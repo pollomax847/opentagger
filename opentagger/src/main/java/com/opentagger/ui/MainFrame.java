@@ -496,7 +496,6 @@ public class MainFrame extends JFrame {
         sp.setResizeWeight(0.68);
         sp.setDividerSize(4);
         sp.setBorder(null);
-        sp.putClientProperty("FlatLaf.style", "dividerColor: #3A3B3E");
         return sp;
     }
 
