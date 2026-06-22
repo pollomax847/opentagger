@@ -78,11 +78,26 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             processEntry(entry);
 
+            // Si annulé pendant processEntry, remettre l'entrée en attente
+            if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
+                entry.status  = FileEntry.Status.PENDING;
+                entry.message = "";
+            }
+
             setProgress((++done * 100) / total);
             publish(entry);
 
             // Rate-limit MusicBrainz (1 req/s max)
-            if (done < total) sleep(1100);
+            if (!isCancelled() && done < total) sleep(1100);
+        }
+
+        // Remettre en attente toute entrée restée bloquée en PROCESSING
+        for (FileEntry entry : entries) {
+            if (entry.status == FileEntry.Status.PROCESSING) {
+                entry.status  = FileEntry.Status.PENDING;
+                entry.message = "";
+                publish(entry);
+            }
         }
 
         cache.purgeExpired();
@@ -246,6 +261,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     }
 
     private void sleep(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+        try { Thread.sleep(ms); } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // restaurer le flag pour que isCancelled() soit fiable
+        }
     }
 }

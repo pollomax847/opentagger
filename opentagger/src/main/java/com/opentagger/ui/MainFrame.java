@@ -1022,6 +1022,16 @@ public class MainFrame extends JFrame {
 
     private void cancelTagging() {
         if (worker != null) worker.cancel(true);
+        // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.status == FileEntry.Status.PROCESSING) {
+                e.status  = FileEntry.Status.PENDING;
+                e.message = "";
+                tableModel.update(e);
+            }
+        }
+        refreshStats();
         setStatus("Arrêté."); resetBtns();
     }
 
