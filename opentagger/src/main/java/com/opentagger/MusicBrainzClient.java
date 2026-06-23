@@ -50,8 +50,11 @@ public class MusicBrainzClient {
                 info.artistSort = ac.path("artist").path("sort-name").asText("").trim();
                 info.artistMbid = ac.path("artist").path("id").asText("").trim();
             }
+            JsonNode isrcsCached = rec.path("isrcs");
+            if (isrcsCached.isArray() && !isrcsCached.isEmpty()) info.isrc = isrcsCached.get(0).asText("").trim();
             boolean onlyOfficial = Config.get().bool("musicbrainz.only_official", true);
             JsonNode chosen = findBestRelease(rec.path("releases"), onlyOfficial);
+            if (chosen == null) chosen = findBestRelease(rec.path("releases"), false);
             if (chosen != null) {
                 info.releaseMbid      = chosen.path("id").asText("").trim();
                 info.album            = chosen.path("title").asText("").trim();
@@ -64,6 +67,8 @@ public class MusicBrainzClient {
                     info.albumArtistSort = rc.get(0).path("artist").path("sort-name").asText("").trim();
                 }
                 if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
+                info.language = chosen.path("text-representation").path("language").asText("").trim();
+                extractSecondaryTypes(chosen, info);
                 extractMediaInfo(chosen, info);
             }
             return info;
@@ -79,7 +84,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits";
+                + "&inc=releases+artist-credits+isrcs";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -111,6 +116,8 @@ public class MusicBrainzClient {
             info.title         = rec.path("title").asText("").trim();
             info.comment       = rec.path("disambiguation").asText("").trim();
             info.recordingMbid = rec.path("id").asText("").trim();
+            JsonNode isrcsNode = rec.path("isrcs");
+            if (isrcsNode.isArray() && !isrcsNode.isEmpty()) info.isrc = isrcsNode.get(0).asText("").trim();
 
             // ── Artiste piste ──────────────────────────────────────────────
             JsonNode trackCredits = rec.path("artist-credit");
@@ -124,6 +131,7 @@ public class MusicBrainzClient {
             // ── Release choisie ────────────────────────────────────────────
             JsonNode releases = rec.path("releases");
             JsonNode chosen   = findBestRelease(releases, onlyOfficial);
+            if (chosen == null) chosen = findBestRelease(releases, false);
             if (chosen != null) {
                 info.releaseMbid      = chosen.path("id").asText("").trim();
                 info.album            = chosen.path("title").asText("").trim();
@@ -143,17 +151,8 @@ public class MusicBrainzClient {
                 if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
                 if (info.albumArtistSort.isBlank()) info.albumArtistSort = info.artistSort;
 
-                // isCompilation — release-group secondary types
-                JsonNode secTypes = chosen.path("release-group").path("secondary-types");
-                if (secTypes.isArray()) {
-                    for (JsonNode t : secTypes) {
-                        if ("Compilation".equalsIgnoreCase(t.asText())) {
-                            info.isCompilation = "1"; break;
-                        }
-                    }
-                }
-                // "Various Artists" → compilation
-                if ("Various Artists".equalsIgnoreCase(info.albumArtist)) info.isCompilation = "1";
+                // Release-group secondary types (Compilation, Live, Soundtrack, Greatest Hits)
+                extractSecondaryTypes(chosen, info);
 
                 // Media — piste, disc, totaux
                 extractMediaInfo(chosen, info);
@@ -164,12 +163,33 @@ public class MusicBrainzClient {
         return results;
     }
 
+    private void extractSecondaryTypes(JsonNode release, TagInfo info) {
+        JsonNode secTypes = release.path("release-group").path("secondary-types");
+        if (secTypes.isArray()) {
+            for (JsonNode t : secTypes) {
+                String type = t.asText();
+                if ("Compilation".equalsIgnoreCase(type))    info.isCompilation  = "1";
+                if ("Live".equalsIgnoreCase(type))            info.isLive         = "1";
+                if ("Soundtrack".equalsIgnoreCase(type))      info.isSoundtrack   = "1";
+                if ("Greatest Hits".equalsIgnoreCase(type))   info.isGreatestHits = "1";
+            }
+        }
+        if ("Various Artists".equalsIgnoreCase(info.albumArtist)) info.isCompilation = "1";
+    }
+
     private JsonNode findBestRelease(JsonNode releases, boolean onlyOfficial) {
         if (!releases.isArray() || releases.isEmpty()) return null;
+        // Priorité 1 : Official
         for (JsonNode r : releases) {
             if ("Official".equalsIgnoreCase(r.path("status").asText())) return r;
         }
-        return onlyOfficial ? null : releases.get(0);
+        if (onlyOfficial) return null;
+        // Priorité 2 : tout sauf Bootleg (Promotional, etc.)
+        for (JsonNode r : releases) {
+            if (!"Bootleg".equalsIgnoreCase(r.path("status").asText())) return r;
+        }
+        // Priorité 3 : n'importe quelle release en dernier recours
+        return releases.get(0);
     }
 
     private void extractMediaInfo(JsonNode release, TagInfo info) {
@@ -200,11 +220,80 @@ public class MusicBrainzClient {
         }
     }
 
+    // ── Lookup d'une release complète (tracklist) ─────────────────────────────
+
+    public record ReleaseTrack(int disc, int trackNo, int trackTotal, String title,
+                               String artist, String recordingMbid) {}
+
+    public record ReleaseTracklist(String releaseMbid, String album, String albumArtist,
+                                   String albumArtistSort, String year, String releaseGroupMbid,
+                                   boolean isCompilation, List<ReleaseTrack> tracks) {}
+
+    public ReleaseTracklist lookupRelease(String releaseMbid) throws Exception {
+        String url = BASE_URL + "/release/" + releaseMbid.trim()
+                + "?fmt=json&inc=recordings+artist-credits+release-groups";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", Config.get().userAgent())
+                .GET()
+                .build();
+
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) return null;
+
+        JsonNode root = mapper.readTree(response.body());
+        String album     = root.path("title").asText("").trim();
+        String date      = root.path("date").asText("");
+        String year      = date.length() >= 4 ? date.substring(0, 4) : date;
+        String rgMbid    = root.path("release-group").path("id").asText("").trim();
+
+        // AlbumArtist
+        String albumArtist     = "";
+        String albumArtistSort = "";
+        boolean isCompilation  = false;
+        JsonNode ac = root.path("artist-credit");
+        if (ac.isArray() && !ac.isEmpty()) {
+            albumArtist     = ac.get(0).path("name").asText("").trim();
+            albumArtistSort = ac.get(0).path("artist").path("sort-name").asText("").trim();
+        }
+        if ("Various Artists".equalsIgnoreCase(albumArtist)) isCompilation = true;
+        JsonNode secTypes = root.path("release-group").path("secondary-types");
+        if (secTypes.isArray()) {
+            for (JsonNode t : secTypes)
+                if ("Compilation".equalsIgnoreCase(t.asText())) { isCompilation = true; break; }
+        }
+
+        // Tracks
+        List<ReleaseTrack> tracks = new ArrayList<>();
+        JsonNode media = root.path("media");
+        if (media.isArray()) {
+            int discCount = media.size();
+            for (JsonNode medium : media) {
+                int disc       = medium.path("position").asInt(1);
+                int trackTotal = medium.path("track-count").asInt(0);
+                for (JsonNode t : medium.path("tracks")) {
+                    int    pos      = t.path("position").asInt(0);
+                    String tTitle   = t.path("title").asText("").trim();
+                    String recMbid  = t.path("recording").path("id").asText("").trim();
+                    String tArtist  = "";
+                    JsonNode tac = t.path("recording").path("artist-credit");
+                    if (tac.isArray() && !tac.isEmpty())
+                        tArtist = tac.get(0).path("name").asText("").trim();
+                    tracks.add(new ReleaseTrack(discCount > 1 ? disc : 0, pos, trackTotal,
+                                               tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid));
+                }
+            }
+        }
+        return new ReleaseTracklist(releaseMbid, album, albumArtist, albumArtistSort,
+                                    year, rgMbid, isCompilation, tracks);
+    }
+
     // ── Lookup d'un recording par MBID ────────────────────────────────────────
     // Utilisé par AcoustIdClient après résolution AcoustID → MBID
     public TagInfo lookupRecording(String mbid) throws Exception {
-        String url = BASE_URL + "/recording/" + mbid
-                + "?fmt=json&inc=releases+artist-credits+release-groups";
+        String url = BASE_URL + "/recording/" + mbid.trim()
+                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -230,9 +319,15 @@ public class MusicBrainzClient {
             info.artistMbid = ac.path("artist").path("id").asText("").trim();
         }
 
+        JsonNode isrcsLookup = rec.path("isrcs");
+        if (isrcsLookup.isArray() && !isrcsLookup.isEmpty()) info.isrc = isrcsLookup.get(0).asText("").trim();
+
         JsonNode releases = rec.path("releases");
         boolean onlyOfficial = Config.get().bool("musicbrainz.only_official", true);
         JsonNode chosen = findBestRelease(releases, onlyOfficial);
+        // Fallback : si aucune release "Official" trouvée, accepter n'importe quelle release
+        // pour récupérer au moins l'album et l'année
+        if (chosen == null) chosen = findBestRelease(releases, false);
         if (chosen != null) {
             info.releaseMbid      = chosen.path("id").asText("").trim();
             info.album            = chosen.path("title").asText("").trim();
@@ -248,8 +343,35 @@ public class MusicBrainzClient {
             }
             if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
 
+            info.language = chosen.path("text-representation").path("language").asText("").trim();
+            extractSecondaryTypes(chosen, info);
             extractMediaInfo(chosen, info);
         }
         return info;
+    }
+
+    /**
+     * Recherche l'MBID d'un artiste par nom.
+     * Utilisé en fallback quand un titre n'est pas dans MB (démo, bootleg) :
+     * on récupère au moins l'artistMbid pour la pochette (FanArt/CAA).
+     */
+    public String searchArtistMbid(String artistName) throws Exception {
+        if (artistName == null || artistName.isBlank()) return "";
+        String url = BASE_URL + "/artist?query=artist:"
+                + URLEncoder.encode(artistName, StandardCharsets.UTF_8)
+                + "&limit=1&fmt=json";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", Config.get().userAgent())
+                .GET().build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200) return "";
+        JsonNode root = mapper.readTree(resp.body());
+        JsonNode artists = root.path("artists");
+        if (artists.isArray() && artists.size() > 0) {
+            int score = artists.get(0).path("score").asInt(0);
+            if (score >= 80) return artists.get(0).path("id").asText("").trim();
+        }
+        return "";
     }
 }

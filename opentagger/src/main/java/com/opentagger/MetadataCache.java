@@ -173,16 +173,29 @@ public class MetadataCache {
     // ── Historique personnel (tagging_history + file_history) ────────────────
 
     /**
+     * Génère une clé cache synthétique pour les fichiers identifiés sans MBID réel
+     * (ex: résultat SongRec seul). Préfixe "syn_" pour les distinguer des MBIDs MB.
+     */
+    public static String syntheticKey(String artist, String title) {
+        String s = (artist + "###" + title).toLowerCase().trim();
+        return "syn_" + Integer.toHexString(Math.abs(s.hashCode()));
+    }
+
+    /**
      * Sauvegarde le TagInfo final dans l'historique personnel.
-     * Appelé après chaque taguage réussi — le json inclut toutes les corrections.
+     * Accepte un keyOverride pour les fichiers sans recordingMbid (SongRec, AudD…).
      */
     public void saveTaggingHistory(TagInfo t) {
-        if (conn == null || t.recordingMbid.isBlank()) return;
+        saveTaggingHistory(t, t.recordingMbid);
+    }
+
+    public void saveTaggingHistory(TagInfo t, String key) {
+        if (conn == null || key == null || key.isBlank()) return;
         try {
             String json = mapper.writeValueAsString(t);
             try (PreparedStatement ps = conn.prepareStatement(
                     "INSERT OR REPLACE INTO tagging_history(mbid,artist,title,album,year,json,ts) VALUES(?,?,?,?,?,?,?)")) {
-                ps.setString(1, t.recordingMbid);
+                ps.setString(1, key);
                 ps.setString(2, t.artist);
                 ps.setString(3, t.title);
                 ps.setString(4, t.album);

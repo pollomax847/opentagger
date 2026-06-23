@@ -62,12 +62,13 @@ public class AcoustIdClient {
     private Fingerprint fingerprint(File fichier) throws Exception {
         String fpcalc = FpcalcInstaller.resolve();
         if (fpcalc == null) throw new Exception("fpcalc introuvable — installez-le via Préférences → Audio");
-        Process process = new ProcessBuilder(fpcalc, fichier.getAbsolutePath())
-                .redirectErrorStream(true)
-                .start();
-
-        String output = new String(process.getInputStream().readAllBytes()).trim();
-        process.waitFor();
+        ProcessBuilder pb = new ProcessBuilder(fpcalc, fichier.getAbsolutePath())
+                .redirectErrorStream(true);
+        String output = ProcessUtils.readStringWithTimeout(pb, 60);
+        if (output == null || output.isEmpty()) {
+            System.out.println("  fpcalc timeout ou erreur sur " + fichier.getName());
+            return null;
+        }
 
         // fpcalc retourne : DURATION=315\nFINGERPRINT=AQADt...
         Fingerprint fp = new Fingerprint();

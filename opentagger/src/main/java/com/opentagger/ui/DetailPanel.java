@@ -99,6 +99,11 @@ public class DetailPanel extends JPanel {
     private final JTextField tfMoodDance       = tf(12);
     private final JTextField tfMoodParty       = tf(12);
 
+    // ── Onglet Pochette ──────────────────────────────────────────────────────
+    private final JLabel     lblCoverTab  = new JLabel("Aucune pochette", SwingConstants.CENTER);
+    private final JLabel     lblCoverInfo = new JLabel(" ", SwingConstants.CENTER);
+    private Runnable         onCoverClick;
+
     // ── Onglet 5 — Paroles ───────────────────────────────────────────────────
     private final JTextArea  taLyrics    = new JTextArea(8, 40);
     private final JTextField tfLyricsUrl = tf(40);
@@ -132,12 +137,13 @@ public class DetailPanel extends JPanel {
     public DetailPanel() {
         super(new BorderLayout());
         JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP);
-        tabs.addTab("Général",      buildGeneralTab());
-        tabs.addTab("Classique",    buildClassicalTab());
+        tabs.addTab("Général",       buildGeneralTab());
+        tabs.addTab("Pochette",      buildPochetteTab());
+        tabs.addTab("Classique",     buildClassicalTab());
         tabs.addTab("Contributeurs", buildContribTab());
-        tabs.addTab("Audio / Mood", buildAudioTab());
-        tabs.addTab("Paroles",      buildLyricsTab());
-        tabs.addTab("URLs & IDs",   buildIdsTab());
+        tabs.addTab("Audio / Mood",  buildAudioTab());
+        tabs.addTab("Paroles",       buildLyricsTab());
+        tabs.addTab("URLs & IDs",    buildIdsTab());
         add(tabs, BorderLayout.CENTER);
         add(buildFooter(), BorderLayout.SOUTH);
 
@@ -584,6 +590,61 @@ public class DetailPanel extends JPanel {
         fields.put("Dansant :",            tfMoodDance);
         fields.put("Festif :",             tfMoodParty);
         return scroll(formPanel(fields));
+    }
+
+    // ── Pochette ─────────────────────────────────────────────────────────────
+
+    public void setOnCoverClick(Runnable r) { onCoverClick = r; }
+
+    public void setCoverIcon(java.awt.image.BufferedImage img) {
+        if (img == null) { clearCover(); return; }
+        int w = img.getWidth(), h = img.getHeight();
+        int max = 280;
+        double ratio = Math.min((double) max / w, (double) max / h);
+        int sw = (int)(w * ratio), sh = (int)(h * ratio);
+        java.awt.Image scaled = img.getScaledInstance(sw, sh, java.awt.Image.SCALE_SMOOTH);
+        lblCoverTab.setIcon(new ImageIcon(scaled));
+        lblCoverTab.setText("");
+        lblCoverInfo.setText(w + " × " + h + " px");
+    }
+
+    public void clearCover() {
+        lblCoverTab.setIcon(null);
+        lblCoverTab.setText("Aucune pochette");
+        lblCoverInfo.setText(" ");
+    }
+
+    private JPanel buildPochetteTab() {
+        lblCoverTab.putClientProperty("FlatLaf.style", "foreground: #546E7A");
+        lblCoverInfo.putClientProperty("FlatLaf.style", "foreground: #546E7A; font: 10 $defaultFont");
+        lblCoverTab.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+        lblCoverTab.setToolTipText("Double-clic pour gérer la pochette");
+        lblCoverTab.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2 && onCoverClick != null) onCoverClick.run();
+            }
+        });
+
+        JPanel center = new JPanel();
+        center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
+        center.setBorder(new EmptyBorder(20, 20, 10, 20));
+        lblCoverTab.setAlignmentX(java.awt.Component.CENTER_ALIGNMENT);
+        lblCoverInfo.setAlignmentX(java.awt.Component.CENTER_ALIGNMENT);
+        center.add(Box.createVerticalGlue());
+        center.add(lblCoverTab);
+        center.add(Box.createVerticalStrut(8));
+        center.add(lblCoverInfo);
+        center.add(Box.createVerticalGlue());
+
+        JButton btnChange = new JButton("Changer la pochette…");
+        btnChange.addActionListener(e -> { if (onCoverClick != null) onCoverClick.run(); });
+        JPanel btnRow = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.CENTER));
+        btnRow.add(btnChange);
+
+        JPanel p = new JPanel(new java.awt.BorderLayout());
+        p.add(center, java.awt.BorderLayout.CENTER);
+        p.add(btnRow,  java.awt.BorderLayout.SOUTH);
+        return p;
     }
 
     private JScrollPane buildLyricsTab() {

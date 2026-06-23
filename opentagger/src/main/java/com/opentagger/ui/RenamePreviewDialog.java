@@ -33,7 +33,11 @@ public class RenamePreviewDialog extends JDialog {
     private final JLabel            lblSummary;
 
     public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, Runnable onApply) {
-        super(owner, "Aperçu du renommage", true);
+        this(owner, rows, "Aperçu du renommage", onApply);
+    }
+
+    public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, String title, Runnable onApply) {
+        super(owner, title, true);
         this.rows    = rows;
         this.onApply = onApply;
         setSize(900, 560);
@@ -82,6 +86,14 @@ public class RenamePreviewDialog extends JDialog {
      * Utilise FileRenamer.preview() — aucun fichier n'est déplacé.
      */
     public static List<PreviewRow> compute(FileTableModel model, int maskIndex) {
+        return compute(model, maskIndex, null);
+    }
+
+    /**
+     * Variante avec destRoot explicite (pour "Organiser en dossiers").
+     * Si destRoot == null, utilise le scanRoot de chaque fichier.
+     */
+    public static List<PreviewRow> compute(FileTableModel model, int maskIndex, Path destRoot) {
         FileRenamer renamer = new FileRenamer();
         List<PreviewRow> result = new ArrayList<>();
 
@@ -91,17 +103,21 @@ public class RenamePreviewDialog extends JDialog {
             if (e.currentPath == null) continue;
 
             Path current  = e.currentPath;
-            Path root     = e.scanRoot != null ? e.scanRoot : current.getParent();
+            Path root     = destRoot != null ? destRoot
+                          : (e.scanRoot != null ? e.scanRoot : current.getParent());
             String curName = current.getFileName().toString();
             String ext     = curName.contains(".") ? curName.substring(curName.lastIndexOf('.')) : "";
 
             try {
                 String newName = renamer.preview(e.activeTags(), maskIndex, ext);
-                if (newName.isBlank() || newName.equals(curName)) {
-                    result.add(new PreviewRow(e, curName, curName,
+                Path newPath = root.resolve(newName).normalize();
+                if (newName.isBlank()) {
+                    result.add(new PreviewRow(e, current.toString(), "—", "—",
+                        RowState.ERROR, "Masque vide — tags incomplets ?"));
+                } else if (newPath.equals(current) && destRoot == null) {
+                    result.add(new PreviewRow(e, current.toString(), curName,
                         current.toString(), RowState.ALREADY_OK, ""));
                 } else {
-                    Path newPath = root.resolve(newName).normalize();
                     result.add(new PreviewRow(e, current.toString(), newName,
                         newPath.toString(), RowState.WILL_RENAME, ""));
                 }

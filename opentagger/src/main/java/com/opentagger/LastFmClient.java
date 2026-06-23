@@ -18,49 +18,103 @@ public class LastFmClient {
 
     private static final String BASE_URL = "https://ws.audioscrobbler.com/2.0/";
 
+    // Tags Last.fm classifiés comme "mood"
+    private static final String[][] MOOD_MAP = {
+        {"happy", "upbeat", "feel good", "feel-good", "joyful", "cheerful", "fun", "positive"},
+        {"sad", "melancholic", "melancholy", "depressing", "heartbreak", "emotional", "tearjerker"},
+        {"chill", "chillout", "relax", "relaxed", "calm", "peaceful", "soothing", "mellow", "laid back"},
+        {"energetic", "energy", "pump up", "adrenaline", "workout", "running", "power"},
+        {"aggressive", "angry", "rage", "intense", "harsh"},
+        {"romantic", "love", "romance", "sensual"},
+        {"party", "dance", "danceable", "club", "rave"},
+        {"dark", "haunting", "gloomy", "atmospheric", "noir"},
+        {"acoustic", "unplugged", "folk acoustic"},
+        {"instrumental", "no vocals"},
+    };
+    private static final String[] MOOD_LABELS = {
+        "Happy", "Sad", "Relaxed", "Energetic", "Aggressive",
+        "Romantic", "Party", "Dark", "Acoustic", "Instrumental"
+    };
+
     private final HttpClient   http   = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /**
-     * Enrichit le genre d'un TagInfo depuis les tags Last.fm (track puis artist).
-     * Ne modifie genre que si toujours vide.
-     */
+    /** Enrichit le genre d'un TagInfo depuis les tags Last.fm. Ne modifie genre que si vide. */
     public void enrichGenres(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
         if (!info.genre.isBlank()) return;
 
-        // Strategie 1 : tags du morceau
+        List<String> allTags = fetchAllTags(info);
+
+        List<String> genreTags = new ArrayList<>();
+        for (String name : allTags) {
+            if (!isBlacklisted(name) && !isMoodTag(name.toLowerCase())) {
+                genreTags.add(capitalize(name));
+                if (genreTags.size() >= Config.get().discogsMaxGenres()) break;
+            }
+        }
+        if (!genreTags.isEmpty()) info.genre = joinGenres(genreTags);
+    }
+
+    /** Enrichit le mood d'un TagInfo depuis les tags Last.fm. Ne modifie mood que si vide. */
+    public void enrichMood(TagInfo info) throws Exception {
+        if (!Config.get().lastfmEnabled()) return;
+        if (!info.mood.isBlank()) return;
+
+        List<String> allTags = fetchAllTags(info);
+
+        for (String raw : allTags) {
+            String t = raw.toLowerCase().trim();
+            for (int i = 0; i < MOOD_MAP.length; i++) {
+                for (String kw : MOOD_MAP[i]) {
+                    if (t.contains(kw)) {
+                        info.mood = MOOD_LABELS[i];
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /** Récupère tous les tags bruts Last.fm (morceau puis artiste en fallback). */
+    private List<String> fetchAllTags(TagInfo info) throws Exception {
+        List<String> tags = List.of();
         if (!info.artist.isBlank() && !info.title.isBlank()) {
-            List<String> tags = getTrackTags(info.artist, info.title);
-            if (!tags.isEmpty()) { info.genre = joinGenres(tags); return; }
-        }
-
-        // Strategie 2 : tags de l'artiste
-        if (!info.artist.isBlank()) {
-            List<String> tags = getArtistTags(info.artist);
-            if (!tags.isEmpty()) info.genre = joinGenres(tags);
-        }
-    }
-
-    private List<String> getTrackTags(String artist, String title) throws Exception {
-        String url = BASE_URL
+            tags = getRawTags(BASE_URL
                 + "?method=track.getTopTags"
-                + "&artist=" + encode(artist)
-                + "&track="  + encode(title)
+                + "&artist=" + encode(info.artist)
+                + "&track="  + encode(info.title)
                 + "&api_key=" + Config.get().lastfmKey()
-                + "&format=json";
-        return parseTags(fetch(url));
+                + "&format=json");
+        }
+        if (tags.isEmpty() && !info.artist.isBlank()) {
+            tags = getRawTags(BASE_URL
+                + "?method=artist.getTopTags"
+                + "&artist="  + encode(info.artist)
+                + "&api_key=" + Config.get().lastfmKey()
+                + "&format=json");
+        }
+        return tags;
     }
 
-    private List<String> getArtistTags(String artist) throws Exception {
-        String url = BASE_URL
-                + "?method=artist.getTopTags"
-                + "&artist="  + encode(artist)
-                + "&api_key=" + Config.get().lastfmKey()
-                + "&format=json";
-        return parseTags(fetch(url));
+    private List<String> getRawTags(String url) throws Exception {
+        JsonNode root = fetch(url);
+        List<String> result = new ArrayList<>();
+        if (root == null) return result;
+
+        JsonNode tagArray = root.path("toptags").path("tag");
+        if (!tagArray.isArray() || tagArray.isEmpty())
+            tagArray = root.path("tags").path("tag");
+        if (!tagArray.isArray()) return result;
+
+        for (JsonNode tag : tagArray) {
+            String name = tag.path("name").asText("").trim();
+            if (!name.isBlank() && name.length() > 2)
+                result.add(name);
+        }
+        return result;
     }
 
     private JsonNode fetch(String url) throws Exception {
@@ -72,39 +126,28 @@ public class LastFmClient {
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) return null;
         JsonNode root = mapper.readTree(response.body());
-        // Last.fm retourne {"error": ...} si probleme
         if (root.has("error")) return null;
         return root;
     }
 
-    private List<String> parseTags(JsonNode root) {
-        List<String> result = new ArrayList<>();
-        if (root == null) return result;
-
-        // Chemin : toptags.tag[] ou tags.tag[]
-        JsonNode tagArray = root.path("toptags").path("tag");
-        if (!tagArray.isArray() || tagArray.isEmpty())
-            tagArray = root.path("tags").path("tag");
-        if (!tagArray.isArray()) return result;
-
-        int max = Config.get().discogsMaxGenres();
-        for (JsonNode tag : tagArray) {
-            String name = tag.path("name").asText("").trim();
-            // Filtrer les tags generiques ou trop courts
-            if (!name.isBlank() && name.length() > 2 && !isBlacklisted(name)) {
-                result.add(capitalize(name));
-                if (result.size() >= max) break;
-            }
-        }
-        return result;
+    private boolean isMoodTag(String t) {
+        for (String[] group : MOOD_MAP)
+            for (String kw : group)
+                if (t.contains(kw)) return true;
+        return false;
     }
 
     private boolean isBlacklisted(String tag) {
-        String t = tag.toLowerCase();
+        String t = tag.toLowerCase().trim();
         return t.equals("seen live") || t.equals("favorites") || t.equals("favourite")
                 || t.equals("love") || t.equals("awesome") || t.equals("cool")
                 || t.equals("best") || t.equals("good") || t.startsWith("00s")
-                || t.startsWith("my ");
+                || t.startsWith("10s") || t.startsWith("20s") || t.startsWith("my ")
+                || t.contains("under") && t.contains("listeners")
+                || t.contains("over")  && t.contains("listeners")
+                || t.contains("listener") // "under 2000 listeners", "500 listeners" etc.
+                || t.equals("music") || t.equals("songs") || t.equals("playlist")
+                || t.equals("spotify") || t.equals("youtube") || t.equals("all");
     }
 
     private String capitalize(String s) {

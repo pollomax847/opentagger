@@ -44,8 +44,14 @@ public class AcoustIdSubmitter {
      * @throws Exception si fpcalc échoue, si la clé est manquante ou si AcoustID répond une erreur
      */
     public String submit(File file, TagInfo tags) throws Exception {
-        String appKey = Config.get().acoustidKey();
-        if (appKey.isBlank()) throw new Exception("Clé AcoustID non configurée (Préférences → APIs)");
+        String appKey   = Config.get().acoustidKey();
+        String userToken = Config.get().str("acoustid.user_token", "").trim();
+        if (appKey.isBlank())    throw new Exception("Clé AcoustID non configurée (Préférences → APIs → AcoustID API Key)");
+        if (userToken.isBlank()) throw new Exception(
+            "Token utilisateur AcoustID manquant.\n" +
+            "Obtenez-le sur https://acoustid.org/api-key puis ajoutez :\n" +
+            "acoustid.user_token = VOTRE_TOKEN\n" +
+            "dans ~/.opentagger/settings.properties");
 
         // 1. Générer l'empreinte avec fpcalc
         FpcalcResult fp = fingerprint(file);
@@ -53,6 +59,7 @@ public class AcoustIdSubmitter {
         // 2. Construire le corps de la requête (format indexed-array d'AcoustID)
         StringBuilder body = new StringBuilder();
         append(body, "client",         appKey);
+        append(body, "user",           userToken);
         append(body, "fingerprint[0]", fp.fingerprint);
         append(body, "duration[0]",    fp.duration);
         if (!tags.recordingMbid.isBlank())

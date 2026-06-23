@@ -5,11 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.awt.Desktop;
 import java.io.*;
-import java.net.*;
+import java.net.URI;
 import java.net.http.*;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -48,10 +49,11 @@ public class MusicBrainzOAuth {
     // ── Autorisation OAuth2 ───────────────────────────────────────────────────
 
     /**
-     * Lance le flow OAuth2 :
-     *  - Ouvre le navigateur de l'utilisateur sur la page MB
-     *  - Attend le callback (max 90 secondes)
-     *  - Retourne l'access_token
+     * Lance le flow OAuth2 mode OOB (out-of-band) pour application installée :
+     *  - Ouvre le navigateur sur la page d'autorisation MB
+     *  - MB affiche un code à l'écran (pas de redirect URI nécessaire)
+     *  - Demande à l'utilisateur de coller le code dans une boîte de dialogue
+     *  - Échange le code contre un token
      *
      * Doit être appelé depuis un thread non-EDT (SwingWorker).
      */
@@ -64,30 +66,40 @@ public class MusicBrainzOAuth {
                 "Enregistrez votre application sur\nhttps://musicbrainz.org/account/applications/register\n" +
                 "puis renseignez les identifiants dans Préférences → MusicBrainz.");
 
-        try (ServerSocket srv = new ServerSocket(0)) {
-            srv.setSoTimeout(90_000);
-            int    port        = srv.getLocalPort();
-            String redirectUri = "http://localhost:" + port + "/callback";
+        // Redirect URI vide = mode OOB : MB affiche le code à l'écran
+        String redirectUri = "";
+        String authUrl = AUTH_URL
+            + "?client_id="     + encode(clientId)
+            + "&response_type=code"
+            + "&scope=profile+tag+rating";
 
-            String authUrl = AUTH_URL
-                + "?client_id="     + encode(clientId)
-                + "&response_type=code"
-                + "&redirect_uri="  + encode(redirectUri)
-                + "&scope=tag+rating";
+        Desktop.getDesktop().browse(URI.create(authUrl));
 
-            Desktop.getDesktop().browse(URI.create(authUrl));
-
-            try (Socket conn = srv.accept()) {
-                String code = parseCode(conn);
-                sendOkPage(conn);
-                String token = exchangeCode(code, redirectUri, clientId, clientSecret);
-                // Persister le token + username
-                String username = fetchUsername(token);
-                Config.get().set("mb.oauth.token",    token);
-                Config.get().set("mb.oauth.username", username);
-                return token;
-            }
+        // Demander le code à l'utilisateur via une boîte de dialogue (sur l'EDT)
+        String[] result = new String[1];
+        try {
+            javax.swing.SwingUtilities.invokeAndWait(() -> {
+                result[0] = javax.swing.JOptionPane.showInputDialog(
+                    null,
+                    "<html>MusicBrainz a ouvert dans votre navigateur.<br><br>" +
+                    "Connectez-vous, autorisez OpenTagger,<br>" +
+                    "puis copiez le <b>code d'autorisation</b> affiché et collez-le ici :</html>",
+                    "Code d'autorisation MusicBrainz",
+                    javax.swing.JOptionPane.PLAIN_MESSAGE);
+            });
+        } catch (Exception e) {
+            throw new Exception("Dialogue annulé : " + e.getMessage());
         }
+
+        String code = result[0];
+        if (code == null || code.isBlank())
+            throw new Exception("Code d'autorisation non fourni.");
+
+        String token = exchangeCode(code.trim(), redirectUri, clientId, clientSecret);
+        String username = fetchUsername(token);
+        Config.get().set("mb.oauth.token",    token);
+        Config.get().set("mb.oauth.username", username);
+        return token;
     }
 
     /** Révoque le token local (supprime de la config — pas d'appel réseau, MB ne supporte pas la révocation). */
@@ -160,33 +172,6 @@ public class MusicBrainzOAuth {
 
     // ── Helpers OAuth ─────────────────────────────────────────────────────────
 
-    private String parseCode(Socket conn) throws IOException {
-        BufferedReader br = new BufferedReader(
-                new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
-        String line = br.readLine(); // "GET /callback?code=XXX HTTP/1.1"
-        if (line == null) throw new IOException("Réponse navigateur vide");
-        int q = line.indexOf('?'), s = line.lastIndexOf(' ');
-        if (q < 0 || s < 0) throw new IOException("Paramètres OAuth introuvables");
-        for (String part : line.substring(q + 1, s).split("&")) {
-            if (part.startsWith("code="))  return part.substring(5);
-            if (part.startsWith("error=")) throw new IOException("Accès refusé par MB : " + part.substring(6));
-        }
-        throw new IOException("Code OAuth introuvable dans le callback");
-    }
-
-    private void sendOkPage(Socket conn) {
-        String body = "<html><body style='font-family:sans-serif;background:#1e1e1e;color:#ddd;padding:40px'>" +
-            "<h2 style='color:#1db954'>&#10003; Connecté à MusicBrainz !</h2>" +
-            "<p>Vous pouvez fermer cet onglet et retourner dans OpenTagger.</p>" +
-            "</body></html>";
-        String resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n" +
-            "Content-Length: " + body.getBytes(StandardCharsets.UTF_8).length +
-            "\r\nConnection: close\r\n\r\n" + body;
-        try {
-            conn.getOutputStream().write(resp.getBytes(StandardCharsets.UTF_8));
-            conn.getOutputStream().flush();
-        } catch (IOException ignored) {}
-    }
 
     private String exchangeCode(String code, String redirectUri, String clientId, String clientSecret)
             throws Exception {

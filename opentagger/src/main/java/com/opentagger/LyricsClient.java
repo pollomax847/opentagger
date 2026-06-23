@@ -45,6 +45,7 @@ public class LyricsClient {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("User-Agent", Config.get().userAgent())
+                    .timeout(Duration.ofSeconds(10))
                     .GET()
                     .build();
 

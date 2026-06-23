@@ -93,9 +93,10 @@ public class AudioRecognitionChain {
             } catch (Exception ignored) {}
         }
 
-        // MB n'a pas confirmé : utiliser le résultat du service seul + enrichir le genre
+        // MB n'a pas confirmé : faire confiance à l'empreinte audio (Shazam/AudD sont fiables)
+        result.score = 85; // audio fingerprint fiable même sans validation MB
         System.out.printf("[%s] %s — %s (score=%d, sans MB)%n",
-                serviceName, ti.artist, ti.title, ti.score);
+                serviceName, ti.artist, ti.title, result.score);
         if (result.genre.isBlank()) { try { discogs.enrichGenres(result); } catch (Exception ignored) {} }
         if (result.genre.isBlank()) { try { lastFm.enrichGenres(result);  } catch (Exception ignored) {} }
         return List.of(result);

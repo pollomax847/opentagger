@@ -15,44 +15,76 @@ import java.time.Duration;
 
 public class FanArtClient {
 
-    private static final String BASE_URL = "https://webservice.fanart.tv/v3/music";
+    private static final String BASE_URL  = "https://webservice.fanart.tv/v3/music";
+    private static final String CAA_URL   = "https://coverartarchive.org";
 
     private final HttpClient   http   = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
+            .followRedirects(HttpClient.Redirect.ALWAYS)
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
     /**
      * Télécharge la pochette d'album dans un fichier temporaire.
      * Retourne le chemin du fichier, ou null si rien trouvé.
-     * Stratégie : album cover (release group) → artist thumbnail.
+     * Stratégie : FanArt.tv (album exact → discographie → artiste) → Cover Art Archive (MusicBrainz).
      */
     public Path downloadCover(TagInfo info) throws Exception {
-        if (info.artistMbid.isBlank()) return null;
-
-        JsonNode data = fetchArtistData(info.artistMbid);
-        if (data == null) return null;
-
-        // Stratégie 1 : pochette de l'album exact (release group)
-        if (!info.releaseGroupMbid.isBlank()) {
-            String url = extractBestImage(data.path("albums").path(info.releaseGroupMbid).path("albumcover"));
-            if (url != null) return download(url);
-        }
-
-        // Stratégie 2 : premier album disponible dans la discographie
-        JsonNode albums = data.path("albums");
-        if (albums.isObject()) {
-            for (JsonNode album : albums) {
-                String url = extractBestImage(album.path("albumcover"));
+        // ── 1. FanArt.tv ─────────────────────────────────────────────────────
+        if (!info.artistMbid.isBlank()) {
+            JsonNode data = fetchArtistData(info.artistMbid);
+            if (data != null) {
+                // Pochette de l'album exact (release group)
+                if (!info.releaseGroupMbid.isBlank()) {
+                    String url = extractBestImage(data.path("albums").path(info.releaseGroupMbid).path("albumcover"));
+                    if (url != null) return download(url);
+                }
+                // Premier album dans la discographie
+                JsonNode albums = data.path("albums");
+                if (albums.isObject()) {
+                    for (JsonNode album : albums) {
+                        String url = extractBestImage(album.path("albumcover"));
+                        if (url != null) return download(url);
+                    }
+                }
+                // Photo de l'artiste (dernier recours FanArt.tv)
+                String url = extractBestImage(data.path("artistthumb"));
                 if (url != null) return download(url);
             }
         }
 
-        // Stratégie 3 : photo de l'artiste
-        String url = extractBestImage(data.path("artistthumb"));
-        if (url != null) return download(url);
+        // ── 2. Cover Art Archive (MusicBrainz) ───────────────────────────────
+        // Gratuit, sans clé, ~95 % de couverture des releases MB.
+        // Essaye : release exacte → release group
+        if (!info.releaseMbid.isBlank()) {
+            Path p = downloadFromCaa("/release/" + info.releaseMbid + "/front");
+            if (p != null) return p;
+        }
+        if (!info.releaseGroupMbid.isBlank()) {
+            Path p = downloadFromCaa("/release-group/" + info.releaseGroupMbid + "/front");
+            if (p != null) return p;
+        }
 
         return null;
+    }
+
+    private Path downloadFromCaa(String path) {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(CAA_URL + path))
+                    .header("User-Agent", Config.get().userAgent())
+                    .GET()
+                    .build();
+            HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            if (resp.statusCode() != 200) return null;
+            // Détecter le type depuis le Content-Type ou les premiers octets
+            String ct  = resp.headers().firstValue("Content-Type").orElse("");
+            String ext = ct.contains("png") ? ".png" : ".jpg";
+            Path tmp   = Files.createTempFile("opentagger-cover-", ext);
+            Files.copy(resp.body(), tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            if (Files.size(tmp) < 1000) { Files.deleteIfExists(tmp); return null; }
+            return tmp;
+        } catch (Exception e) { return null; }
     }
 
     private JsonNode fetchArtistData(String artistMbid) throws Exception {

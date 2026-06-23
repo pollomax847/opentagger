@@ -19,7 +19,17 @@ public class App {
         Logger.getLogger("org.jaudiotagger").setLevel(Level.OFF);
 
         if (args.length == 0) {
-            MainFrame.launch();
+            MainFrame.launch(startupDirs(new File[0]));
+            return;
+        }
+
+        // --- Mode UI avec dossiers pré-chargés : opentagger /dir1 /dir2 ... ---
+        if (!args[0].startsWith("--") && new File(args[0]).isDirectory()) {
+            File[] cli = java.util.Arrays.stream(args)
+                .map(File::new)
+                .filter(File::isDirectory)
+                .toArray(File[]::new);
+            MainFrame.launch(startupDirs(cli));
             return;
         }
 
@@ -204,6 +214,16 @@ public class App {
                 System.out.println("Masque invalide, renommage ignoré.");
             }
         }
+    }
+
+    /** Fusionne les dossiers CLI avec les dossiers de démarrage configurés dans les préférences. */
+    private static File[] startupDirs(File[] cliDirs) {
+        java.util.LinkedHashSet<File> all = new java.util.LinkedHashSet<>(java.util.Arrays.asList(cliDirs));
+        for (String p : com.opentagger.Config.get().startupFolders()) {
+            File f = new File(p.trim());
+            if (f.isDirectory()) all.add(f);
+        }
+        return all.toArray(new File[0]);
     }
 
     private static void printUsage() {

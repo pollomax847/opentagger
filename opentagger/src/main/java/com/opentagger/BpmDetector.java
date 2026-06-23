@@ -53,20 +53,13 @@ public class BpmDetector {
         );
         pb.redirectErrorStream(false);
 
-        try {
-            Process proc = pb.start();
-            // On ignore stderr pour ne pas bloquer
-            proc.getErrorStream().transferTo(OutputStream.nullOutputStream());
-
-            byte[] raw = proc.getInputStream().readAllBytes();
-            proc.waitFor();
-
-            if (raw.length < FRAME_SIZE * 2) return null;
-            return computeEnergy(raw);
-
-        } catch (Exception e) {
+        byte[] raw = ProcessUtils.readWithTimeout(pb, 30);
+        if (raw == null) {
+            System.out.println("[OT] BPM timeout sur " + new File(filePath).getName() + " — ffmpeg tué");
             return null;
         }
+        if (raw.length < FRAME_SIZE * 2) return null;
+        return computeEnergy(raw);
     }
 
     private float[] computeEnergy(byte[] pcm) {

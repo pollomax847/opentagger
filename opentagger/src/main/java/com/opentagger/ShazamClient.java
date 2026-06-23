@@ -86,10 +86,8 @@ public class ShazamClient {
                 "pipe:1"
             );
             pb.redirectErrorStream(false);
-            Process p = pb.start();
-            byte[] data = p.getInputStream().readAllBytes();
-            p.waitFor();
-            return data.length > 0 ? data : null;
+            byte[] data = ProcessUtils.readWithTimeout(pb, 30);
+            return (data != null && data.length > 0) ? data : null;
         } catch (Exception e) {
             return null;
         }

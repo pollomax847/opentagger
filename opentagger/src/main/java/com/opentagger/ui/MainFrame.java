@@ -4,6 +4,7 @@ import com.formdev.flatlaf.FlatDarkLaf;
 import com.opentagger.AudioScanner;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
+import com.opentagger.MetadataCache;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
@@ -44,8 +45,10 @@ public class MainFrame extends JFrame {
 
     // ── État ─────────────────────────────────────────────────────────────────
     private final FileTableModel tableModel = new FileTableModel();
-    private TaggingWorker        worker;
-    private int                  currentMask = Config.get().defaultRenameMask();
+    private TaggingWorker           worker;
+    private AlbumCompletionWorker   completionWorker;
+    private InfoCompleterWorker     infoCompleter;
+    private int                     currentMask = Config.get().defaultRenameMask();
 
     // ── Composants header ────────────────────────────────────────────────────
     private JButton    btnTagAll, btnTagSel, btnCancel;
@@ -76,13 +79,23 @@ public class MainFrame extends JFrame {
     private JLabel       lblStatus;
     private JProgressBar progress;
 
+    // ── Bandeau de chargement dossiers (Jaikoz-style) ─────────────────────────
+    private final JPanel scanBanner  = new JPanel();
+    private final JPanel scanEntries = new JPanel();
+    private int          activeScanCount = 0;
+
     // ── Entrée publique ───────────────────────────────────────────────────────
 
-    public static void launch() {
+    public static void launch(java.io.File[] initialDirs) {
         FlatDarkLaf.setup();
         UIManager.put("Table.alternateRowColor", new Color(45, 47, 52));
         SwingUtilities.invokeLater(() ->
-            SplashScreen.show(() -> SwingUtilities.invokeLater(() -> new MainFrame().setVisible(true)))
+            SplashScreen.show(() -> SwingUtilities.invokeLater(() -> {
+                MainFrame frame = new MainFrame();
+                frame.setVisible(true);
+                if (initialDirs != null && initialDirs.length > 0)
+                    frame.loadFiles(initialDirs);
+            }))
         );
     }
 
@@ -110,7 +123,10 @@ public class MainFrame extends JFrame {
         JPanel topArea = new JPanel(new BorderLayout(0, 0));
         topArea.add(buildHeader(),    BorderLayout.NORTH);
         topArea.add(buildStatsStrip(), BorderLayout.CENTER);
-        topArea.add(buildFilterBar(), BorderLayout.SOUTH);
+        JPanel filterAndScan = new JPanel(new BorderLayout(0, 0));
+        filterAndScan.add(buildFilterBar(),  BorderLayout.NORTH);
+        filterAndScan.add(buildScanBanner(), BorderLayout.SOUTH);
+        topArea.add(filterAndScan, BorderLayout.SOUTH);
         add(topArea, BorderLayout.NORTH);
 
         // ── Split horizontal : table gauche | détail droit ──────────────────
@@ -198,6 +214,13 @@ public class MainFrame extends JFrame {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { renameTagged(); }
         });
 
+        // Ctrl+L = compléter les albums
+        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_L,
+                java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "completeAlbums");
+        actionMap.put("completeAlbums", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { completeAlbums(); }
+        });
+
         undoManager.addListener(this::updateUndoButtons);
     }
 
@@ -216,11 +239,23 @@ public class MainFrame extends JFrame {
         JMenu m = new JMenu("Fichier");
         m.setMnemonic('F');
         m.add(mitem("Ouvrir un dossier…",     "Ctrl+O",  e -> openFolder()));
+        m.add(mitem("Vider la liste",          "Ctrl+W",  e -> clearFileList()));
         m.addSeparator();
         m.add(mitem("Exporter CSV…",           "Ctrl+E",  e -> exportCsv()));
         m.addSeparator();
         m.add(mitem("Quitter",                 null,      e -> System.exit(0)));
         return m;
+    }
+
+    private void clearFileList() {
+        if (worker != null && !worker.isDone()) {
+            JOptionPane.showMessageDialog(this, "Arrêtez le taguage avant de vider la liste.",
+                "Taguage en cours", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        tableModel.clear();
+        refreshStats();
+        setStatus("Liste vidée.");
     }
 
     private JMenu buildMenuEdition() {
@@ -243,7 +278,7 @@ public class MainFrame extends JFrame {
         m.add(mitem("Sélectionner les erreurs",        null, e -> selectByStatus(FileEntry.Status.ERROR)));
         m.add(mitem("Sélectionner les en attente",     null, e -> selectByStatus(FileEntry.Status.PENDING)));
         m.addSeparator();
-        m.add(mitem("Préférences…",            "Ctrl+Virgule", e -> new SettingsDialog(this).setVisible(true)));
+        m.add(mitem("Préférences…",            "Ctrl+Virgule", e -> new SettingsDialog(this, this::loadFiles).setVisible(true)));
         return m;
     }
 
@@ -256,7 +291,10 @@ public class MainFrame extends JFrame {
         m.add(mitem("Arrêter",                 null,  e -> cancelTagging()));
         m.addSeparator();
         m.add(mitem("Renommer les fichiers tagués", "Ctrl+R", e -> renameTagged()));
+        m.add(mitem("Organiser en dossiers…",  "Ctrl+G", e -> organizeFiles()));
         m.add(mitem("Choisir le masque…",      null,      e -> chooseMask()));
+        m.addSeparator();
+        m.add(mitem("Compléter les albums…",   "Ctrl+L", e -> completeAlbums()));
         return m;
     }
 
@@ -265,6 +303,9 @@ public class MainFrame extends JFrame {
         m.setMnemonic('O');
         m.add(mitem("Correspondance manuelle…","Ctrl+M",  e -> openMatchDialog()));
         m.add(mitem("Gérer la pochette…",      null,      e -> openCoverDialog()));
+        m.addSeparator();
+        m.add(mitem("Forcer le re-taguage…",    null,      e -> forceRetag()));
+        m.add(mitem("Passe complète…",          "Ctrl+P",  e -> completeAllInfo()));
         m.addSeparator();
         m.add(mitem("Détecter les doublons…",  null,      e -> detectDuplicates()));
         m.add(mitem("Supprimer les fichiers illisibles…", null, e -> deleteErrorFiles()));
@@ -324,9 +365,9 @@ public class MainFrame extends JFrame {
         JButton btnOpen = accentBtn("Ouvrir dossier", "Ctrl+O");
         btnOpen.addActionListener(e -> openFolder());
 
-        btnTagAll = headerBtn("Tout tagger", "Tagger tous les fichiers cochés (F5)");
-        btnTagSel = headerBtn("Tagger la sélection", "Tagger les lignes sélectionnées (F6)");
-        btnCancel = headerBtn("Arrêter", "Annuler le traitement en cours");
+        btnTagAll  = headerBtn("Tout tagger", "Tagger tous les fichiers cochés (F5)");
+        btnTagSel  = headerBtn("Tagger la sélection", "Tagger les lignes sélectionnées (F6)");
+        btnCancel  = headerBtn("Arrêter", "Annuler le traitement en cours");
         btnTagAll.addActionListener(e -> startTagging(false));
         btnTagSel.addActionListener(e -> startTagging(true));
         btnCancel.addActionListener(e -> cancelTagging());
@@ -484,6 +525,8 @@ public class MainFrame extends JFrame {
         table = new JTable(tableModel);
         configureTable();
         installContextMenu();
+        // Propager le TransferHandler de la fenêtre à la table
+        table.setTransferHandler(getTransferHandler());
         JScrollPane scroll = new JScrollPane(table);
         scroll.setBorder(null);
 
@@ -696,6 +739,7 @@ public class MainFrame extends JFrame {
         // ── DetailPanel (champs de tags) ─────────────────────────────────────
         detailPanel = new DetailPanel();
         detailPanel.setOnApply(this::applyDetail);
+        detailPanel.setOnCoverClick(this::openCoverDialog);
 
         // ── Assemblage ───────────────────────────────────────────────────────
         JPanel content = new JPanel();
@@ -750,8 +794,9 @@ public class MainFrame extends JFrame {
 
     private void loadCoverThumb(File f) {
         lblCoverImg.setIcon(null); lblCoverImg.setText("…");
-        new SwingWorker<ImageIcon, Void>() {
-            @Override protected ImageIcon doInBackground() {
+        detailPanel.clearCover();
+        new SwingWorker<BufferedImage, Void>() {
+            @Override protected BufferedImage doInBackground() {
                 try {
                     AudioFile af = AudioFileIO.read(f);
                     Tag tag = af.getTag();
@@ -760,18 +805,25 @@ public class MainFrame extends JFrame {
                     if (art == null) return null;
                     byte[] data = art.getBinaryData();
                     try (InputStream in = new java.io.ByteArrayInputStream(data)) {
-                        BufferedImage img = ImageIO.read(in);
-                        if (img == null) return null;
-                        Image scaled = img.getScaledInstance(86, 86, Image.SCALE_SMOOTH);
-                        return new ImageIcon(scaled);
+                        return ImageIO.read(in);
                     }
                 } catch (Exception ignore) { return null; }
             }
             @Override protected void done() {
                 try {
-                    ImageIcon icon = get();
-                    if (icon != null) { lblCoverImg.setIcon(icon); lblCoverImg.setText(""); }
-                    else              { lblCoverImg.setIcon(null);  lblCoverImg.setText("—"); }
+                    BufferedImage img = get();
+                    if (img != null) {
+                        // Miniature 86×86 pour le haut du panneau
+                        Image small = img.getScaledInstance(86, 86, Image.SCALE_SMOOTH);
+                        lblCoverImg.setIcon(new ImageIcon(small));
+                        lblCoverImg.setText("");
+                        // Grande prévisualisation dans l'onglet Pochette
+                        detailPanel.setCoverIcon(img);
+                    } else {
+                        lblCoverImg.setIcon(null);
+                        lblCoverImg.setText("—");
+                        detailPanel.clearCover();
+                    }
                 } catch (Exception ignored) {}
             }
         }.execute();
@@ -789,20 +841,21 @@ public class MainFrame extends JFrame {
             TagInfo   ti   = e.activeTags();
             detailPanel.collect(ti);
             refreshTableRow(mr, ti);
+            markManuallyTagged(e, ti, mr);
             undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), "Modifier " + e.filename());
             writeTagsSafe(e, ti);
             setStatus("Tags sauvegardés — " + e.filename());
         } else {
             // ── Édition en lot ─────────────────────────────────────────────
-            // collect() en mode multi : n'écrase que les champs non vides
             int saved = 0;
             for (int row : rows) {
                 int       mr   = table.convertRowIndexToModel(row);
                 FileEntry e    = tableModel.get(mr);
                 TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
                 TagInfo   ti   = e.activeTags();
-                detailPanel.collect(ti);       // multiMode → écrase seulement les champs non vides
+                detailPanel.collect(ti);
                 refreshTableRow(mr, ti);
+                markManuallyTagged(e, ti, mr);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), "Lot " + e.filename());
                 writeTagsSafe(e, ti);
                 saved++;
@@ -863,6 +916,20 @@ public class MainFrame extends JFrame {
         tableModel.setValueAt(ti.track,       mr, FileTableModel.COL_TRACK);
     }
 
+    /**
+     * Après une sauvegarde manuelle, met le statut à TAGGED si au moins
+     * artiste ou titre sont renseignés — ce qui met à jour le filtre statut
+     * en temps réel sans redémarrage.
+     */
+    private void markManuallyTagged(FileEntry e, TagInfo ti, int mr) {
+        if (e.status != FileEntry.Status.TAGGED
+                && (!ti.artist.isBlank() || !ti.title.isBlank())) {
+            e.status  = FileEntry.Status.TAGGED;
+            e.message = "";
+            tableModel.update(e);   // fire fireTableRowsUpdated → RowSorter re-évalue le filtre
+        }
+    }
+
     private void writeTagsSafe(FileEntry e, TagInfo ti) {
         try {
             File target = e.currentPath != null ? e.currentPath.toFile() : e.file;
@@ -910,10 +977,82 @@ public class MainFrame extends JFrame {
         return bar;
     }
 
+    // ── Bandeau de scan dossiers (Jaikoz-style) ──────────────────────────────
+
+    private JPanel buildScanBanner() {
+        scanEntries.setLayout(new BoxLayout(scanEntries, BoxLayout.Y_AXIS));
+        scanEntries.setOpaque(false);
+        scanBanner.setLayout(new BorderLayout());
+        scanBanner.add(scanEntries, BorderLayout.CENTER);
+        scanBanner.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, sep()));
+        scanBanner.setVisible(false);
+        return scanBanner;
+    }
+
+    /** Ajoute une entrée de scan dans le bandeau. Retourne le panneau pour mise à jour ultérieure. */
+    private JPanel addScanEntry(String dirName) {
+        activeScanCount++;
+
+        JPanel row = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 8, 3));
+        row.setOpaque(false);
+
+        JLabel spinner = new JLabel("⠋");
+        spinner.setForeground(new Color(0x5599FF));
+        spinner.setFont(spinner.getFont().deriveFont(12f));
+
+        JLabel lbl = new JLabel(dirName + " — scan en cours…");
+        lbl.setForeground(UIManager.getColor("Label.foreground"));
+        lbl.setFont(lbl.getFont().deriveFont(11f));
+
+        row.add(spinner);
+        row.add(lbl);
+
+        String[] frames = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
+        int[] fi = {0};
+        Timer anim = new Timer(80, e -> { fi[0] = (fi[0]+1) % frames.length; spinner.setText(frames[fi[0]]); });
+        anim.start();
+        row.putClientProperty("anim", anim);
+        row.putClientProperty("lbl",  lbl);
+
+        SwingUtilities.invokeLater(() -> {
+            scanEntries.add(row);
+            scanBanner.setVisible(true);
+            scanBanner.revalidate();
+            scanBanner.repaint();
+        });
+        return row;
+    }
+
+    /** Met à jour l'entrée de scan à la fin du chargement et la supprime après 3 s. */
+    private void completeScanEntry(JPanel row, String dirName, int total, long tagged, Exception error) {
+        activeScanCount--;
+        Timer anim = (Timer) row.getClientProperty("anim");
+        if (anim != null) anim.stop();
+        JLabel lbl = (JLabel) row.getClientProperty("lbl");
+        JLabel spinner = (JLabel) row.getComponent(0);
+
+        if (error != null) {
+            spinner.setText("✗"); spinner.setForeground(new Color(0xDD4444));
+            if (lbl != null) lbl.setText(dirName + " — erreur : " + error.getMessage());
+        } else {
+            spinner.setText("✓"); spinner.setForeground(new Color(0x4DB6AC));
+            if (lbl != null) lbl.setText(dirName + " — " + total + " fichier(s), " + tagged + " déjà tagué(s)");
+        }
+        scanBanner.revalidate();
+        // Disparaît après 4 s
+        new Timer(4000, e -> {
+            ((Timer)e.getSource()).stop();
+            scanEntries.remove(row);
+            if (scanEntries.getComponentCount() == 0) scanBanner.setVisible(false);
+            scanBanner.revalidate();
+            scanBanner.repaint();
+        }) {{ setRepeats(false); }}.start();
+    }
+
     // ── Drag & Drop d'un dossier ──────────────────────────────────────────────
 
     private void installDragDrop() {
-        setTransferHandler(new TransferHandler() {
+        TransferHandler th = new TransferHandler() {
             @Override public boolean canImport(TransferSupport ts) {
                 return ts.isDataFlavorSupported(DataFlavor.javaFileListFlavor);
             }
@@ -922,15 +1061,12 @@ public class MainFrame extends JFrame {
                 try {
                     List<File> dropped = (List<File>) ts.getTransferable()
                             .getTransferData(DataFlavor.javaFileListFlavor);
-                    // Accepte plusieurs dossiers (ou fichiers audio) droppés en même temps
-                    for (File f : dropped) {
-                        if (f.isDirectory()) loadDirectory(f, true);
-                        else if (f.isFile())  loadDirectory(f.getParentFile(), true);
-                    }
+                    loadFiles(dropped.toArray(new File[0]));
                     return true;
                 } catch (Exception e) { return false; }
             }
-        });
+        };
+        setTransferHandler(th);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -939,52 +1075,95 @@ public class MainFrame extends JFrame {
 
     private void openFolder() {
         JFileChooser fc = new JFileChooser();
-        fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        // FILES_AND_DIRECTORIES : seul mode qui permet la multi-sélection sur Linux
+        fc.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
         fc.setMultiSelectionEnabled(true);
-        fc.setDialogTitle("Choisir un ou plusieurs dossiers de musique");
+        fc.setDialogTitle("Choisir un ou plusieurs dossiers / fichiers audio");
+        fc.setFileFilter(new javax.swing.filechooser.FileFilter() {
+            @Override public boolean accept(File f) {
+                if (f.isDirectory()) return true;
+                String n = f.getName().toLowerCase();
+                return n.endsWith(".mp3") || n.endsWith(".flac") || n.endsWith(".m4a")
+                    || n.endsWith(".ogg") || n.endsWith(".wav") || n.endsWith(".aac")
+                    || n.endsWith(".wma") || n.endsWith(".aiff");
+            }
+            @Override public String getDescription() { return "Dossiers et fichiers audio"; }
+        });
         if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File[] dirs = fc.getSelectedFiles();
-        if (dirs == null || dirs.length == 0) dirs = new File[]{fc.getSelectedFile()};
-        // Premier dossier : remplace la liste ; suivants : s'ajoutent
-        boolean replace = true;
-        for (File d : dirs) {
-            loadDirectory(d, replace);
-            replace = false;
+
+        // Sur Linux, getSelectedFiles() peut manquer le dernier élément sélectionné
+        // (celui affiché dans le champ "Nom du fichier"). On fusionne les deux.
+        java.util.LinkedHashSet<File> all = new java.util.LinkedHashSet<>();
+        File[] multi = fc.getSelectedFiles();
+        if (multi != null) for (File f : multi) if (f != null) all.add(f);
+        File single = fc.getSelectedFile();
+        if (single != null) all.add(single);
+        if (all.isEmpty()) return;
+        loadFiles(all.toArray(new File[0]));
+    }
+
+    void loadFiles(File[] selected) {
+        // Toujours accumuler (comme Jaikoz) — utiliser "Vider la liste" Ctrl+W pour repartir à zéro
+        for (File f : selected) {
+            if (f == null) continue;
+            if (f.isDirectory()) loadDirectory(f);
+            else if (f.isFile()) loadDirectory(f.getParentFile());
         }
     }
 
-    /**
-     * Charge un dossier (récursivement) dans la table.
-     * @param append  false = remplace la liste, true = ajoute à la liste existante
-     */
-    private void loadDirectory(File dir, boolean append) {
+    /** Charge un dossier (récursivement) dans la table — toujours en mode ajout. */
+    private void loadDirectory(File dir) {
         if (dir == null || !dir.isDirectory()) return;
-        setStatus("Scan de " + dir.getName() + "...");
-        final Path root = dir.toPath();
+        final String dirName = dir.getName();
+        final Path   root    = dir.toPath();
+        final JPanel scanRow = addScanEntry(dirName);
+        setStatus("Scan de " + dirName + "…");
+
         new SwingWorker<List<FileEntry>, Void>() {
             @Override protected List<FileEntry> doInBackground() throws Exception {
+                MetadataCache cache = new MetadataCache();
                 List<File> files = new AudioScanner().scan(dir);
                 List<FileEntry> list = new ArrayList<>(files.size());
                 for (File f : files) {
                     FileEntry entry = new FileEntry(f, readTags(f));
                     entry.scanRoot = root;
+                    // Restaurer le statut depuis le cache (évite de tout recommencer)
+                    String mbid = cache.getFileTagging(f.getAbsolutePath());
+                    if (mbid != null) {
+                        mbid = mbid.trim();
+                        com.opentagger.model.TagInfo cached = cache.getTaggingHistory(mbid);
+                        if (cached != null && (!cached.artist.isBlank() || !cached.title.isBlank())) {
+                            entry.result  = cached;
+                            entry.status  = FileEntry.Status.TAGGED;
+                            entry.message = "";
+                        }
+                    }
                     list.add(entry);
                 }
+                cache.close();
                 return list;
             }
             @Override protected void done() {
                 try {
                     List<FileEntry> list = get();
-                    if (append) tableModel.addAll(list);
-                    else        tableModel.replaceAll(list);
-                    setStatus(tableModel.getRowCount() + " fichier(s) au total — dernier ajout : " + dir.getName());
+                    tableModel.addAll(list);
+                    long tagged = list.stream().filter(e -> e.status == FileEntry.Status.TAGGED).count();
+                    setStatus(tableModel.getRowCount() + " fichier(s) — " + tagged + " déjà tagué(s)");
                     refreshStats();
-                } catch (Exception ex) { showError(ex.getMessage()); }
+                    completeScanEntry(scanRow, dirName, list.size(), tagged, null);
+                } catch (Exception ex) {
+                    completeScanEntry(scanRow, dirName, 0, 0, ex);
+                    showError(ex.getMessage());
+                }
             }
         }.execute();
     }
 
     private void startTagging(boolean selOnly) {
+        if (worker != null && !worker.isDone()) {
+            setStatus("Taguage en cours — attendez la fin ou cliquez sur Annuler.");
+            return;
+        }
         List<FileEntry> toTag = new ArrayList<>();
         if (selOnly) {
             for (int r : table.getSelectedRows())
@@ -1001,7 +1180,8 @@ public class MainFrame extends JFrame {
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setVisible(true);
 
-        worker = new TaggingWorker(toTag, chkAcoustId.isSelected(), -1,
+        int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
+        worker = new TaggingWorker(toTag, chkAcoustId.isSelected(), autoMask,
             msg -> setStatus(msg),
             entry -> {
                 tableModel.update(entry);
@@ -1035,13 +1215,146 @@ public class MainFrame extends JFrame {
         setStatus("Arrêté."); resetBtns();
     }
 
+    // ── Passe complète (compléter les infos manquantes) ──────────────────────
+
+    private void completeAllInfo() {
+        if (infoCompleter != null && !infoCompleter.isDone()) {
+            infoCompleter.cancel(false);
+            setStatus("Passe complète annulée.");
+            return;
+        }
+        if (worker != null && !worker.isDone()) {
+            setStatus("Taguage en cours — attendez la fin avant de lancer la passe complète.");
+            return;
+        }
+
+        // Cible : sélection si ≥1, sinon tous les TAGGED avec champs manquants
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        List<FileEntry> targets = new ArrayList<>();
+        java.util.Set<String> seenPaths = new java.util.HashSet<>();
+        if (sel.length > 0) {
+            for (int r : sel) {
+                FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
+                if (e.status == FileEntry.Status.TAGGED) {
+                    String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
+                    if (seenPaths.add(p)) targets.add(e);
+                }
+            }
+        } else {
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                FileEntry e = tableModel.get(i);
+                if (e.status != FileEntry.Status.TAGGED) continue;
+                String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
+                if (!seenPaths.add(p)) continue;
+                TagInfo ti = e.result;
+                boolean incomplete = ti == null
+                    || ti.artistMbid.isBlank() || ti.album.isBlank()
+                    || ti.year.isBlank()        || ti.genre.isBlank()
+                    || ti.mood.isBlank()         || ti.bpm.isBlank()
+                    || ti.lyrics.isBlank();
+                if (incomplete) targets.add(e);
+            }
+        }
+
+        if (targets.isEmpty()) {
+            setStatus("Tous les fichiers tagués sont déjà complets.");
+            return;
+        }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            targets.size() + " fichier(s) ont des infos manquantes.\n"
+            + "La passe complète va chercher album, année, pochette, genre, mood, BPM et paroles.\n"
+            + "Durée estimée : " + (targets.size() * 2) + "–" + (targets.size() * 4) + " secondes.",
+            "Passe complète", JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        progress.setVisible(true);
+        progress.setMaximum(targets.size());
+        progress.setValue(0);
+
+        infoCompleter = new InfoCompleterWorker(
+            targets,
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
+            entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); refreshStats(); }),
+            (done, total) -> SwingUtilities.invokeLater(() -> {
+                progress.setValue(done);
+                progress.setString(done + "/" + total);
+            })
+        );
+        infoCompleter.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    progress.setVisible(false);
+                    setStatus("Passe complète terminée — " + targets.size() + " fichier(s) traités.");
+                    refreshStats();
+                });
+            }
+        });
+        infoCompleter.execute();
+    }
+
+    private void forceRetag() {
+        // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        List<FileEntry> targets = new ArrayList<>();
+        if (sel.length > 0) {
+            for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
+        } else {
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                FileEntry e = tableModel.get(i);
+                if (e.status == FileEntry.Status.TAGGED) targets.add(e);
+            }
+        }
+        if (targets.isEmpty()) { setStatus("Aucun fichier sélectionné à re-taguer."); return; }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            targets.size() + " fichier(s) vont être remis en PENDING et leur cache effacé.\n"
+            + "Ils seront re-tagués au prochain lancement du taguage.",
+            "Forcer le re-taguage", JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        MetadataCache cache = new MetadataCache();
+        try {
+            for (FileEntry e : targets) {
+                java.io.File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                // Effacer le cache pour ce fichier
+                cache.recordFileTagging(fichier.getAbsolutePath(), null);
+                // Effacer les MBIDs du fichier audio pour forcer une nouvelle identification
+                // (sinon MUSICBRAINZ_TRACK_ID est relu et peut donner un mauvais résultat en cache)
+                try {
+                    org.jaudiotagger.audio.AudioFile af = org.jaudiotagger.audio.AudioFileIO.read(fichier);
+                    org.jaudiotagger.tag.Tag tag = af.getTag();
+                    if (tag != null) {
+                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_TRACK_ID);
+                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_ARTISTID);
+                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASEID);
+                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
+                        af.commit();
+                    }
+                } catch (Exception ignored) {}
+                // Réinitialiser le statut
+                e.status   = FileEntry.Status.PENDING;
+                e.message  = "";
+                e.result   = null;
+                e.candidates = null;
+                tableModel.update(e);
+            }
+        } finally { cache.close(); }
+        refreshStats();
+        setStatus(targets.size() + " fichier(s) remis en attente — relancez le taguage.");
+    }
+
     private void onTaggingDone(List<FileEntry> done) {
         long ok   = done.stream().filter(e -> e.status == FileEntry.Status.TAGGED).count();
         long skip = done.stream().filter(e -> e.status == FileEntry.Status.SKIPPED).count();
         long err  = done.stream().filter(e -> e.status == FileEntry.Status.ERROR).count();
-        setStatus(String.format("Terminé — ✓ %d tagué(s)  ⚠ %d ignoré(s)  ✗ %d erreur(s)", ok, skip, err));
+        setStatus(String.format("Terminé — ✓ %d tagué(s)  ⚠ %d ignoré(s)  ✗ %d erreur(s)  — complétion albums…",
+                ok, skip, err));
         resetBtns();
         refreshStats();
+        // Lancer la complétion albums automatiquement après chaque session de tagging
+        completeAlbums();
     }
 
     private void resetBtns() {
@@ -1122,6 +1435,117 @@ public class MainFrame extends JFrame {
         try (Stream<Path> s = Files.walk(root)) {
             return s.filter(Files::isDirectory).count();
         } catch (Exception e) { return 0; }
+    }
+
+    // ── Compléter les albums ──────────────────────────────────────────────────
+
+    private void completeAlbums() {
+        if (completionWorker != null && !completionWorker.isDone()) {
+            completionWorker.cancel(true);
+            setStatus("Complétion annulée.");
+            return;
+        }
+        setStatus("Complétion des albums en cours…");
+        completionWorker = new AlbumCompletionWorker(
+            tableModel,
+            new com.opentagger.MusicBrainzClient(),
+            this::setStatus,
+            () -> SwingUtilities.invokeLater(() -> setStatus("Complétion albums terminée."))
+        );
+        completionWorker.execute();
+    }
+
+    // ── Organiser en dossiers ─────────────────────────────────────────────────
+
+    private Path organizeDestRoot;
+    private int  organizeMask = 3; // défaut : AlbumArtist/Album/Track - Artist - Title
+
+    private void organizeFiles() {
+        long tagged = 0;
+        for (int i = 0; i < tableModel.getRowCount(); i++)
+            if (tableModel.get(i).status == FileEntry.Status.TAGGED) tagged++;
+        if (tagged == 0) { setStatus("Aucun fichier tagué à organiser."); return; }
+
+        // 1. Choisir le dossier de destination
+        JFileChooser fc = new JFileChooser(organizeDestRoot != null
+                ? organizeDestRoot.toFile()
+                : javax.swing.filechooser.FileSystemView.getFileSystemView().getDefaultDirectory());
+        fc.setDialogTitle("Dossier de destination de la bibliothèque musicale");
+        fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        fc.setApproveButtonText("Choisir ce dossier");
+        if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        organizeDestRoot = fc.getSelectedFile().toPath();
+
+        // 2. Choisir le masque (filtré : masques contenant "/" donc avec sous-dossiers)
+        FileRenamer renamer = new FileRenamer();
+        List<String> folderLabels = new ArrayList<>();
+        List<Integer> folderIndexes = new ArrayList<>();
+        for (int i = 0; i < renamer.maskCount(); i++) {
+            if (renamer.maskExpression(i).contains("/") || renamer.maskExpression(i).contains("{album}")) {
+                folderLabels.add(String.format("[%2d] %s", i, renamer.maskLabel(i)));
+                folderIndexes.add(i);
+            }
+        }
+        if (folderLabels.isEmpty()) { setStatus("Aucun masque avec sous-dossiers disponible."); return; }
+
+        int defaultIdx = folderIndexes.indexOf(organizeMask);
+        if (defaultIdx < 0) defaultIdx = 0;
+        String[] labelsArr = folderLabels.toArray(new String[0]);
+        String chosen = (String) JOptionPane.showInputDialog(this,
+                "Structure de dossiers :\n(destination : " + organizeDestRoot + ")",
+                "Organiser en dossiers",
+                JOptionPane.PLAIN_MESSAGE, null, labelsArr, labelsArr[defaultIdx]);
+        if (chosen == null) return;
+        for (int i = 0; i < labelsArr.length; i++)
+            if (labelsArr[i].equals(chosen)) { organizeMask = folderIndexes.get(i); break; }
+
+        // 3. Aperçu
+        List<RenamePreviewDialog.PreviewRow> preview =
+                RenamePreviewDialog.compute(tableModel, organizeMask, organizeDestRoot);
+        if (preview.isEmpty()) { setStatus("Aucun fichier à organiser."); return; }
+
+        RenamePreviewDialog dlg = new RenamePreviewDialog(this,
+                preview, "Organiser en dossiers", () -> doOrganizeFiles(organizeDestRoot, organizeMask));
+        dlg.setVisible(true);
+    }
+
+    private void doOrganizeFiles(Path destRoot, int maskIndex) {
+        FileRenamer renamer = new FileRenamer();
+        int moved = 0, skipped = 0, errors = 0;
+        List<Path> sourceDirs = new ArrayList<>();
+
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.status != FileEntry.Status.TAGGED) continue;
+
+            Path oldPath = e.currentPath;
+            try {
+                Path newPath = renamer.rename(e.currentPath, e.activeTags(), maskIndex, destRoot);
+                if (newPath != null) {
+                    sourceDirs.add(oldPath.getParent());
+                    e.currentPath = newPath;
+                    moved++;
+                    tableModel.update(e);
+                } else {
+                    skipped++;
+                }
+            } catch (Exception ex) {
+                errors++;
+                e.message = "Organisation : " + ex.getMessage();
+                tableModel.update(e);
+            }
+        }
+
+        // Nettoyer les dossiers source devenus vides
+        Set<Path> roots = new LinkedHashSet<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.scanRoot != null) roots.add(e.scanRoot);
+        }
+        for (Path src : sourceDirs)
+            for (Path r : roots) FileRenamer.deleteEmptyAncestors(src, r);
+
+        setStatus(String.format("Organisation — ✓ %d déplacé(s)  déjà OK %d  ✗ %d erreur(s)", moved, skipped, errors));
     }
 
     private void chooseMask() {
@@ -1503,27 +1927,69 @@ public class MainFrame extends JFrame {
     }
 
     private void submitAcoustId() {
-        int row = table.getSelectedRow();
-        if (row < 0) return;
-        FileEntry e = tableModel.get(table.convertRowIndexToModel(row));
-        if (e.status != FileEntry.Status.TAGGED) {
-            setStatus("Soumettre AcoustID : ce fichier doit d'abord être tagué.");
-            return;
-        }
         if (!com.opentagger.AcoustIdSubmitter.isAvailable()) {
             showError("fpcalc introuvable — installez chromaprint pour soumettre une empreinte.");
             return;
         }
-        setStatus("Soumission AcoustID en cours…");
-        File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-        TagInfo tags = e.activeTags();
-        new SwingWorker<String, Void>() {
-            @Override protected String doInBackground() throws Exception {
-                return new com.opentagger.AcoustIdSubmitter().submit(f, tags);
+
+        // Collecter les fichiers candidats (sélection, ou tous les TAGGED si rien sélectionné)
+        int[] sel = table.getSelectedRows();
+        List<FileEntry> candidates = new ArrayList<>();
+        if (sel.length > 0) {
+            for (int r : sel)
+                candidates.add(tableModel.get(table.convertRowIndexToModel(r)));
+        } else {
+            for (int i = 0; i < tableModel.getRowCount(); i++)
+                candidates.add(tableModel.get(i));
+        }
+
+        // Filtrer : seulement les TAGGED avec un recordingMbid (soumission utile)
+        List<FileEntry> toSubmit = new ArrayList<>();
+        int skippedNotTagged = 0, skippedNoMbid = 0;
+        for (FileEntry e : candidates) {
+            if (e.status != FileEntry.Status.TAGGED) { skippedNotTagged++; continue; }
+            TagInfo ti = e.activeTags();
+            if (ti == null || ti.recordingMbid.isBlank()) { skippedNoMbid++; continue; }
+            toSubmit.add(e);
+        }
+
+        if (toSubmit.isEmpty()) {
+            String msg = "Aucun fichier éligible à soumettre.";
+            if (skippedNotTagged > 0) msg += " (" + skippedNotTagged + " non tagué(s) ignoré(s))";
+            if (skippedNoMbid   > 0) msg += " (" + skippedNoMbid   + " sans MBID ignoré(s))";
+            setStatus(msg);
+            return;
+        }
+
+        int total = toSubmit.size();
+        String info = total + " fichier(s) à soumettre";
+        if (skippedNotTagged > 0) info += ", " + skippedNotTagged + " non tagué(s) ignoré(s)";
+        if (skippedNoMbid   > 0) info += ", " + skippedNoMbid   + " sans MBID ignoré(s)";
+        setStatus("Soumission AcoustID : " + info + "…");
+
+        new SwingWorker<String, String>() {
+            @Override protected String doInBackground() {
+                com.opentagger.AcoustIdSubmitter sub = new com.opentagger.AcoustIdSubmitter();
+                int ok = 0, failed = 0;
+                for (FileEntry e : toSubmit) {
+                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    try {
+                        sub.submit(f, e.activeTags());
+                        ok++;
+                        publish("  ✔ " + f.getName());
+                    } catch (Exception ex) {
+                        failed++;
+                        publish("  ✗ " + f.getName() + " : " + ex.getMessage());
+                    }
+                }
+                return "Soumission terminée — ✔ " + ok + " envoyé(s)" + (failed > 0 ? "  ✗ " + failed + " erreur(s)" : "");
+            }
+            @Override protected void process(List<String> chunks) {
+                chunks.forEach(System.out::println);
             }
             @Override protected void done() {
-                try { setStatus("AcoustID : " + get()); }
-                catch (Exception ex) { showError("Soumission AcoustID : " + ex.getMessage()); }
+                try { setStatus(get()); }
+                catch (Exception ex) { setStatus("Soumission AcoustID : erreur inattendue"); }
             }
         }.execute();
     }

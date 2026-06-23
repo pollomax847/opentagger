@@ -85,10 +85,8 @@ public class AudDClient {
                 "pipe:1"
             );
             pb.redirectErrorStream(false);
-            Process p = pb.start();
-            byte[] data = p.getInputStream().readAllBytes();
-            p.waitFor();
-            if (data.length > 4096) return data; // succès
+            byte[] data = ProcessUtils.readWithTimeout(pb, 35);
+            if (data != null && data.length > 4096) return data; // succès
         } catch (Exception ignored) {}
 
         // Fallback : envoyer les 2 premiers Mo du fichier original

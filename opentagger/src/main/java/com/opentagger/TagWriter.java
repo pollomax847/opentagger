@@ -101,8 +101,12 @@ public class TagWriter {
         m.put(FieldKey.GROUPING,           i.grouping);
 
         // ── Flags ─────────────────────────────────────────────────────────
-        if ("1".equals(i.isClassical))   m.put(FieldKey.IS_CLASSICAL,   "1");
-        if ("1".equals(i.isCompilation)) m.put(FieldKey.IS_COMPILATION, "1");
+        if ("1".equals(i.isClassical))    m.put(FieldKey.IS_CLASSICAL,    "1");
+        if ("1".equals(i.isCompilation))  m.put(FieldKey.IS_COMPILATION,  "1");
+        if ("1".equals(i.isLive))         m.put(FieldKey.IS_LIVE,         "1");
+        if ("1".equals(i.isHD))           m.put(FieldKey.IS_HD,           "1");
+        if ("1".equals(i.isSoundtrack))   m.put(FieldKey.IS_SOUNDTRACK,   "1");
+        if ("1".equals(i.isGreatestHits)) m.put(FieldKey.IS_GREATEST_HITS,"1");
 
         // ── Audio ─────────────────────────────────────────────────────────
         m.put(FieldKey.BPM,                i.bpm);

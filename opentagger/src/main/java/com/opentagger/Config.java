@@ -73,6 +73,11 @@ public class Config {
     public boolean fanartEnabled()     { return bool("fanart.download_cover", true); }
     public boolean lastfmEnabled()     { return bool("lastfm.use_tags", true); }
     public int    defaultRenameMask()  { return num("rename.default_mask", 3); }
+    public boolean autoRenameEnabled() { return bool("rename.auto_enabled", false); }
+    public String[] startupFolders()   {
+        String v = str("startup.folders");
+        return v.isBlank() ? new String[0] : v.split("\\|");
+    }
 
     public String userAgent() {
         return "OpenTagger/" + str("app.version", "0.1") + " (" + contact() + ")";

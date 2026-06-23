@@ -96,6 +96,17 @@ public class FileTableModel extends AbstractTableModel {
             case COL_GENRE        -> activeTags(e).genre        = (String) value;
             case COL_TRACK        -> activeTags(e).track        = (String) value;
         }
+        // Mettre à jour le statut dynamiquement lors d'une édition inline
+        if (col >= COL_ARTIST && col <= COL_TRACK) {
+            TagInfo ti = e.activeTags();
+            boolean hasTags = !ti.artist.isBlank() || !ti.title.isBlank();
+            if (e.status != FileEntry.Status.TAGGED && hasTags) {
+                e.status  = FileEntry.Status.TAGGED;
+                e.message = "";
+                fireTableRowsUpdated(row, row);  // met à jour COL_STATUS + re-évalue le filtre
+                return;
+            }
+        }
         fireTableCellUpdated(row, col);
     }
 
