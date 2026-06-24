@@ -69,6 +69,7 @@ public class MusicBrainzClient {
                 if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
                 info.language = chosen.path("text-representation").path("language").asText("").trim();
                 extractSecondaryTypes(chosen, info);
+                extractReleaseDetails(chosen, info);
                 extractMediaInfo(chosen, info);
             }
             return info;
@@ -153,6 +154,7 @@ public class MusicBrainzClient {
 
                 // Release-group secondary types (Compilation, Live, Soundtrack, Greatest Hits)
                 extractSecondaryTypes(chosen, info);
+                extractReleaseDetails(chosen, info);
 
                 // Media — piste, disc, totaux
                 extractMediaInfo(chosen, info);
@@ -175,6 +177,19 @@ public class MusicBrainzClient {
             }
         }
         if ("Various Artists".equalsIgnoreCase(info.albumArtist)) info.isCompilation = "1";
+
+        // Primary type (Album, Single, EP, Broadcast, Other)
+        String ptype = release.path("release-group").path("primary-type").asText("").trim();
+        if (!ptype.isBlank()) info.releaseType = ptype;
+    }
+
+    /** Extrait script, country depuis la release (disponibles en inline recording lookup). */
+    private void extractReleaseDetails(JsonNode release, TagInfo info) {
+        String sc = release.path("text-representation").path("script").asText("").trim();
+        if (!sc.isBlank() && info.script.isBlank()) info.script = sc;
+
+        String co = release.path("country").asText("").trim();
+        if (!co.isBlank() && info.country.isBlank()) info.country = co;
     }
 
     private JsonNode findBestRelease(JsonNode releases, boolean onlyOfficial) {
@@ -345,8 +360,12 @@ public class MusicBrainzClient {
 
             info.language = chosen.path("text-representation").path("language").asText("").trim();
             extractSecondaryTypes(chosen, info);
+            extractReleaseDetails(chosen, info);
             extractMediaInfo(chosen, info);
         }
+        // originalYear : date de première sortie du recording
+        String frd = rec.path("first-release-date").asText("").trim();
+        if (frd.length() >= 4 && info.originalYear.isBlank()) info.originalYear = frd.substring(0, 4);
         return info;
     }
 

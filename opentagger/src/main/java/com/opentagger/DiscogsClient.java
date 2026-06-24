@@ -28,30 +28,42 @@ public class DiscogsClient {
     private final ObjectMapper mapper = new ObjectMapper();
 
     /**
-     * Enrichit un TagInfo existant avec les genres et styles Discogs.
-     * Stratégie : artiste + album → si rien, artiste seul.
+     * Enrichit un TagInfo : genres, barcode, catalogue number.
+     * Stratégie : artiste + album → artiste + titre → artiste seul.
      */
     public void enrichGenres(TagInfo info) throws Exception {
         if (info.artist.isBlank()) return;
 
-        // Stratégie 1 : artiste + album
-        if (!info.album.isBlank()) {
-            List<String> genres = search(info.artist, info.album);
-            if (!genres.isEmpty()) { info.genre = String.join(", ", genres); return; }
+        JsonNode hit = null;
+        if (!info.album.isBlank())  hit = searchBest(info.artist, info.album);
+        if (hit == null && !info.title.isBlank()) hit = searchBest(info.artist, info.title);
+        if (hit == null) hit = searchBest(info.artist, "");
+        if (hit == null) return;
+
+        // Genres/styles
+        if (info.genre.isBlank()) {
+            List<String> genres = extraireTableau(hit.path("style"));
+            if (genres.isEmpty()) genres = extraireTableau(hit.path("genre"));
+            if (!genres.isEmpty()) info.genre = String.join(", ", genres);
         }
 
-        // Stratégie 2 : artiste + titre
-        if (!info.title.isBlank()) {
-            List<String> genres = search(info.artist, info.title);
-            if (!genres.isEmpty()) { info.genre = String.join(", ", genres); return; }
+        // Barcode (tableau dans les résultats Discogs)
+        if (info.barcode.isBlank()) {
+            JsonNode barcodes = hit.path("barcode");
+            if (barcodes.isArray() && !barcodes.isEmpty()) {
+                String bc = barcodes.get(0).asText("").trim().replaceAll("[^0-9]", "");
+                if (!bc.isBlank()) info.barcode = bc;
+            }
         }
 
-        // Stratégie 3 : artiste seul (prend le genre le plus fréquent)
-        List<String> genres = search(info.artist, "");
-        if (!genres.isEmpty()) info.genre = String.join(", ", genres);
+        // Catalogue number
+        if (info.catalogNo.isBlank()) {
+            String catno = hit.path("catno").asText("").trim();
+            if (!catno.isBlank() && !"none".equalsIgnoreCase(catno)) info.catalogNo = catno;
+        }
     }
 
-    private List<String> search(String artist, String album) throws Exception {
+    private JsonNode searchBest(String artist, String album) throws Exception {
         String url = BASE_URL + "/database/search?type=release&per_page=5"
                 + "&artist=" + encode(artist)
                 + (album.isBlank() ? "" : "&release_title=" + encode(album));
@@ -64,16 +76,10 @@ public class DiscogsClient {
                 .build();
 
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return List.of();
+        if (response.statusCode() != 200) return null;
 
         JsonNode results = mapper.readTree(response.body()).path("results");
-        if (!results.isArray() || results.isEmpty()) return List.of();
-
-        // Styles d'abord (plus précis), sinon genres
-        JsonNode premier = results.get(0);
-        List<String> genres = extraireTableau(premier.path("style"));
-        if (genres.isEmpty()) genres = extraireTableau(premier.path("genre"));
-        return genres;
+        return (results.isArray() && !results.isEmpty()) ? results.get(0) : null;
     }
 
     private List<String> extraireTableau(JsonNode node) {

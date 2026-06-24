@@ -163,10 +163,19 @@ public class TagWriter {
         m.put(FieldKey.ACOUSTID_FINGERPRINT, i.acoustidFingerprint);
 
         // ── IDs MusicBrainz ───────────────────────────────────────────────
-        m.put(FieldKey.MUSICBRAINZ_ARTISTID,         i.artistMbid);
-        m.put(FieldKey.MUSICBRAINZ_RELEASEID,         i.releaseMbid);
-        m.put(FieldKey.MUSICBRAINZ_TRACK_ID,          i.recordingMbid);
-        m.put(FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID,  i.releaseGroupMbid);
+        m.put(FieldKey.MUSICBRAINZ_ARTISTID,          i.artistMbid);
+        m.put(FieldKey.MUSICBRAINZ_RELEASEID,          i.releaseMbid);
+        m.put(FieldKey.MUSICBRAINZ_TRACK_ID,           i.recordingMbid);
+        m.put(FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID,   i.releaseGroupMbid);
+        m.put(FieldKey.MUSICBRAINZ_RELEASE_COUNTRY,    i.country);
+        m.put(FieldKey.MUSICBRAINZ_RELEASE_TYPE,       i.releaseType);
+
+        // ── Métadonnées release (Jaikoz TXXX) ────────────────────────────
+        m.put(FieldKey.SCRIPT,        i.script);
+        m.put(FieldKey.COUNTRY,       i.country);
+        m.put(FieldKey.BARCODE,       i.barcode);
+        m.put(FieldKey.CATALOG_NO,    i.catalogNo);
+        m.put(FieldKey.ORIGINAL_YEAR, i.originalYear);
 
         return m;
     }

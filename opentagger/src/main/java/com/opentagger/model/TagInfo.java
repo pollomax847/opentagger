@@ -120,6 +120,14 @@ public class TagInfo {
     public String acoustidId          = "";
     public String acoustidFingerprint = "";
 
+    // ── Métadonnées release (Jaikoz TXXX) ───────────────────────────────────
+    public String script              = "";    // Latin, Cyrillic, CJK…
+    public String country             = "";    // code ISO-3166 : US, FR, GB…
+    public String barcode             = "";
+    public String catalogNo           = "";
+    public String releaseType         = "";    // Album, Single, EP, Broadcast…
+    public String originalYear        = "";    // Première année de parution
+
     // ── IDs MusicBrainz ──────────────────────────────────────────────────────
     public String artistMbid          = "";
     public String releaseGroupMbid    = "";
