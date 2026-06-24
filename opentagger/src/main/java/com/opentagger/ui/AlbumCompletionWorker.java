@@ -83,8 +83,10 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         Map<String, FileEntry> candidateIndex = new LinkedHashMap<>();
         for (FileEntry e : candidates) {
             if (isCancelled()) break;
-            String t = readEmbeddedTitle(e.currentPath.toFile());
-            if (t.isBlank()) t = filenameTitle(e.currentPath.getFileName().toString());
+            java.nio.file.Path p = e.currentPath != null ? e.currentPath : e.file.toPath();
+            if (!java.nio.file.Files.exists(p)) continue; // fichier introuvable, ignorer
+            String t = readEmbeddedTitle(p.toFile());
+            if (t.isBlank()) t = filenameTitle(p.getFileName().toString());
             String key = normalize(t);
             if (!key.isBlank()) candidateIndex.put(key, e);
         }

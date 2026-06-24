@@ -5,6 +5,9 @@ import org.jaudiotagger.audio.AudioFile;
 import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
+import org.jaudiotagger.tag.id3.AbstractID3v2Tag;
+import org.jaudiotagger.tag.id3.framebody.FrameBodyTXXX;
+import org.jaudiotagger.tag.id3.ID3v23Frame;
 import org.jaudiotagger.tag.images.Artwork;
 import org.jaudiotagger.tag.images.ArtworkFactory;
 
@@ -21,7 +24,7 @@ public class TagWriter {
 
     public void write(File fichier, TagInfo info, Path coverImage) throws Exception {
         AudioFile audio = AudioFileIO.read(fichier);
-        Tag tag = audio.getTagOrCreateDefault();
+        Tag tag = getOrCreateID3v23Tag(audio);
 
         // Construction du mapping field → valeur pour une écriture uniforme
         Map<FieldKey, String> fields = buildFieldMap(info);
@@ -37,6 +40,25 @@ public class TagWriter {
         }
 
         audio.commit();
+    }
+
+    /**
+     * Pour les MP3 : force ID3v2.3 comme Jaikoz.
+     * Pour les autres formats (FLAC, M4A…) : utilise le tag natif.
+     */
+    private Tag getOrCreateID3v23Tag(AudioFile audio) {
+        if (audio instanceof org.jaudiotagger.audio.mp3.MP3File mp3) {
+            org.jaudiotagger.tag.id3.ID3v23Tag v23;
+            if (mp3.hasID3v2Tag()) {
+                // Convertir le tag existant en v2.3 en conservant les données
+                v23 = new org.jaudiotagger.tag.id3.ID3v23Tag(mp3.getID3v2TagAsv24());
+            } else {
+                v23 = new org.jaudiotagger.tag.id3.ID3v23Tag();
+            }
+            mp3.setID3v2Tag(v23);
+            return v23;
+        }
+        return audio.getTagOrCreateDefault();
     }
 
     private Map<FieldKey, String> buildFieldMap(TagInfo i) {
@@ -162,7 +184,25 @@ public class TagWriter {
 
     private void setIfNonBlank(Tag tag, FieldKey key, String value) {
         if (value == null || value.isBlank()) return;
-        try { tag.setField(key, value); }
-        catch (Exception ignored) {}
+        // MOOD : TMOO n'existe qu'en ID3v2.4 ; pour ID3v2.3 on écrit TXXX:MOOD directement
+        if (key == FieldKey.MOOD && tag instanceof AbstractID3v2Tag id3
+                && !(tag instanceof org.jaudiotagger.tag.id3.ID3v24Tag)) {
+            writeTxxx(id3, "MOOD", value);
+            return;
+        }
+        try {
+            tag.setField(key, value);
+        } catch (Exception ignored) {}
+    }
+
+    private void writeTxxx(AbstractID3v2Tag id3tag, String description, String value) {
+        try {
+            FrameBodyTXXX body = new FrameBodyTXXX();
+            body.setDescription(description);
+            body.setText(value);
+            ID3v23Frame frame = new ID3v23Frame("TXXX");
+            frame.setBody(body);
+            id3tag.setFrame(frame);
+        } catch (Exception ignored) {}
     }
 }

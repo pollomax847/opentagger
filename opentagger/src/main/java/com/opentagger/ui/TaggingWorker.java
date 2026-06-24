@@ -114,6 +114,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private void processEntry(FileEntry entry) {
         try {
             File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+
+            // Vérifier que le fichier existe avant tout traitement
+            if (!fichier.exists()) {
+                entry.status  = FileEntry.Status.ERROR;
+                entry.message = "Fichier introuvable";
+                log("▶ SKIP   " + fichier.getName() + " (fichier introuvable)");
+                return;
+            }
+
             log("▶ START  " + fichier.getName());
 
             log("  findTags...");

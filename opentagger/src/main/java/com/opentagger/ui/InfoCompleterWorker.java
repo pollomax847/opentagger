@@ -72,6 +72,15 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                     : entry.file;
 
             onProgress.accept("[" + (done+1) + "/" + total + "] " + fichier.getName());
+
+            if (!fichier.exists()) {
+                log("▶ SKIP " + fichier.getName() + " (fichier introuvable)");
+                done++;
+                onCount.accept(done, total);
+                publish(entry);
+                continue;
+            }
+
             log("▶ COMPLÉTER " + fichier.getName());
 
             try {

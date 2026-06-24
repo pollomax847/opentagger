@@ -246,8 +246,13 @@ public class FileRenamer {
         return sb.toString().replaceAll("/+", "/").replaceAll("^/|/$", "");
     }
 
+    private static final java.util.regex.Pattern AUDIO_EXT =
+            java.util.regex.Pattern.compile("(?i)\\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|aiff|ape|wv)$");
+
     private String sanitize(String s) {
         if (s == null || s.isBlank()) return "";
+        // Retirer l'extension audio si le tag la contient (ex: title="Song.mp3")
+        s = AUDIO_EXT.matcher(s.trim()).replaceAll("");
         return s.trim()
                 .replaceAll("[\\\\:*?\"<>|]", "_")
                 .replaceAll("\\.{2,}", ".")
