@@ -290,6 +290,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             cache.saveTaggingHistory(best, cacheKey);
             cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey);
 
+            acoustId.submit(best.recordingMbid);
             submitToMusicBrainz(best);
 
         } catch (Exception ex) {

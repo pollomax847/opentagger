@@ -17,8 +17,9 @@ import java.util.List;
 
 public class AcoustIdClient {
 
-    private static final String API_URL  = "https://api.acoustid.org/v2/lookup";
-    private static final String MB_URL   = "https://musicbrainz.org/ws/2/recording/";
+    private static final String LOOKUP_URL = "https://api.acoustid.org/v2/lookup";
+    private static final String SUBMIT_URL = "https://api.acoustid.org/v2/submit";
+    private static final String MB_URL     = "https://musicbrainz.org/ws/2/recording/";
 
     private final HttpClient   http   = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -26,10 +27,21 @@ public class AcoustIdClient {
     private final ObjectMapper mapper = new ObjectMapper();
     private final MusicBrainzClient mbClient = new MusicBrainzClient();
 
+    // Fingerprint du dernier fichier identifié — réutilisé pour submit()
+    private String lastFingerprint = "";
+    private String lastDuration    = "";
+    private String lastAcoustId    = "";
+
     public List<TagInfo> identify(File fichier) throws Exception {
+        lastFingerprint = "";
+        lastDuration    = "";
+        lastAcoustId    = "";
+
         // 1. Générer l'empreinte audio avec fpcalc
         Fingerprint fp = fingerprint(fichier);
         if (fp == null) return List.of();
+        lastFingerprint = fp.fingerprint;
+        lastDuration    = fp.duration;
 
         // 2. Envoyer l'empreinte à AcoustID
         String body = "client=" + Config.get().acoustidKey()
@@ -38,7 +50,7 @@ public class AcoustIdClient {
                 + "&meta=recordings";
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(API_URL))
+                .uri(URI.create(LOOKUP_URL))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("User-Agent", Config.get().userAgent())
                 .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -51,12 +63,57 @@ public class AcoustIdClient {
             return List.of();
         }
 
-        // 3. Extraire les IDs MusicBrainz depuis la réponse AcoustID
-        List<String> mbids = parseMbids(mapper.readTree(response.body()));
+        // 3. Extraire les IDs MusicBrainz et l'AcoustID depuis la réponse
+        JsonNode root = mapper.readTree(response.body());
+        List<String> mbids = parseMbids(root);
+        extractAcoustId(root);
         if (mbids.isEmpty()) return List.of();
 
         // 4. Récupérer les tags complets depuis MusicBrainz
-        return fetchFromMusicBrainz(mbids.get(0));
+        List<TagInfo> results = fetchFromMusicBrainz(mbids.get(0));
+        // Stocker l'AcoustID dans le TagInfo pour qu'il soit écrit dans le fichier
+        if (!lastAcoustId.isBlank())
+            results.forEach(t -> { if (t.acoustidId.isBlank()) t.acoustidId = lastAcoustId; });
+        if (!lastFingerprint.isBlank())
+            results.forEach(t -> { if (t.acoustidFingerprint.isBlank()) t.acoustidFingerprint = lastFingerprint; });
+        return results;
+    }
+
+    /**
+     * Soumet le fingerprint du dernier fichier identifié à AcoustID.
+     * À appeler après identify() + enrichissement MB (pour avoir le recordingMbid définitif).
+     * Silencieux si user token absent ou fingerprint manquant.
+     */
+    public void submit(String recordingMbid) {
+        String userToken = Config.get().str("acoustid.user_token", "");
+        if (userToken.isBlank() || lastFingerprint.isBlank() || lastDuration.isBlank()) return;
+
+        try {
+            StringBuilder body = new StringBuilder()
+                .append("client=").append(URLEncoder.encode(Config.get().acoustidKey(), StandardCharsets.UTF_8))
+                .append("&user=").append(URLEncoder.encode(userToken, StandardCharsets.UTF_8))
+                .append("&fingerprint[]=").append(URLEncoder.encode(lastFingerprint, StandardCharsets.UTF_8))
+                .append("&duration[]=").append(URLEncoder.encode(lastDuration, StandardCharsets.UTF_8));
+            if (!recordingMbid.isBlank())
+                body.append("&mbid[]=").append(URLEncoder.encode(recordingMbid, StandardCharsets.UTF_8));
+            if (!lastAcoustId.isBlank())
+                body.append("&trackid[]=").append(URLEncoder.encode(lastAcoustId, StandardCharsets.UTF_8));
+
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(SUBMIT_URL))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("User-Agent", Config.get().userAgent())
+                    .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+                    .build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200) {
+                System.out.println("  AcoustID soumis ✔");
+            } else {
+                System.out.println("  AcoustID submit HTTP " + resp.statusCode() + ": " + resp.body());
+            }
+        } catch (Exception e) {
+            System.out.println("  AcoustID submit skip: " + e.getMessage());
+        }
     }
 
     private Fingerprint fingerprint(File fichier) throws Exception {
@@ -86,18 +143,26 @@ public class AcoustIdClient {
 
     private List<String> parseMbids(JsonNode root) {
         List<String> mbids = new ArrayList<>();
-        JsonNode results = root.path("results");
-
-        for (JsonNode result : results) {
-            double score = result.path("score").asDouble();
-            if (score < 0.85) continue; // ignorer les résultats peu fiables
-
+        for (JsonNode result : root.path("results")) {
+            if (result.path("score").asDouble() < 0.85) continue;
             for (JsonNode recording : result.path("recordings")) {
                 String mbid = recording.path("id").asText("");
                 if (!mbid.isBlank()) mbids.add(mbid);
             }
         }
         return mbids;
+    }
+
+    /** Extrait le meilleur AcoustID track ID (résultat de score le plus élevé). */
+    private void extractAcoustId(JsonNode root) {
+        double bestScore = 0;
+        for (JsonNode result : root.path("results")) {
+            double score = result.path("score").asDouble();
+            if (score > bestScore) {
+                bestScore  = score;
+                lastAcoustId = result.path("id").asText("");
+            }
+        }
     }
 
     private List<TagInfo> fetchFromMusicBrainz(String mbid) throws Exception {
