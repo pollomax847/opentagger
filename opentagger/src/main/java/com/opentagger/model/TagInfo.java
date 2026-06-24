@@ -76,7 +76,8 @@ public class TagInfo {
     public String isInstrumental      = "0";
 
     // ── Audio / tempo / tonalité ─────────────────────────────────────────────
-    public String bpm                 = "";    // ex: "120"
+    public String bpm                 = "";    // ex: "120" (entier)
+    public String fbpm                = "";    // ex: "92.0984" (float précis Essentia)
     public String initialKey          = "";    // ex: "Cm", "F#"
     public String language            = "";    // ISO 639 ex: "eng"
 

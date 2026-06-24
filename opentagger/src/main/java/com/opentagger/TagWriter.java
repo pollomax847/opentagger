@@ -32,6 +32,10 @@ public class TagWriter {
             setIfNonBlank(tag, entry.getKey(), entry.getValue());
         }
 
+        // FBPM : TXXX:FBPM non standard, écrit directement
+        if (info.fbpm != null && !info.fbpm.isBlank() && tag instanceof AbstractID3v2Tag id3)
+            writeTxxx(id3, "FBPM", info.fbpm);
+
         // Pochette
         if (coverImage != null) {
             Artwork artwork = ArtworkFactory.createArtworkFromFile(coverImage.toFile());
@@ -123,6 +127,8 @@ public class TagWriter {
         m.put(FieldKey.BPM,                i.bpm);
         m.put(FieldKey.KEY,                i.initialKey);
         m.put(FieldKey.LANGUAGE,           i.language);
+        // FBPM : TXXX:FBPM (BPM décimal Essentia, comme Jaikoz/SongKong)
+        // Pas de FieldKey standard — écrit après la boucle
 
         // ── Paroles ───────────────────────────────────────────────────────
         m.put(FieldKey.LYRICS,             i.lyrics);

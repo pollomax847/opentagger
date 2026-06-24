@@ -72,7 +72,10 @@ public class EssentiaClient {
         JsonNode rhythm = root.path("rhythm");
         if (!rhythm.isMissingNode()) {
             double bpm = rhythm.path("bpm").asDouble(0);
-            if (bpm > 0) info.bpm = String.valueOf((int) Math.round(bpm));
+            if (bpm > 0) {
+                info.bpm  = String.valueOf((int) Math.round(bpm));
+                info.fbpm = String.format("%.4f", bpm);
+            }
         }
 
         // ── Tonalité ──────────────────────────────────────────────────────
