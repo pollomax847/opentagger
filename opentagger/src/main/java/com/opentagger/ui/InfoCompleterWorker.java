@@ -44,6 +44,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final TagWriter         writer  = new TagWriter();
     private final MetadataCache     cache   = new MetadataCache();
     private final FileRenamer       renamer = new FileRenamer();
+    private final MusicBrainzOAuth  mbOauth = new MusicBrainzOAuth();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
     private final boolean autoRename   = Config.get().autoRenameEnabled();
@@ -241,9 +242,40 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 }
             }
             log("  ✔ mis à jour");
+            submitToMusicBrainz(ti);
         } else {
             log("  — déjà complet, rien à faire");
         }
+    }
+
+    private void submitToMusicBrainz(TagInfo info) {
+        String token = Config.get().str("mb.oauth.token", "");
+        if (token.isBlank() || info.recordingMbid.isBlank()) return;
+
+        java.util.List<String> tags = new java.util.ArrayList<>();
+        if (!info.genre.isBlank())
+            java.util.Arrays.stream(info.genre.split(",")).map(String::trim)
+                    .filter(s -> !s.isBlank()).forEach(tags::add);
+        if (!info.mood.isBlank()) tags.add(info.mood);
+
+        try {
+            if (!tags.isEmpty()) { mbOauth.submitUserTags(info.recordingMbid, tags, token); log("  MB tags soumis"); }
+        } catch (Exception e) { log("  MB tags skip: " + e.getMessage()); }
+
+        try {
+            int rating = parseStars(info.rating);
+            if (rating > 0) { mbOauth.submitRating(info.recordingMbid, rating, token); log("  MB rating soumis: " + rating); }
+        } catch (Exception e) { log("  MB rating skip: " + e.getMessage()); }
+    }
+
+    private static int parseStars(String raw) {
+        if (raw == null || raw.isBlank()) return 0;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v >= 1 && v <= 5) return v;
+            if (v >= 6 && v <= 255) return Math.min(5, (v + 25) / 51);
+        } catch (NumberFormatException ignored) {}
+        return 0;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

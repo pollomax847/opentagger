@@ -52,6 +52,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final BpmDetector        bpmDet    = new BpmDetector();
     private final EssentiaClient     essentia  = new EssentiaClient();
     private final LyricsClient       lyrics    = new LyricsClient();
+    private final MusicBrainzOAuth   mbOauth   = new MusicBrainzOAuth();
 
     private final boolean bpmEnabled      = BpmDetector.isAvailable();
     private final boolean essentiaEnabled = EssentiaClient.isOnPath();
@@ -288,6 +289,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 : MetadataCache.syntheticKey(best.artist, best.title);
             cache.saveTaggingHistory(best, cacheKey);
             cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey);
+
+            submitToMusicBrainz(best);
 
         } catch (Exception ex) {
             entry.status  = FileEntry.Status.ERROR;
@@ -630,9 +633,56 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         });
     }
 
+    /**
+     * Soumet genres et rating à MusicBrainz si le token OAuth est disponible.
+     * Silencieux : une erreur n'interrompt pas le tagging local.
+     */
+    private void submitToMusicBrainz(TagInfo info) {
+        String token = Config.get().str("mb.oauth.token", "");
+        if (token.isBlank() || info.recordingMbid.isBlank()) return;
+
+        // Tags : genres + mood
+        java.util.List<String> tags = new java.util.ArrayList<>();
+        if (!info.genre.isBlank())
+            java.util.Arrays.stream(info.genre.split(",")).map(String::trim)
+                    .filter(s -> !s.isBlank()).forEach(tags::add);
+        if (!info.mood.isBlank()) tags.add(info.mood);
+
+        try {
+            if (!tags.isEmpty()) {
+                mbOauth.submitUserTags(info.recordingMbid, tags, token);
+                log("  MB tags soumis: " + tags);
+            }
+        } catch (Exception e) {
+            log("  MB tags skip: " + e.getMessage());
+        }
+
+        // Rating (valeur 1–5 uniquement)
+        try {
+            int rating = parseStars(info.rating);
+            if (rating > 0) {
+                mbOauth.submitRating(info.recordingMbid, rating, token);
+                log("  MB rating soumis: " + rating + " étoile(s)");
+            }
+        } catch (Exception e) {
+            log("  MB rating skip: " + e.getMessage());
+        }
+    }
+
+    /** Convertit une valeur de rating en étoiles 1–5. Retourne 0 si non applicable. */
+    private static int parseStars(String raw) {
+        if (raw == null || raw.isBlank()) return 0;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v >= 1 && v <= 5) return v;
+            if (v >= 6 && v <= 255) return Math.min(5, (v + 25) / 51);
+        } catch (NumberFormatException ignored) {}
+        return 0;
+    }
+
     private void sleep(long ms) {
         try { Thread.sleep(ms); } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); // restaurer le flag pour que isCancelled() soit fiable
+            Thread.currentThread().interrupt();
         }
     }
 }
