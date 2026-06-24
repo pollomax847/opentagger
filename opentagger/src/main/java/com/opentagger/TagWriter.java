@@ -24,7 +24,7 @@ public class TagWriter {
 
     public void write(File fichier, TagInfo info, Path coverImage) throws Exception {
         AudioFile audio = AudioFileIO.read(fichier);
-        Tag tag = getOrCreateID3v23Tag(audio);
+        Tag tag = getOrCreateTag(audio);
 
         // Construction du mapping field → valeur pour une écriture uniforme
         Map<FieldKey, String> fields = buildFieldMap(info);
@@ -43,21 +43,10 @@ public class TagWriter {
     }
 
     /**
-     * Pour les MP3 : force ID3v2.3 comme Jaikoz.
-     * Pour les autres formats (FLAC, M4A…) : utilise le tag natif.
+     * Retourne le tag existant ou en crée un nouveau.
+     * On préserve la version ID3 déjà présente (v2.3 ou v2.4) — comme Jaikoz/SongKong.
      */
-    private Tag getOrCreateID3v23Tag(AudioFile audio) {
-        if (audio instanceof org.jaudiotagger.audio.mp3.MP3File mp3) {
-            org.jaudiotagger.tag.id3.ID3v23Tag v23;
-            if (mp3.hasID3v2Tag()) {
-                // Convertir le tag existant en v2.3 en conservant les données
-                v23 = new org.jaudiotagger.tag.id3.ID3v23Tag(mp3.getID3v2TagAsv24());
-            } else {
-                v23 = new org.jaudiotagger.tag.id3.ID3v23Tag();
-            }
-            mp3.setID3v2Tag(v23);
-            return v23;
-        }
+    private Tag getOrCreateTag(AudioFile audio) {
         return audio.getTagOrCreateDefault();
     }
 
@@ -184,9 +173,8 @@ public class TagWriter {
 
     private void setIfNonBlank(Tag tag, FieldKey key, String value) {
         if (value == null || value.isBlank()) return;
-        // MOOD : TMOO n'existe qu'en ID3v2.4 ; pour ID3v2.3 on écrit TXXX:MOOD directement
-        if (key == FieldKey.MOOD && tag instanceof AbstractID3v2Tag id3
-                && !(tag instanceof org.jaudiotagger.tag.id3.ID3v24Tag)) {
+        // MOOD : toujours écrire TXXX:MOOD comme Jaikoz/SongKong (compatible v2.3 et v2.4)
+        if (key == FieldKey.MOOD && tag instanceof AbstractID3v2Tag id3) {
             writeTxxx(id3, "MOOD", value);
             return;
         }
