@@ -165,6 +165,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 changed |= fillBlank(ti, "country",           mbr.country);
                 changed |= fillBlank(ti, "releaseType",       mbr.releaseType);
                 changed |= fillBlank(ti, "originalYear",      mbr.originalYear);
+                changed |= fillBlank(ti, "artists",           mbr.artists);
+                changed |= fillBlank(ti, "artistsSort",       mbr.artistsSort);
             } else if (ti.artistMbid.isBlank()) {
                 // Fallback minimal : artistMbid pour la pochette
                 log("  MB artist search: '" + ti.artist + "'");

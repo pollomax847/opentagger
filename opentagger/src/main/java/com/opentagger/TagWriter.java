@@ -32,9 +32,26 @@ public class TagWriter {
             setIfNonBlank(tag, entry.getKey(), entry.getValue());
         }
 
-        // FBPM : TXXX:FBPM non standard, écrit directement
-        if (info.fbpm != null && !info.fbpm.isBlank() && tag instanceof AbstractID3v2Tag id3)
-            writeTxxx(id3, "FBPM", info.fbpm);
+        // Champs TXXX non couverts par FieldKey — écrits directement
+        if (tag instanceof AbstractID3v2Tag id3) {
+            if (info.fbpm != null && !info.fbpm.isBlank())
+                writeTxxx(id3, "FBPM", info.fbpm);
+
+            // TXXX:ARTISTS / ARTISTS_SORT (tous les artistes feat.)
+            String allArtists = info.artists != null && !info.artists.isBlank()
+                    ? info.artists : "";
+            String allSorts   = info.artistsSort != null && !info.artistsSort.isBlank()
+                    ? info.artistsSort : "";
+            // Toujours écrire TXXX:ARTISTS (au moins l'artiste principal, comme SongKong)
+            String txArtists = allArtists.isBlank() ? info.artist : allArtists;
+            String txSorts   = allSorts.isBlank()   ? info.artistSort : allSorts;
+            if (!txArtists.isBlank()) writeTxxx(id3, "ARTISTS",      txArtists);
+            if (!txSorts.isBlank())   writeTxxx(id3, "ARTISTS_SORT", txSorts);
+
+            // TXXX:ALBUM_ARTISTS / ALBUM_ARTISTS_SORT
+            if (!info.albumArtist.isBlank())     writeTxxx(id3, "ALBUM_ARTISTS",      info.albumArtist);
+            if (!info.albumArtistSort.isBlank()) writeTxxx(id3, "ALBUM_ARTISTS_SORT", info.albumArtistSort);
+        }
 
         // Pochette
         if (coverImage != null) {

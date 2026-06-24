@@ -43,13 +43,7 @@ public class MusicBrainzClient {
             info.title         = rec.path("title").asText("").trim();
             info.comment       = rec.path("disambiguation").asText("").trim();
             info.recordingMbid = rec.path("id").asText("").trim();
-            JsonNode credits = rec.path("artist-credit");
-            if (credits.isArray() && !credits.isEmpty()) {
-                JsonNode ac = credits.get(0);
-                info.artist     = ac.path("name").asText("").trim();
-                info.artistSort = ac.path("artist").path("sort-name").asText("").trim();
-                info.artistMbid = ac.path("artist").path("id").asText("").trim();
-            }
+            extractTrackArtists(rec.path("artist-credit"), info);
             JsonNode isrcsCached = rec.path("isrcs");
             if (isrcsCached.isArray() && !isrcsCached.isEmpty()) info.isrc = isrcsCached.get(0).asText("").trim();
             boolean onlyOfficial = Config.get().bool("musicbrainz.only_official", true);
@@ -120,14 +114,8 @@ public class MusicBrainzClient {
             JsonNode isrcsNode = rec.path("isrcs");
             if (isrcsNode.isArray() && !isrcsNode.isEmpty()) info.isrc = isrcsNode.get(0).asText("").trim();
 
-            // ── Artiste piste ──────────────────────────────────────────────
-            JsonNode trackCredits = rec.path("artist-credit");
-            if (trackCredits.isArray() && !trackCredits.isEmpty()) {
-                JsonNode ac = trackCredits.get(0);
-                info.artist     = ac.path("name").asText("").trim();
-                info.artistSort = ac.path("artist").path("sort-name").asText("").trim();
-                info.artistMbid = ac.path("artist").path("id").asText("").trim();
-            }
+            // ── Artiste(s) piste ───────────────────────────────────────────
+            extractTrackArtists(rec.path("artist-credit"), info);
 
             // ── Release choisie ────────────────────────────────────────────
             JsonNode releases = rec.path("releases");
@@ -181,6 +169,33 @@ public class MusicBrainzClient {
         // Primary type (Album, Single, EP, Broadcast, Other)
         String ptype = release.path("release-group").path("primary-type").asText("").trim();
         if (!ptype.isBlank()) info.releaseType = ptype;
+    }
+
+    /**
+     * Extrait tous les artistes d'un nœud artist-credit MB.
+     * Remplit info.artist/artistSort/artistMbid (premier artiste) ET
+     * info.artists/artistsSort (tous, séparés par \0).
+     */
+    private void extractTrackArtists(JsonNode credits, TagInfo info) {
+        if (!credits.isArray() || credits.isEmpty()) return;
+        StringBuilder names = new StringBuilder();
+        StringBuilder sorts = new StringBuilder();
+        for (int i = 0; i < credits.size(); i++) {
+            JsonNode ac = credits.get(i);
+            String name = ac.path("name").asText("").trim();
+            String sort = ac.path("artist").path("sort-name").asText("").trim();
+            if (i == 0) {
+                info.artist     = name;
+                info.artistSort = sort;
+                info.artistMbid = ac.path("artist").path("id").asText("").trim();
+            }
+            if (!name.isBlank()) { if (names.length() > 0) names.append('\0'); names.append(name); }
+            if (!sort.isBlank()) { if (sorts.length() > 0) sorts.append('\0'); sorts.append(sort); }
+        }
+        if (credits.size() > 1) {
+            info.artists     = names.toString();
+            info.artistsSort = sorts.toString();
+        }
     }
 
     /** Extrait script, country depuis la release (disponibles en inline recording lookup). */
@@ -326,13 +341,7 @@ public class MusicBrainzClient {
         info.comment       = rec.path("disambiguation").asText("").trim();
         info.recordingMbid = rec.path("id").asText("").trim();
 
-        JsonNode trackCredits = rec.path("artist-credit");
-        if (trackCredits.isArray() && !trackCredits.isEmpty()) {
-            JsonNode ac = trackCredits.get(0);
-            info.artist     = ac.path("name").asText("").trim();
-            info.artistSort = ac.path("artist").path("sort-name").asText("").trim();
-            info.artistMbid = ac.path("artist").path("id").asText("").trim();
-        }
+        extractTrackArtists(rec.path("artist-credit"), info);
 
         JsonNode isrcsLookup = rec.path("isrcs");
         if (isrcsLookup.isArray() && !isrcsLookup.isEmpty()) info.isrc = isrcsLookup.get(0).asText("").trim();

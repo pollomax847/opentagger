@@ -21,6 +21,10 @@ public class TagInfo {
     public String discNo              = "";
     public String discTotal           = "";
 
+    // ── Listes d'artistes (séparées par \0 pour TXXX multi-valeur) ──────────
+    public String artists             = "";    // tous les artistes piste (feat. inclus)
+    public String artistsSort         = "";    // sort names correspondants
+
     // ── Tri ─────────────────────────────────────────────────────────────────
     public String titleSort           = "";
     public String artistSort          = "";
