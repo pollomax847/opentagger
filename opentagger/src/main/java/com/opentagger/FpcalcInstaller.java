@@ -115,8 +115,11 @@ public class FpcalcInstaller {
             ProcessBuilder pb = new ProcessBuilder(cmd, "-version");
             pb.redirectErrorStream(true);
             Process p = pb.start();
+            // Timeout 5s : évite le blocage si le binaire est corrompu ou ne répond pas
+            boolean done = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); return false; }
             p.getInputStream().transferTo(OutputStream.nullOutputStream());
-            return p.waitFor() == 0;
+            return p.exitValue() == 0;
         } catch (Exception e) { return false; }
     }
 

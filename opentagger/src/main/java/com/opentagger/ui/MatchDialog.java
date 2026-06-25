@@ -23,9 +23,10 @@ public class MatchDialog extends JDialog {
     private static final String[] COLS =
         {"Score", "Artiste", "Artiste Album", "Titre", "Album", "Année", "MBID"};
 
-    private final FileEntry     entry;
-    private final FileTableModel tableModel;
-    private final Runnable       onApplied;
+    private final FileEntry       entry;
+    private final FileTableModel  tableModel;
+    private final Runnable        onApplied;
+    private final MusicBrainzClient mb = new MusicBrainzClient();
 
     private final JTextField     tfArtist;
     private final JTextField     tfTitle;
@@ -144,7 +145,7 @@ public class MatchDialog extends JDialog {
 
         new SwingWorker<List<TagInfo>, Void>() {
             @Override protected List<TagInfo> doInBackground() throws Exception {
-                return new MusicBrainzClient().searchRecording(artist, title);
+                return mb.searchRecording(artist, title);
             }
             @Override protected void done() {
                 try {
@@ -190,7 +191,6 @@ public class MatchDialog extends JDialog {
         java.nio.file.Path path = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
         new LocalCorrector().correct(chosen, path);
 
-        TagInfo snap = com.opentagger.UndoManager.snapshot(entry.activeTags());
         entry.result     = chosen;
         entry.status     = FileEntry.Status.TAGGED;
         entry.message    = "Sélectionné manuellement";

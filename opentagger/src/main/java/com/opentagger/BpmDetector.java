@@ -138,7 +138,9 @@ public class BpmDetector {
                     .redirectErrorStream(true)
                     .start();
             p.getInputStream().transferTo(OutputStream.nullOutputStream());
-            return p.waitFor() == 0;
+            boolean done = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); return false; }
+            return p.exitValue() == 0;
         } catch (Exception e) {
             return false;
         }

@@ -45,7 +45,9 @@ public final class ProcessUtils {
                 reader.cancel(true);
                 return null;
             }
-            reader.get(5, TimeUnit.SECONDS);
+            // Après la fin du processus, le flux est fermé → readAllBytes() se termine rapidement.
+            // On attend au maximum timeoutSec supplémentaires pour la lecture (cas des gros fichiers).
+            reader.get(timeoutSec, TimeUnit.SECONDS);
             return result.get();
 
         } catch (Exception e) {

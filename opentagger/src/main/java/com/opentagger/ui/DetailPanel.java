@@ -395,12 +395,24 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfLyricist)).isBlank())     t.lyricist     = v;
             if (!(v = g(tfProducer)).isBlank())     t.producer     = v;
             if (!(v = g(tfArranger)).isBlank())     t.arranger     = v;
-            if (!(v = g(tfBpm)).isBlank())          t.bpm          = v;
-            if (!(v = g(tfKey)).isBlank())          t.initialKey   = v;
-            if (!(v = g(tfLanguage)).isBlank())     t.language     = v;
-            if (!(v = g(tfRating)).isBlank())       t.rating       = v;
-            if (!(v = g(tfIsrc)).isBlank())         t.isrc         = v;
-            if (!(v = g(tfTags)).isBlank())         t.tags         = v;
+            if (!(v = g(tfBpm)).isBlank())              t.bpm              = v;
+            if (!(v = g(tfKey)).isBlank())              t.initialKey       = v;
+            if (!(v = g(tfLanguage)).isBlank())         t.language         = v;
+            if (!(v = g(tfRating)).isBlank())           t.rating           = v;
+            if (!(v = g(tfIsrc)).isBlank())             t.isrc             = v;
+            if (!(v = g(tfTags)).isBlank())             t.tags             = v;
+            if (!(v = g(tfComposerSort)).isBlank())     t.composerSort     = v;
+            if (!(v = g(tfConductorSort)).isBlank())    t.conductorSort    = v;
+            if (!(v = g(tfOrchestraSort)).isBlank())    t.orchestraSort    = v;
+            if (!(v = g(tfEngineer)).isBlank())         t.engineer         = v;
+            if (!(v = g(tfMixer)).isBlank())            t.mixer            = v;
+            if (!(v = g(tfDjMixer)).isBlank())          t.djMixer          = v;
+            if (!(v = g(tfTitleSort)).isBlank())        t.titleSort        = v;
+            if (!(v = g(tfArtistSort)).isBlank())       t.artistSort       = v;
+            if (!(v = g(tfAlbumSort)).isBlank())        t.albumSort        = v;
+            if (!(v = g(tfAlbumArtistSort)).isBlank())  t.albumArtistSort  = v;
+            if (!(v = g(tfAmazonId)).isBlank())         t.amazonId         = v;
+            if (!(v = g(tfLyricsUrl)).isBlank())        t.lyricsUrl        = v;
             // Checkboxes : ne toucher que celles à valeur homogène
             if (!indetermCbs.contains(chkClassical))
                 t.isClassical    = chkClassical.isSelected()    ? "1" : "0";
@@ -647,7 +659,7 @@ public class DetailPanel extends JPanel {
         return p;
     }
 
-    private JScrollPane buildLyricsTab() {
+    private JPanel buildLyricsTab() {
         JPanel p = new JPanel(new BorderLayout(0, 6));
         p.setBorder(new EmptyBorder(10, 14, 10, 14));
 
@@ -661,7 +673,10 @@ public class DetailPanel extends JPanel {
 
         p.add(urlRow,                  BorderLayout.NORTH);
         p.add(new JScrollPane(taLyrics), BorderLayout.CENTER);
-        return new JScrollPane(p, JScrollPane.VERTICAL_SCROLLBAR_NEVER, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        // Retourner directement le panneau — la textarea a déjà son propre JScrollPane.
+        // L'ancien wrapper JScrollPane(p, NEVER, NEVER) était inutile et pouvait rogner
+        // le champ URL si la fenêtre était trop petite.
+        return p;
     }
 
     private JScrollPane buildIdsTab() {

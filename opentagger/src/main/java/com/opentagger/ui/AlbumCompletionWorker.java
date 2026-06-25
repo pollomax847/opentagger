@@ -134,8 +134,9 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
                     // Écrire les tags
                     try {
-                        new TagWriter().write(hit.currentPath.toFile(), ti);
-                        cache.recordFileTagging(hit.currentPath.toString(), track.recordingMbid());
+                        java.nio.file.Path writePath = hit.currentPath != null ? hit.currentPath : hit.file.toPath();
+                        new TagWriter().write(writePath.toFile(), ti);
+                        cache.recordFileTagging(writePath.toString(), track.recordingMbid());
                         cache.saveTaggingHistory(ti);
 
                         hit.result  = ti;
@@ -183,9 +184,17 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private ReleaseTracklist fetchTracklist(MetadataCache cache, String relMbid) {
         String cacheKey = "release:" + relMbid;
         try {
-            // On n'utilise pas le cache ici car la structure est différente
-            // (on stockerait le JSON de la release, pas d'un recording)
-            return mb.lookupRelease(relMbid);
+            String cached = cache.getLookup(cacheKey);
+            if (cached != null) {
+                ReleaseTracklist tl = mb.parseReleaseFromCache(cached);
+                if (tl != null) return tl;
+            }
+            ReleaseTracklist tl = mb.lookupRelease(relMbid);
+            if (tl != null) {
+                String raw = mb.lastRawJson();
+                if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
+            }
+            return tl;
         } catch (Exception e) {
             publish("  ⚠ Impossible de récupérer la tracklist : " + e.getMessage());
             return null;
@@ -201,9 +210,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         if (hit != null) return hit;
 
         // 2. Inclusion (le candidat contient le titre de la piste ou l'inverse)
+        // Garde de longueur minimale : évite les faux positifs avec des mots très courts
         for (Map.Entry<String, FileEntry> e : index.entrySet()) {
             String k = e.getKey();
-            if (k.contains(norm) || norm.contains(k)) return e.getValue();
+            if ((k.contains(norm) && norm.length() >= 12) ||
+                (norm.contains(k) && k.length() >= 12)) return e.getValue();
         }
 
         // 3. Similarité par mots partagés (≥ 70%)

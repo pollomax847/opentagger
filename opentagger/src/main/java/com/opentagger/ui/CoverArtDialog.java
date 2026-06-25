@@ -235,7 +235,10 @@ public class CoverArtDialog extends JDialog {
         }
         try {
             File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-            Path dest = f.toPath().getParent().resolve("folder.jpg");
+            // Détecter PNG par les bytes magiques (0x89 PNG) pour choisir la bonne extension
+            String fname = (data.length >= 4 && (data[0] & 0xFF) == 0x89 && data[1] == 'P')
+                    ? "folder.png" : "folder.jpg";
+            Path dest = f.toPath().getParent().resolve(fname);
             Files.write(dest, data);
             lblInfo.setText("Sauvegardé → " + dest.getFileName());
         } catch (Exception ex) {

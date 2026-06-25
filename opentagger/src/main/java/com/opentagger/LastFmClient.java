@@ -41,6 +41,9 @@ public class LastFmClient {
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
+    private String         cachedTagsKey  = null;
+    private List<String>   cachedTagsList = null;
+
     /** Enrichit le genre d'un TagInfo depuis les tags Last.fm. Ne modifie genre que si vide. */
     public void enrichGenres(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
@@ -52,7 +55,7 @@ public class LastFmClient {
         for (String name : allTags) {
             if (!isBlacklisted(name) && !isMoodTag(name.toLowerCase())) {
                 genreTags.add(capitalize(name));
-                if (genreTags.size() >= Config.get().discogsMaxGenres()) break;
+                if (genreTags.size() >= Config.get().num("lastfm.max_genres", 3)) break;
             }
         }
         if (!genreTags.isEmpty()) info.genre = joinGenres(genreTags);
@@ -80,6 +83,10 @@ public class LastFmClient {
 
     /** Récupère tous les tags bruts Last.fm (morceau puis artiste en fallback). */
     private List<String> fetchAllTags(TagInfo info) throws Exception {
+        // Cache : évite deux requêtes réseau quand enrichGenres() et enrichMood() sont appelés successivement
+        String key = info.artist + "\0" + info.title;
+        if (key.equals(cachedTagsKey)) return cachedTagsList;
+
         List<String> tags = List.of();
         if (!info.artist.isBlank() && !info.title.isBlank()) {
             tags = getRawTags(BASE_URL
@@ -96,6 +103,8 @@ public class LastFmClient {
                 + "&api_key=" + Config.get().lastfmKey()
                 + "&format=json");
         }
+        cachedTagsKey  = key;
+        cachedTagsList = tags;
         return tags;
     }
 

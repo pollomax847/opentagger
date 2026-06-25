@@ -58,11 +58,22 @@ public class EssentiaClient {
     }
 
     private int runEssentia(String inputFile, String outputFile) throws Exception {
+        // Timeout 120s pour éviter le blocage infini sur les fichiers corrompus
         ProcessBuilder pb = new ProcessBuilder(binary, inputFile, outputFile);
         pb.redirectErrorStream(true);
         Process proc = pb.start();
-        proc.getInputStream().transferTo(OutputStream.nullOutputStream());
-        return proc.waitFor();
+        Thread drainer = Thread.ofVirtual().start(() -> {
+            try { proc.getInputStream().transferTo(OutputStream.nullOutputStream()); }
+            catch (Exception ignored) {}
+        });
+        boolean done = proc.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+        if (!done) {
+            proc.destroyForcibly();
+            LOG.warning("Essentia timeout sur " + inputFile);
+            return -1;
+        }
+        drainer.join(5000);
+        return proc.exitValue();
     }
 
     // ── Extraction des champs depuis le JSON ─────────────────────────────────
@@ -132,7 +143,8 @@ public class EssentiaClient {
                     .redirectErrorStream(true)
                     .start();
             p.getInputStream().transferTo(OutputStream.nullOutputStream());
-            p.waitFor();
+            boolean done = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); return false; }
             return true; // l'absence de binaire lève une IOException
         } catch (IOException e) {
             return false;
@@ -147,7 +159,10 @@ public class EssentiaClient {
             Process p = new ProcessBuilder("which", binary)
                     .redirectErrorStream(true)
                     .start();
-            return p.waitFor() == 0;
+            p.getInputStream().transferTo(OutputStream.nullOutputStream());
+            boolean done = p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); return false; }
+            return p.exitValue() == 0;
         } catch (Exception e) { return false; }
     }
 }

@@ -85,7 +85,9 @@ public class LyricsClient {
             if (plain.isBlank()) {
                 String synced = root.path("syncedLyrics").asText("").trim();
                 if (!synced.isBlank())
-                    plain = synced.replaceAll("\\[\\d{2}:\\d{2}\\.\\d+\\]\\s*", "").trim();
+                    plain = synced.replaceAll("\\[\\d+:\\d{2}\\.\\d+\\]\\s*", "")
+                                  .replaceAll("\n{3,}", "\n\n")
+                                  .trim();
             }
             if (!plain.isBlank()) {
                 info.lyrics    = plain;

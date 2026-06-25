@@ -96,8 +96,11 @@ public class AcoustIdSubmitter {
             throw new Exception("AcoustID : " + msg + " (HTTP " + resp.statusCode() + ")");
         }
 
-        // Extraire l'AcoustID attribué (peut être null si déjà connu)
-        JsonNode result = root.path("result");
+        // Extraire l'AcoustID attribué — AcoustID retourne un tableau dans "result"
+        JsonNode resultNode = root.path("result");
+        JsonNode result = resultNode.isArray() && !resultNode.isEmpty()
+                        ? resultNode.get(0)
+                        : resultNode;
         String newId = result.path("id").asText("");
         int created  = result.path("created").asInt(0);
         int merged   = result.path("merged").asInt(0);
@@ -120,23 +123,24 @@ public class AcoustIdSubmitter {
     private FpcalcResult fingerprint(File file) throws Exception {
         String fpcalc = FpcalcInstaller.resolve();
         if (fpcalc == null) throw new Exception("fpcalc introuvable");
-        Process process = new ProcessBuilder(fpcalc, file.getAbsolutePath())
-                .redirectErrorStream(true)
-                .start();
-        String output = new String(process.getInputStream().readAllBytes()).trim();
-        int exit = process.waitFor();
-        if (exit != 0 || output.isEmpty())
-            throw new Exception("fpcalc a échoué (code " + exit + ")");
 
-        String duration = null;
-        String fingerprint = null;
-        for (String line : output.split("\n")) {
-            if (line.startsWith("DURATION="))    duration    = line.substring(9).trim();
-            if (line.startsWith("FINGERPRINT=")) fingerprint = line.substring(12).trim();
+        // Utilise -json et -length 120 comme AcoustIdClient, avec timeout pour éviter les blocages infinis
+        ProcessBuilder pb = new ProcessBuilder(fpcalc, "-json", "-length", "120", file.getAbsolutePath())
+                .redirectErrorStream(false);
+        String output = ProcessUtils.readStringWithTimeout(pb, 60);
+        if (output == null || output.isBlank())
+            throw new Exception("fpcalc timeout ou sortie vide pour " + file.getName());
+
+        try {
+            com.fasterxml.jackson.databind.JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(output);
+            String fingerprint = json.path("fingerprint").asText("");
+            int duration = (int) json.path("duration").asDouble(0);
+            if (fingerprint.isBlank() || duration == 0)
+                throw new Exception("fpcalc : fingerprint ou durée manquant");
+            return new FpcalcResult(String.valueOf(duration), fingerprint);
+        } catch (Exception e) {
+            throw new Exception("fpcalc : sortie invalide — " + e.getMessage());
         }
-        if (fingerprint == null || duration == null)
-            throw new Exception("fpcalc : sortie inattendue — " + output);
-        return new FpcalcResult(duration, fingerprint);
     }
 
     private void append(StringBuilder sb, String key, String value) {

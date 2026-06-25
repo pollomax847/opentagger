@@ -96,22 +96,25 @@ public class FileTableModel extends AbstractTableModel {
             case COL_GENRE        -> activeTags(e).genre        = (String) value;
             case COL_TRACK        -> activeTags(e).track        = (String) value;
         }
-        // Mettre à jour le statut dynamiquement lors d'une édition inline
-        if (col >= COL_ARTIST && col <= COL_TRACK) {
-            TagInfo ti = e.activeTags();
-            boolean hasTags = !ti.artist.isBlank() || !ti.title.isBlank();
-            if (e.status != FileEntry.Status.TAGGED && hasTags) {
-                e.status  = FileEntry.Status.TAGGED;
-                e.message = "";
-                fireTableRowsUpdated(row, row);  // met à jour COL_STATUS + re-évalue le filtre
-                return;
-            }
-        }
+        // L'édition inline ne change pas le statut : les tags sont en mémoire
+        // mais pas encore écrits sur disque. Le statut TAGGED ne sera mis à jour
+        // que lors d'une écriture réelle (applyDetail() ou TaggingWorker).
         fireTableCellUpdated(row, col);
     }
 
     private TagInfo activeTags(FileEntry e) {
-        if (e.result == null) e.result = new TagInfo();
+        if (e.result == null) {
+            // Copier depuis current pour ne pas effacer les tags existants lors d'une
+            // édition inline (un new TagInfo() vide remplacerait tous les champs affichés).
+            TagInfo src = e.current != null ? e.current : new TagInfo();
+            TagInfo t = new TagInfo();
+            t.score = src.score;
+            for (java.lang.reflect.Field f : TagInfo.class.getDeclaredFields()) {
+                if (f.getType() != String.class) continue;
+                try { f.setAccessible(true); f.set(t, f.get(src)); } catch (Exception ignored) {}
+            }
+            e.result = t;
+        }
         return e.result;
     }
 

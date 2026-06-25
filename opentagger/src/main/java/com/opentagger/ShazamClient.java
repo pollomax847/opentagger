@@ -63,10 +63,14 @@ public class ShazamClient {
         return parse(resp.body());
     }
 
+    // Cache de disponibilité ffmpeg — évite de relancer ffmpeg -version à chaque appel
+    private static Boolean ffmpegAvailable = null;
+
     /** @return true si une clé RapidAPI est configurée ET ffmpeg est disponible */
     public static boolean isAvailable() {
-        return !Config.get().str("rapidapi.key", "").isBlank()
-            && BpmDetector.isAvailable(); // BpmDetector.isAvailable() vérifie ffmpeg
+        if (Config.get().str("rapidapi.key", "").isBlank()) return false;
+        if (ffmpegAvailable == null) ffmpegAvailable = BpmDetector.isAvailable();
+        return ffmpegAvailable;
     }
 
     // ── Extraction PCM ──────��─────────────────────────────────────────────────

@@ -26,7 +26,9 @@ public class MbContributeDialog extends JDialog {
     private final JButton         btnLogin;
     private final JButton         btnLogout;
 
-    private final List<JCheckBox> genreCbs = new ArrayList<>();
+    private final List<JCheckBox> genreCbs  = new ArrayList<>();
+    private final List<JButton>   starBtns  = new ArrayList<>();
+    private       JButton         btnContrib;
     private final JTextField      tfCustomTag;
     private final JLabel          lblStars;
     private       int             stars = 0;
@@ -154,6 +156,7 @@ public class MbContributeDialog extends JDialog {
             b.setFocusPainted(false);
             b.setToolTipText(s + " étoile" + (s > 1 ? "s" : "") + "  →  " + (s * 20) + " / 100 sur MB");
             b.addActionListener(e -> { stars = s; updateStars(); });
+            starBtns.add(b);
             p.add(b);
         }
         JButton btnClear = new JButton("✕");
@@ -170,13 +173,21 @@ public class MbContributeDialog extends JDialog {
     private void updateStars() {
         if (stars == 0) lblStars.setText("(non noté)");
         else lblStars.setText("★".repeat(stars) + "☆".repeat(5 - stars) + "  (" + (stars * 20) + "/100)");
+        for (int i = 0; i < starBtns.size(); i++) {
+            JButton b = starBtns.get(i);
+            boolean active = (i + 1) <= stars;
+            b.putClientProperty("FlatLaf.style",
+                active ? "foreground: #f0c040; font: bold $buttonFont"
+                       : "foreground: #555555; font: $buttonFont");
+            b.repaint();
+        }
     }
 
     // ── Pied de page ─────────────────────────────────────────────────────────
 
     private JPanel buildFooter() {
-        JButton btnContrib = new JButton("🤝  Contribuer");
-        JButton btnCancel  = new JButton("Annuler");
+        btnContrib = new JButton("🤝  Contribuer");
+        JButton btnCancel = new JButton("Annuler");
         btnContrib.putClientProperty("FlatLaf.style", "background: #1a6030");
         btnContrib.addActionListener(e -> contribute());
         btnCancel .addActionListener(e -> dispose());
@@ -212,8 +223,11 @@ public class MbContributeDialog extends JDialog {
                     get();
                     refreshLoginState();
                 } catch (Exception ex) {
+                    String msg = ex.getMessage();
+                    if (msg == null && ex.getCause() != null) msg = ex.getCause().getMessage();
+                    if (msg == null) msg = ex.getClass().getSimpleName();
                     JOptionPane.showMessageDialog(MbContributeDialog.this,
-                        "<html>" + ex.getMessage().replace("\n", "<br>") + "</html>",
+                        "<html>" + msg.replace("\n", "<br>") + "</html>",
                         "Erreur de connexion", JOptionPane.ERROR_MESSAGE);
                     refreshLoginState();
                 }
@@ -261,20 +275,26 @@ public class MbContributeDialog extends JDialog {
         }
 
         List<String> tags = new ArrayList<>();
-        for (JCheckBox cb : genreCbs) if (cb.isSelected()) tags.add(cb.getText());
+        for (JCheckBox cb : genreCbs) if (cb.isSelected()) tags.add(cb.getText().toLowerCase());
         String custom = tfCustomTag.getText().trim();
         if (!custom.isBlank())
-            Arrays.stream(custom.split("[,;]")).map(String::trim)
+            Arrays.stream(custom.split("[,;]")).map(String::trim).map(String::toLowerCase)
                     .filter(s -> !s.isBlank()).forEach(tags::add);
 
-        if (tags.isEmpty() && stars == 0) {
+        // Déduplication : évite de soumettre le même tag deux fois si coché ET tapé
+        List<String> dedupTags = tags.stream().distinct().toList();
+
+        if (dedupTags.isEmpty() && stars == 0) {
             JOptionPane.showMessageDialog(this,
                 "Aucun tag ni rating à soumettre.", "Info", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
-        final List<String> finalTags  = tags;
+        final List<String> finalTags  = dedupTags;
         final int          finalStars = stars;
+
+        btnContrib.setEnabled(false);
+        btnContrib.setText("Envoi en cours…");
 
         new SwingWorker<String, Void>() {
             @Override protected String doInBackground() throws Exception {
@@ -288,13 +308,15 @@ public class MbContributeDialog extends JDialog {
                 }
                 if (finalStars > 0) {
                     oauth.submitRating(ti.recordingMbid, finalStars, token);
-                    if (!sb.isEmpty()) sb.append("\n");
+                    if (sb.length() > 0) sb.append("\n");
                     sb.append("Rating : ").append(finalStars).append("★  (")
                       .append(finalStars * 20).append("/100)");
                 }
                 return sb.toString();
             }
             @Override protected void done() {
+                btnContrib.setEnabled(true);
+                btnContrib.setText("🤝  Contribuer");
                 try {
                     String summary = get();
                     JOptionPane.showMessageDialog(MbContributeDialog.this,
@@ -302,8 +324,10 @@ public class MbContributeDialog extends JDialog {
                         "Succès", JOptionPane.INFORMATION_MESSAGE);
                     dispose();
                 } catch (Exception ex) {
+                    String msg = ex.getMessage();
+                    if (msg == null) msg = ex.getClass().getSimpleName();
                     JOptionPane.showMessageDialog(MbContributeDialog.this,
-                        "Erreur : " + ex.getMessage(), "Erreur", JOptionPane.ERROR_MESSAGE);
+                        "Erreur : " + msg, "Erreur", JOptionPane.ERROR_MESSAGE);
                 }
             }
         }.execute();

@@ -40,10 +40,21 @@ public class DiscogsClient {
         if (hit == null) hit = searchBest(info.artist, "");
         if (hit == null) return;
 
-        // Genres/styles
+        // Genres/styles : ordre et limite configurables
         if (info.genre.isBlank()) {
-            List<String> genres = extraireTableau(hit.path("style"));
-            if (genres.isEmpty()) genres = extraireTableau(hit.path("genre"));
+            String source = Config.get().discogsGenreSource();
+            int    max    = Config.get().discogsMaxGenres();
+            List<String> genres;
+            if ("genre_only".equals(source)) {
+                genres = extraireTableau(hit.path("genre"));
+            } else if ("genre_then_style".equals(source)) {
+                genres = extraireTableau(hit.path("genre"));
+                if (genres.isEmpty()) genres = extraireTableau(hit.path("style"));
+            } else {
+                genres = extraireTableau(hit.path("style"));
+                if (genres.isEmpty()) genres = extraireTableau(hit.path("genre"));
+            }
+            if (max > 0 && genres.size() > max) genres = genres.subList(0, max);
             if (!genres.isEmpty()) info.genre = String.join(", ", genres);
         }
 

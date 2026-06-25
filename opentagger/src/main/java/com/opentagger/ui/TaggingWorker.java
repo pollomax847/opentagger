@@ -39,9 +39,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final Consumer<String>    onProgress;
     private final Consumer<FileEntry> onUpdate;
 
-    private final MusicBrainzClient  mb        = new MusicBrainzClient();
-    private final AcoustIdClient     acoustId  = new AcoustIdClient();
-    private final SongRecClient      songRec   = new SongRecClient();
+    private final MusicBrainzClient        mb               = new MusicBrainzClient();
+    private final AcoustIdClient           acoustId         = new AcoustIdClient();
+    private final SongRecClient            songRec          = new SongRecClient();
+    private final AudioRecognitionChain    recognitionChain = new AudioRecognitionChain();
     private final DiscogsClient      discogs   = new DiscogsClient();
     private final LastFmClient       lastFm    = new LastFmClient();
     private final FanArtClient       fanArt    = new FanArtClient();
@@ -135,7 +136,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             if (results.isEmpty() || results.get(0).score < seuil) {
                 log("  chain Shazam→AudD...");
-                List<TagInfo> chain = new AudioRecognitionChain().recognize(fichier);
+                List<TagInfo> chain = recognitionChain.recognize(fichier);
                 log("  chain → " + chain.size() + " résultat(s)");
                 if (!chain.isEmpty()) results = chain;
             }
@@ -148,14 +149,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             TagInfo best = results.get(0);
-
-            // Rejeter tout résultat hors FR/EN (japonais, coréen, arabe, cyrillique…)
-            if (hasNonLatinChars(best.artist) || hasNonLatinChars(best.title)) {
-                entry.status  = FileEntry.Status.SKIPPED;
-                entry.message = "Hors FR/EN";
-                log("  SKIPPED (hors FR/EN) : " + best.artist + " – " + best.title);
-                return;
-            }
 
             if (best.score < seuil) {
                 entry.candidates = results;
@@ -196,7 +189,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             // Fallback MB search : si album ou artistMbid toujours vides après lookup
-            // (pas de release dans MB, ou SongRec-only sans MBID)
+            // (pas de release dans MB, ou SongRec-only sans MBID).
+            // Pause rate-limit MB entre les deux blocs pour ne pas envoyer deux requêtes à la suite.
+            if ((best.album.isBlank() || best.year.isBlank()) && !best.recordingMbid.isBlank()) {
+                sleep(1100);
+            }
             if (!best.artist.isBlank()
                     && (best.album.isBlank() || best.artistMbid.isBlank())) {
                 try {
@@ -290,7 +287,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             cache.saveTaggingHistory(best, cacheKey);
             cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey);
 
-            acoustId.submit(best.recordingMbid);
+            if (!best.recordingMbid.isBlank()) acoustId.submit(best.recordingMbid);
             submitToMusicBrainz(best);
 
         } catch (Exception ex) {
@@ -346,8 +343,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         // 2. AcoustID (fingerprint)
         if (useAcoustId) {
-            List<TagInfo> r = acoustId.identify(fichier);
-            if (!r.isEmpty()) return r;
+            // ignore_existing : si un AcoustID est déjà dans les tags et qu'on ne force pas, on skip
+            boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
+            if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
+                List<TagInfo> r = acoustId.identify(fichier);
+                if (!r.isEmpty()) return r;
+            }
         }
 
         // 3. Tags texte existants, avec fallback sur le nom de fichier
@@ -425,9 +426,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (cached != null) {
                 List<TagInfo> r = mb.parseFromCache(cached);
                 log("  MB cache: " + r.size() + " résultat(s)");
-                // Filtrer les résultats hors FR/EN du cache
-                r = r.stream().filter(t -> !hasNonLatinChars(t.artist) && !hasNonLatinChars(t.title))
-                    .collect(java.util.stream.Collectors.toList());
                 if (!r.isEmpty()) return r;
             }
 
@@ -436,9 +434,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             results = mb.searchRecording(artist, title);
             log("  MB search → " + results.size() + " résultat(s)" +
                 (results.isEmpty() ? "" : " meilleur score=" + results.get(0).score));
-            // Filtrer hors FR/EN
-            results = results.stream().filter(t -> !hasNonLatinChars(t.artist) && !hasNonLatinChars(t.title))
-                .collect(java.util.stream.Collectors.toList());
             if (!results.isEmpty()) {
                 cache.putRecordingSearch(hash, mb.lastRawJson());
                 return results;
@@ -450,8 +445,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log("  MB fallback artiste simplifié: '" + artistSimple + "'");
                 results = mb.searchRecording(artistSimple, title);
                 log("  MB fallback → " + results.size() + " résultat(s)");
-                results = results.stream().filter(t -> !hasNonLatinChars(t.artist) && !hasNonLatinChars(t.title))
-                    .collect(java.util.stream.Collectors.toList());
                 if (!results.isEmpty()) {
                     cache.putRecordingSearch(hash, mb.lastRawJson());
                     return results;
@@ -468,54 +461,45 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 TagInfo sr = songRec.recognize(fichier);
                 if (sr != null) {
                     log("  SongRec → " + sr.artist + " – " + sr.title);
-                    // Rejeter si le résultat SongRec lui-même est hors FR/EN
-                    if (hasNonLatinChars(sr.artist) || hasNonLatinChars(sr.title)) {
-                        log("  SongRec résultat hors FR/EN ignoré");
-                    } else {
-                        // Enrichir avec MB pour avoir MBID, album complet, numéro de piste
-                        List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
-                        mbResults = mbResults.stream().filter(t -> !hasNonLatinChars(t.artist) && !hasNonLatinChars(t.title))
-                            .collect(java.util.stream.Collectors.toList());
-                        if (!mbResults.isEmpty() && mbResults.get(0).score >= 80) {
-                            TagInfo mbr = mbResults.get(0);
+                    // Enrichir avec MB pour avoir MBID, album complet, numéro de piste
+                    List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
+                    if (!mbResults.isEmpty() && mbResults.get(0).score >= 80) {
+                        TagInfo mbr = mbResults.get(0);
+                        if (mbr.genre.isBlank() && !sr.genre.isBlank()) mbr.genre = sr.genre;
+                        if (mbr.album.isBlank() && !sr.album.isBlank()) mbr.album = sr.album;
+                        mbr.score = 90;
+                        log("  SongRec+MB → " + mbr.artist + " – " + mbr.title);
+                        return List.of(mbr);
+                    }
+                    // MB échoue avec le titre complet → réessayer sans qualificatif entre parenthèses
+                    // ex: "Carsmille Smith (Home Demos)" → "Carsmille Smith"
+                    String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
+                    if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
+                        log("  SongRec+MB (titre nettoyé): '" + cleanTitle + "'");
+                        List<TagInfo> mbClean = mb.searchRecording(sr.artist, cleanTitle);
+                        if (!mbClean.isEmpty() && mbClean.get(0).score >= 70) {
+                            TagInfo mbr = mbClean.get(0);
                             if (mbr.genre.isBlank() && !sr.genre.isBlank()) mbr.genre = sr.genre;
                             if (mbr.album.isBlank() && !sr.album.isBlank()) mbr.album = sr.album;
-                            mbr.score = 90;
-                            log("  SongRec+MB → " + mbr.artist + " – " + mbr.title);
+                            // Conserver le titre original SongRec (plus précis)
+                            if (!sr.title.equals(cleanTitle)) mbr.title = sr.title;
+                            mbr.score = 85;
+                            log("  SongRec+MB(nettoyé) → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
                             return List.of(mbr);
                         }
-                        // MB échoue avec le titre complet → réessayer sans qualificatif entre parenthèses
-                        // ex: "Carsmille Smith (Home Demos)" → "Carsmille Smith"
-                        String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
-                        if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
-                            log("  SongRec+MB (titre nettoyé): '" + cleanTitle + "'");
-                            List<TagInfo> mbClean = mb.searchRecording(sr.artist, cleanTitle);
-                            mbClean = mbClean.stream().filter(t -> !hasNonLatinChars(t.artist) && !hasNonLatinChars(t.title))
-                                .collect(java.util.stream.Collectors.toList());
-                            if (!mbClean.isEmpty() && mbClean.get(0).score >= 70) {
-                                TagInfo mbr = mbClean.get(0);
-                                if (mbr.genre.isBlank() && !sr.genre.isBlank()) mbr.genre = sr.genre;
-                                if (mbr.album.isBlank() && !sr.album.isBlank()) mbr.album = sr.album;
-                                // Conserver le titre original SongRec (plus précis)
-                                if (!sr.title.equals(cleanTitle)) mbr.title = sr.title;
-                                mbr.score = 85;
-                                log("  SongRec+MB(nettoyé) → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
-                                return List.of(mbr);
-                            }
-                        }
-                        // Toujours rien → au moins récupérer l'artistMbid pour la pochette
-                        if (sr.artistMbid.isBlank()) {
-                            try {
-                                String amid = mb.searchArtistMbid(sr.artist);
-                                if (!amid.isBlank()) {
-                                    sr.artistMbid = amid;
-                                    log("  artistMbid←MB: " + amid);
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                        sr.score = 85;
-                        return List.of(sr);
                     }
+                    // Toujours rien → au moins récupérer l'artistMbid pour la pochette
+                    if (sr.artistMbid.isBlank()) {
+                        try {
+                            String amid = mb.searchArtistMbid(sr.artist);
+                            if (!amid.isBlank()) {
+                                sr.artistMbid = amid;
+                                log("  artistMbid←MB: " + amid);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    sr.score = 85;
+                    return List.of(sr);
                 }
             } catch (Exception e) {
                 log("  SongRec erreur: " + e.getMessage());
@@ -676,7 +660,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         try {
             int v = Integer.parseInt(raw.trim());
             if (v >= 1 && v <= 5) return v;
-            if (v >= 6 && v <= 255) return Math.min(5, (v + 25) / 51);
+            if (v >= 6 && v <= 255) return Math.max(1, Math.min(5, (int) Math.round(v * 5.0 / 255)));
         } catch (NumberFormatException ignored) {}
         return 0;
     }

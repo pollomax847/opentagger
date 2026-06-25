@@ -16,7 +16,8 @@ import java.util.List;
 
 public class MusicBrainzClient {
 
-    private static final String BASE_URL = "https://musicbrainz.org/ws/2";
+    private static final String BASE_URL    = "https://musicbrainz.org/ws/2";
+    private static final int    MAX_RETRIES = 3;
 
     private final HttpClient   http   = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -60,7 +61,8 @@ public class MusicBrainzClient {
                     info.albumArtist     = rc.get(0).path("name").asText("").trim();
                     info.albumArtistSort = rc.get(0).path("artist").path("sort-name").asText("").trim();
                 }
-                if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
+                if (info.albumArtist.isBlank())     info.albumArtist     = info.artist;
+                if (info.albumArtistSort.isBlank()) info.albumArtistSort = info.artistSort;
                 info.language = chosen.path("text-representation").path("language").asText("").trim();
                 extractSecondaryTypes(chosen, info);
                 extractReleaseDetails(chosen, info);
@@ -74,21 +76,13 @@ public class MusicBrainzClient {
         String query = buildQuery(artist, title);
         if (query.isBlank()) return List.of();
 
-        // inc=artist-credits → artiste complet (avec artistSort)
-        // inc=releases      → releases dans la réponse
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
                 + "&inc=releases+artist-credits+isrcs";
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", Config.get().userAgent())
-                .GET()
-                .build();
-
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return List.of();
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return List.of();
 
         lastRawJson = response.body();
         return parseRecordings(mapper.readTree(lastRawJson));
@@ -96,9 +90,60 @@ public class MusicBrainzClient {
 
     private String buildQuery(String artist, String title) {
         List<String> parts = new ArrayList<>();
-        if (!title.isBlank())  parts.add("recording:\"" + title.replace("\"","")  + "\"");
-        if (!artist.isBlank()) parts.add("artist:\""    + artist.replace("\"","") + "\"");
+        if (!title.isBlank())  parts.add("recording:\"" + escapeLucene(title)  + "\"");
+        if (!artist.isBlank()) parts.add("artist:\""    + escapeLucene(artist) + "\"");
         return String.join(" AND ", parts);
+    }
+
+    /** Échappe les caractères spéciaux Lucene (requis par l'API MB). */
+    private static String escapeLucene(String s) {
+        return s.replace("\\", "\\\\")
+                .replace("+",  "\\+")
+                .replace("-",  "\\-")
+                .replace("&&", "\\&&")
+                .replace("||", "\\||")
+                .replace("!",  "\\!")
+                .replace("(",  "\\(")
+                .replace(")",  "\\)")
+                .replace("{",  "\\{")
+                .replace("}",  "\\}")
+                .replace("[",  "\\[")
+                .replace("]",  "\\]")
+                .replace("^",  "\\^")
+                .replace("~",  "\\~")
+                .replace("*",  "\\*")
+                .replace("?",  "\\?")
+                .replace(":",  "\\:")
+                .replace("/",  "\\/")
+                .replace("\"", "");
+    }
+
+    /**
+     * GET avec retry exponentiel sur 503/429 (MB rate-limit ou surcharge).
+     * Comme Picard ratecontrol.py : backoff jusqu'à ~30 secondes.
+     */
+    private HttpResponse<String> getWithRetry(String url) throws Exception {
+        int delayMs = 1000;
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+                System.out.println("  MB retry " + attempt + "/" + MAX_RETRIES + " dans " + (delayMs / 1000) + "s...");
+                Thread.sleep(delayMs);
+                delayMs = Math.min(delayMs * 2, 30_000);
+            }
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", Config.get().userAgent())
+                    .GET()
+                    .build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            int status = response.statusCode();
+            if (status == 200) return response;
+            if (status == 503 || status == 429) continue; // retry
+            System.out.println("  MB HTTP " + status + " : " + url);
+            return null;
+        }
+        System.out.println("  MB : échec après " + MAX_RETRIES + " tentatives");
+        return null;
     }
 
     private List<TagInfo> parseRecordings(JsonNode root) {
@@ -164,7 +209,7 @@ public class MusicBrainzClient {
                 if ("Greatest Hits".equalsIgnoreCase(type))   info.isGreatestHits = "1";
             }
         }
-        if ("Various Artists".equalsIgnoreCase(info.albumArtist)) info.isCompilation = "1";
+        if (Config.get().vaName().equalsIgnoreCase(info.albumArtist) || "Various Artists".equalsIgnoreCase(info.albumArtist)) info.isCompilation = "1";
 
         // Primary type (Album, Single, EP, Broadcast, Other)
         String ptype = release.path("release-group").path("primary-type").asText("").trim();
@@ -178,24 +223,29 @@ public class MusicBrainzClient {
      */
     private void extractTrackArtists(JsonNode credits, TagInfo info) {
         if (!credits.isArray() || credits.isEmpty()) return;
-        StringBuilder names = new StringBuilder();
-        StringBuilder sorts = new StringBuilder();
+        boolean standardize = Config.get().standardizeArtists();
+        StringBuilder fullName = new StringBuilder(); // nom complet avec joinphrase ("Simon & Garfunkel")
+        StringBuilder names    = new StringBuilder(); // noms \0-séparés pour TXXX:ARTISTS
+        StringBuilder sorts    = new StringBuilder();
         for (int i = 0; i < credits.size(); i++) {
-            JsonNode ac = credits.get(i);
-            String name = ac.path("name").asText("").trim();
-            String sort = ac.path("artist").path("sort-name").asText("").trim();
+            JsonNode ac    = credits.get(i);
+            // credit name = tel qu'imprimé sur le disque, standard name = nom MB officiel
+            String creditName  = ac.path("name").asText("").trim();
+            String standardName= ac.path("artist").path("name").asText("").trim();
+            String name = (standardize && !standardName.isBlank()) ? standardName : creditName;
+            String sort   = ac.path("artist").path("sort-name").asText("").trim();
+            String join   = ac.path("joinphrase").asText(""); // ex: " & ", " feat. "
+            fullName.append(name).append(join);
             if (i == 0) {
-                info.artist     = name;
                 info.artistSort = sort;
                 info.artistMbid = ac.path("artist").path("id").asText("").trim();
             }
             if (!name.isBlank()) { if (names.length() > 0) names.append('\0'); names.append(name); }
             if (!sort.isBlank()) { if (sorts.length() > 0) sorts.append('\0'); sorts.append(sort); }
         }
-        if (credits.size() > 1) {
-            info.artists     = names.toString();
-            info.artistsSort = sorts.toString();
-        }
+        info.artist      = fullName.toString().trim();
+        info.artists     = names.toString();
+        info.artistsSort = sorts.toString();
     }
 
     /** Extrait script, country depuis la release (disponibles en inline recording lookup). */
@@ -207,18 +257,56 @@ public class MusicBrainzClient {
         if (!co.isBlank() && info.country.isBlank()) info.country = co;
     }
 
+    /**
+     * Sélectionne la meilleure release parmi la liste, avec scoring multicritères (comme Picard) :
+     *  - Statut Official : +100 pts ; non-Bootleg : +10 pts
+     *  - Pays préféré : +(N - rang) × 10 pts  (1er pays préféré = N×10, 2e = (N-1)×10, etc.)
+     *  - Format préféré : +(N - rang) × 5 pts  (CD=1er = N×5, etc.)
+     */
     private JsonNode findBestRelease(JsonNode releases, boolean onlyOfficial) {
         if (!releases.isArray() || releases.isEmpty()) return null;
-        // Priorité 1 : Official
+
+        String[]  preferredCountries = Config.get().preferredCountries();
+        String[]  preferredFormats   = Config.get().preferredFormats();
+        int       nc = preferredCountries.length;
+        int       nf = preferredFormats.length;
+
+        JsonNode best      = null;
+        int      bestScore = Integer.MIN_VALUE;
+
         for (JsonNode r : releases) {
-            if ("Official".equalsIgnoreCase(r.path("status").asText())) return r;
+            String status  = r.path("status").asText("");
+            if (onlyOfficial && !"Official".equalsIgnoreCase(status)) continue;
+
+            int score = 0;
+            if ("Official".equalsIgnoreCase(status)) score += 100;
+            else if (!"Bootleg".equalsIgnoreCase(status)) score += 10;
+
+            // Bonus pays préféré
+            String country = r.path("country").asText("").trim().toUpperCase();
+            for (int i = 0; i < nc; i++) {
+                if (preferredCountries[i].trim().equalsIgnoreCase(country)) {
+                    score += (nc - i) * 10;
+                    break;
+                }
+            }
+
+            // Bonus format préféré (premier média de la release)
+            String format = "";
+            JsonNode media = r.path("media");
+            if (media.isArray() && !media.isEmpty())
+                format = media.get(0).path("format").asText("").trim();
+            for (int i = 0; i < nf; i++) {
+                if (preferredFormats[i].trim().equalsIgnoreCase(format)) {
+                    score += (nf - i) * 5;
+                    break;
+                }
+            }
+
+            if (best == null || score > bestScore) { bestScore = score; best = r; }
         }
+        if (best != null) return best;
         if (onlyOfficial) return null;
-        // Priorité 2 : tout sauf Bootleg (Promotional, etc.)
-        for (JsonNode r : releases) {
-            if (!"Bootleg".equalsIgnoreCase(r.path("status").asText())) return r;
-        }
-        // Priorité 3 : n'importe quelle release en dernier recours
         return releases.get(0);
     }
 
@@ -263,14 +351,8 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/release/" + releaseMbid.trim()
                 + "?fmt=json&inc=recordings+artist-credits+release-groups";
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", Config.get().userAgent())
-                .GET()
-                .build();
-
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return null;
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return null;
 
         JsonNode root = mapper.readTree(response.body());
         String album     = root.path("title").asText("").trim();
@@ -287,7 +369,7 @@ public class MusicBrainzClient {
             albumArtist     = ac.get(0).path("name").asText("").trim();
             albumArtistSort = ac.get(0).path("artist").path("sort-name").asText("").trim();
         }
-        if ("Various Artists".equalsIgnoreCase(albumArtist)) isCompilation = true;
+        if (Config.get().vaName().equalsIgnoreCase(albumArtist) || "Various Artists".equalsIgnoreCase(albumArtist)) isCompilation = true;
         JsonNode secTypes = root.path("release-group").path("secondary-types");
         if (secTypes.isArray()) {
             for (JsonNode t : secTypes)
@@ -319,20 +401,61 @@ public class MusicBrainzClient {
                                     year, rgMbid, isCompilation, tracks);
     }
 
+    /** Désérialise un ReleaseTracklist depuis un JSON mis en cache (même format que lookupRelease). */
+    public ReleaseTracklist parseReleaseFromCache(String json) {
+        try {
+            JsonNode root = mapper.readTree(json);
+            String relMbid   = root.path("id").asText("").trim();
+            String album     = root.path("title").asText("").trim();
+            String date      = root.path("date").asText("");
+            String year      = date.length() >= 4 ? date.substring(0, 4) : date;
+            String rgMbid    = root.path("release-group").path("id").asText("").trim();
+            String albumArtist = "", albumArtistSort = "";
+            boolean isCompilation = false;
+            JsonNode ac = root.path("artist-credit");
+            if (ac.isArray() && !ac.isEmpty()) {
+                albumArtist     = ac.get(0).path("name").asText("").trim();
+                albumArtistSort = ac.get(0).path("artist").path("sort-name").asText("").trim();
+            }
+            if (Config.get().vaName().equalsIgnoreCase(albumArtist) || "Various Artists".equalsIgnoreCase(albumArtist)) isCompilation = true;
+            JsonNode secTypes = root.path("release-group").path("secondary-types");
+            if (secTypes.isArray())
+                for (JsonNode t : secTypes)
+                    if ("Compilation".equalsIgnoreCase(t.asText())) { isCompilation = true; break; }
+            List<ReleaseTrack> tracks = new ArrayList<>();
+            JsonNode media = root.path("media");
+            if (media.isArray()) {
+                int discCount = media.size();
+                for (JsonNode medium : media) {
+                    int disc       = medium.path("position").asInt(1);
+                    int trackTotal = medium.path("track-count").asInt(0);
+                    for (JsonNode t : medium.path("tracks")) {
+                        int    pos     = t.path("position").asInt(0);
+                        String tTitle  = t.path("title").asText("").trim();
+                        String recMbid = t.path("recording").path("id").asText("").trim();
+                        String tArtist = "";
+                        JsonNode tac = t.path("recording").path("artist-credit");
+                        if (tac.isArray() && !tac.isEmpty())
+                            tArtist = tac.get(0).path("name").asText("").trim();
+                        tracks.add(new ReleaseTrack(discCount > 1 ? disc : 0, pos, trackTotal,
+                                                   tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid));
+                    }
+                }
+            }
+            if (relMbid.isBlank() || album.isBlank()) return null;
+            return new ReleaseTracklist(relMbid, album, albumArtist, albumArtistSort,
+                                        year, rgMbid, isCompilation, tracks);
+        } catch (Exception e) { return null; }
+    }
+
     // ── Lookup d'un recording par MBID ────────────────────────────────────────
     // Utilisé par AcoustIdClient après résolution AcoustID → MBID
     public TagInfo lookupRecording(String mbid) throws Exception {
         String url = BASE_URL + "/recording/" + mbid.trim()
                 + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs";
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", Config.get().userAgent())
-                .GET()
-                .build();
-
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return null;
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return null;
 
         JsonNode rec = mapper.readTree(response.body());
         TagInfo info = new TagInfo();
@@ -386,14 +509,10 @@ public class MusicBrainzClient {
     public String searchArtistMbid(String artistName) throws Exception {
         if (artistName == null || artistName.isBlank()) return "";
         String url = BASE_URL + "/artist?query=artist:"
-                + URLEncoder.encode(artistName, StandardCharsets.UTF_8)
+                + URLEncoder.encode(escapeLucene(artistName), StandardCharsets.UTF_8)
                 + "&limit=1&fmt=json";
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", Config.get().userAgent())
-                .GET().build();
-        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() != 200) return "";
+        HttpResponse<String> resp = getWithRetry(url);
+        if (resp == null) return "";
         JsonNode root = mapper.readTree(resp.body());
         JsonNode artists = root.path("artists");
         if (artists.isArray() && artists.size() > 0) {

@@ -27,6 +27,8 @@ public class SettingsDialog extends JDialog {
     private JTextField tfDiscogsKey, tfDiscogsSecret;
     private JTextField tfLastFmKey;
     private JTextField tfFanArtKey;
+    private JCheckBox  chkFanartEnabled;
+    private JCheckBox  chkLastfmEnabled;
 
     // ── Onglet Matching ──────────────────────────────────────────────────────
     private JSpinner   spMinScore;
@@ -34,6 +36,10 @@ public class SettingsDialog extends JDialog {
     private JTextField tfPreferredCountry;
     private JSpinner   spResultsLimit;
     private JSpinner   spCacheDays;
+    @SuppressWarnings("unchecked")
+    private JComboBox<String> cmbDiscogsGenreSource;
+    private JSpinner   spDiscogsMaxGenres;
+    private JSpinner   spLastfmMaxGenres;
 
     // ── Onglet Renommage ─────────────────────────────────────────────────────
     private JSpinner   spDefaultMask;
@@ -52,10 +58,28 @@ public class SettingsDialog extends JDialog {
     private JTextField tfRapidApiKey;
     private JTextField tfAudDToken;
 
+    // ── Onglet Tags ───────────────────────────────────────────────────────────
+    @SuppressWarnings("unchecked")
+    private JComboBox<String> cmbId3Version;
+    private JCheckBox  chkPreserveTimestamps;
+    private JCheckBox  chkClearExistingTags;
+    private JCheckBox  chkPreserveImages;
+    private JCheckBox  chkSaveAcoustidFingerprints;
+    private JCheckBox  chkIgnoreExistingFingerprints;
+    private JSpinner   spFpcalcThreads;
+
+    // ── Onglet Matching — releases préférées + méta ───────────────────────────
+    private JTextField tfPreferredCountries;
+    private JTextField tfPreferredFormats;
+    private JTextField tfVaName;
+    private JCheckBox  chkStandardizeArtists;
+
     // ── Onglet MusicBrainz OAuth ──────────────────────────────────────────────
     private JTextField tfMbClientId;
     private JTextField tfMbClientSecret;
     private JLabel     lblMbAccount;
+    @SuppressWarnings("unchecked")
+    private JComboBox<String> cmbMbOAuthMode;
 
     // ── Onglet Démarrage ──────────────────────────────────────────────────────
     private DefaultListModel<String> startupFolderModel;
@@ -75,6 +99,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab("Démarrage",    buildStartupPanel());
         tabs.addTab("APIs",         buildApiPanel());
         tabs.addTab("Matching",     buildMatchingPanel());
+        tabs.addTab("Tags",         buildTagsPanel());
         tabs.addTab("Renommage",    buildRenamePanel());
         tabs.addTab("Audio",        buildAudioPanel());
         tabs.addTab("MusicBrainz",  buildMbOAuthPanel());
@@ -126,9 +151,6 @@ public class SettingsDialog extends JDialog {
                 for (java.io.File f : fc.getSelectedFiles())
                     if (!startupFolderModel.contains(f.getAbsolutePath()))
                         startupFolderModel.addElement(f.getAbsolutePath());
-                java.io.File single = fc.getSelectedFile();
-                if (single != null && !startupFolderModel.contains(single.getAbsolutePath()))
-                    startupFolderModel.addElement(single.getAbsolutePath());
             }
         });
         btnRemove.addActionListener(e -> {
@@ -157,6 +179,7 @@ public class SettingsDialog extends JDialog {
         return outer;
     }
 
+    @SuppressWarnings("unchecked")
     private JPanel buildApiPanel() {
         tfMbUserAgent      = tf();
         tfAcoustIdKey      = tf();
@@ -167,6 +190,8 @@ public class SettingsDialog extends JDialog {
         tfFanArtKey        = tf();
         tfRapidApiKey      = tf();
         tfAudDToken        = tf();
+        chkFanartEnabled   = new JCheckBox("Activer le téléchargement FanArt");
+        chkLastfmEnabled   = new JCheckBox("Activer l'enrichissement Last.fm");
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
@@ -209,9 +234,22 @@ public class SettingsDialog extends JDialog {
             }
         }
 
+        // Section enrichissement
+        JPanel enrichInner = new JPanel(new GridBagLayout());
+        enrichInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Enrichissement automatique"));
+        for (int i = 0; i < 2; i++) {
+            JCheckBox chk = (i == 0) ? chkFanartEnabled : chkLastfmEnabled;
+            GridBagConstraints c = new GridBagConstraints();
+            c.gridx = 0; c.gridy = i; c.anchor = GridBagConstraints.WEST;
+            c.insets = new Insets(3, 10, 3, 8); c.gridwidth = 3;
+            enrichInner.add(chk, c);
+        }
+
         JPanel p = new JPanel(new BorderLayout(0, 4));
         p.setBorder(new EmptyBorder(8, 8, 8, 8));
-        p.add(inner, BorderLayout.CENTER);
+        p.add(inner,       BorderLayout.CENTER);
+        p.add(enrichInner, BorderLayout.SOUTH);
         return p;
     }
 
@@ -235,6 +273,7 @@ public class SettingsDialog extends JDialog {
         return btn;
     }
 
+    @SuppressWarnings("unchecked")
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(85, 0, 100, 5));
         chkOnlyOfficial  = new JCheckBox("Uniquement les releases officielles");
@@ -243,7 +282,19 @@ public class SettingsDialog extends JDialog {
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
 
-        return form(new String[]{
+        cmbDiscogsGenreSource = new JComboBox<>(new String[]{
+            "Style puis Genre", "Genre puis Style", "Genre uniquement"});
+        spDiscogsMaxGenres = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+        spLastfmMaxGenres  = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+
+        tfPreferredCountries = tf();
+        tfPreferredCountries.setToolTipText("Codes ISO séparés par virgule, ex: FR,DE,US — priorité décroissante");
+        tfPreferredFormats   = tf();
+        tfPreferredFormats.setToolTipText("ex: CD,Digital Media,Vinyl — priorité décroissante");
+        tfVaName             = tf();
+        chkStandardizeArtists = new JCheckBox("Utiliser les noms MB standardisés (ex: The Beatles vs Beatles, The)");
+
+        JPanel matchPanel = form(new String[]{
             "Score minimum (%) :",
             "Releases officielles seulement :",
             "Pays préféré (code ISO, ex: FR) :",
@@ -254,6 +305,102 @@ public class SettingsDialog extends JDialog {
             tfPreferredCountry, spResultsLimit,
             spCacheDays
         }, "Critères de correspondance MusicBrainz");
+
+        JPanel releasesPanel = form(new String[]{
+            "Pays préférés (ex: FR,DE,US) :",
+            "Formats préférés (ex: CD,Digital Media) :",
+            "Nom Various Artists :",
+            ""
+        }, new JComponent[]{
+            tfPreferredCountries, tfPreferredFormats,
+            tfVaName, chkStandardizeArtists
+        }, "Releases préférées (comme Picard)");
+
+        JPanel genrePanel = form(new String[]{
+            "Source genres Discogs :",
+            "Max genres Discogs :",
+            "Max genres Last.fm :"
+        }, new JComponent[]{
+            cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres
+        }, "Sources de genres (Discogs / Last.fm)");
+
+        JPanel combined = new JPanel();
+        combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
+        combined.add(matchPanel);
+        combined.add(releasesPanel);
+        combined.add(genrePanel);
+
+        JPanel wrap = new JPanel(new BorderLayout());
+        wrap.add(combined, BorderLayout.NORTH);
+        return wrap;
+    }
+
+    @SuppressWarnings("unchecked")
+    private JPanel buildTagsPanel() {
+        cmbId3Version              = new JComboBox<>(new String[]{"Garder version existante", "ID3v2.3 (compatible)", "ID3v2.4 (standard)"});
+        chkPreserveTimestamps      = new JCheckBox("Préserver la date de modification du fichier");
+        chkClearExistingTags       = new JCheckBox("Effacer les tags existants avant écriture (repartir de zéro)");
+        chkPreserveImages          = new JCheckBox("Conserver la pochette existante si aucune nouvelle");
+        chkSaveAcoustidFingerprints   = new JCheckBox("Sauvegarder l'empreinte AcoustID dans les tags");
+        chkIgnoreExistingFingerprints = new JCheckBox("Forcer le re-fingerprint (même si AcoustID déjà présent)");
+        spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
+
+        JLabel id3Hint = new JLabel(
+            "<html><i>ID3v2.3 : recommandé pour voitures, NAS anciens, Windows Explorer.<br>" +
+            "ID3v2.4 : standard actuel, supporte Unicode complet.</i></html>");
+        id3Hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        id3Hint.setBorder(new EmptyBorder(0, 10, 6, 0));
+
+        JPanel tagInner = new JPanel(new GridBagLayout());
+        tagInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Écriture des tags"));
+        Object[][] rows = {
+            { "Version ID3 (MP3) :", cmbId3Version },
+            { null, id3Hint },
+            { "", chkPreserveTimestamps },
+            { "", chkClearExistingTags  },
+            { "", chkPreserveImages     },
+        };
+        for (int i = 0; i < rows.length; i++) {
+            if (rows[i][0] != null) {
+                GridBagConstraints lc = new GridBagConstraints();
+                lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(3, 10, 3, 8);
+                tagInner.add(new JLabel((String) rows[i][0]), lc);
+            }
+            GridBagConstraints fc = new GridBagConstraints();
+            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL;
+            fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 10); fc.gridwidth = 2;
+            tagInner.add((JComponent) rows[i][1], fc);
+        }
+
+        JPanel fpInner = new JPanel(new GridBagLayout());
+        fpInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "AcoustID / Fingerprint"));
+        JComponent[][] fpRows = {
+            { new JLabel(""), chkSaveAcoustidFingerprints },
+            { new JLabel(""), chkIgnoreExistingFingerprints },
+            { new JLabel("Threads fpcalc :"), spFpcalcThreads },
+        };
+        for (int i = 0; i < fpRows.length; i++) {
+            GridBagConstraints lc = new GridBagConstraints();
+            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(3, 10, 3, 8);
+            fpInner.add(fpRows[i][0], lc);
+            GridBagConstraints fc = new GridBagConstraints();
+            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL;
+            fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 10);
+            fpInner.add(fpRows[i][1], fc);
+        }
+
+        JPanel combined = new JPanel();
+        combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
+
+        JPanel pw = new JPanel(new BorderLayout()); pw.setBorder(new EmptyBorder(8,8,0,8)); pw.add(tagInner, BorderLayout.CENTER);
+        JPanel fw = new JPanel(new BorderLayout()); fw.setBorder(new EmptyBorder(8,8,8,8)); fw.add(fpInner,  BorderLayout.CENTER);
+        combined.add(pw); combined.add(fw);
+
+        JPanel wrap = new JPanel(new BorderLayout());
+        wrap.add(combined, BorderLayout.NORTH);
+        return wrap;
     }
 
     private JPanel buildRenamePanel() {
@@ -382,10 +529,13 @@ public class SettingsDialog extends JDialog {
         }.execute();
     }
 
+    @SuppressWarnings("unchecked")
     private JPanel buildMbOAuthPanel() {
         tfMbClientId     = tf();
         tfMbClientSecret = tf();
         lblMbAccount     = new JLabel();
+        cmbMbOAuthMode   = new JComboBox<>(new String[]{
+            "scheme (URL handler)", "localhost (port 8484)", "oob (copier-coller)"});
 
         // Bouton unique qui change selon l'état : "Obtenir ID/Secret" → "Se connecter"
         JButton btnAction = new JButton();
@@ -477,16 +627,17 @@ public class SettingsDialog extends JDialog {
         }
 
         JLabel hint = new JLabel(
-            "<html><i>Sur MusicBrainz, laissez le champ « URI de rappel » <b>vide</b><br>" +
-            "(application installée — mode out-of-band).</i></html>");
+            "<html><i><b>scheme</b> : URL handler système (défaut, Linux/Mac).<br>" +
+            "<b>localhost</b> : serveur local port 8484, redirect_uri = http://localhost:8484.<br>" +
+            "<b>oob</b> : code affiché dans le navigateur, copier-coller ici.</i></html>");
         hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         hint.setBorder(new EmptyBorder(4, 0, 0, 0));
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), "Compte MusicBrainz (contribution OAuth2)"));
-        String[] labels = {"Client ID :", "Client Secret :", "Compte connecté :"};
-        JComponent[] fields = {tfMbClientId, tfMbClientSecret, lblMbAccount};
+        String[] labels = {"Client ID :", "Client Secret :", "Compte connecté :", "Mode OAuth :"};
+        JComponent[] fields = {tfMbClientId, tfMbClientSecret, lblMbAccount, cmbMbOAuthMode};
         for (int i = 0; i < labels.length; i++) {
             GridBagConstraints lc = new GridBagConstraints();
             lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(4,10,4,8);
@@ -496,7 +647,7 @@ public class SettingsDialog extends JDialog {
             inner.add(fields[i], fc);
         }
         GridBagConstraints bc = new GridBagConstraints();
-        bc.gridx = 1; bc.gridy = 3; bc.anchor = GridBagConstraints.WEST; bc.insets = new Insets(6,0,4,10);
+        bc.gridx = 1; bc.gridy = 4; bc.anchor = GridBagConstraints.WEST; bc.insets = new Insets(6,0,4,10);
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         btnRow.add(btnAction); btnRow.add(btnLogout);
         inner.add(btnRow, bc);
@@ -551,12 +702,47 @@ public class SettingsDialog extends JDialog {
         tfRapidApiKey.setText(cfg.str("rapidapi.key",    ""));
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
 
+        chkFanartEnabled.setSelected(cfg.bool("fanart.download_cover", true));
+        chkLastfmEnabled.setSelected(cfg.bool("lastfm.use_tags",       true));
+
+        String genreSrc = cfg.str("discogs.genre_source", "style_then_genre");
+        cmbDiscogsGenreSource.setSelectedIndex(
+            "genre_then_style".equals(genreSrc) ? 1 : "genre_only".equals(genreSrc) ? 2 : 0);
+        spDiscogsMaxGenres.setValue(cfg.num("discogs.max_genres",   3));
+        spLastfmMaxGenres .setValue(cfg.num("lastfm.max_genres",    3));
+
+        // ─ Releases préférées ─
+        tfPreferredCountries.setText(cfg.str("releases.preferred_countries", ""));
+        tfPreferredFormats  .setText(cfg.str("releases.preferred_formats",   ""));
+        tfVaName            .setText(cfg.vaName());
+        chkStandardizeArtists.setSelected(cfg.standardizeArtists());
+
+        // ─ Tags (onglet Tags) ─
+        String id3v = cfg.id3v2Version();
+        cmbId3Version.setSelectedIndex("2.3".equals(id3v) ? 1 : "2.4".equals(id3v) ? 2 : 0);
+        chkPreserveTimestamps     .setSelected(cfg.preserveTimestamps());
+        chkClearExistingTags      .setSelected(cfg.clearExistingTags());
+        chkPreserveImages         .setSelected(cfg.preserveImages());
+        chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
+        chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
+        spFpcalcThreads           .setValue(cfg.fpcalcThreads());
+
         tfMbClientId    .setText(cfg.mbClientId());
         tfMbClientSecret.setText(cfg.mbClientSecret());
+        String mode = cfg.str("mb.oauth.mode", "scheme");
+        cmbMbOAuthMode.setSelectedIndex(
+            "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
     }
 
     private void save() {
+        // Partir du fichier utilisateur existant pour préserver les clés non affichées dans le formulaire
+        // (discogs.genre_source, lastfm.max_genres, mb.oauth.mode configurées manuellement, etc.)
         Properties p = new Properties();
+        Path userFile = Paths.get(SETTINGS_FILE);
+        if (Files.exists(userFile)) {
+            try (java.io.InputStream in = Files.newInputStream(userFile)) { p.load(in); }
+            catch (IOException ignored) {}
+        }
 
         p.setProperty("musicbrainz.user_agent",        tfMbUserAgent.getText().trim());
         p.setProperty("acoustid.api_key",               tfAcoustIdKey.getText().trim());
@@ -589,11 +775,38 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rapidapi.key",   tfRapidApiKey.getText().trim());
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
 
+        p.setProperty("fanart.download_cover", String.valueOf(chkFanartEnabled.isSelected()));
+        p.setProperty("lastfm.use_tags",       String.valueOf(chkLastfmEnabled.isSelected()));
+
+        String[] genreSources = {"style_then_genre", "genre_then_style", "genre_only"};
+        p.setProperty("discogs.genre_source", genreSources[cmbDiscogsGenreSource.getSelectedIndex()]);
+        p.setProperty("discogs.max_genres",   String.valueOf(spDiscogsMaxGenres.getValue()));
+        p.setProperty("lastfm.max_genres",    String.valueOf(spLastfmMaxGenres.getValue()));
+
+        // ─ Releases préférées ─
+        p.setProperty("releases.preferred_countries", tfPreferredCountries.getText().trim());
+        p.setProperty("releases.preferred_formats",   tfPreferredFormats.getText().trim());
+        p.setProperty("metadata.va_name",             tfVaName.getText().trim().isEmpty()
+                                                      ? "Various Artists" : tfVaName.getText().trim());
+        p.setProperty("metadata.standardize_artists", String.valueOf(chkStandardizeArtists.isSelected()));
+
+        // ─ Onglet Tags ─
+        String[] id3Versions = {"keep", "2.3", "2.4"};
+        p.setProperty("tags.id3v2_version",            id3Versions[cmbId3Version.getSelectedIndex()]);
+        p.setProperty("tags.preserve_timestamps",      String.valueOf(chkPreserveTimestamps.isSelected()));
+        p.setProperty("tags.clear_existing_tags",      String.valueOf(chkClearExistingTags.isSelected()));
+        p.setProperty("tags.preserve_images",          String.valueOf(chkPreserveImages.isSelected()));
+        p.setProperty("acoustid.save_fingerprints",    String.valueOf(chkSaveAcoustidFingerprints.isSelected()));
+        p.setProperty("acoustid.ignore_existing",      String.valueOf(chkIgnoreExistingFingerprints.isSelected()));
+        p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
+
         p.setProperty("mb.oauth.client_id",            tfMbClientId.getText().trim());
         p.setProperty("mb.oauth.client_secret",        tfMbClientSecret.getText().trim());
         // Conserver le token et username existants
         p.setProperty("mb.oauth.token",               Config.get().mbToken());
         p.setProperty("mb.oauth.username",            Config.get().mbUsername());
+        String[] oauthModes = {"scheme", "localhost", "oob"};
+        p.setProperty("mb.oauth.mode", oauthModes[cmbMbOAuthMode.getSelectedIndex()]);
 
         // Mémoriser les dossiers déjà connus avant la sauvegarde
         java.util.Set<String> alreadyKnown = new java.util.HashSet<>(

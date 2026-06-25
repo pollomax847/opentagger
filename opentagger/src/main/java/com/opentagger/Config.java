@@ -14,7 +14,11 @@ public class Config {
     private static final String CONFIG_DIR  = System.getProperty("user.home") + "/.opentagger";
     private static final String CONFIG_FILE = CONFIG_DIR + "/settings.properties";
 
-    private static Config instance;
+    // Holder idiom — thread-safe sans synchronized, initialisation paresseuse
+    private static final class Holder {
+        static final Config INSTANCE = new Config();
+    }
+
     private final Properties props = new Properties();
 
     private Config() {
@@ -24,12 +28,11 @@ public class Config {
     }
 
     public static Config get() {
-        if (instance == null) instance = new Config();
-        return instance;
+        return Holder.INSTANCE;
     }
 
     /** Recharge la config utilisateur après modification par SettingsDialog. */
-    public void reload() {
+    public synchronized void reload() {
         props.clear();
         loadDefaults();
         loadUserConfig();
@@ -37,22 +40,22 @@ public class Config {
 
     // --- Lecture ---
 
-    public String str(String key) {
+    public synchronized String str(String key) {
         return props.getProperty(key, "").trim();
     }
 
-    public String str(String key, String fallback) {
+    public synchronized String str(String key, String fallback) {
         String v = props.getProperty(key, fallback);
         return v == null ? fallback : v.trim();
     }
 
-    public int num(String key, int fallback) {
-        try { return Integer.parseInt(str(key)); }
+    public synchronized int num(String key, int fallback) {
+        try { return Integer.parseInt(props.getProperty(key, "").trim()); }
         catch (NumberFormatException e) { return fallback; }
     }
 
-    public boolean bool(String key, boolean fallback) {
-        String v = str(key);
+    public synchronized boolean bool(String key, boolean fallback) {
+        String v = props.getProperty(key, "").trim();
         if (v.isEmpty()) return fallback;
         return "true".equalsIgnoreCase(v) || "1".equals(v) || "yes".equalsIgnoreCase(v);
     }
@@ -83,6 +86,31 @@ public class Config {
         return "OpenTagger/" + str("app.version", "0.1") + " (" + contact() + ")";
     }
 
+    // --- Tags écriture ---
+    public boolean preserveTimestamps()      { return bool("tags.preserve_timestamps",  false); }
+    public boolean clearExistingTags()       { return bool("tags.clear_existing_tags",  false); }
+    public boolean preserveImages()          { return bool("tags.preserve_images",       true); }
+    public String  id3v2Version()            { return str ("tags.id3v2_version",        "keep"); } // keep / 2.3 / 2.4
+
+    // --- AcoustID fingerprint ---
+    public boolean saveAcoustidFingerprints()     { return bool("acoustid.save_fingerprints", true); }
+    public boolean ignoreExistingFingerprints()   { return bool("acoustid.ignore_existing",   false); }
+    public int     fpcalcThreads()                { return num ("acoustid.fpcalc_threads",    2); }
+
+    // --- Métadonnées ---
+    public String  vaName()                 { return str("metadata.va_name",              "Various Artists"); }
+    public boolean standardizeArtists()     { return bool("metadata.standardize_artists", false); }
+
+    // --- Releases préférées (codes séparés par virgule) ---
+    public String[] preferredCountries()    {
+        String v = str("releases.preferred_countries", "");
+        return v.isBlank() ? new String[0] : v.split(",");
+    }
+    public String[] preferredFormats()      {
+        String v = str("releases.preferred_formats", "");
+        return v.isBlank() ? new String[0] : v.split(",");
+    }
+
     // --- MusicBrainz OAuth ---
     public String mbToken()        { return str("mb.oauth.token"); }
     public String mbUsername()     { return str("mb.oauth.username"); }
@@ -91,13 +119,13 @@ public class Config {
     public boolean mbConnected()   { return !mbToken().isBlank(); }
 
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
-    public void set(String key, String value) {
+    public synchronized void set(String key, String value) {
         props.setProperty(key, value != null ? value : "");
         persist();
     }
 
     /** Écrit toutes les propriétés actuelles dans le fichier utilisateur. */
-    public void persist() {
+    public synchronized void persist() {
         try {
             Path dir = Paths.get(CONFIG_DIR);
             if (!Files.exists(dir)) Files.createDirectories(dir);

@@ -134,12 +134,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                     mbr = mbLookup(ti.artist, clean);
                 }
                 if (mbr == null && !ti.title.isBlank()) {
-                    // Dernier essai : artiste seul (titre trop spécifique)
+                    // Dernier essai avec titre tronqué — seuil plus élevé (90%)
+                    // pour éviter d'accepter un enregistrement différent partageant les 2 premiers mots
                     String[] words = ti.title.split("\\s+");
                     if (words.length > 1) {
                         String short1 = words[0] + " " + words[1];
-                        mbr = mbLookup(ti.artist, short1);
-                        if (mbr != null) log("  MB search (titre court): '" + short1 + "'");
+                        TagInfo candidate = mbLookupStrict(ti.artist, short1, 90);
+                        if (candidate != null && titlesSimilar(ti.title, candidate.title)) {
+                            mbr = candidate;
+                            log("  MB search (titre court): '" + short1 + "'");
+                        }
                     }
                 }
                 Thread.sleep(1100);
@@ -275,7 +279,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         try {
             int v = Integer.parseInt(raw.trim());
             if (v >= 1 && v <= 5) return v;
-            if (v >= 6 && v <= 255) return Math.min(5, (v + 25) / 51);
+            if (v >= 6 && v <= 255) return Math.max(1, Math.min(5, (int) Math.round(v * 5.0 / 255)));
         } catch (NumberFormatException ignored) {}
         return 0;
     }
@@ -284,12 +288,29 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
     /** Cherche dans MB et retourne le meilleur résultat si score ≥ 70, sinon null. */
     private TagInfo mbLookup(String artist, String title) {
+        return mbLookupStrict(artist, title, 70);
+    }
+
+    /** Cherche dans MB et retourne le meilleur résultat si score ≥ minScore, sinon null. */
+    private TagInfo mbLookupStrict(String artist, String title, int minScore) {
         try {
             List<TagInfo> results = mb.searchRecording(artist, title);
-            if (!results.isEmpty() && results.get(0).score >= 70)
+            if (!results.isEmpty() && results.get(0).score >= minScore)
                 return results.get(0);
         } catch (Exception ignored) {}
         return null;
+    }
+
+    /** Retourne true si deux titres partagent ≥ 60% de leurs mots (après normalisation). */
+    private static boolean titlesSimilar(String a, String b) {
+        if (a == null || b == null) return false;
+        String[] wa = a.toLowerCase().replaceAll("[^a-z0-9 ]", " ").trim().split("\\s+");
+        String[] wb = b.toLowerCase().replaceAll("[^a-z0-9 ]", " ").trim().split("\\s+");
+        if (wa.length == 0 || wb.length == 0) return false;
+        java.util.Set<String> setB = new java.util.HashSet<>(java.util.Arrays.asList(wb));
+        int shared = 0;
+        for (String w : wa) if (setB.contains(w)) shared++;
+        return shared >= Math.max(1, (int)(wa.length * 0.6));
     }
 
     /** Remplit un champ vide. Retourne true si modifié. */
@@ -320,9 +341,17 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             ti.bpm             = tag.getFirst(FieldKey.BPM);
             ti.mood            = tag.getFirst(FieldKey.MOOD);
             ti.lyrics          = tag.getFirst(FieldKey.LYRICS);
-            ti.artistMbid      = tag.getFirst(FieldKey.MUSICBRAINZ_ARTISTID);
-            ti.releaseMbid     = tag.getFirst(FieldKey.MUSICBRAINZ_RELEASEID);
-            ti.recordingMbid   = tag.getFirst(FieldKey.MUSICBRAINZ_TRACK_ID);
+            ti.trackTotal       = tag.getFirst(FieldKey.TRACK_TOTAL);
+            ti.discNo           = tag.getFirst(FieldKey.DISC_NO);
+            ti.discTotal        = tag.getFirst(FieldKey.DISC_TOTAL);
+            ti.artistSort       = tag.getFirst(FieldKey.ARTIST_SORT);
+            ti.albumArtistSort  = tag.getFirst(FieldKey.ALBUM_ARTIST_SORT);
+            ti.isrc             = tag.getFirst(FieldKey.ISRC);
+            ti.language         = tag.getFirst(FieldKey.LANGUAGE);
+            ti.script           = tag.getFirst(FieldKey.SCRIPT);
+            ti.artistMbid       = tag.getFirst(FieldKey.MUSICBRAINZ_ARTISTID);
+            ti.releaseMbid      = tag.getFirst(FieldKey.MUSICBRAINZ_RELEASEID);
+            ti.recordingMbid    = tag.getFirst(FieldKey.MUSICBRAINZ_TRACK_ID);
             ti.releaseGroupMbid = tag.getFirst(FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
             // Nettoyer les nulls
             var cls = TagInfo.class;

@@ -55,6 +55,7 @@ public class AudDClient {
                 .uri(URI.create(API_URL))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(Duration.ofSeconds(60))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
 
@@ -103,26 +104,26 @@ public class AudDClient {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
         // -- api_token
-        writePart(baos, boundary, "api_token", token.getBytes());
+        writePart(baos, boundary, "api_token", token.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         // -- return
-        writePart(baos, boundary, "return", "apple_music,spotify".getBytes());
+        writePart(baos, boundary, "return", "apple_music,spotify".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         // -- file
-        baos.write(("--" + boundary + "\r\n").getBytes());
-        baos.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n").getBytes());
-        baos.write("Content-Type: audio/mpeg\r\n\r\n".getBytes());
+        baos.write(("--" + boundary + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        baos.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        baos.write("Content-Type: audio/mpeg\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         baos.write(audioBytes);
-        baos.write("\r\n".getBytes());
+        baos.write("\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         // -- close
-        baos.write(("--" + boundary + "--\r\n").getBytes());
+        baos.write(("--" + boundary + "--\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
         return baos.toByteArray();
     }
 
     private void writePart(ByteArrayOutputStream baos, String boundary, String name, byte[] value)
             throws IOException {
-        baos.write(("--" + boundary + "\r\n").getBytes());
-        baos.write(("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n").getBytes());
+        baos.write(("--" + boundary + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        baos.write(("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
         baos.write(value);
-        baos.write("\r\n".getBytes());
+        baos.write("\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     // ── Parsing de la réponse ─────────────────────────────────────────────────

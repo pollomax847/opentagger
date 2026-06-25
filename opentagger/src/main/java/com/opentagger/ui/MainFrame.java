@@ -101,8 +101,11 @@ public class MainFrame extends JFrame {
 
     public MainFrame() {
         super("OpenTagger  " + Config.get().str("app.version", "0.1.0"));
-        buildUI();
+        // installDragDrop doit précéder buildUI : buildMainSplit() appelle
+        // table.setTransferHandler(getTransferHandler()) — sans handler préalable
+        // la table reçoit null et le drag-drop ne fonctionne pas sur la zone principale.
         installDragDrop();
+        buildUI();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -940,13 +943,17 @@ public class MainFrame extends JFrame {
     }
 
     private void performUndo() {
+        // Capturer la description AVANT undo() pour afficher ce qui vient d'être annulé,
+        // pas la prochaine action disponible dans la pile.
+        String desc = undoManager.undoDescription();
         FileEntry e = undoManager.undo();
-        if (e != null) { tableModel.update(e); refreshDetail(); setStatus("Annulé : " + undoManager.undoDescription()); }
+        if (e != null) { tableModel.update(e); refreshDetail(); setStatus("Annulé : " + desc); }
     }
 
     private void performRedo() {
+        String desc = undoManager.redoDescription();
         FileEntry e = undoManager.redo();
-        if (e != null) { tableModel.update(e); refreshDetail(); setStatus("Rétabli : " + undoManager.redoDescription()); }
+        if (e != null) { tableModel.update(e); refreshDetail(); setStatus("Rétabli : " + desc); }
     }
 
     private void updateUndoButtons() {
@@ -1146,6 +1153,16 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 try {
                     List<FileEntry> list = get();
+                    // Dédupliquer : ne pas ajouter un fichier déjà présent dans la table
+                    Set<Path> existing = new java.util.HashSet<>();
+                    for (int i = 0; i < tableModel.getRowCount(); i++) {
+                        FileEntry fe = tableModel.get(i);
+                        Path p = fe.currentPath != null ? fe.currentPath : fe.file.toPath();
+                        existing.add(p.toAbsolutePath());
+                    }
+                    list = list.stream()
+                            .filter(e -> !existing.contains(e.file.toPath().toAbsolutePath()))
+                            .collect(java.util.stream.Collectors.toList());
                     tableModel.addAll(list);
                     long tagged = list.stream().filter(e -> e.status == FileEntry.Status.TAGGED).count();
                     setStatus(tableModel.getRowCount() + " fichier(s) — " + tagged + " déjà tagué(s)");
@@ -1182,7 +1199,7 @@ public class MainFrame extends JFrame {
 
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         worker = new TaggingWorker(toTag, chkAcoustId.isSelected(), autoMask,
-            msg -> setStatus(msg),
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
                 table.repaint();

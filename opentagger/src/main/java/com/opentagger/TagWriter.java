@@ -6,8 +6,11 @@ import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
 import org.jaudiotagger.tag.id3.AbstractID3v2Tag;
+import org.jaudiotagger.tag.id3.ID3v23Tag;
+import org.jaudiotagger.tag.id3.ID3v24Tag;
 import org.jaudiotagger.tag.id3.framebody.FrameBodyTXXX;
 import org.jaudiotagger.tag.id3.ID3v23Frame;
+import org.jaudiotagger.tag.id3.ID3v24Frame;
 import org.jaudiotagger.tag.images.Artwork;
 import org.jaudiotagger.tag.images.ArtworkFactory;
 
@@ -26,8 +29,36 @@ public class TagWriter {
         AudioFile audio = AudioFileIO.read(fichier);
         Tag tag = getOrCreateTag(audio);
 
+        // Préserver les timestamps avant toute modification
+        long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
+
+        // Sauvegarder la pochette existante si on vide les tags ET qu'on veut la préserver
+        Artwork savedArtwork = null;
+        if (Config.get().clearExistingTags() && Config.get().preserveImages() && coverImage == null) {
+            try { savedArtwork = tag.getFirstArtwork(); } catch (Exception ignored) {}
+        }
+
+        // Effacer tous les champs existants si configuré (Clear Existing Tags comme Picard)
+        if (Config.get().clearExistingTags()) {
+            try { tag.deleteArtworkField(); } catch (Exception ignored) {}
+            for (FieldKey key : FieldKey.values()) {
+                try { tag.deleteField(key); } catch (Exception ignored) {}
+            }
+        }
+
+        // Fusionner avec les tags existants si on ne les efface pas.
+        // Les champs vides dans TagInfo sont complétés par les valeurs déjà présentes
+        // (évite d'effacer trackTotal/discTotal en ID3v2.3 "3/12").
+        TagInfo merged = Config.get().clearExistingTags() ? info.copy() : mergeWithExisting(info, tag);
+
+        // Supprimer empreinte AcoustID si désactivé
+        if (!Config.get().saveAcoustidFingerprints()) {
+            merged.acoustidFingerprint = "";
+            merged.acoustidId          = "";
+        }
+
         // Construction du mapping field → valeur pour une écriture uniforme
-        Map<FieldKey, String> fields = buildFieldMap(info);
+        Map<FieldKey, String> fields = buildFieldMap(merged);
         for (Map.Entry<FieldKey, String> entry : fields.entrySet()) {
             setIfNonBlank(tag, entry.getKey(), entry.getValue());
         }
@@ -53,22 +84,131 @@ public class TagWriter {
             if (!info.albumArtistSort.isBlank()) writeTxxx(id3, "ALBUM_ARTISTS_SORT", info.albumArtistSort);
         }
 
-        // Pochette
+        // Pochette : nouvelle image, pochette sauvegardée (preserve_images), ou inchangée
         if (coverImage != null) {
             Artwork artwork = ArtworkFactory.createArtworkFromFile(coverImage.toFile());
             tag.deleteArtworkField();
             tag.setField(artwork);
+        } else if (savedArtwork != null) {
+            try { tag.setField(savedArtwork); } catch (Exception ignored) {}
         }
 
         audio.commit();
+
+        // Restaurer les timestamps du fichier (Picard : preserve_timestamps)
+        if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
     }
 
     /**
-     * Retourne le tag existant ou en crée un nouveau.
-     * On préserve la version ID3 déjà présente (v2.3 ou v2.4) — comme Jaikoz/SongKong.
+     * Pour les MP3 : garantit un tag ID3v2 dans la version configurée.
+     *  - "keep" (défaut) : préserve la version existante ; crée v2.3 si aucun tag
+     *  - "2.3"           : convertit/crée toujours en ID3v2.3 (compatibilité voiture/NAS)
+     *  - "2.4"           : convertit/crée toujours en ID3v2.4 (standard actuel)
+     * ID3v1 ne supporte pas ISRC, MOOD, TPOS, TLAN, etc. — on le passe toujours en ID3v2.
+     * Pour les autres formats (FLAC, M4A, OGG) : comportement jaudiotagger standard.
      */
     private Tag getOrCreateTag(AudioFile audio) {
+        if (audio instanceof org.jaudiotagger.audio.mp3.MP3File mp3) {
+            String ver = Config.get().id3v2Version();
+            if ("2.3".equals(ver)) {
+                if (mp3.hasID3v2Tag() && mp3.getID3v2Tag() instanceof ID3v23Tag v23) return v23;
+                ID3v23Tag v23 = mp3.hasID3v2Tag()
+                        ? new ID3v23Tag(mp3.getID3v2Tag())   // convertit v2.4 → v2.3
+                        : new ID3v23Tag();
+                mp3.setID3v2Tag(v23);
+                return v23;
+            } else if ("2.4".equals(ver)) {
+                if (mp3.hasID3v2Tag() && mp3.getID3v2Tag() instanceof ID3v24Tag v24) return v24;
+                ID3v24Tag v24 = mp3.hasID3v2Tag()
+                        ? new ID3v24Tag(mp3.getID3v2Tag())   // convertit v2.3 → v2.4
+                        : new ID3v24Tag();
+                mp3.setID3v2Tag(v24);
+                return v24;
+            } else {
+                // "keep" : préserve la version existante
+                if (mp3.hasID3v2Tag()) return mp3.getID3v2Tag();
+                ID3v23Tag v23 = new ID3v23Tag();
+                mp3.setID3v2Tag(v23);
+                return v23;
+            }
+        }
         return audio.getTagOrCreateDefault();
+    }
+
+    /**
+     * Retourne un TagInfo où les champs vides sont complétés par les valeurs
+     * déjà présentes dans le tag du fichier. Les valeurs de {@code info} ont
+     * priorité quand elles sont non-vides.
+     */
+    private TagInfo mergeWithExisting(TagInfo info, Tag tag) {
+        TagInfo m = info.copy();
+        for (FieldKey key : FieldKey.values()) {
+            String existing = getTagFirst(tag, key);
+            if (existing == null || existing.isBlank()) continue;
+            try {
+                java.lang.reflect.Field f = fieldFor(key);
+                if (f == null) continue;
+                String cur = (String) f.get(m);
+                if (cur == null || cur.isBlank()) {
+                    // Pour TRACK et DISC_NO, jaudiotagger peut retourner "N/Total" en ID3v2.3.
+                    // On ne garde que la partie avant le "/" pour éviter de doubler le total.
+                    if (key == FieldKey.TRACK || key == FieldKey.DISC_NO) {
+                        int slash = existing.indexOf('/');
+                        existing = slash >= 0 ? existing.substring(0, slash).trim() : existing;
+                    }
+                    f.set(m, existing);
+                }
+            } catch (Exception ignored) {}
+        }
+        return m;
+    }
+
+    private String getTagFirst(Tag tag, FieldKey key) {
+        try { return tag.getFirst(key); } catch (Exception e) { return ""; }
+    }
+
+    private static final java.util.Map<FieldKey, java.lang.reflect.Field> KEY_TO_FIELD =
+            new java.util.HashMap<>();
+
+    private java.lang.reflect.Field fieldFor(FieldKey key) {
+        return KEY_TO_FIELD.computeIfAbsent(key, k -> {
+            String name = switch (k) {
+                case TITLE              -> "title";
+                case ARTIST             -> "artist";
+                case ALBUM_ARTIST       -> "albumArtist";
+                case ALBUM              -> "album";
+                case YEAR               -> "year";
+                case TRACK              -> "track";
+                case TRACK_TOTAL        -> "trackTotal";
+                case GENRE              -> "genre";
+                case DISC_NO            -> "discNo";
+                case DISC_TOTAL         -> "discTotal";
+                case COMMENT            -> "comment";
+                case TITLE_SORT         -> "titleSort";
+                case ARTIST_SORT        -> "artistSort";
+                case ALBUM_SORT         -> "albumSort";
+                case ALBUM_ARTIST_SORT  -> "albumArtistSort";
+                case COMPOSER           -> "composer";
+                case LYRICIST           -> "lyricist";
+                case LANGUAGE           -> "language";
+                case ISRC               -> "isrc";
+                case BPM                -> "bpm";
+                case MOOD               -> "mood";
+                case LYRICS             -> "lyrics";
+                case RATING             -> "rating";
+                case MUSICBRAINZ_TRACK_ID           -> "recordingMbid";
+                case MUSICBRAINZ_ARTISTID           -> "artistMbid";
+                case MUSICBRAINZ_RELEASEID          -> "releaseMbid";
+                case MUSICBRAINZ_RELEASE_GROUP_ID   -> "releaseGroupMbid";
+                default -> null;
+            };
+            if (name == null) return null;
+            try {
+                java.lang.reflect.Field f = com.opentagger.model.TagInfo.class.getField(name);
+                f.setAccessible(true);
+                return f;
+            } catch (Exception e) { return null; }
+        });
     }
 
     private Map<FieldKey, String> buildFieldMap(TagInfo i) {
@@ -195,7 +335,6 @@ public class TagWriter {
 
         // ── Métadonnées release (Jaikoz TXXX) ────────────────────────────
         m.put(FieldKey.SCRIPT,        i.script);
-        m.put(FieldKey.COUNTRY,       i.country);
         m.put(FieldKey.BARCODE,       i.barcode);
         m.put(FieldKey.CATALOG_NO,    i.catalogNo);
         m.put(FieldKey.ORIGINAL_YEAR, i.originalYear);
@@ -220,9 +359,17 @@ public class TagWriter {
             FrameBodyTXXX body = new FrameBodyTXXX();
             body.setDescription(description);
             body.setText(value);
-            ID3v23Frame frame = new ID3v23Frame("TXXX");
-            frame.setBody(body);
-            id3tag.setFrame(frame);
+            // Utiliser le type de frame correspondant à la version du tag (v2.3 ou v2.4)
+            // Évite la corruption du fichier quand on insère un frame v2.3 dans un tag v2.4
+            if (id3tag instanceof ID3v24Tag) {
+                ID3v24Frame frame = new ID3v24Frame("TXXX");
+                frame.setBody(body);
+                id3tag.setFrame(frame);
+            } else {
+                ID3v23Frame frame = new ID3v23Frame("TXXX");
+                frame.setBody(body);
+                id3tag.setFrame(frame);
+            }
         } catch (Exception ignored) {}
     }
 }

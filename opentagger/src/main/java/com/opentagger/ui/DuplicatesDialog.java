@@ -107,6 +107,7 @@ public class DuplicatesDialog extends JDialog {
         box.add(header, BorderLayout.NORTH);
 
         JPanel rows = new JPanel(new GridBagLayout());
+        int rowIdx = 0;
         for (FileEntry e : group.files()) {
             boolean isBest = (e == best);
             JCheckBox cb = new JCheckBox();
@@ -139,9 +140,8 @@ public class DuplicatesDialog extends JDialog {
                 lblKeep.putClientProperty("FlatLaf.style", "foreground: #a5d6a7; font: bold 10 $defaultFont");
             }
 
-            int r = allBoxes.size() - 1;
             GridBagConstraints gc = new GridBagConstraints();
-            gc.gridy = r; gc.insets = new Insets(3, 0, 3, 6);
+            gc.gridy = rowIdx++; gc.insets = new Insets(3, 0, 3, 6);
 
             gc.gridx = 0; gc.weightx = 0; gc.fill = GridBagConstraints.NONE;
             rows.add(cb, gc);

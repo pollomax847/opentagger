@@ -134,6 +134,9 @@ public class FileRenamer {
                 cible = rootDir.resolve(chemin + " (" + n++ + ")" + ext).normalize();
                 if (cible.getParent() != null) Files.createDirectories(cible.getParent());
             } while (Files.exists(cible) && n < 100);
+            if (Files.exists(cible))
+                throw new IOException("Impossible de renommer '"
+                        + fichier.getFileName() + "' : 98 fichiers en collision existent déjà.");
         }
 
         moveFile(fichier, cible);
@@ -189,9 +192,11 @@ public class FileRenamer {
         engine.put("artistsort",      safe(info.artistSort));
         engine.put("albumartistsort", safe(info.albumArtistSort));
         engine.put("mb_comment",      safe(info.comment));
-        engine.put("mbreleaseid",     safe(info.releaseMbid));
-        engine.put("mbrecordingid",   safe(info.recordingMbid));
-        engine.put("mbreleaseartistid", safe(info.releaseGroupMbid));
+        engine.put("mbreleaseid",        safe(info.releaseMbid));
+        engine.put("mbrecordingid",      safe(info.recordingMbid));
+        engine.put("mbreleaseartistid",  safe(info.artistMbid));
+        engine.put("mbartistid",         safe(info.artistMbid));
+        engine.put("mbreleasegroupid",   safe(info.releaseGroupMbid));
         engine.put("isclassical",     info.isClassical);
         engine.put("iscompilation",   info.isCompilation);
         engine.put("ishd",            info.isHD);

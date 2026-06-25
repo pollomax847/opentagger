@@ -72,7 +72,7 @@ public class AudioRecognitionChain {
     private List<TagInfo> enrichWithMb(TagInfo ti, String serviceName) {
         TagInfo result = ti;
 
-        if (!ti.artist.isBlank() || !ti.title.isBlank()) {
+        if (!ti.artist.isBlank() && !ti.title.isBlank()) {
             try {
                 List<TagInfo> mbResults = mb.searchRecording(ti.artist, ti.title);
                 if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {

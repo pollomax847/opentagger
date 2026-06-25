@@ -124,9 +124,12 @@ public class FanArtClient {
         HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
         if (response.statusCode() != 200) return null;
 
-        String ext = imageUrl.endsWith(".png") ? ".png" : ".jpg";
+        // Détecter le type depuis le Content-Type (l'URL peut ne pas finir par .png/.jpg)
+        String ct  = response.headers().firstValue("Content-Type").orElse("");
+        String ext = ct.contains("png") ? ".png" : ".jpg";
         Path tmp   = Files.createTempFile("opentagger-cover-", ext);
         Files.copy(response.body(), tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        if (Files.size(tmp) < 1000) { Files.deleteIfExists(tmp); return null; }
         return tmp;
     }
 }

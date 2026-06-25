@@ -7,7 +7,11 @@ import java.util.Set;
 
 public class AudioScanner {
 
-    private static final Set<String> EXTENSIONS = Set.of(".mp3", ".flac", ".m4a", ".ogg", ".wav");
+    private static final Set<String> EXTENSIONS = Set.of(
+        ".mp3", ".flac", ".m4a", ".ogg", ".wav",
+        ".aac", ".opus", ".wma", ".ape", ".wv",
+        ".aiff", ".aif", ".mpc", ".mp4", ".dsf", ".dff"
+    );
 
     public List<File> scan(File dossier) {
         List<File> fichiers = new ArrayList<>();

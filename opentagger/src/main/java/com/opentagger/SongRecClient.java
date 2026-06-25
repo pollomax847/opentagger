@@ -58,12 +58,12 @@ public class SongRecClient {
                     "-i", audioFile.getAbsolutePath(),
                     "-t", String.valueOf(SEGMENT_SEC),
                     "-ar", "44100", "-ac", "1",
-                    "-f", "wav", tmp.toString()
+                    "-f", "wav", tmp.toString(),
+                    "-loglevel", "quiet"
                 );
-                ffmpeg.redirectErrorStream(true);
-                Process p = ffmpeg.start();
-                p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
-                if (p.waitFor() != 0 || Files.size(tmp) < 1000) return null;
+                // ProcessUtils avec timeout 30s — évite blocage infini sur fichiers corrompus
+                ProcessUtils.readWithTimeout(ffmpeg, 30);
+                if (!Files.exists(tmp) || Files.size(tmp) < 1000) return null;
                 segment = tmp.toFile();
             } catch (Exception e) {
                 return null;

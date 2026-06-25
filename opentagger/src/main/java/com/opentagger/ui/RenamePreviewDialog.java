@@ -114,7 +114,7 @@ public class RenamePreviewDialog extends JDialog {
                 if (newName.isBlank()) {
                     result.add(new PreviewRow(e, current.toString(), "—", "—",
                         RowState.ERROR, "Masque vide — tags incomplets ?"));
-                } else if (newPath.equals(current) && destRoot == null) {
+                } else if (newPath.equals(current)) {
                     result.add(new PreviewRow(e, current.toString(), curName,
                         current.toString(), RowState.ALREADY_OK, ""));
                 } else {

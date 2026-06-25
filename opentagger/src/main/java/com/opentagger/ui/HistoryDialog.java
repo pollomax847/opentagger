@@ -51,6 +51,11 @@ public class HistoryDialog extends JDialog {
 
         cache = new MetadataCache();
 
+        // Fermer le cache SQLite même si l'utilisateur clique sur la croix système
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosed(java.awt.event.WindowEvent e) { cache.close(); }
+        });
+
         model = new DefaultTableModel(COLS, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
         };
@@ -111,7 +116,7 @@ public class HistoryDialog extends JDialog {
         JButton btnPurge   = new JButton("Purger l'historique…");
         JButton btnExport  = new JButton("📤  Exporter JSON");
         JButton btnImport  = new JButton("📥  Importer JSON");
-        btnClose .addActionListener(e -> { cache.close(); dispose(); });
+        btnClose .addActionListener(e -> dispose());
         btnPurge .addActionListener(e -> confirmPurge());
         btnExport.addActionListener(e -> exportJson());
         btnImport.addActionListener(e -> importJson());

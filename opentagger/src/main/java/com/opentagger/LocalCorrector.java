@@ -45,14 +45,15 @@ public class LocalCorrector {
 
     /**
      * Applique toutes les corrections locales dans l'ordre Jaikoz :
-     * filename → feat. → capitalisation → genre → classique
+     * filename → feat. → capitalisation (seulement sur données filename) → genre → classique
      */
     public void correct(TagInfo info, Path fichier) {
+        boolean wasEmpty = info.title.isBlank() && info.artist.isBlank();
         extractFromFilenameIfEmpty(info, fichier);
+        // Capitaliser UNIQUEMENT les données extraites du nom de fichier (pas les données MB)
+        if (wasEmpty) correctCapitalization(info);
         correctFeaturedArtist(info);
-        addAlbumDisambiguation(info);   // Script 0
         removeDiscnoPadding(info);      // Script 2
-        correctCapitalization(info);
         normalizeGenre(info);
         detectClassical(info);          // Script 3 : genre Classical si isClassical
     }
@@ -108,15 +109,7 @@ public class LocalCorrector {
         }
     }
 
-    // ── 2b. Script 0 : Add Album disambiguation (mb_comment → Album title) ──────
-
-    public void addAlbumDisambiguation(TagInfo info) {
-        if (!info.comment.isBlank() && !info.album.contains(info.comment)) {
-            info.album = info.album + " (" + info.comment + ")";
-        }
-    }
-
-    // ── 2c. Script 2 : Remove disc number padding ─────────────────────────────
+    // ── 2b. Script 2 : Remove disc number padding ─────────────────────────────
 
     public void removeDiscnoPadding(TagInfo info) {
         if (!info.discNo.isBlank()) {

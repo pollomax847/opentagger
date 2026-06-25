@@ -56,6 +56,9 @@ public class MetadataCache {
             conn = DriverManager.getConnection("jdbc:sqlite:" + DB_PATH);
             conn.setAutoCommit(true);
             try (Statement st = conn.createStatement()) {
+                // WAL mode : permet les lectures concurrentes pendant les écritures
+                st.execute("PRAGMA journal_mode=WAL");
+                st.execute("PRAGMA synchronous=NORMAL");
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS recordings (
                         query_hash TEXT PRIMARY KEY,
@@ -106,7 +109,7 @@ public class MetadataCache {
 
     // ── Recording Search ─────────────────────────────────────────────────────
 
-    public String getRecordingSearch(String queryHash) {
+    public synchronized String getRecordingSearch(String queryHash) {
         if (conn == null) return null;
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT json FROM recordings WHERE query_hash=? AND ts>?")) {
@@ -118,7 +121,7 @@ public class MetadataCache {
         } catch (Exception e) { return null; }
     }
 
-    public void putRecordingSearch(String queryHash, String json) {
+    public synchronized void putRecordingSearch(String queryHash, String json) {
         if (conn == null) return;
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT OR REPLACE INTO recordings(query_hash,json,ts) VALUES(?,?,?)")) {
@@ -131,7 +134,7 @@ public class MetadataCache {
 
     // ── Recording Lookup (par MBID) ──────────────────────────────────────────
 
-    public String getLookup(String mbid) {
+    public synchronized String getLookup(String mbid) {
         if (conn == null) return null;
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT json FROM lookups WHERE mbid=? AND ts>?")) {
@@ -143,7 +146,7 @@ public class MetadataCache {
         } catch (Exception e) { return null; }
     }
 
-    public void putLookup(String mbid, String json) {
+    public synchronized void putLookup(String mbid, String json) {
         if (conn == null) return;
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT OR REPLACE INTO lookups(mbid,json,ts) VALUES(?,?,?)")) {
@@ -156,7 +159,7 @@ public class MetadataCache {
 
     // ── Historique des corrections ────────────────────────────────────────────
 
-    public void recordCorrection(String filePath, String field, String oldVal, String newVal) {
+    public synchronized void recordCorrection(String filePath, String field, String oldVal, String newVal) {
         if (conn == null) return;
         if (newVal == null || newVal.equals(oldVal)) return;
         try (PreparedStatement ps = conn.prepareStatement(
@@ -178,18 +181,18 @@ public class MetadataCache {
      */
     public static String syntheticKey(String artist, String title) {
         String s = (artist + "###" + title).toLowerCase().trim();
-        return "syn_" + Integer.toHexString(Math.abs(s.hashCode()));
+        return "syn_" + Integer.toHexString(s.hashCode() & 0x7FFFFFFF);
     }
 
     /**
      * Sauvegarde le TagInfo final dans l'historique personnel.
      * Accepte un keyOverride pour les fichiers sans recordingMbid (SongRec, AudD…).
      */
-    public void saveTaggingHistory(TagInfo t) {
+    public synchronized void saveTaggingHistory(TagInfo t) {
         saveTaggingHistory(t, t.recordingMbid);
     }
 
-    public void saveTaggingHistory(TagInfo t, String key) {
+    public synchronized void saveTaggingHistory(TagInfo t, String key) {
         if (conn == null || key == null || key.isBlank()) return;
         try {
             String json = mapper.writeValueAsString(t);
@@ -211,7 +214,7 @@ public class MetadataCache {
      * Récupère le TagInfo de l'historique pour un MBID donné.
      * Retourne null si non trouvé.
      */
-    public TagInfo getTaggingHistory(String mbid) {
+    public synchronized TagInfo getTaggingHistory(String mbid) {
         if (conn == null || mbid == null || mbid.isBlank()) return null;
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT json FROM tagging_history WHERE mbid=?")) {
@@ -224,7 +227,7 @@ public class MetadataCache {
     }
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
-    public void recordFileTagging(String path, String mbid) {
+    public synchronized void recordFileTagging(String path, String mbid) {
         if (conn == null || path == null) return;
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT OR REPLACE INTO file_history(path,mbid,ts) VALUES(?,?,?)")) {
@@ -239,7 +242,7 @@ public class MetadataCache {
      * Retourne le MBID précédemment appliqué à ce chemin, ou null.
      * Permet de re-tagger instantanément depuis l'historique sans appel réseau.
      */
-    public String getFileTagging(String path) {
+    public synchronized String getFileTagging(String path) {
         if (conn == null || path == null) return null;
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT mbid FROM file_history WHERE path=?")) {
@@ -255,7 +258,7 @@ public class MetadataCache {
     }
 
     /** Nombre total d'entrées dans l'historique personnel. */
-    public int historyCount() {
+    public synchronized int historyCount() {
         if (conn == null) return 0;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM tagging_history")) {
@@ -349,7 +352,7 @@ public class MetadataCache {
 
     /** Génère une clé de cache stable pour une requête artist+title. */
     public static String queryHash(String artist, String title) {
-        return Integer.toHexString((artist + " " + title).toLowerCase().hashCode());
+        return Integer.toHexString((artist + " " + title).toLowerCase().hashCode() & 0x7FFFFFFF);
     }
 
     public void purgeExpired() {

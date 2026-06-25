@@ -138,4 +138,18 @@ public class TagInfo {
     public String releaseGroupMbid    = "";
     public String releaseMbid         = "";
     public String recordingMbid       = "";
+
+    /** Copie superficielle — tous les champs String sont indépendants (immutables). */
+    public TagInfo copy() {
+        try {
+            TagInfo c = new TagInfo();
+            c.score = this.score;
+            for (java.lang.reflect.Field f : TagInfo.class.getFields()) {
+                if (f.getType() == String.class) f.set(c, f.get(this));
+            }
+            return c;
+        } catch (Exception e) {
+            return this;
+        }
+    }
 }

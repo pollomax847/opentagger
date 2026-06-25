@@ -100,15 +100,24 @@ public class MusicBrainzOAuth {
             + "&redirect_uri=" + encode(REDIRECT_SCHEME);
         Desktop.getDesktop().browse(new URI(authUrl));
 
-        // Attendre que le handler écrive le code (max 2 min)
-        long deadline = System.currentTimeMillis() + 120_000;
-        while (System.currentTimeMillis() < deadline) {
-            if (Files.exists(CODE_FILE)) {
-                String code = Files.readString(CODE_FILE).trim();
-                Files.deleteIfExists(CODE_FILE);
-                if (!code.isBlank()) return finalizeToken(code, REDIRECT_SCHEME, clientId, clientSecret);
+        // Attendre que le handler écrive le code — WatchService évite le busy-wait Thread.sleep
+        Path watchDir = CODE_FILE.getParent();
+        try (WatchService watcher = watchDir.getFileSystem().newWatchService()) {
+            watchDir.register(watcher,
+                    StandardWatchEventKinds.ENTRY_CREATE,
+                    StandardWatchEventKinds.ENTRY_MODIFY);
+            long deadline = System.currentTimeMillis() + 120_000;
+            while (System.currentTimeMillis() < deadline) {
+                long remaining = Math.max(100, deadline - System.currentTimeMillis());
+                WatchKey key = watcher.poll(remaining, TimeUnit.MILLISECONDS);
+                if (key != null) { key.pollEvents(); key.reset(); }
+                if (Files.exists(CODE_FILE)) {
+                    String code = Files.readString(CODE_FILE).trim();
+                    Files.deleteIfExists(CODE_FILE);
+                    if (!code.isBlank())
+                        return finalizeToken(code, REDIRECT_SCHEME, clientId, clientSecret);
+                }
             }
-            Thread.sleep(500);
         }
         throw new Exception("Délai dépassé (2 min). Vérifiez que l'app est bien autorisée dans le navigateur.");
     }
@@ -259,6 +268,8 @@ public class MusicBrainzOAuth {
                 .header("User-Agent", Config.get().userAgent())
                 .GET().build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200)
+            throw new Exception("Erreur HTTP " + resp.statusCode() + " lors de la récupération du compte MB.");
         JsonNode json = mapper.readTree(resp.body());
         return json.has("sub") ? json.get("sub").asText() : "(inconnu)";
     }
