@@ -6,37 +6,38 @@ import java.io.File;
 import java.util.List;
 
 /**
- * Chaîne de reconnaissance audio pour les fichiers non identifiés par AcoustID/MB.
+ * Chaîne de reconnaissance audio pour les fichiers non identifiés par MB.
  *
- * Ordre de tentative :
- *  1. Shazam  — reconnaissance audio via RapidAPI  (clé : rapidapi.key)
- *  2. AudD    — reconnaissance audio directe       (clé : audd.api_token)
+ * Étape 1 — Reconnaissance audio (empreinte Shazam) :
+ *   1a. SongRec — client Shazam open-source, sans clé API (binaire : songrec)
+ *   1b. AudD    — algorithme différent, en fallback        (clé : audd.api_token)
  *
- * Après chaque identification réussie :
- *  - Lookup MusicBrainz pour récupérer les IDs complets
- *  - Enrichissement genre via Discogs puis Last.fm (déjà intégrés)
+ * Étape 2 — Complétion MusicBrainz :
+ *   SongRec/AudD fournissent titre + artiste.
+ *   MB ajoute : MBID, album complet, track#, disc#, albumArtist, année précise,
+ *               langue, pays, ISRC, etc.
+ *   Les champs MB manquants sont comblés par les données SongRec/AudD.
  */
 public class AudioRecognitionChain {
 
     private final MusicBrainzClient mb      = new MusicBrainzClient();
+    private final SongRecClient     songRec = new SongRecClient();
     private final DiscogsClient     discogs = new DiscogsClient();
     private final LastFmClient      lastFm  = new LastFmClient();
 
-    // ── Point d'entrée ────────────────────────────────────────────────────────
-
     /**
-     * Tente de reconnaître le fichier via Shazam → AudD.
-     * @return liste de candidats (peut être vide), le premier ayant le score le plus élevé
+     * Tente de reconnaître le fichier via SongRec → AudD,
+     * puis enrichit le résultat avec MusicBrainz.
      */
     public List<TagInfo> recognize(File fichier) {
-        // ── 1. Shazam ──────────────────────────────────────────────────────
-        if (ShazamClient.isAvailable()) {
-            List<TagInfo> r = tryService(() -> new ShazamClient().recognize(fichier),
-                    fichier.getName(), "Shazam");
+        // ── 1a. SongRec (empreinte Shazam gratuite) ──────────────────────
+        if (SongRecClient.isAvailable()) {
+            List<TagInfo> r = tryService(() -> songRec.recognize(fichier),
+                    fichier.getName(), "SongRec");
             if (!r.isEmpty()) return r;
         }
 
-        // ── 2. AudD ────────────────────────────────────────────────────────
+        // ── 1b. AudD (algorithme différent, en fallback) ─────────────────
         if (AudDClient.isAvailable()) {
             List<TagInfo> r = tryService(() -> new AudDClient().recognize(fichier),
                     fichier.getName(), "AudD");
@@ -47,7 +48,7 @@ public class AudioRecognitionChain {
     }
 
     public static boolean isAnyAvailable() {
-        return ShazamClient.isAvailable() || AudDClient.isAvailable();
+        return SongRecClient.isAvailable() || AudDClient.isAvailable();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -55,55 +56,59 @@ public class AudioRecognitionChain {
     private List<TagInfo> tryService(RecognitionSupplier supplier,
             String filename, String serviceName) {
         try {
-            TagInfo ti = supplier.get();
-            if (ti == null) return List.of();
-            return enrichWithMb(ti, serviceName);
+            TagInfo sr = supplier.get();
+            if (sr == null) return List.of();
+            return completeWithMb(sr, serviceName);
         } catch (Exception e) {
-            log(serviceName, filename, e.getMessage());
+            System.out.printf("[%s] %s : erreur — %s%n", serviceName, filename, e.getMessage());
             return List.of();
         }
     }
 
     /**
-     * Enrichit un TagInfo avec MB (IDs) puis Discogs/Last.fm (genre).
-     * Si MB confirme avec score ≥ 50, retourne le résultat MB.
-     * Sinon retourne le TagInfo du service d'origine.
+     * Étape 2 : MB complète ce que SongRec/AudD a trouvé.
+     *
+     * SongRec fournit : titre, artiste, genre, album, année (données Shazam).
+     * MB ajoute       : recordingMbid, releaseMbid, releaseGroupMbid, artistMbid,
+     *                   albumArtist, artistSort, track#, disc#, langue, pays, ISRC.
+     * Les champs que MB ne trouve pas sont conservés depuis SongRec.
      */
-    private List<TagInfo> enrichWithMb(TagInfo ti, String serviceName) {
-        TagInfo result = ti;
+    private List<TagInfo> completeWithMb(TagInfo sr, String serviceName) {
+        System.out.printf("[%s] identifié : %s — %s%n", serviceName, sr.artist, sr.title);
 
-        if (!ti.artist.isBlank() && !ti.title.isBlank()) {
+        if (!sr.artist.isBlank() && !sr.title.isBlank()) {
             try {
-                List<TagInfo> mbResults = mb.searchRecording(ti.artist, ti.title);
+                List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
                 if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
-                    TagInfo best = mbResults.get(0);
-                    if (best.album.isBlank()  && !ti.album.isBlank())  best.album  = ti.album;
-                    if (best.year.isBlank()   && !ti.year.isBlank())   best.year   = ti.year;
-                    if (best.genre.isBlank()  && !ti.genre.isBlank())  best.genre  = ti.genre;
-                    if (best.isrc.isBlank()   && !ti.isrc.isBlank())   best.isrc   = ti.isrc;
-                    if (best.track.isBlank()  && !ti.track.isBlank())  best.track  = ti.track;
-                    result = best;
-                    System.out.printf("[%s → MB] %s — %s (score=%d)%n",
-                            serviceName, best.artist, best.title, best.score);
-                    // Genre via Discogs puis Last.fm si toujours vide
-                    if (result.genre.isBlank()) { try { discogs.enrichGenres(result); } catch (Exception ignored) {} }
-                    if (result.genre.isBlank()) { try { lastFm.enrichGenres(result);  } catch (Exception ignored) {} }
+                    TagInfo mbr = mbResults.get(0);
+
+                    // MB est la source principale (IDs, structure album, métadonnées normalisées)
+                    // SongRec comble ce que MB n'a pas
+                    if (mbr.album.isBlank()   && !sr.album.isBlank())   mbr.album   = sr.album;
+                    if (mbr.year.isBlank()    && !sr.year.isBlank())    mbr.year    = sr.year;
+                    if (mbr.genre.isBlank()   && !sr.genre.isBlank())   mbr.genre   = sr.genre;
+                    if (mbr.isrc.isBlank()    && !sr.isrc.isBlank())    mbr.isrc    = sr.isrc;
+                    if (mbr.track.isBlank()   && !sr.track.isBlank())   mbr.track   = sr.track;
+                    if (mbr.comment.isBlank() && !sr.comment.isBlank()) mbr.comment = sr.comment;
+
+                    mbr.score = 90;
+                    System.out.printf("[%s → MB] %s — %s [%s] (score=%d)%n",
+                            serviceName, mbr.artist, mbr.title, mbr.album, mbr.score);
+
+                    if (mbr.genre.isBlank()) { try { discogs.enrichGenres(mbr); } catch (Exception ignored) {} }
+                    if (mbr.genre.isBlank()) { try { lastFm.enrichGenres(mbr);  } catch (Exception ignored) {} }
                     return mbResults;
                 }
             } catch (Exception ignored) {}
         }
 
-        // MB n'a pas confirmé : faire confiance à l'empreinte audio (Shazam/AudD sont fiables)
-        result.score = 85; // audio fingerprint fiable même sans validation MB
-        System.out.printf("[%s] %s — %s (score=%d, sans MB)%n",
-                serviceName, ti.artist, ti.title, result.score);
-        if (result.genre.isBlank()) { try { discogs.enrichGenres(result); } catch (Exception ignored) {} }
-        if (result.genre.isBlank()) { try { lastFm.enrichGenres(result);  } catch (Exception ignored) {} }
-        return List.of(result);
-    }
-
-    private static void log(String service, String file, String msg) {
-        System.out.printf("[%s] %s : %s%n", service, file, msg);
+        // MB n'a rien trouvé : on garde les données SongRec/AudD telles quelles
+        sr.score = 85;
+        System.out.printf("[%s] %s — %s (MB non trouvé, données audio conservées)%n",
+                serviceName, sr.artist, sr.title);
+        if (sr.genre.isBlank()) { try { discogs.enrichGenres(sr); } catch (Exception ignored) {} }
+        if (sr.genre.isBlank()) { try { lastFm.enrichGenres(sr);  } catch (Exception ignored) {} }
+        return List.of(sr);
     }
 
     @FunctionalInterface

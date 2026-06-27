@@ -153,8 +153,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             int seuil = Config.get().minScoreAuto();
 
             if (results.isEmpty() || results.get(0).score < seuil) {
-                step.accept("reconnaissance Shazam/AudD…");
-                log("  chain Shazam→AudD...");
+                step.accept("reconnaissance SongRec/Shazam/AudD…");
+                log("  chain SongRec→Shazam→AudD...");
                 List<TagInfo> chain = recognitionChain.recognize(fichier);
                 log("  chain → " + chain.size() + " résultat(s)");
                 if (!chain.isEmpty()) results = chain;
@@ -529,51 +529,58 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         // NOTE: Le fallback "titre seul" est désactivé — trop de faux positifs.
 
-        // 5c. SongRec — en priorité si tags non-Latin, sinon en fallback
+        // 5c. SongRec — étape 1 : reconnaissance audio (empreinte Shazam gratuite)
+        //              étape 2 : MB complète ce que SongRec a trouvé
         if (SongRecClient.isAvailable()) {
             log(nonLatinInput ? "  SongRec (non-Latin)..." : "  SongRec fallback...");
             try {
                 TagInfo sr = songRec.recognize(fichier);
                 if (sr != null) {
                     log("  SongRec → " + sr.artist + " – " + sr.title);
-                    // Enrichir avec MB pour avoir MBID, album complet, numéro de piste
+                    // MB complète : MBID, album complet, track#, disc#, albumArtist, année…
                     List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
-                    if (!mbResults.isEmpty() && mbResults.get(0).score >= 80) {
+                    if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
                         TagInfo mbr = mbResults.get(0);
-                        if (mbr.genre.isBlank() && !sr.genre.isBlank()) mbr.genre = sr.genre;
-                        if (mbr.album.isBlank() && !sr.album.isBlank()) mbr.album = sr.album;
+                        // SongRec comble ce que MB n'a pas
+                        if (mbr.album.isBlank()   && !sr.album.isBlank())   mbr.album   = sr.album;
+                        if (mbr.year.isBlank()     && !sr.year.isBlank())    mbr.year    = sr.year;
+                        if (mbr.genre.isBlank()    && !sr.genre.isBlank())   mbr.genre   = sr.genre;
+                        if (mbr.isrc.isBlank()     && !sr.isrc.isBlank())    mbr.isrc    = sr.isrc;
+                        if (mbr.track.isBlank()    && !sr.track.isBlank())   mbr.track   = sr.track;
+                        if (mbr.comment.isBlank()  && !sr.comment.isBlank()) mbr.comment = sr.comment;
                         mbr.score = 90;
-                        log("  SongRec+MB → " + mbr.artist + " – " + mbr.title);
+                        log("  SongRec+MB → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
                         return List.of(mbr);
                     }
-                    // MB échoue avec le titre complet → réessayer sans qualificatif entre parenthèses
-                    // ex: "Carsmille Smith (Home Demos)" → "Carsmille Smith"
+                    // MB échoue avec titre complet → réessayer sans qualificatif entre parenthèses
+                    // ex: "Song Name (Home Demos)" → "Song Name"
                     String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
                     if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
                         log("  SongRec+MB (titre nettoyé): '" + cleanTitle + "'");
                         List<TagInfo> mbClean = mb.searchRecording(sr.artist, cleanTitle);
-                        if (!mbClean.isEmpty() && mbClean.get(0).score >= 70) {
+                        if (!mbClean.isEmpty() && mbClean.get(0).score >= 50) {
                             TagInfo mbr = mbClean.get(0);
-                            if (mbr.genre.isBlank() && !sr.genre.isBlank()) mbr.genre = sr.genre;
-                            if (mbr.album.isBlank() && !sr.album.isBlank()) mbr.album = sr.album;
-                            // Conserver le titre original SongRec (plus précis)
+                            if (mbr.album.isBlank()   && !sr.album.isBlank())   mbr.album   = sr.album;
+                            if (mbr.year.isBlank()     && !sr.year.isBlank())    mbr.year    = sr.year;
+                            if (mbr.genre.isBlank()    && !sr.genre.isBlank())   mbr.genre   = sr.genre;
+                            if (mbr.isrc.isBlank()     && !sr.isrc.isBlank())    mbr.isrc    = sr.isrc;
+                            if (mbr.track.isBlank()    && !sr.track.isBlank())   mbr.track   = sr.track;
+                            if (mbr.comment.isBlank()  && !sr.comment.isBlank()) mbr.comment = sr.comment;
                             if (!sr.title.equals(cleanTitle)) mbr.title = sr.title;
                             mbr.score = 85;
                             log("  SongRec+MB(nettoyé) → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
                             return List.of(mbr);
                         }
                     }
-                    // Toujours rien → au moins récupérer l'artistMbid pour la pochette
+                    // MB ne confirme pas → garder les données SongRec + chercher artistMbid pour la pochette
                     if (sr.artistMbid.isBlank()) {
                         try {
                             String amid = mb.searchArtistMbid(sr.artist);
-                            if (!amid.isBlank()) {
-                                sr.artistMbid = amid;
-                                log("  artistMbid←MB: " + amid);
-                            }
+                            if (!amid.isBlank()) { sr.artistMbid = amid; log("  artistMbid←MB: " + amid); }
                         } catch (Exception ignored) {}
                     }
                     sr.score = 85;
+                    log("  SongRec seul (MB non confirmé) → " + sr.artist + " – " + sr.title);
                     return List.of(sr);
                 }
             } catch (Exception e) {

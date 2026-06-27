@@ -389,16 +389,7 @@ public class MainFrame extends JFrame {
         actionsPanel.add(btnTagSel);
         actionsPanel.add(btnCancel);
 
-        // ── Droite : AcoustID + masque + undo/redo ───────────────────────────
-        chkAcoustId = new JCheckBox("AcoustID");
-        chkAcoustId.setBackground(HEADER_BG);
-        chkAcoustId.setForeground(new Color(0xB0BEC5));
-        chkAcoustId.setToolTipText("Identifier par empreinte audio (plus précis, plus lent)");
-
-        lblMask = new JLabel();
-        lblMask.setForeground(new Color(0x78909C));
-        updateMaskLabel();
-
+        // ── Droite : undo/redo (boutons conservés pour updateUndoButtons) ────
         btnUndo = iconBtn("↩", "Annuler (Ctrl+Z)");
         btnRedo = iconBtn("↪", "Rétablir (Ctrl+Y)");
         btnUndo.addActionListener(e -> performUndo());
@@ -408,11 +399,6 @@ public class MainFrame extends JFrame {
 
         JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6));
         rightPanel.setBackground(HEADER_BG);
-        rightPanel.add(chkAcoustId);
-        rightPanel.add(lblMask);
-        rightPanel.add(vSep());
-        rightPanel.add(btnUndo);
-        rightPanel.add(btnRedo);
 
         bar.add(brandPanel,  BorderLayout.WEST);
         bar.add(actionsPanel, BorderLayout.CENTER);
@@ -1251,7 +1237,7 @@ public class MainFrame extends JFrame {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
         final int totalFiles = toTag.size();
-        worker = new TaggingWorker(toTag, chkAcoustId.isSelected(), autoMask,
+        worker = new TaggingWorker(toTag, Config.get().useAcoustId(), autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);

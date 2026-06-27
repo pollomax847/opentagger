@@ -62,6 +62,7 @@ public class Config {
 
     // --- Raccourcis pour les cles les plus utilisees ---
 
+    public boolean useAcoustId()       { return bool("acoustid.use_acoustid", true); }
     public String acoustidKey()        { return str("acoustid.api_key"); }
     public String discogsKey()         { return str("discogs.consumer_key"); }
     public String discogsSecret()      { return str("discogs.consumer_secret"); }

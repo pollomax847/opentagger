@@ -33,6 +33,7 @@ public class SettingsDialog extends JDialog {
     // ── Onglet Matching ──────────────────────────────────────────────────────
     private JSpinner   spMinScore;
     private JCheckBox  chkOnlyOfficial;
+    private JCheckBox  chkUseAcoustId;
     // tfPreferredCountry supprimé — remplacé par le sélecteur lstCountriesModel/cmbCountryPicker
     private JSpinner   spResultsLimit;
     private JSpinner   spCacheDays;
@@ -354,6 +355,7 @@ public class SettingsDialog extends JDialog {
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(85, 0, 100, 5));
         chkOnlyOfficial  = new JCheckBox("Uniquement les releases officielles");
+        chkUseAcoustId   = new JCheckBox("Activer l'identification par empreinte AcoustID (plus précis, plus lent)");
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
 
@@ -427,10 +429,12 @@ public class SettingsDialog extends JDialog {
         JPanel matchPanel = form(new String[]{
             "Score minimum (%) :",
             "Releases officielles seulement :",
+            "",
             "Nb résultats MusicBrainz :",
             "Durée cache (jours) :"
         }, new JComponent[]{
             spMinScore, chkOnlyOfficial,
+            chkUseAcoustId,
             spResultsLimit, spCacheDays
         }, "Critères de correspondance MusicBrainz");
 
@@ -963,6 +967,7 @@ public class SettingsDialog extends JDialog {
 
         spMinScore      .setValue(cfg.num("autocorrector.min_score",   85));
         chkOnlyOfficial .setSelected(cfg.bool("musicbrainz.only_official", true));
+        chkUseAcoustId  .setSelected(cfg.useAcoustId());
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
@@ -1070,6 +1075,7 @@ public class SettingsDialog extends JDialog {
 
         p.setProperty("autocorrector.min_score",       String.valueOf(spMinScore.getValue()));
         p.setProperty("musicbrainz.only_official",     String.valueOf(chkOnlyOfficial.isSelected()));
+        p.setProperty("acoustid.use_acoustid",         String.valueOf(chkUseAcoustId.isSelected()));
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
