@@ -101,6 +101,39 @@ public class Config {
     public String  vaName()                 { return str("metadata.va_name",              "Various Artists"); }
     public boolean standardizeArtists()     { return bool("metadata.standardize_artists", false); }
 
+    // --- Genres MB (folksonomy) ---
+    public boolean mbUseGenres()       { return bool("mb.use_genres",        false); }
+    public int     mbMinGenreUsage()   { return num ("mb.min_genre_usage",   50); }
+    public String  mbGenresFilter()    { return str ("mb.genres_filter",     "-seen live\n-fixme\n-owned\n-favorites"); }
+
+    // --- Pochette fichier ---
+    public boolean coverSaveToFile()   { return bool("cover.save_to_file",   false); }
+    public boolean coverOverwriteFile(){ return bool("cover.overwrite_file", false); }
+    public String  coverFilename()     { return str ("cover.filename",       "cover"); }
+
+    // --- Tags préservés ---
+    public String  preservedTags()     { return str ("tags.preserved_tags",  ""); }
+
+    // --- Ponctuation & nettoyage ---
+    public boolean correctPunctuation(){ return bool("tags.correct_punctuation", false); }
+    public boolean removeId3v1()       { return bool("tags.remove_id3v1",        false); }
+
+    // --- Pochettes locales ---
+    public boolean coverSearchLocal()  { return bool("cover.search_local",       true); }
+
+    // --- MB genres max ---
+    public int     mbMaxGenres()       { return num ("mb.max_genres",            3); }
+
+    // --- ReplayGain ---
+    public boolean replayGainEnabled() { return bool("replaygain.enabled",       false); }
+
+    // --- Translittération artistes ---
+    public boolean translateArtists()  { return bool("metadata.translate_artists", false); }
+    public String  translateLocale()   { return str ("metadata.translate_locale",  "en"); }
+
+    // --- Album clustering ---
+    public boolean albumClusterEnabled(){ return bool("albums.cluster",           false); }
+
     // --- Releases préférées (codes séparés par virgule) ---
     public String[] preferredCountries()    {
         String v = str("releases.preferred_countries", "");
@@ -108,6 +141,16 @@ public class Config {
     }
     public String[] preferredFormats()      {
         String v = str("releases.preferred_formats", "");
+        return v.isBlank() ? new String[0] : v.split(",");
+    }
+
+    // --- Filtres types de release ---
+    public String[] allowedPrimaryTypes()    {
+        String v = str("releases.allowed_primary_types", "");
+        return v.isBlank() ? new String[0] : v.split(",");
+    }
+    public String[] excludedSecondaryTypes() {
+        String v = str("releases.excluded_secondary_types", "");
         return v.isBlank() ? new String[0] : v.split(",");
     }
 

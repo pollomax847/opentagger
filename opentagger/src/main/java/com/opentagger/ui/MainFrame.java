@@ -79,6 +79,9 @@ public class MainFrame extends JFrame {
     private JLabel       lblStatus;
     private JProgressBar progress;
 
+    // ── Throttle stats (évite O(n²) sur 100k+ fichiers) ──────────────────────
+    private volatile long lastStatsRefreshMs = 0;
+
     // ── Bandeau de chargement dossiers (Jaikoz-style) ─────────────────────────
     private final JPanel scanBanner  = new JPanel();
     private final JPanel scanEntries = new JPanel();
@@ -115,9 +118,11 @@ public class MainFrame extends JFrame {
     private void buildUI() {
         setIconImages(AppIcon.all());
         setDefaultCloseOperation(EXIT_ON_CLOSE);
-        setSize(1340, 820);
         setMinimumSize(new Dimension(960, 600));
-        setLocationRelativeTo(null);
+        restoreWindowGeometry();  // taille/position sauvegardées, ou 85% écran par défaut
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosing(java.awt.event.WindowEvent e) { saveWindowGeometry(); }
+        });
         setLayout(new BorderLayout(0, 0));
 
         setJMenuBar(buildMenuBar());
@@ -505,20 +510,29 @@ public class MainFrame extends JFrame {
 
     private void refreshStats() {
         int total = 0, tagged = 0, skipped = 0, error = 0, pending = 0;
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
+        // Compter depuis la VUE filtrée (table.getRowCount) plutôt que le modèle
+        // pour que les chips reflètent toujours ce que l'utilisateur voit.
+        int viewRows = (table != null) ? table.getRowCount() : tableModel.getRowCount();
+        for (int viewRow = 0; viewRow < viewRows; viewRow++) {
+            int modelRow = (table != null)
+                    ? table.convertRowIndexToModel(viewRow) : viewRow;
             total++;
-            switch (tableModel.get(i).status) {
+            switch (tableModel.get(modelRow).status) {
                 case TAGGED     -> tagged++;
                 case SKIPPED    -> skipped++;
                 case ERROR      -> error++;
                 default         -> pending++;
             }
         }
-        lblStatTotal  .setText("Total  "         + total);
-        lblStatTagged .setText("Tagués  "        + tagged);
+        // Si un filtre est actif, afficher "N / total_modèle"
+        int modelTotal = tableModel.getRowCount();
+        String totalText = (table != null && rowSorter.getRowFilter() != null && total != modelTotal)
+                ? total + " / " + modelTotal : String.valueOf(total);
+        lblStatTotal  .setText("Total  "          + totalText);
+        lblStatTagged .setText("Tagués  "         + tagged);
         lblStatSkipped.setText("Non identifiés  " + skipped);
-        lblStatError  .setText("Erreurs  "       + error);
-        lblStatPending.setText("En attente  "    + pending);
+        lblStatError  .setText("Erreurs  "        + error);
+        lblStatPending.setText("En attente  "     + pending);
     }
 
     // ── Split pane table / détail ─────────────────────────────────────────────
@@ -1126,48 +1140,82 @@ public class MainFrame extends JFrame {
         final JPanel scanRow = addScanEntry(dirName);
         setStatus("Scan de " + dirName + "…");
 
-        new SwingWorker<List<FileEntry>, Void>() {
-            @Override protected List<FileEntry> doInBackground() throws Exception {
-                MetadataCache cache = new MetadataCache();
+        // Snapshot des chemins déjà dans la table (sur EDT, avant démarrage du worker)
+        final Set<Path> alreadyInTable = new java.util.HashSet<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry fe = tableModel.get(i);
+            alreadyInTable.add((fe.currentPath != null ? fe.currentPath : fe.file.toPath()).toAbsolutePath());
+        }
+
+        // Publié type :
+        //   Object[]{ List<FileEntry> }       → phase 1 : ajouter les entrées vides
+        //   Object[]{ FileEntry, TagInfo, TagInfo|null } → phase 2 : mettre à jour les tags
+        new SwingWorker<int[], Object[]>() {
+
+            @Override protected int[] doInBackground() throws Exception {
+                // ── Phase 1 : lister les fichiers (filesystem seulement, ~instant) ──
                 List<File> files = new AudioScanner().scan(dir);
-                List<FileEntry> list = new ArrayList<>(files.size());
+                List<FileEntry> newEntries = new ArrayList<>(files.size());
                 for (File f : files) {
-                    FileEntry entry = new FileEntry(f, readTags(f));
-                    entry.scanRoot = root;
-                    // Restaurer le statut depuis le cache (évite de tout recommencer)
-                    String mbid = cache.getFileTagging(f.getAbsolutePath());
-                    if (mbid != null) {
-                        mbid = mbid.trim();
-                        com.opentagger.model.TagInfo cached = cache.getTaggingHistory(mbid);
+                    if (alreadyInTable.contains(f.toPath().toAbsolutePath())) continue;
+                    FileEntry e = new FileEntry(f, new com.opentagger.model.TagInfo());
+                    e.scanRoot = root;
+                    newEntries.add(e);
+                }
+                @SuppressWarnings("unchecked")
+                Object[] phase1 = new Object[]{ new ArrayList<>(newEntries) };
+                publish(phase1);  // → table peuplée instantanément avec noms seuls
+
+                // ── Cache en 2 requêtes SQL (au lieu de N requêtes unitaires) ─────
+                MetadataCache cache = new MetadataCache();
+                java.util.Map<String, String>  fileMap    = cache.loadFileHistoryMap();
+                java.util.Map<String, com.opentagger.model.TagInfo> taggingMap = cache.loadTaggingHistoryMap();
+                cache.close();
+
+                // ── Phase 2 : lecture des tags (1 thread, séquentiel, économe) ────
+                int tagged = 0;
+                for (FileEntry entry : newEntries) {
+                    com.opentagger.model.TagInfo ti = readTags(entry.file);
+                    String mbid = fileMap.get(entry.file.getAbsolutePath());
+                    com.opentagger.model.TagInfo cached = null;
+                    if (mbid != null) cached = taggingMap.get(mbid.trim());
+                    if (cached != null && (!cached.artist.isBlank() || !cached.title.isBlank())) tagged++;
+                    publish(new Object[]{ entry, ti, cached });  // → mise à jour de la ligne
+                }
+                return new int[]{ newEntries.size(), tagged };
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            protected void process(List<Object[]> chunks) {
+                for (Object[] chunk : chunks) {
+                    if (chunk[0] instanceof List) {
+                        // Phase 1 : ajouter toutes les entrées vides d'un coup
+                        tableModel.addAll((List<FileEntry>) chunk[0]);
+                    } else {
+                        // Phase 2 : appliquer les tags lus sur EDT (thread-safe)
+                        FileEntry entry = (FileEntry) chunk[0];
+                        com.opentagger.model.TagInfo ti     = (com.opentagger.model.TagInfo) chunk[1];
+                        com.opentagger.model.TagInfo cached = (com.opentagger.model.TagInfo) chunk[2];
+                        entry.current = ti;
                         if (cached != null && (!cached.artist.isBlank() || !cached.title.isBlank())) {
                             entry.result  = cached;
                             entry.status  = FileEntry.Status.TAGGED;
                             entry.message = "";
                         }
+                        tableModel.update(entry);
                     }
-                    list.add(entry);
                 }
-                cache.close();
-                return list;
+                long now = System.currentTimeMillis();
+                if (now - lastStatsRefreshMs >= 300) { lastStatsRefreshMs = now; refreshStats(); }
             }
+
             @Override protected void done() {
                 try {
-                    List<FileEntry> list = get();
-                    // Dédupliquer : ne pas ajouter un fichier déjà présent dans la table
-                    Set<Path> existing = new java.util.HashSet<>();
-                    for (int i = 0; i < tableModel.getRowCount(); i++) {
-                        FileEntry fe = tableModel.get(i);
-                        Path p = fe.currentPath != null ? fe.currentPath : fe.file.toPath();
-                        existing.add(p.toAbsolutePath());
-                    }
-                    list = list.stream()
-                            .filter(e -> !existing.contains(e.file.toPath().toAbsolutePath()))
-                            .collect(java.util.stream.Collectors.toList());
-                    tableModel.addAll(list);
-                    long tagged = list.stream().filter(e -> e.status == FileEntry.Status.TAGGED).count();
-                    setStatus(tableModel.getRowCount() + " fichier(s) — " + tagged + " déjà tagué(s)");
+                    int[] r = get();
+                    setStatus(tableModel.getRowCount() + " fichier(s) — " + r[1] + " déjà tagué(s)");
                     refreshStats();
-                    completeScanEntry(scanRow, dirName, list.size(), tagged, null);
+                    completeScanEntry(scanRow, dirName, r[0], r[1], null);
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
@@ -1188,16 +1236,21 @@ public class MainFrame extends JFrame {
         } else {
             for (int i = 0; i < tableModel.getRowCount(); i++) {
                 FileEntry e = tableModel.get(i);
-                if (e.selected) toTag.add(e);
+                if (e.selected && e.status != FileEntry.Status.TAGGED) toTag.add(e);
             }
         }
-        if (toTag.isEmpty()) { setStatus("Aucun fichier sélectionné."); return; }
+        if (toTag.isEmpty()) {
+            setStatus("Aucun fichier à taguer (tous déjà tagués — utilisez « Forcer le re-taguage » pour les re-traiter).");
+            return;
+        }
 
         btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setVisible(true);
 
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
+        lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
+        final int totalFiles = toTag.size();
         worker = new TaggingWorker(toTag, chkAcoustId.isSelected(), autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
@@ -1206,11 +1259,24 @@ public class MainFrame extends JFrame {
                 int sel = table.getSelectedRow();
                 if (sel >= 0 && tableModel.get(table.convertRowIndexToModel(sel)) == entry)
                     refreshDetail();
+                // Throttle : rafraîchir les chips au plus toutes les 300ms
+                long now = System.currentTimeMillis();
+                if (now - lastStatsRefreshMs >= 300) {
+                    lastStatsRefreshMs = now;
+                    refreshStats();
+                }
             }
         );
         worker.addPropertyChangeListener(evt -> {
-            if ("progress".equals(evt.getPropertyName()))
-                progress.setValue((Integer) evt.getNewValue());
+            if ("progress".equals(evt.getPropertyName())) {
+                int pct = (Integer) evt.getNewValue();
+                progress.setValue(pct);
+                int fileDone = (int) Math.round(pct * totalFiles / 100.0);
+                progress.setString(fileDone + " / " + totalFiles);
+                // Refresher les chips à chaque % de progression (≤101 appels au total)
+                // plutôt qu'à chaque fichier — évite O(n²) sur 100k+ fichiers.
+                refreshStats();
+            }
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
                 onTaggingDone(toTag);
         });
@@ -1810,6 +1876,9 @@ public class MainFrame extends JFrame {
         } else {
             rowSorter.setRowFilter(RowFilter.andFilter(List.of(textFilter, statusFilter)));
         }
+
+        // Mettre à jour les chips de stats pour refléter la vue filtrée
+        refreshStats();
     }
 
     // ── Sélection par statut ──────────────────────────────────────────────────
@@ -1890,6 +1959,7 @@ public class MainFrame extends JFrame {
         int total = groups.stream().mapToInt(g -> g.files().size()).sum();
         setStatus(groups.size() + " groupe(s) de doublons, " + total + " fichier(s) concerné(s).");
         new DuplicatesDialog(this, groups, tableModel).setVisible(true);
+        refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture
     }
 
     private void deleteErrorFiles() {
@@ -2017,6 +2087,40 @@ public class MainFrame extends JFrame {
 
     private void showError(String msg) {
         JOptionPane.showMessageDialog(this, msg, "Erreur", JOptionPane.ERROR_MESSAGE);
+    }
+
+    private static final java.util.prefs.Preferences PREFS =
+            java.util.prefs.Preferences.userNodeForPackage(MainFrame.class);
+
+    private void restoreWindowGeometry() {
+        java.awt.Dimension screen = java.awt.Toolkit.getDefaultToolkit().getScreenSize();
+        int defW = Math.max(960, (int)(screen.width  * 0.85));
+        int defH = Math.max(600, (int)(screen.height * 0.85));
+        int w    = PREFS.getInt("win.w", defW);
+        int h    = PREFS.getInt("win.h", defH);
+        int x    = PREFS.getInt("win.x", (screen.width  - w) / 2);
+        int y    = PREFS.getInt("win.y", (screen.height - h) / 2);
+        // Vérifier que la fenêtre est bien sur un écran visible
+        java.awt.Rectangle screenBounds = new java.awt.Rectangle(screen);
+        if (!screenBounds.intersects(new java.awt.Rectangle(x, y, w, h))) {
+            x = (screen.width - w) / 2;
+            y = (screen.height - h) / 2;
+        }
+        setBounds(x, y, w, h);
+        if (PREFS.getBoolean("win.max", false))
+            setExtendedState(getExtendedState() | MAXIMIZED_BOTH);
+    }
+
+    private void saveWindowGeometry() {
+        boolean max = (getExtendedState() & MAXIMIZED_BOTH) != 0;
+        PREFS.putBoolean("win.max", max);
+        if (!max) {
+            PREFS.putInt("win.w", getWidth());
+            PREFS.putInt("win.h", getHeight());
+            PREFS.putInt("win.x", getX());
+            PREFS.putInt("win.y", getY());
+        }
+        try { PREFS.flush(); } catch (Exception ignored) {}
     }
 
     private Color sep() {

@@ -33,7 +33,7 @@ public class SettingsDialog extends JDialog {
     // ── Onglet Matching ──────────────────────────────────────────────────────
     private JSpinner   spMinScore;
     private JCheckBox  chkOnlyOfficial;
-    private JTextField tfPreferredCountry;
+    // tfPreferredCountry supprimé — remplacé par le sélecteur lstCountriesModel/cmbCountryPicker
     private JSpinner   spResultsLimit;
     private JSpinner   spCacheDays;
     @SuppressWarnings("unchecked")
@@ -64,15 +64,82 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkPreserveTimestamps;
     private JCheckBox  chkClearExistingTags;
     private JCheckBox  chkPreserveImages;
+    private JCheckBox  chkCorrectPunctuation;
+    private JCheckBox  chkRemoveId3v1;
     private JCheckBox  chkSaveAcoustidFingerprints;
     private JCheckBox  chkIgnoreExistingFingerprints;
     private JSpinner   spFpcalcThreads;
+    private JTextField tfPreservedTags;
+    private JCheckBox  chkMbUseGenres;
+    private JSpinner   spMbMinGenreUsage;
+    private JSpinner   spMbMaxGenres;
+    private JTextArea  taGenresFilter;
+    private JCheckBox  chkCoverSaveToFile;
+    private JCheckBox  chkCoverOverwriteFile;
+    private JCheckBox  chkCoverSearchLocal;
+    private JTextField tfCoverFilename;
+
+    // ── Onglet Script tagger ─────────────────────────────────────────────────
+    private JTextArea  taTaggerScript;
+
+    // ── Onglet Audio ─────────────────────────────────────────────────────────
+    private JCheckBox  chkReplayGainEnabled;
 
     // ── Onglet Matching — releases préférées + méta ───────────────────────────
-    private JTextField tfPreferredCountries;
+    private JCheckBox  chkTranslateArtists;
+    private JTextField tfTranslateLocale;
+    private JCheckBox  chkAlbumCluster;
+    @SuppressWarnings("unchecked")
+    private JComboBox<String>         cmbCountryPicker;
+    private DefaultListModel<String>  lstCountriesModel = new DefaultListModel<>();
+    private JList<String>             lstPreferredCountries;
     private JTextField tfPreferredFormats;
     private JTextField tfVaName;
     private JCheckBox  chkStandardizeArtists;
+
+    // ── Filtres types de release ─────────────────────────────────────────────
+    private static final String[] PRIMARY_TYPES   = {"Album", "Single", "EP", "Broadcast", "Other"};
+    private static final String[] SECONDARY_TYPES = {"Compilation", "Live", "Soundtrack", "Greatest Hits", "Remix", "Demo", "DJ-mix", "Mixtape/Street"};
+    private JCheckBox[] chkPrimaryTypes   = new JCheckBox[PRIMARY_TYPES.length];
+    private JCheckBox[] chkExcludedSecondary = new JCheckBox[SECONDARY_TYPES.length];
+
+    // Codes ISO → Nom complet (pour affichage dans le sélecteur)
+    private static final java.util.LinkedHashMap<String,String> ISO_COUNTRIES;
+    static {
+        ISO_COUNTRIES = new java.util.LinkedHashMap<>();
+        String[][] data = {
+            {"AD","Andorre"},{"AE","Émirats arabes unis"},{"AR","Argentine"},
+            {"AT","Autriche"},{"AU","Australie"},{"BA","Bosnie-Herzégovine"},
+            {"BE","Belgique"},{"BG","Bulgarie"},{"BR","Brésil"},
+            {"BY","Biélorussie"},{"CA","Canada"},{"CH","Suisse"},
+            {"CL","Chili"},{"CN","Chine"},{"CO","Colombie"},
+            {"CY","Chypre"},{"CZ","Tchéquie"},{"DE","Allemagne"},
+            {"DK","Danemark"},{"EC","Équateur"},{"EE","Estonie"},
+            {"EG","Égypte"},{"ES","Espagne"},{"FI","Finlande"},
+            {"FR","France"},{"GB","Royaume-Uni"},{"GR","Grèce"},
+            {"HR","Croatie"},{"HU","Hongrie"},{"ID","Indonésie"},
+            {"IE","Irlande"},{"IL","Israël"},{"IN","Inde"},
+            {"IS","Islande"},{"IT","Italie"},{"JP","Japon"},
+            {"KR","Corée du Sud"},{"LT","Lituanie"},{"LU","Luxembourg"},
+            {"LV","Lettonie"},{"MA","Maroc"},{"MK","Macédoine du Nord"},
+            {"MT","Malte"},{"MX","Mexique"},{"MY","Malaisie"},
+            {"NL","Pays-Bas"},{"NO","Norvège"},{"NZ","Nouvelle-Zélande"},
+            {"PH","Philippines"},{"PL","Pologne"},{"PT","Portugal"},
+            {"RO","Roumanie"},{"RS","Serbie"},{"RU","Russie"},
+            {"SE","Suède"},{"SG","Singapour"},{"SI","Slovénie"},
+            {"SK","Slovaquie"},{"TH","Thaïlande"},{"TR","Turquie"},
+            {"TW","Taïwan"},{"UA","Ukraine"},{"US","États-Unis"},
+            {"UY","Uruguay"},{"VE","Venezuela"},{"ZA","Afrique du Sud"},
+            {"XW","Monde entier"},{"XE","Europe"},
+        };
+        for (String[] row : data) ISO_COUNTRIES.put(row[0], row[1]);
+    }
+    private static String countryLabel(String code) {
+        return ISO_COUNTRIES.containsKey(code) ? code + " — " + ISO_COUNTRIES.get(code) : code;
+    }
+    private static String codeFromLabel(String label) {
+        return label.contains(" — ") ? label.substring(0, label.indexOf(" — ")) : label;
+    }
 
     // ── Onglet MusicBrainz OAuth ──────────────────────────────────────────────
     private JTextField tfMbClientId;
@@ -91,18 +158,20 @@ public class SettingsDialog extends JDialog {
     public SettingsDialog(Frame owner, java.util.function.Consumer<java.io.File[]> onLoadFolders) {
         super(owner, "Préférences — OpenTagger", true);
         this.onLoadFolders = onLoadFolders;
-        setSize(560, 480);
-        setMinimumSize(new Dimension(480, 420));
-        setLocationRelativeTo(owner);
+        setMinimumSize(new Dimension(560, 500));
+        setResizable(true);
 
-        JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("Démarrage",    buildStartupPanel());
-        tabs.addTab("APIs",         buildApiPanel());
-        tabs.addTab("Matching",     buildMatchingPanel());
-        tabs.addTab("Tags",         buildTagsPanel());
-        tabs.addTab("Renommage",    buildRenamePanel());
-        tabs.addTab("Audio",        buildAudioPanel());
-        tabs.addTab("MusicBrainz",  buildMbOAuthPanel());
+        JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
+        // Chaque onglet est enveloppé dans un JScrollPane pour que le contenu soit
+        // toujours accessible quelle que soit la taille de la fenêtre
+        tabs.addTab("Démarrage",    scrollWrap(buildStartupPanel()));
+        tabs.addTab("APIs",         scrollWrap(buildApiPanel()));
+        tabs.addTab("Matching",     scrollWrap(buildMatchingPanel()));
+        tabs.addTab("Tags",         scrollWrap(buildTagsPanel()));
+        tabs.addTab("Renommage",    scrollWrap(buildRenamePanel()));
+        tabs.addTab("Audio",        scrollWrap(buildAudioPanel()));
+        tabs.addTab("Script",       scrollWrap(buildScriptPanel()));
+        tabs.addTab("MusicBrainz",  scrollWrap(buildMbOAuthPanel()));
 
         JButton btnOk     = new JButton("OK");
         JButton btnCancel = new JButton("Annuler");
@@ -120,6 +189,14 @@ public class SettingsDialog extends JDialog {
         getContentPane().add(buttons, BorderLayout.SOUTH);
 
         load();
+
+        // Adapter la taille à l'écran : 55% de la largeur et 70% de la hauteur, borné
+        java.awt.Dimension screen = java.awt.Toolkit.getDefaultToolkit().getScreenSize();
+        int w = Math.min(Math.max((int)(screen.width  * 0.55), 620), 900);
+        int h = Math.min(Math.max((int)(screen.height * 0.70), 520), 800);
+        setSize(w, h);
+        setLocationRelativeTo(owner);
+
         getRootPane().setDefaultButton(btnOk);
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
@@ -277,8 +354,6 @@ public class SettingsDialog extends JDialog {
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(85, 0, 100, 5));
         chkOnlyOfficial  = new JCheckBox("Uniquement les releases officielles");
-        tfPreferredCountry = tf();
-        tfPreferredCountry.setColumns(4);
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
 
@@ -287,32 +362,85 @@ public class SettingsDialog extends JDialog {
         spDiscogsMaxGenres = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
         spLastfmMaxGenres  = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
 
-        tfPreferredCountries = tf();
-        tfPreferredCountries.setToolTipText("Codes ISO séparés par virgule, ex: FR,DE,US — priorité décroissante");
         tfPreferredFormats   = tf();
         tfPreferredFormats.setToolTipText("ex: CD,Digital Media,Vinyl — priorité décroissante");
         tfVaName             = tf();
         chkStandardizeArtists = new JCheckBox("Utiliser les noms MB standardisés (ex: The Beatles vs Beatles, The)");
 
+        // ── Sélecteur de pays ISO ──────────────────────────────────────────────
+        // Remplir le combo : "(Sélectionner...)" puis tous les pays triés
+        String[] countryEntries = ISO_COUNTRIES.entrySet().stream()
+            .map(e -> e.getKey() + " — " + e.getValue())
+            .sorted()
+            .toArray(String[]::new);
+        String[] comboItems = new String[countryEntries.length + 1];
+        comboItems[0] = "(Sélectionner un pays…)";
+        System.arraycopy(countryEntries, 0, comboItems, 1, countryEntries.length);
+        cmbCountryPicker = new JComboBox<>(comboItems);
+
+        lstPreferredCountries = new JList<>(lstCountriesModel);
+        lstPreferredCountries.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        lstPreferredCountries.setVisibleRowCount(4);
+        JScrollPane countriesScroll = new JScrollPane(lstPreferredCountries);
+        countriesScroll.setPreferredSize(new Dimension(220, 80));
+
+        JButton btnAddCountry    = new JButton("+");
+        JButton btnRemoveCountry = new JButton("−");
+        JButton btnUpCountry     = new JButton("↑");
+        JButton btnDownCountry   = new JButton("↓");
+        for (JButton b : new JButton[]{btnAddCountry, btnRemoveCountry, btnUpCountry, btnDownCountry})
+            b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnAddCountry.addActionListener(e -> {
+            int idx = cmbCountryPicker.getSelectedIndex();
+            if (idx <= 0) return;
+            String label = (String) cmbCountryPicker.getSelectedItem();
+            String code  = codeFromLabel(label);
+            // Éviter les doublons
+            for (int i = 0; i < lstCountriesModel.size(); i++)
+                if (codeFromLabel(lstCountriesModel.get(i)).equals(code)) return;
+            lstCountriesModel.addElement(label);
+        });
+        btnRemoveCountry.addActionListener(e -> {
+            int sel = lstPreferredCountries.getSelectedIndex();
+            if (sel >= 0) lstCountriesModel.remove(sel);
+        });
+        btnUpCountry.addActionListener(e -> {
+            int sel = lstPreferredCountries.getSelectedIndex();
+            if (sel > 0) { String v = lstCountriesModel.remove(sel); lstCountriesModel.add(sel-1, v); lstPreferredCountries.setSelectedIndex(sel-1); }
+        });
+        btnDownCountry.addActionListener(e -> {
+            int sel = lstPreferredCountries.getSelectedIndex();
+            if (sel >= 0 && sel < lstCountriesModel.size()-1) { String v = lstCountriesModel.remove(sel); lstCountriesModel.add(sel+1, v); lstPreferredCountries.setSelectedIndex(sel+1); }
+        });
+
+        JPanel countryBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
+        for (JButton b : new JButton[]{btnAddCountry, btnRemoveCountry, btnUpCountry, btnDownCountry})
+            countryBtns.add(b);
+
+        JPanel countryPicker = new JPanel(new BorderLayout(0, 4));
+        countryPicker.add(cmbCountryPicker, BorderLayout.NORTH);
+        countryPicker.add(countriesScroll,  BorderLayout.CENTER);
+        countryPicker.add(countryBtns,      BorderLayout.SOUTH);
+        // ── fin sélecteur pays ─────────────────────────────────────────────────
+
         JPanel matchPanel = form(new String[]{
             "Score minimum (%) :",
             "Releases officielles seulement :",
-            "Pays préféré (code ISO, ex: FR) :",
             "Nb résultats MusicBrainz :",
             "Durée cache (jours) :"
         }, new JComponent[]{
             spMinScore, chkOnlyOfficial,
-            tfPreferredCountry, spResultsLimit,
-            spCacheDays
+            spResultsLimit, spCacheDays
         }, "Critères de correspondance MusicBrainz");
 
         JPanel releasesPanel = form(new String[]{
-            "Pays préférés (ex: FR,DE,US) :",
+            "Pays préférés (priorité décroissante) :",
             "Formats préférés (ex: CD,Digital Media) :",
             "Nom Various Artists :",
             ""
         }, new JComponent[]{
-            tfPreferredCountries, tfPreferredFormats,
+            countryPicker, tfPreferredFormats,
             tfVaName, chkStandardizeArtists
         }, "Releases préférées (comme Picard)");
 
@@ -324,11 +452,83 @@ public class SettingsDialog extends JDialog {
             cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres
         }, "Sources de genres (Discogs / Last.fm)");
 
+        // MB genres
+        chkMbUseGenres    = new JCheckBox("Utiliser les genres folksonomy MusicBrainz");
+        spMbMinGenreUsage = new JSpinner(new SpinnerNumberModel(50, 1, 500, 10));
+        spMbMaxGenres     = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+        taGenresFilter    = new JTextArea(4, 20);
+        taGenresFilter.setLineWrap(true);
+        taGenresFilter.setToolTipText("Un genre par ligne. Préfixe - pour exclure (ex: -seen live)");
+        JPanel mbGenrePanel = form(new String[]{
+            "", "Nb votes minimum :", "Max genres MB :", "Filtre genres (- = exclure) :"
+        }, new JComponent[]{
+            chkMbUseGenres, spMbMinGenreUsage, spMbMaxGenres, new JScrollPane(taGenresFilter)
+        }, "Genres MusicBrainz (folksonomy)");
+
+        // ── Translittération artistes ──────────────────────────────────────────
+        chkTranslateArtists = new JCheckBox("Translittérer les noms d'artiste non-Latin via alias MB");
+        tfTranslateLocale   = tf();
+        tfTranslateLocale.setToolTipText("Locale cible ex: en, fr, de — utilise les alias MusicBrainz");
+        JLabel transHint = new JLabel("<html><i>Exemple : 宇多田ヒカル → Hikaru Utada (locale=en).<br>Nécessite un artistMbid valide.</i></html>");
+        transHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        transHint.setBorder(new EmptyBorder(0, 10, 4, 0));
+        JPanel transPanel = new JPanel(new BorderLayout()); transPanel.setBorder(new EmptyBorder(8,8,0,8));
+        JPanel transInner = form(new String[]{"", "Locale cible :"}, new JComponent[]{chkTranslateArtists, tfTranslateLocale}, "Translittération artistes");
+        transInner.add(transHint, BorderLayout.SOUTH);
+        transPanel.add(transInner, BorderLayout.CENTER);
+
+        // ── Album clustering ──────────────────────────────────────────────────
+        chkAlbumCluster = new JCheckBox("Grouper par album et corriger numéros de piste (passe 2 après taguage)");
+        JLabel clusterHint = new JLabel("<html><i>Pour chaque groupe de ≥2 fichiers partageant le même releaseMbid,<br>" +
+            "un seul lookupRelease MB corrige trackNo, trackTotal, discNo, albumArtist.</i></html>");
+        clusterHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        clusterHint.setBorder(new EmptyBorder(0, 10, 4, 0));
+        JPanel clusterPanel = new JPanel(new BorderLayout()); clusterPanel.setBorder(new EmptyBorder(8,8,8,8));
+        JPanel clusterInner = form(new String[]{""}, new JComponent[]{chkAlbumCluster}, "Album Clustering");
+        clusterInner.add(clusterHint, BorderLayout.SOUTH);
+        clusterPanel.add(clusterInner, BorderLayout.CENTER);
+
+        // ── Filtres types de release ───────────────────────────────────────────
+        for (int i = 0; i < PRIMARY_TYPES.length; i++)   chkPrimaryTypes[i]      = new JCheckBox(PRIMARY_TYPES[i]);
+        for (int i = 0; i < SECONDARY_TYPES.length; i++) chkExcludedSecondary[i] = new JCheckBox(SECONDARY_TYPES[i]);
+
+        JPanel rowPrimary = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        for (JCheckBox c : chkPrimaryTypes) rowPrimary.add(c);
+        JPanel rowSecondary = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        for (JCheckBox c : chkExcludedSecondary) rowSecondary.add(c);
+
+        JPanel releaseTypePanel = new JPanel(new GridBagLayout());
+        releaseTypePanel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Filtres types de release (MusicBrainz)"));
+        GridBagConstraints gtc = new GridBagConstraints();
+        gtc.gridx = 0; gtc.gridy = 0; gtc.anchor = GridBagConstraints.WEST;
+        gtc.insets = new Insets(4, 10, 2, 8);
+        releaseTypePanel.add(new JLabel("Types primaires acceptés :"), gtc);
+        gtc.gridy = 1; gtc.insets = new Insets(0, 6, 4, 8);
+        releaseTypePanel.add(rowPrimary, gtc);
+        gtc.gridy = 2; gtc.insets = new Insets(6, 10, 2, 8);
+        releaseTypePanel.add(new JLabel("Types secondaires à exclure :"), gtc);
+        gtc.gridy = 3; gtc.insets = new Insets(0, 6, 4, 8);
+        releaseTypePanel.add(rowSecondary, gtc);
+        JLabel typeHint = new JLabel("<html><i>Vide = aucun filtre. Décochez un type primaire pour l'ignorer.<br>" +
+            "Cochez un type secondaire pour exclure ces releases (ex: Compilation, Live).</i></html>");
+        typeHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        typeHint.setBorder(new EmptyBorder(0, 10, 6, 0));
+        gtc.gridy = 4; gtc.insets = new Insets(0, 0, 4, 0);
+        releaseTypePanel.add(typeHint, gtc);
+        JPanel releaseTypeWrap = new JPanel(new BorderLayout());
+        releaseTypeWrap.setBorder(new EmptyBorder(8, 8, 0, 8));
+        releaseTypeWrap.add(releaseTypePanel, BorderLayout.CENTER);
+
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
         combined.add(matchPanel);
         combined.add(releasesPanel);
+        combined.add(releaseTypeWrap);
         combined.add(genrePanel);
+        combined.add(mbGenrePanel);
+        combined.add(transPanel);
+        combined.add(clusterPanel);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -341,6 +541,8 @@ public class SettingsDialog extends JDialog {
         chkPreserveTimestamps      = new JCheckBox("Préserver la date de modification du fichier");
         chkClearExistingTags       = new JCheckBox("Effacer les tags existants avant écriture (repartir de zéro)");
         chkPreserveImages          = new JCheckBox("Conserver la pochette existante si aucune nouvelle");
+        chkCorrectPunctuation      = new JCheckBox("Normaliser la ponctuation (‘ ’ “ ” – … → ASCII)");
+        chkRemoveId3v1             = new JCheckBox("Supprimer le tag ID3v1 des MP3 (footer 128 octets inutile)");
         chkSaveAcoustidFingerprints   = new JCheckBox("Sauvegarder l'empreinte AcoustID dans les tags");
         chkIgnoreExistingFingerprints = new JCheckBox("Forcer le re-fingerprint (même si AcoustID déjà présent)");
         spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
@@ -357,9 +559,11 @@ public class SettingsDialog extends JDialog {
         Object[][] rows = {
             { "Version ID3 (MP3) :", cmbId3Version },
             { null, id3Hint },
-            { "", chkPreserveTimestamps },
-            { "", chkClearExistingTags  },
-            { "", chkPreserveImages     },
+            { "", chkPreserveTimestamps  },
+            { "", chkClearExistingTags   },
+            { "", chkPreserveImages      },
+            { "", chkCorrectPunctuation  },
+            { "", chkRemoveId3v1         },
         };
         for (int i = 0; i < rows.length; i++) {
             if (rows[i][0] != null) {
@@ -391,12 +595,31 @@ public class SettingsDialog extends JDialog {
             fpInner.add(fpRows[i][1], fc);
         }
 
+        // ── Tags préservés ────────────────────────────────────────────────────────
+        tfPreservedTags = tf();
+        tfPreservedTags.setToolTipText("Noms FieldKey séparés par | — ex: RATING|COMMENT  (laisser vide = aucun)");
+        JPanel preserveInner = form(new String[]{"Tags à ne jamais écraser :"},
+                new JComponent[]{tfPreservedTags}, "Tags préservés");
+
+        // ── Pochette fichier ──────────────────────────────────────────────────────
+        chkCoverSaveToFile   = new JCheckBox("Sauvegarder la pochette dans un fichier séparé");
+        chkCoverOverwriteFile= new JCheckBox("Écraser le fichier si déjà existant");
+        chkCoverSearchLocal  = new JCheckBox("Utiliser folder.jpg/cover.jpg local si présent (avant CAA)");
+        tfCoverFilename      = tf();
+        JPanel coverFileInner = form(new String[]{
+            "", "", "", "Nom du fichier (sans extension) :"
+        }, new JComponent[]{
+            chkCoverSearchLocal, chkCoverSaveToFile, chkCoverOverwriteFile, tfCoverFilename
+        }, "Pochette en fichier (cover.jpg / folder.jpg)");
+
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
 
-        JPanel pw = new JPanel(new BorderLayout()); pw.setBorder(new EmptyBorder(8,8,0,8)); pw.add(tagInner, BorderLayout.CENTER);
-        JPanel fw = new JPanel(new BorderLayout()); fw.setBorder(new EmptyBorder(8,8,8,8)); fw.add(fpInner,  BorderLayout.CENTER);
-        combined.add(pw); combined.add(fw);
+        JPanel pw  = new JPanel(new BorderLayout()); pw.setBorder(new EmptyBorder(8,8,0,8)); pw.add(tagInner,       BorderLayout.CENTER);
+        JPanel fw  = new JPanel(new BorderLayout()); fw.setBorder(new EmptyBorder(8,8,0,8)); fw.add(fpInner,        BorderLayout.CENTER);
+        JPanel prw = new JPanel(new BorderLayout()); prw.setBorder(new EmptyBorder(8,8,0,8));prw.add(preserveInner, BorderLayout.CENTER);
+        JPanel cfw = new JPanel(new BorderLayout()); cfw.setBorder(new EmptyBorder(8,8,8,8));cfw.add(coverFileInner,BorderLayout.CENTER);
+        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(cfw);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -427,11 +650,12 @@ public class SettingsDialog extends JDialog {
     }
 
     private JPanel buildAudioPanel() {
-        tfFfmpegPath     = tf();
-        tfEssentiaPath   = tf();
-        tfFpcalcPath     = tf();
-        chkLyricsEnabled = new JCheckBox("Activer la récupération des paroles");
-        lblFpcalcStatus  = new JLabel();
+        tfFfmpegPath        = tf();
+        tfEssentiaPath      = tf();
+        tfFpcalcPath        = tf();
+        chkLyricsEnabled    = new JCheckBox("Activer la récupération des paroles");
+        chkReplayGainEnabled= new JCheckBox("Calculer et écrire le ReplayGain (via ffmpeg, lent)");
+        lblFpcalcStatus     = new JLabel();
 
         refreshFpcalcStatus();
 
@@ -447,10 +671,11 @@ public class SettingsDialog extends JDialog {
                 BorderFactory.createEtchedBorder(), "Outils audio externes (optionnels)"));
 
         Object[][] rows = {
-            { "Chemin ffmpeg :",        tfFfmpegPath,    "https://ffmpeg.org/download.html"                   },
-            { "Chemin Essentia :",       tfEssentiaPath,  null                                                 },
-            { "Chemin fpcalc :",         fpcalcRow,       "https://acoustid.org/chromaprint"                  },
-            { "Paroles (LyricsOvh) :",  chkLyricsEnabled,"https://lyricsovh.docs.apiary.io/"                 },
+            { "Chemin ffmpeg :",        tfFfmpegPath,       "https://ffmpeg.org/download.html"               },
+            { "Chemin Essentia :",       tfEssentiaPath,     null                                             },
+            { "Chemin fpcalc :",         fpcalcRow,          "https://acoustid.org/chromaprint"              },
+            { "Paroles (LyricsOvh) :",  chkLyricsEnabled,   "https://lyricsovh.docs.apiary.io/"             },
+            { "ReplayGain :",           chkReplayGainEnabled, null                                           },
         };
         for (int i = 0; i < rows.length; i++) {
             String     label = (String) rows[i][0];
@@ -527,6 +752,61 @@ public class SettingsDialog extends JDialog {
                 btn.setText("Télécharger fpcalc…");
             }
         }.execute();
+    }
+
+    private JPanel buildScriptPanel() {
+        taTaggerScript = new JTextArea(18, 60);
+        taTaggerScript.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        taTaggerScript.setLineWrap(false);
+        taTaggerScript.setTabSize(4);
+        JScrollPane scriptScroll = new JScrollPane(taTaggerScript,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        JLabel lblDesc = new JLabel(
+            "<html>Le script est exécuté <b>après l'identification et la correction</b> de chaque fichier,<br>" +
+            "juste avant l'écriture des tags. Modifiez <code>tags.champ</code> pour transformer les métadonnées.<br><br>" +
+            "<b>Champs accessibles :</b> title, artist, albumArtist, album, year, track, trackTotal,<br>" +
+            "discNo, discTotal, genre, composer, conductor, lyricist, bpm, mood, language, isrc,<br>" +
+            "isClassical, isCompilation, isLive, artistMbid, releaseMbid, recordingMbid, comment</html>");
+        lblDesc.setFont(lblDesc.getFont().deriveFont(11f));
+        lblDesc.putClientProperty("FlatLaf.style", "foreground: #888888");
+        lblDesc.setBorder(new EmptyBorder(0, 0, 8, 0));
+
+        JTextArea taExamples = new JTextArea(
+            "// Synchroniser albumArtist si vide\n" +
+            "if (!tags.albumArtist) tags.albumArtist = tags.artist;\n\n" +
+            "// Supprimer \"(feat. ...)\" du titre\n" +
+            "tags.title = tags.title.replace(/\\s*\\(feat\\..*?\\)/gi, '').trim();\n\n" +
+            "// Forcer le genre Classical si le compositeur est renseigné\n" +
+            "if (tags.composer && !tags.genre) tags.genre = 'Classical';\n\n" +
+            "// Corriger les apostrophes typographiques\n" +
+            "tags.title = tags.title.replace(/[\\u2018\\u2019]/g, \"'\");\n\n" +
+            "// Mettre le genre en minuscules\n" +
+            "// tags.genre = tags.genre.toLowerCase();"
+        );
+        taExamples.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        taExamples.setEditable(false);
+        taExamples.setBackground(UIManager.getColor("TextArea.background") != null
+            ? UIManager.getColor("TextArea.background").darker() : java.awt.Color.LIGHT_GRAY);
+        taExamples.setForeground(java.awt.Color.GRAY);
+        taExamples.setBorder(new EmptyBorder(6, 8, 6, 8));
+
+        JPanel exBox = new JPanel(new BorderLayout());
+        exBox.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(), "Exemples"));
+        exBox.add(taExamples, BorderLayout.CENTER);
+
+        JPanel scriptBox = new JPanel(new BorderLayout(0, 6));
+        scriptBox.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Script JavaScript (tagger.script)"));
+        scriptBox.add(lblDesc, BorderLayout.NORTH);
+        scriptBox.add(scriptScroll, BorderLayout.CENTER);
+
+        JPanel outer = new JPanel(new BorderLayout(0, 10));
+        outer.setBorder(new EmptyBorder(10, 10, 10, 10));
+        outer.add(scriptBox, BorderLayout.CENTER);
+        outer.add(exBox, BorderLayout.SOUTH);
+        return outer;
     }
 
     @SuppressWarnings("unchecked")
@@ -683,7 +963,6 @@ public class SettingsDialog extends JDialog {
 
         spMinScore      .setValue(cfg.num("autocorrector.min_score",   85));
         chkOnlyOfficial .setSelected(cfg.bool("musicbrainz.only_official", true));
-        tfPreferredCountry.setText(cfg.str("musicbrainz.preferred_country", ""));
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
@@ -702,8 +981,9 @@ public class SettingsDialog extends JDialog {
         tfRapidApiKey.setText(cfg.str("rapidapi.key",    ""));
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
 
-        chkFanartEnabled.setSelected(cfg.bool("fanart.download_cover", true));
-        chkLastfmEnabled.setSelected(cfg.bool("lastfm.use_tags",       true));
+        chkFanartEnabled    .setSelected(cfg.bool("fanart.download_cover", true));
+        chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
+        chkReplayGainEnabled.setSelected(cfg.replayGainEnabled());
 
         String genreSrc = cfg.str("discogs.genre_source", "style_then_genre");
         cmbDiscogsGenreSource.setSelectedIndex(
@@ -712,12 +992,46 @@ public class SettingsDialog extends JDialog {
         spLastfmMaxGenres .setValue(cfg.num("lastfm.max_genres",    3));
 
         // ─ Releases préférées ─
-        tfPreferredCountries.setText(cfg.str("releases.preferred_countries", ""));
+        lstCountriesModel.clear();
+        String savedCountries = cfg.str("releases.preferred_countries", "");
+        if (!savedCountries.isBlank())
+            for (String code : savedCountries.split(","))
+                if (!code.isBlank()) lstCountriesModel.addElement(countryLabel(code.trim()));
         tfPreferredFormats  .setText(cfg.str("releases.preferred_formats",   ""));
         tfVaName            .setText(cfg.vaName());
         chkStandardizeArtists.setSelected(cfg.standardizeArtists());
+        chkTranslateArtists  .setSelected(cfg.translateArtists());
+
+        // ─ Filtres types de release ─
+        String allowedPrimStr = cfg.str("releases.allowed_primary_types", "");
+        java.util.Set<String> allowedPrimSet = new java.util.HashSet<>();
+        if (!allowedPrimStr.isBlank())
+            for (String t : allowedPrimStr.split(",")) allowedPrimSet.add(t.trim());
+        for (int i = 0; i < PRIMARY_TYPES.length; i++)
+            chkPrimaryTypes[i].setSelected(allowedPrimSet.isEmpty() || allowedPrimSet.contains(PRIMARY_TYPES[i]));
+        String excludedSecStr = cfg.str("releases.excluded_secondary_types", "");
+        java.util.Set<String> excludedSecSet = new java.util.HashSet<>();
+        if (!excludedSecStr.isBlank())
+            for (String t : excludedSecStr.split(",")) excludedSecSet.add(t.trim());
+        for (int i = 0; i < SECONDARY_TYPES.length; i++)
+            chkExcludedSecondary[i].setSelected(excludedSecSet.contains(SECONDARY_TYPES[i]));
+        tfTranslateLocale    .setText(cfg.translateLocale());
+        chkAlbumCluster      .setSelected(cfg.albumClusterEnabled());
+
+        // ─ MB Genres ─
+        chkMbUseGenres   .setSelected(cfg.mbUseGenres());
+        spMbMinGenreUsage.setValue(cfg.mbMinGenreUsage());
+        spMbMaxGenres    .setValue(cfg.mbMaxGenres());
+        taGenresFilter   .setText(cfg.mbGenresFilter());
 
         // ─ Tags (onglet Tags) ─
+        tfPreservedTags      .setText(cfg.preservedTags());
+        chkCoverSearchLocal  .setSelected(cfg.coverSearchLocal());
+        chkCoverSaveToFile   .setSelected(cfg.coverSaveToFile());
+        chkCoverOverwriteFile.setSelected(cfg.coverOverwriteFile());
+        tfCoverFilename      .setText(cfg.coverFilename());
+        chkCorrectPunctuation.setSelected(cfg.correctPunctuation());
+        chkRemoveId3v1       .setSelected(cfg.removeId3v1());
         String id3v = cfg.id3v2Version();
         cmbId3Version.setSelectedIndex("2.3".equals(id3v) ? 1 : "2.4".equals(id3v) ? 2 : 0);
         chkPreserveTimestamps     .setSelected(cfg.preserveTimestamps());
@@ -732,6 +1046,8 @@ public class SettingsDialog extends JDialog {
         String mode = cfg.str("mb.oauth.mode", "scheme");
         cmbMbOAuthMode.setSelectedIndex(
             "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
+
+        taTaggerScript.setText(cfg.str("tagger.script", ""));
     }
 
     private void save() {
@@ -754,7 +1070,6 @@ public class SettingsDialog extends JDialog {
 
         p.setProperty("autocorrector.min_score",       String.valueOf(spMinScore.getValue()));
         p.setProperty("musicbrainz.only_official",     String.valueOf(chkOnlyOfficial.isSelected()));
-        p.setProperty("musicbrainz.preferred_country", tfPreferredCountry.getText().trim());
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
@@ -775,8 +1090,9 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rapidapi.key",   tfRapidApiKey.getText().trim());
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
 
-        p.setProperty("fanart.download_cover", String.valueOf(chkFanartEnabled.isSelected()));
-        p.setProperty("lastfm.use_tags",       String.valueOf(chkLastfmEnabled.isSelected()));
+        p.setProperty("fanart.download_cover",  String.valueOf(chkFanartEnabled.isSelected()));
+        p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
+        p.setProperty("replaygain.enabled",     String.valueOf(chkReplayGainEnabled.isSelected()));
 
         String[] genreSources = {"style_then_genre", "genre_then_style", "genre_only"};
         p.setProperty("discogs.genre_source", genreSources[cmbDiscogsGenreSource.getSelectedIndex()]);
@@ -784,13 +1100,46 @@ public class SettingsDialog extends JDialog {
         p.setProperty("lastfm.max_genres",    String.valueOf(spLastfmMaxGenres.getValue()));
 
         // ─ Releases préférées ─
-        p.setProperty("releases.preferred_countries", tfPreferredCountries.getText().trim());
+        StringBuilder sbCountries = new StringBuilder();
+        for (int i = 0; i < lstCountriesModel.size(); i++) {
+            if (i > 0) sbCountries.append(',');
+            sbCountries.append(codeFromLabel(lstCountriesModel.get(i)));
+        }
+        p.setProperty("releases.preferred_countries", sbCountries.toString());
         p.setProperty("releases.preferred_formats",   tfPreferredFormats.getText().trim());
+
+        // Filtres types de release
+        java.util.List<String> selPrimary = new java.util.ArrayList<>();
+        for (int i = 0; i < PRIMARY_TYPES.length; i++)
+            if (chkPrimaryTypes[i].isSelected()) selPrimary.add(PRIMARY_TYPES[i]);
+        p.setProperty("releases.allowed_primary_types",
+            selPrimary.size() == PRIMARY_TYPES.length ? "" : String.join(",", selPrimary));
+        java.util.List<String> selExcluded = new java.util.ArrayList<>();
+        for (int i = 0; i < SECONDARY_TYPES.length; i++)
+            if (chkExcludedSecondary[i].isSelected()) selExcluded.add(SECONDARY_TYPES[i]);
+        p.setProperty("releases.excluded_secondary_types", String.join(",", selExcluded));
+
         p.setProperty("metadata.va_name",             tfVaName.getText().trim().isEmpty()
                                                       ? "Various Artists" : tfVaName.getText().trim());
-        p.setProperty("metadata.standardize_artists", String.valueOf(chkStandardizeArtists.isSelected()));
+        p.setProperty("metadata.standardize_artists",  String.valueOf(chkStandardizeArtists.isSelected()));
+        p.setProperty("metadata.translate_artists",    String.valueOf(chkTranslateArtists.isSelected()));
+        p.setProperty("metadata.translate_locale",     tfTranslateLocale.getText().trim().isEmpty() ? "en" : tfTranslateLocale.getText().trim());
+        p.setProperty("albums.cluster",                String.valueOf(chkAlbumCluster.isSelected()));
+
+        // ─ MB Genres ─
+        p.setProperty("mb.use_genres",       String.valueOf(chkMbUseGenres.isSelected()));
+        p.setProperty("mb.min_genre_usage",  String.valueOf(spMbMinGenreUsage.getValue()));
+        p.setProperty("mb.max_genres",       String.valueOf(spMbMaxGenres.getValue()));
+        p.setProperty("mb.genres_filter",    taGenresFilter.getText());
 
         // ─ Onglet Tags ─
+        p.setProperty("tags.preserved_tags",       tfPreservedTags.getText().trim());
+        p.setProperty("cover.search_local",        String.valueOf(chkCoverSearchLocal.isSelected()));
+        p.setProperty("cover.save_to_file",        String.valueOf(chkCoverSaveToFile.isSelected()));
+        p.setProperty("cover.overwrite_file",      String.valueOf(chkCoverOverwriteFile.isSelected()));
+        p.setProperty("cover.filename",            tfCoverFilename.getText().trim().isEmpty() ? "cover" : tfCoverFilename.getText().trim());
+        p.setProperty("tags.correct_punctuation",  String.valueOf(chkCorrectPunctuation.isSelected()));
+        p.setProperty("tags.remove_id3v1",         String.valueOf(chkRemoveId3v1.isSelected()));
         String[] id3Versions = {"keep", "2.3", "2.4"};
         p.setProperty("tags.id3v2_version",            id3Versions[cmbId3Version.getSelectedIndex()]);
         p.setProperty("tags.preserve_timestamps",      String.valueOf(chkPreserveTimestamps.isSelected()));
@@ -799,6 +1148,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.save_fingerprints",    String.valueOf(chkSaveAcoustidFingerprints.isSelected()));
         p.setProperty("acoustid.ignore_existing",      String.valueOf(chkIgnoreExistingFingerprints.isSelected()));
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
+
+        p.setProperty("tagger.script",                 taTaggerScript.getText());
 
         p.setProperty("mb.oauth.client_id",            tfMbClientId.getText().trim());
         p.setProperty("mb.oauth.client_secret",        tfMbClientSecret.getText().trim());
@@ -840,6 +1191,16 @@ public class SettingsDialog extends JDialog {
     // ── Helpers UI ───────────────────────────────────────────────────────────
 
     private JTextField tf() { return new JTextField(28); }
+
+    /** Enveloppe un panneau dans un JScrollPane sans bordure — les onglets défilent si besoin. */
+    private JScrollPane scrollWrap(JPanel panel) {
+        JScrollPane sp = new JScrollPane(panel,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        sp.setBorder(null);
+        sp.getVerticalScrollBar().setUnitIncrement(12);
+        return sp;
+    }
 
     private JPanel form(String[] labels, JComponent[] fields, String title) {
         JPanel inner = new JPanel(new GridBagLayout());

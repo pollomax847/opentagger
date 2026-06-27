@@ -266,8 +266,10 @@ public class MusicBrainzClient {
     private JsonNode findBestRelease(JsonNode releases, boolean onlyOfficial) {
         if (!releases.isArray() || releases.isEmpty()) return null;
 
-        String[]  preferredCountries = Config.get().preferredCountries();
-        String[]  preferredFormats   = Config.get().preferredFormats();
+        String[]  preferredCountries  = Config.get().preferredCountries();
+        String[]  preferredFormats    = Config.get().preferredFormats();
+        String[]  allowedPrimary      = Config.get().allowedPrimaryTypes();
+        String[]  excludedSecondary   = Config.get().excludedSecondaryTypes();
         int       nc = preferredCountries.length;
         int       nf = preferredFormats.length;
 
@@ -277,6 +279,29 @@ public class MusicBrainzClient {
         for (JsonNode r : releases) {
             String status  = r.path("status").asText("");
             if (onlyOfficial && !"Official".equalsIgnoreCase(status)) continue;
+
+            // Filtre type primaire (Album, Single, EP, Broadcast, Other)
+            if (allowedPrimary.length > 0) {
+                String ptype = r.path("release-group").path("primary-type").asText("").trim();
+                boolean ok = false;
+                for (String t : allowedPrimary) if (t.trim().equalsIgnoreCase(ptype)) { ok = true; break; }
+                if (!ok) continue;
+            }
+
+            // Filtre types secondaires exclus (Compilation, Live, Soundtrack, etc.)
+            if (excludedSecondary.length > 0) {
+                JsonNode secTypes = r.path("release-group").path("secondary-types");
+                boolean excluded = false;
+                if (secTypes.isArray()) {
+                    outer:
+                    for (JsonNode st : secTypes) {
+                        String stName = st.asText();
+                        for (String ex : excludedSecondary)
+                            if (ex.trim().equalsIgnoreCase(stName)) { excluded = true; break outer; }
+                    }
+                }
+                if (excluded) continue;
+            }
 
             int score = 0;
             if ("Official".equalsIgnoreCase(status)) score += 100;
@@ -451,8 +476,11 @@ public class MusicBrainzClient {
     // ── Lookup d'un recording par MBID ────────────────────────────────────────
     // Utilisé par AcoustIdClient après résolution AcoustID → MBID
     public TagInfo lookupRecording(String mbid) throws Exception {
+        boolean mbGenres = Config.get().bool("mb.use_genres", false);
         String url = BASE_URL + "/recording/" + mbid.trim()
-                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs";
+                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs"
+                + (mbGenres ? "+genres" : "")
+                + "+artist-rels+recording-rels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return null;
@@ -498,7 +526,112 @@ public class MusicBrainzClient {
         // originalYear : date de première sortie du recording
         String frd = rec.path("first-release-date").asText("").trim();
         if (frd.length() >= 4 && info.originalYear.isBlank()) info.originalYear = frd.substring(0, 4);
+
+        // Genres MB (folksonomy) — uniquement si mb.use_genres=true
+        if (Config.get().bool("mb.use_genres", false)) {
+            String mbGenre = parseMbGenres(rec.path("genres"));
+            if (!mbGenre.isBlank()) info.genre = mbGenre;
+        }
+
+        // Relations ARs (compositeur, chef d'orchestre, producteur…)
+        extractRelations(rec.path("relations"), info);
+
         return info;
+    }
+
+    /**
+     * Parse les genres folksonomy MB. Filtre par vote minimum et liste noire.
+     * Format API : [{"name":"rock","count":15,"disambiguation":""},…]
+     */
+    private String parseMbGenres(JsonNode genres) {
+        if (!genres.isArray() || genres.isEmpty()) return "";
+        int minUsage  = Config.get().num("mb.min_genre_usage", 50);
+        int maxGenres = Config.get().mbMaxGenres();
+        String filterRaw = Config.get().str("mb.genres_filter", "-seen live\n-fixme\n-owned\n-favorites");
+        java.util.Set<String> blacklist = new java.util.HashSet<>();
+        for (String line : filterRaw.split("[\\r\\n]+")) {
+            String l = line.trim();
+            if (l.startsWith("-")) blacklist.add(l.substring(1).trim().toLowerCase());
+        }
+
+        java.util.List<String> result = new java.util.ArrayList<>();
+        for (JsonNode g : genres) {
+            int count  = g.path("count").asInt(0);
+            if (count < minUsage) continue;
+            String name = g.path("name").asText("").trim();
+            if (name.isBlank() || blacklist.contains(name.toLowerCase())) continue;
+            // Capitaliser première lettre
+            result.add(Character.toUpperCase(name.charAt(0)) + name.substring(1));
+            if (result.size() >= maxGenres) break;
+        }
+        return String.join(", ", result);
+    }
+
+    /**
+     * Parse les relations MB (artist-rels, recording-rels) pour remplir compositeur,
+     * chef d'orchestre, producteur, arrangeur, ingénieur du son, parolier.
+     * Défensif : ignore tous les champs manquants/inattendus.
+     */
+    private void extractRelations(JsonNode relations, TagInfo info) {
+        if (!relations.isArray()) return;
+        for (JsonNode rel : relations) {
+            String type = rel.path("type").asText("").toLowerCase().trim();
+            if (type.isBlank()) continue;
+            // Les relations artist-rels ont un nœud "artist", les recording-rels ont "recording"
+            JsonNode artistNode = rel.path("artist");
+            if (artistNode.isMissingNode()) continue;
+            String name     = artistNode.path("name").asText("").trim();
+            String sortName = artistNode.path("sort-name").asText("").trim();
+            if (name.isBlank()) continue;
+
+            switch (type) {
+                case "composer"   -> { if (info.composer.isBlank())   { info.composer    = name; info.composerSort    = sortName; } }
+                case "lyricist"   -> { if (info.lyricist.isBlank())   { info.lyricist    = name; info.lyricistSort    = sortName; } }
+                case "arranger"   -> { if (info.arranger.isBlank())   { info.arranger    = name; info.arrangerSort    = sortName; } }
+                case "conductor"  -> { if (info.conductor.isBlank())  { info.conductor   = name; info.conductorSort   = sortName; } }
+                case "producer"   -> { if (info.producer.isBlank())   { info.producer    = name; info.producerSort    = sortName; } }
+                case "engineer", "recording", "mix", "mastering"
+                                  -> { if (info.engineer.isBlank())   { info.engineer    = name; } }
+                case "performer", "instrument", "vocal"
+                                  -> { /* déjà géré par artist-credits */ }
+                default -> {} // ignorer les autres types de relation
+            }
+        }
+    }
+
+    /**
+     * Cherche un alias latin pour un artiste MB (translittération).
+     * Retourne l'alias correspondant au locale préféré (ex: "en"), ou "" si introuvable.
+     * Exemple : artiste MB "宇多田ヒカル" → alias "Hikaru Utada" (locale=en)
+     */
+    public String lookupArtistAlias(String artistMbid, String preferredLocale) throws Exception {
+        if (artistMbid == null || artistMbid.isBlank()) return "";
+        String url = BASE_URL + "/artist/" + artistMbid.trim() + "?fmt=json&inc=aliases";
+        HttpResponse<String> resp = getWithRetry(url);
+        if (resp == null) return "";
+        JsonNode root = mapper.readTree(resp.body());
+        JsonNode aliases = root.path("aliases");
+        if (!aliases.isArray() || aliases.isEmpty()) return "";
+
+        String prefix = preferredLocale == null ? "en" : preferredLocale.toLowerCase();
+
+        // 1er passage : alias dont le locale commence par le préféré et dont le type est "Artist name"
+        for (JsonNode alias : aliases) {
+            String locale = alias.path("locale").asText("").toLowerCase();
+            String type   = alias.path("type").asText("");
+            String name   = alias.path("name").asText("").trim();
+            if (!name.isBlank() && locale.startsWith(prefix)
+                    && ("Artist name".equalsIgnoreCase(type) || type.isBlank())) {
+                return name;
+            }
+        }
+        // 2e passage : n'importe quel alias avec le bon locale
+        for (JsonNode alias : aliases) {
+            String locale = alias.path("locale").asText("").toLowerCase();
+            String name   = alias.path("name").asText("").trim();
+            if (!name.isBlank() && locale.startsWith(prefix)) return name;
+        }
+        return "";
     }
 
     /**
