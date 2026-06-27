@@ -57,10 +57,20 @@ public class TagWriter {
             merged.acoustidId          = "";
         }
 
+        // Sauvegarder les tags préservés AVANT toute écriture
+        Map<FieldKey, String> preserved = readPreservedTags(tag);
+
         // Construction du mapping field → valeur pour une écriture uniforme
         Map<FieldKey, String> fields = buildFieldMap(merged);
         for (Map.Entry<FieldKey, String> entry : fields.entrySet()) {
-            setIfNonBlank(tag, entry.getKey(), entry.getValue());
+            // Ne pas écraser un tag préservé si la nouvelle valeur est non-vide
+            if (!preserved.containsKey(entry.getKey()))
+                setIfNonBlank(tag, entry.getKey(), entry.getValue());
+        }
+
+        // Restaurer les tags préservés (priorité absolue sur toute autre valeur)
+        for (Map.Entry<FieldKey, String> entry : preserved.entrySet()) {
+            try { tag.setField(entry.getKey(), entry.getValue()); } catch (Exception ignored) {}
         }
 
         // Champs TXXX non couverts par FieldKey — écrits directement
@@ -93,10 +103,83 @@ public class TagWriter {
             try { tag.setField(savedArtwork); } catch (Exception ignored) {}
         }
 
+        // Supprimer ID3v1 si configuré (MP3 seulement — ID3v1 = footer 128 octets inutile)
+        if (Config.get().removeId3v1() && audio instanceof org.jaudiotagger.audio.mp3.MP3File) {
+            org.jaudiotagger.tag.TagOptionSingleton.getInstance().setId3v1Save(false);
+        }
+
+        // ReplayGain : écriture via TXXX (MP3) ou champ libre (FLAC/OGG)
+        // Doit être AVANT commit pour être inclus dans le même write
+        if (info.replayGainTrackGain != null && !info.replayGainTrackGain.isBlank()) {
+            if (tag instanceof AbstractID3v2Tag id3) {
+                writeTxxx(id3, "REPLAYGAIN_TRACK_GAIN", info.replayGainTrackGain);
+                if (!info.replayGainTrackPeak.isBlank()) writeTxxx(id3, "REPLAYGAIN_TRACK_PEAK", info.replayGainTrackPeak);
+            } else if (tag instanceof org.jaudiotagger.tag.flac.FlacTag flac) {
+                try { flac.setField("REPLAYGAIN_TRACK_GAIN", info.replayGainTrackGain); } catch (Exception ignored) {}
+                try { if (!info.replayGainTrackPeak.isBlank()) flac.setField("REPLAYGAIN_TRACK_PEAK", info.replayGainTrackPeak); } catch (Exception ignored) {}
+            } else if (tag instanceof org.jaudiotagger.tag.vorbiscomment.VorbisCommentTag vorbis) {
+                try { vorbis.setField("REPLAYGAIN_TRACK_GAIN", info.replayGainTrackGain); } catch (Exception ignored) {}
+                try { if (!info.replayGainTrackPeak.isBlank()) vorbis.setField("REPLAYGAIN_TRACK_PEAK", info.replayGainTrackPeak); } catch (Exception ignored) {}
+            }
+        }
+
         audio.commit();
 
         // Restaurer les timestamps du fichier (Picard : preserve_timestamps)
         if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+    }
+
+    /**
+     * Écrit les tags ReplayGain Track Gain/Peak dans le fichier.
+     * MP3 (ID3v2) : TXXX:REPLAYGAIN_TRACK_GAIN / TXXX:REPLAYGAIN_TRACK_PEAK
+     * FLAC/OGG (VorbisComment) : champs texte libres du même nom
+     * M4A : non supporté (jaudiotagger n'expose pas les atomes freeform iTunes)
+     */
+    public void writeReplayGain(File fichier, String trackGain, String trackPeak) {
+        if ((trackGain == null || trackGain.isBlank()) && (trackPeak == null || trackPeak.isBlank())) return;
+        try {
+            AudioFile audio = AudioFileIO.read(fichier);
+            Tag tag = audio.getTag();
+            if (tag == null) return;
+
+            if (tag instanceof AbstractID3v2Tag id3) {
+                if (trackGain != null && !trackGain.isBlank()) writeTxxx(id3, "REPLAYGAIN_TRACK_GAIN", trackGain);
+                if (trackPeak != null && !trackPeak.isBlank()) writeTxxx(id3, "REPLAYGAIN_TRACK_PEAK", trackPeak);
+            } else if (tag instanceof org.jaudiotagger.tag.flac.FlacTag flac) {
+                if (trackGain != null && !trackGain.isBlank()) flac.setField("REPLAYGAIN_TRACK_GAIN", trackGain);
+                if (trackPeak != null && !trackPeak.isBlank()) flac.setField("REPLAYGAIN_TRACK_PEAK", trackPeak);
+            } else if (tag instanceof org.jaudiotagger.tag.vorbiscomment.VorbisCommentTag vorbis) {
+                if (trackGain != null && !trackGain.isBlank()) vorbis.setField("REPLAYGAIN_TRACK_GAIN", trackGain);
+                if (trackPeak != null && !trackPeak.isBlank()) vorbis.setField("REPLAYGAIN_TRACK_PEAK", trackPeak);
+            }
+            // M4A (Mp4Tag) : pas d'API freeform dans jaudiotagger 3.0.1 — ignoré
+
+            audio.commit();
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Écrit REPLAYGAIN_ALBUM_GAIN / REPLAYGAIN_ALBUM_PEAK dans le fichier.
+     * Utilisé par la passe album clustering après analyse collective des pistes.
+     */
+    public void writeAlbumReplayGain(File fichier, String albumGain, String albumPeak) {
+        if ((albumGain == null || albumGain.isBlank()) && (albumPeak == null || albumPeak.isBlank())) return;
+        try {
+            AudioFile audio = AudioFileIO.read(fichier);
+            Tag tag = audio.getTag();
+            if (tag == null) return;
+            if (tag instanceof AbstractID3v2Tag id3) {
+                if (albumGain != null && !albumGain.isBlank()) writeTxxx(id3, "REPLAYGAIN_ALBUM_GAIN", albumGain);
+                if (albumPeak != null && !albumPeak.isBlank()) writeTxxx(id3, "REPLAYGAIN_ALBUM_PEAK", albumPeak);
+            } else if (tag instanceof org.jaudiotagger.tag.flac.FlacTag flac) {
+                if (albumGain != null && !albumGain.isBlank()) flac.setField("REPLAYGAIN_ALBUM_GAIN", albumGain);
+                if (albumPeak != null && !albumPeak.isBlank()) flac.setField("REPLAYGAIN_ALBUM_PEAK", albumPeak);
+            } else if (tag instanceof org.jaudiotagger.tag.vorbiscomment.VorbisCommentTag vorbis) {
+                if (albumGain != null && !albumGain.isBlank()) vorbis.setField("REPLAYGAIN_ALBUM_GAIN", albumGain);
+                if (albumPeak != null && !albumPeak.isBlank()) vorbis.setField("REPLAYGAIN_ALBUM_PEAK", albumPeak);
+            }
+            audio.commit();
+        } catch (Exception ignored) {}
     }
 
     /**
@@ -165,6 +248,29 @@ public class TagWriter {
 
     private String getTagFirst(Tag tag, FieldKey key) {
         try { return tag.getFirst(key); } catch (Exception e) { return ""; }
+    }
+
+    /**
+     * Lit et retourne les tags que l'utilisateur veut préserver (tags.preserved_tags).
+     * Format config : noms FieldKey séparés par | ex: "RATING|COMMENT|CUSTOM1"
+     * Retourne une map vide si la config est absente ou si tous les champs sont vides.
+     */
+    private Map<FieldKey, String> readPreservedTags(Tag tag) {
+        String raw = Config.get().str("tags.preserved_tags", "");
+        Map<FieldKey, String> result = new LinkedHashMap<>();
+        if (raw.isBlank()) return result;
+        for (String name : raw.split("\\|")) {
+            name = name.trim();
+            if (name.isBlank()) continue;
+            try {
+                FieldKey key = FieldKey.valueOf(name.toUpperCase());
+                String val = getTagFirst(tag, key);
+                if (val != null && !val.isBlank()) result.put(key, val);
+            } catch (IllegalArgumentException ignored) {
+                // Nom de FieldKey inconnu — on ignore silencieusement
+            }
+        }
+        return result;
     }
 
     private static final java.util.Map<FieldKey, java.lang.reflect.Field> KEY_TO_FIELD =

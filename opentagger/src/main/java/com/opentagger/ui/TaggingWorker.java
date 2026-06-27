@@ -6,12 +6,14 @@ import com.opentagger.model.TagInfo;
 import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
+import java.util.Map;
 
 import javax.swing.*;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 /**
  * SwingWorker qui traite les fichiers sélectionnés en arrière-plan
@@ -46,6 +48,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final DiscogsClient      discogs   = new DiscogsClient();
     private final LastFmClient       lastFm    = new LastFmClient();
     private final FanArtClient       fanArt    = new FanArtClient();
+    private final CaaClient          caa       = new CaaClient();
     private final LocalCorrector     corrector = new LocalCorrector();
     private final TagWriter          writer    = new TagWriter();
     private final FileRenamer        renamer   = new FileRenamer();
@@ -57,6 +60,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     private final boolean bpmEnabled      = BpmDetector.isAvailable();
     private final boolean essentiaEnabled = EssentiaClient.isOnPath();
+    private final boolean rgEnabled       = Config.get().replayGainEnabled() && ReplayGainAnalyzer.isAvailable();
+    private final ReplayGainAnalyzer replayGain = rgEnabled ? new ReplayGainAnalyzer() : null;
+    private final TaggerScript taggerScript = new TaggerScript();
+    // Cache alias artiste : artistMbid → nom Latin (évite un appel MB par fichier)
+    private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     public TaggingWorker(List<FileEntry> entries, boolean useAcoustId, int maskIndex,
                          Consumer<String> onProgress, Consumer<FileEntry> onUpdate) {
@@ -77,9 +85,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             entry.status = FileEntry.Status.PROCESSING;
             publish(entry);
-            onProgress.accept(String.format("Traitement : %s (%d/%d)", entry.filename(), done + 1, total));
+            final int fileIdx   = done + 1;
+            final int fileTotal = total;
+            final String fname  = entry.filename();
+            Consumer<String> step = s -> onProgress.accept(
+                String.format("[%d/%d] %s — %s", fileIdx, fileTotal, fname, s));
+            step.accept("identification…");
 
-            processEntry(entry);
+            processEntry(entry, step);
 
             // Si annulé pendant processEntry, remettre l'entrée en attente
             if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
@@ -103,6 +116,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
+        // ── Album clustering : passe 2 — corriger numéros de piste par album ──────
+        if (Config.get().albumClusterEnabled() && !isCancelled()) {
+            clusterAlbums(entries);
+        }
+
         cache.purgeExpired();
         cache.close();
         return null;
@@ -113,7 +131,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         for (FileEntry e : chunks) onUpdate.accept(e);
     }
 
-    private void processEntry(FileEntry entry) {
+    private void processEntry(FileEntry entry, Consumer<String> step) {
         try {
             File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
 
@@ -135,6 +153,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             int seuil = Config.get().minScoreAuto();
 
             if (results.isEmpty() || results.get(0).score < seuil) {
+                step.accept("reconnaissance Shazam/AudD…");
                 log("  chain Shazam→AudD...");
                 List<TagInfo> chain = recognitionChain.recognize(fichier);
                 log("  chain → " + chain.size() + " résultat(s)");
@@ -163,6 +182,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // Enrichir avec lookup si album ou année manquants (la recherche ne retourne pas
             // toujours les releases — ex. remixes, singles sans release dédiée dans MB)
             if ((best.album.isBlank() || best.year.isBlank()) && !best.recordingMbid.isBlank()) {
+                step.accept("enrichissement MusicBrainz…");
                 try {
                     String lookupCached = cache.getLookup(best.recordingMbid);
                     TagInfo full = (lookupCached != null)
@@ -220,7 +240,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             log("  corrector...");
             corrector.correct(best, entry.file.toPath());
+            taggerScript.apply(best);
 
+            step.accept("genres…");
             log("  genres...");
             if (best.genre.isBlank()) {
                 try { discogs.enrichGenres(best); log("  genre←discogs=" + best.genre); } catch (Exception ignored) {}
@@ -235,6 +257,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             if (bpmEnabled && best.bpm.isBlank()) {
+                step.accept("BPM…");
                 log("  BPM...");
                 int bpm = bpmDet.detect(fichier.getAbsolutePath());
                 if (bpm > 0) best.bpm = String.valueOf(bpm);
@@ -247,21 +270,73 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log("  mood←essentia=" + best.mood);
             }
 
+            // ── Translittération artiste (si nom non-Latin et option activée) ──────
+            if (Config.get().translateArtists() && !best.artistMbid.isBlank()
+                    && hasNonLatinChars(best.artist)) {
+                try {
+                    String alias = aliasCache.computeIfAbsent(best.artistMbid, mbid -> {
+                        try { return mb.lookupArtistAlias(mbid, Config.get().translateLocale()); }
+                        catch (Exception e) { return ""; }
+                    });
+                    if (!alias.isBlank()) {
+                        log("  translit: " + best.artist + " → " + alias);
+                        best.artist     = alias;
+                        best.artistSort = alias;
+                    }
+                } catch (Exception ignored) {}
+            }
+
             log("  lyrics...");
             try { lyrics.enrich(best); } catch (Exception ignored) {}
 
-            log("  fanart...");
+            step.accept("pochette…");
+            log("  fanart/caa...");
             Path cover = null;
-            if (!best.artistMbid.isBlank()) {
+            // 0. Pochette locale existante dans le dossier du fichier (folder.jpg, cover.jpg…)
+            if (Config.get().coverSearchLocal()) {
+                try { cover = findLocalCover(fichier.getParentFile()); } catch (Exception ignored) {}
+                if (cover != null) log("  cover←local: " + cover.getFileName());
+            }
+            // 1. Cover Art Archive (MB officiel, sans clé API, lié à la release exacte)
+            if (cover == null && (!best.releaseMbid.isBlank() || !best.releaseGroupMbid.isBlank())) {
+                try { cover = caa.downloadFront(best); } catch (Exception ignored) {}
+            }
+            // 2. FanArt.tv en fallback (meilleur pour les images artiste)
+            if (cover == null && Config.get().fanartEnabled() && !best.artistMbid.isBlank()) {
                 try { cover = fanArt.downloadCover(best); } catch (Exception ignored) {}
+            }
+            // 3. Sauvegarde pochette en fichier séparé si configuré
+            if (cover != null && Config.get().bool("cover.save_to_file", false)) {
+                try {
+                    String fname = Config.get().str("cover.filename", "cover");
+                    String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                    java.nio.file.Path dest = fichier.toPath().resolveSibling(fname + ext);
+                    if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
+                        java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (Exception ignored) {}
             }
             log("  cover=" + (cover != null ? cover.getFileName() : "null"));
 
+            // ── ReplayGain (avant écriture pour inclure dans le même commit) ────────
+            if (rgEnabled) {
+                log("  replaygain...");
+                try {
+                    ReplayGainAnalyzer.RGResult rg = replayGain.analyze(fichier.getAbsolutePath());
+                    if (rg != null) {
+                        best.replayGainTrackGain = rg.trackGain();
+                        best.replayGainTrackPeak = rg.trackPeak();
+                        log("  rg: gain=" + rg.trackGain() + " peak=" + rg.trackPeak());
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            step.accept("écriture tags…");
             log("  write tags...");
             writer.write(fichier, best, cover);
 
             // ── Renommage optionnel ───────────────────────────────────────
             if (maskIndex >= 0) {
+                step.accept("renommage…");
                 try {
                     Path curPath = fichier.toPath();
                     Path root    = entry.scanRoot != null ? entry.scanRoot : curPath.getParent();
@@ -514,6 +589,134 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (!r.isEmpty()) return r;
         }
         return results;
+    }
+
+    /**
+     * Passe 2 : groupe les fichiers taguées par releaseMbid, fait un seul lookupRelease
+     * par album, et re-corrige numéros/totaux de piste + albumArtist cohérent.
+     */
+    private void clusterAlbums(List<FileEntry> entries) {
+        // Grouper par releaseMbid
+        java.util.Map<String, java.util.List<FileEntry>> groups = new java.util.LinkedHashMap<>();
+        for (FileEntry e : entries) {
+            if (e.status == FileEntry.Status.TAGGED && e.result != null
+                    && !e.result.releaseMbid.isBlank()) {
+                groups.computeIfAbsent(e.result.releaseMbid, k -> new java.util.ArrayList<>()).add(e);
+            }
+        }
+
+        for (java.util.Map.Entry<String, java.util.List<FileEntry>> group : groups.entrySet()) {
+            if (isCancelled()) break;
+            java.util.List<FileEntry> albumFiles = group.getValue();
+            if (albumFiles.size() < 2) continue;
+
+            String releaseMbid = group.getKey();
+            log("  cluster: " + albumFiles.size() + " fichiers pour release " + releaseMbid);
+            try {
+                MusicBrainzClient.ReleaseTracklist tracklist = mb.lookupRelease(releaseMbid);
+                if (tracklist == null || tracklist.tracks().isEmpty()) continue;
+
+                int maxDisc = tracklist.tracks().stream().mapToInt(MusicBrainzClient.ReleaseTrack::disc).max().orElse(0);
+
+                for (FileEntry entry : albumFiles) {
+                    TagInfo result = entry.result;
+                    MusicBrainzClient.ReleaseTrack matched = findBestTrack(tracklist, result);
+                    if (matched == null) continue;
+
+                    boolean changed = false;
+                    if (matched.trackNo() > 0 && !String.valueOf(matched.trackNo()).equals(result.track)) {
+                        result.track = String.valueOf(matched.trackNo()); changed = true;
+                    }
+                    if (matched.trackTotal() > 0 && !String.valueOf(matched.trackTotal()).equals(result.trackTotal)) {
+                        result.trackTotal = String.valueOf(matched.trackTotal()); changed = true;
+                    }
+                    if (maxDisc > 1 && matched.disc() > 0) {
+                        result.discNo    = String.valueOf(matched.disc());
+                        result.discTotal = String.valueOf(maxDisc);
+                        changed = true;
+                    }
+                    if (!tracklist.albumArtist().isBlank()) result.albumArtist     = tracklist.albumArtist();
+                    if (!tracklist.albumArtistSort().isBlank()) result.albumArtistSort = tracklist.albumArtistSort();
+                    if (tracklist.isCompilation()) result.isCompilation = "1";
+
+                    if (changed) {
+                        File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+                        writer.write(fichier, result);
+                        log("  cluster ok: " + fichier.getName() + " → piste " + result.track + "/" + result.trackTotal);
+                        entry.result = result;
+                        publish(entry);
+                    }
+                }
+                // ── Album ReplayGain (concat analyse) ─────────────────────────────
+                if (rgEnabled) {
+                    java.util.List<String> paths = albumFiles.stream()
+                        .map(e -> e.currentPath != null ? e.currentPath.toString() : e.file.getAbsolutePath())
+                        .collect(java.util.stream.Collectors.toList());
+                    log("  album RG: analyse " + paths.size() + " pistes...");
+                    ReplayGainAnalyzer.RGResult albumRg = ReplayGainAnalyzer.analyzeAlbum(paths);
+                    if (albumRg != null) {
+                        log("  album RG: gain=" + albumRg.trackGain() + " peak=" + albumRg.trackPeak());
+                        for (FileEntry entry : albumFiles) {
+                            File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+                            writer.writeAlbumReplayGain(f, albumRg.trackGain(), albumRg.trackPeak());
+                        }
+                    }
+                }
+
+                sleep(1100);
+            } catch (Exception e) {
+                log("  cluster erreur: " + e.getMessage());
+            }
+        }
+    }
+
+    private MusicBrainzClient.ReleaseTrack findBestTrack(MusicBrainzClient.ReleaseTracklist tracklist, TagInfo result) {
+        // 1. Correspondance par recordingMbid (100% fiable)
+        if (!result.recordingMbid.isBlank()) {
+            for (var t : tracklist.tracks())
+                if (result.recordingMbid.equals(t.recordingMbid())) return t;
+        }
+        // 2. Correspondance par numéro de piste + disc
+        if (!result.track.isBlank()) {
+            try {
+                int n = Integer.parseInt(result.track.trim());
+                int d = result.discNo.isBlank() ? 1 : Integer.parseInt(result.discNo.trim());
+                for (var t : tracklist.tracks())
+                    if (t.trackNo() == n && (t.disc() == 0 || t.disc() == d)) return t;
+            } catch (NumberFormatException ignored) {}
+        }
+        // 3. Correspondance par similarité de titre
+        String titleLow = result.title.toLowerCase().trim();
+        if (titleLow.isBlank()) return null;
+        MusicBrainzClient.ReleaseTrack best = null;
+        int bestScore = 0;
+        for (var t : tracklist.tracks()) {
+            int sim = titleSimilarity(titleLow, t.title().toLowerCase().trim());
+            if (sim > bestScore && sim >= 70) { bestScore = sim; best = t; }
+        }
+        return best;
+    }
+
+    private static int titleSimilarity(String a, String b) {
+        if (a.equals(b)) return 100;
+        if (a.contains(b) || b.contains(a)) return 90;
+        java.util.Set<String> ta = new java.util.HashSet<>(java.util.Arrays.asList(a.split("\\s+")));
+        java.util.Set<String> tb = new java.util.HashSet<>(java.util.Arrays.asList(b.split("\\s+")));
+        long common = ta.stream().filter(tb::contains).count();
+        int total = ta.size() + tb.size();
+        return total == 0 ? 0 : (int)(common * 2 * 100 / total);
+    }
+
+    /** Cherche une pochette dans le dossier : folder.jpg, cover.jpg, front.jpg… */
+    private static Path findLocalCover(File dir) {
+        if (dir == null || !dir.isDirectory()) return null;
+        for (String name : new String[]{
+                "folder.jpg","cover.jpg","front.jpg","albumart.jpg","album.jpg",
+                "folder.png","cover.png","front.png"}) {
+            File f = new File(dir, name);
+            if (f.exists() && f.length() > 512) return f.toPath();
+        }
+        return null;
     }
 
     private String readTag(File f, FieldKey key) {

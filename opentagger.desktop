@@ -4,7 +4,7 @@ Type=Application
 Name=OpenTagger
 GenericName=Tagueur Audio
 Comment=Identifier et taguer vos fichiers audio via MusicBrainz, AcoustID, Discogs et Last.fm
-Exec=bash -c 'java -Xms150m -Xmx600m -Dawt.useSystemAAFontSettings=on -Dswing.aatext=true -jar /home/paulceline/opentagger/opentagger/target/opentagger.jar'
+Exec=/home/paulceline/opentagger/opentagger.sh
 Icon=/home/paulceline/opentagger/logo.png
 Terminal=false
 Categories=Audio;Music;AudioVideo;

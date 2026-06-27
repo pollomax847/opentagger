@@ -56,6 +56,7 @@ public class LocalCorrector {
         removeDiscnoPadding(info);      // Script 2
         normalizeGenre(info);
         detectClassical(info);          // Script 3 : genre Classical si isClassical
+        if (Config.get().correctPunctuation()) correctPunctuation(info);
     }
 
     // ── 1. Extraction depuis le nom de fichier ──────────────────────────────
@@ -89,12 +90,14 @@ public class LocalCorrector {
     // "Track Artist set to Album Artist and move any additional artists into title"
 
     public void correctFeaturedArtist(TagInfo info) {
-        // Script 4 de Jaikoz : si albumArtist est renseigné et ≠ "Various Artists",
-        // le track artist devient l'albumArtist et les artistes supplémentaires
-        // sont déplacés dans le titre sous la forme "(Ft. X; Y)"
+        // Script 4 de Jaikoz : remplace l'artiste piste par l'artiste album UNIQUEMENT
+        // si l'artiste piste COMMENCE PAR l'artiste album (cas "Khaled feat. Soprano").
+        // Si les deux artistes sont complètement différents (compilation, split),
+        // on ne touche PAS à l'artiste — évite les remplacements erronés.
         if (!info.albumArtist.isBlank()
                 && !info.albumArtist.equalsIgnoreCase("Various Artists")
-                && !info.artist.equalsIgnoreCase(info.albumArtist)) {
+                && !info.artist.equalsIgnoreCase(info.albumArtist)
+                && info.artist.toLowerCase().startsWith(info.albumArtist.toLowerCase())) {
             info.artist = info.albumArtist;
         }
 
@@ -185,6 +188,34 @@ public class LocalCorrector {
         if ("1".equals(info.isClassical) && info.genre.isBlank()) {
             info.genre = "Classical";
         }
+    }
+
+    // ── 6. Correction de la ponctuation typographique ───────────────────────
+
+    public void correctPunctuation(TagInfo info) {
+        info.title       = normPunct(info.title);
+        info.artist      = normPunct(info.artist);
+        info.album       = normPunct(info.album);
+        info.albumArtist = normPunct(info.albumArtist);
+    }
+
+    private String normPunct(String s) {
+        if (s == null || s.isBlank()) return s;
+        return s
+            .replace('‘', '\'')   // ' → '
+            .replace('’', '\'')   // ' → '
+            .replace('‚', '\'')   // ‚ → '
+            .replace('ʼ', '\'')   // ʼ → '
+            .replace('`', '\'')   // ` → '
+            .replace('´', '\'')   // ´ → '
+            .replace('“', '"')    // " → "
+            .replace('”', '"')    // " → "
+            .replace('„', '"')    // „ → "
+            .replace('–', '-')    // – → -
+            .replace('—', '-')    // — → -
+            .replace("…", "...") // … → ...
+            .replaceAll("\\s{2,}", " ")
+            .trim();
     }
 
     // ── Chargement des données ───────────────────────────────────────────────

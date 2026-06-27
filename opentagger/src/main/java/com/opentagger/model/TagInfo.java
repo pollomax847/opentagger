@@ -85,6 +85,10 @@ public class TagInfo {
     public String initialKey          = "";    // ex: "Cm", "F#"
     public String language            = "";    // ISO 639 ex: "eng"
 
+    // ── ReplayGain ────────────────────────────────────────────────────────────
+    public String replayGainTrackGain = "";    // ex: "-4.73 dB"
+    public String replayGainTrackPeak = "";    // ex: "0.983547"
+
     // ── Paroles ──────────────────────────────────────────────────────────────
     public String lyrics              = "";
     public String lyricsUrl           = "";

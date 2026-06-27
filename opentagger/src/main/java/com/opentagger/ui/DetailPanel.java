@@ -136,7 +136,7 @@ public class DetailPanel extends JPanel {
 
     public DetailPanel() {
         super(new BorderLayout());
-        JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP);
+        JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
         tabs.addTab("Général",       buildGeneralTab());
         tabs.addTab("Pochette",      buildPochetteTab());
         tabs.addTab("Classique",     buildClassicalTab());

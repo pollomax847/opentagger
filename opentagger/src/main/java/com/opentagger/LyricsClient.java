@@ -11,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Récupération des paroles depuis deux sources en cascade :
@@ -23,7 +24,7 @@ public class LyricsClient {
     private static final String LRCLIB    = "https://lrclib.net/api/get";
 
     private final HttpClient   http   = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(8))
+            .connectTimeout(Duration.ofSeconds(6))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
@@ -52,9 +53,10 @@ public class LyricsClient {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("User-Agent", Config.get().userAgent())
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(Duration.ofSeconds(8))
                     .GET().build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+                    .orTimeout(8, TimeUnit.SECONDS).join();
             if (resp.statusCode() != 200) return;
             String lyrics = mapper.readTree(resp.body()).path("lyrics").asText("").trim();
             if (!lyrics.isBlank()) {
@@ -75,9 +77,10 @@ public class LyricsClient {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("User-Agent", Config.get().userAgent())
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(Duration.ofSeconds(8))
                     .GET().build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+                    .orTimeout(8, TimeUnit.SECONDS).join();
             if (resp.statusCode() != 200) return;
             JsonNode root = mapper.readTree(resp.body());
             // Préférer les paroles non-synchronisées (plainLyrics), fallback syncedLyrics nettoyé

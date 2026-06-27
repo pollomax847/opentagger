@@ -14,7 +14,15 @@ if [ ! -f "$JAR" ]; then
     exit 1
 fi
 
-exec java -Xms150m -Xmx600m \
+LOG_DIR="$HOME/.local/share/opentagger"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/opentagger.log"
+# Rotation simple : garder au plus 2 Mo
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
+    mv "$LOG" "${LOG}.old"
+fi
+
+java -Xms150m -Xmx600m \
      -Dawt.useSystemAAFontSettings=on \
      -Dswing.aatext=true \
-     -jar "$JAR" "$@"
+     -jar "$JAR" "$@" 2>&1 | tee -a "$LOG"

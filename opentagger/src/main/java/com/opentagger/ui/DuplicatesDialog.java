@@ -31,6 +31,7 @@ public class DuplicatesDialog extends JDialog {
     /** Correspondance parallèle : allBoxes[i] ↔ allEntries[i] */
     private final List<JCheckBox>  allBoxes   = new ArrayList<>();
     private final List<FileEntry>  allEntries = new ArrayList<>();
+    private JCheckBox chkCleanDirs;
 
     public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups, FileTableModel tableModel) {
         super(owner, "Doublons détectés — " + groups.size() + " groupe(s)", true);
@@ -161,9 +162,13 @@ public class DuplicatesDialog extends JDialog {
     private JPanel buildFooter() {
         JButton btnSmart  = new JButton("Sélection intelligente");
         JButton btnNone   = new JButton("Tout décocher");
-        JButton btnDelete = new JButton("Supprimer les cochés…");
+        JButton btnDelete = new JButton("Déplacer dans la corbeille…");
         JButton btnClose  = new JButton("Fermer");
         btnDelete.putClientProperty("FlatLaf.style", "background: #8b1a1a");
+
+        chkCleanDirs = new JCheckBox("Supprimer les dossiers vides après");
+        chkCleanDirs.setSelected(true);
+        chkCleanDirs.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
 
         btnSmart.setToolTipText("Coche automatiquement les fichiers de moindre qualité dans chaque groupe");
         btnSmart .addActionListener(e -> smartSelect());
@@ -180,13 +185,18 @@ public class DuplicatesDialog extends JDialog {
         JLabel info = new JLabel("  " + groups.size() + " groupe(s), " + totalFiles + " fichier(s)");
         info.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
 
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        left.add(info);
+        left.add(Box.createHorizontalStrut(16));
+        left.add(chkCleanDirs);
+
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         right.add(btnSmart);
         right.add(btnNone);
         right.add(Box.createHorizontalStrut(12));
         right.add(btnDelete);
         right.add(btnClose);
-        p.add(info,  BorderLayout.WEST);
+        p.add(left,  BorderLayout.WEST);
         p.add(right, BorderLayout.EAST);
         return p;
     }
@@ -246,24 +256,56 @@ public class DuplicatesDialog extends JDialog {
             "Confirmer la suppression", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (ok != JOptionPane.YES_OPTION) return;
 
+        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+
         int deleted = 0, errors = 0;
+        List<File> deletedParents = new ArrayList<>();
         for (FileEntry e : toDelete) {
             File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
             int modelIdx = tableModel.indexOf(e);
-            if (f.delete()) {
+            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+            if (moved) {
                 if (modelIdx >= 0) tableModel.remove(modelIdx);
+                if (chkCleanDirs.isSelected() && f.getParentFile() != null)
+                    deletedParents.add(f.getParentFile());
                 deleted++;
             } else {
                 errors++;
             }
         }
-        JOptionPane.showMessageDialog(this,
-            deleted + " fichier(s) supprimé(s)" + (errors > 0 ? ", " + errors + " erreur(s)" : "") + ".",
-            "Résultat", JOptionPane.INFORMATION_MESSAGE);
+
+        // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés
+        int dirsRemoved = 0;
+        if (chkCleanDirs.isSelected()) {
+            for (File dir : deletedParents) dirsRemoved += cleanEmptyAncestors(dir);
+        }
+
+        String where = trashSupported ? "déplacé(s) dans la corbeille" : "supprimé(s)";
+        String msg = deleted + " fichier(s) " + where
+            + (dirsRemoved > 0 ? ", " + dirsRemoved + " dossier(s) vide(s) supprimé(s)" : "")
+            + (errors > 0 ? ", " + errors + " erreur(s)" : "") + ".";
+        JOptionPane.showMessageDialog(this, msg, "Résultat", JOptionPane.INFORMATION_MESSAGE);
         dispose();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Remonte les dossiers parents et supprime ceux qui sont vides. Retourne le nombre supprimé. */
+    private static int cleanEmptyAncestors(File dir) {
+        int count = 0;
+        while (dir != null && dir.isDirectory()) {
+            String[] contents = dir.list();
+            if (contents != null && contents.length == 0) {
+                if (dir.delete()) count++;
+                else break;
+                dir = dir.getParentFile();
+            } else {
+                break;
+            }
+        }
+        return count;
+    }
 
     private static String ext(String name) {
         int i = name.lastIndexOf('.');

@@ -257,6 +257,40 @@ public class MetadataCache {
         return null;
     }
 
+    /**
+     * Charge toute la table file_history en mémoire (path → mbid).
+     * Remplace les N appels unitaires à getFileTagging() pendant le scan initial.
+     */
+    public synchronized java.util.Map<String, String> loadFileHistoryMap() {
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        if (conn == null) return map;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT path, mbid FROM file_history WHERE mbid IS NOT NULL AND mbid != ''")) {
+            while (rs.next()) map.put(rs.getString(1), rs.getString(2));
+        } catch (Exception e) { LOG.warning("loadFileHistoryMap: " + e.getMessage()); }
+        return map;
+    }
+
+    /**
+     * Charge toute la table tagging_history en mémoire (mbid → TagInfo).
+     * Remplace les N appels unitaires à getTaggingHistory() pendant le scan initial.
+     */
+    public synchronized java.util.Map<String, TagInfo> loadTaggingHistoryMap() {
+        java.util.Map<String, TagInfo> map = new java.util.HashMap<>();
+        if (conn == null) return map;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT mbid, json FROM tagging_history")) {
+            while (rs.next()) {
+                try {
+                    TagInfo ti = mapper.readValue(rs.getString(2), TagInfo.class);
+                    map.put(rs.getString(1), ti);
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception e) { LOG.warning("loadTaggingHistoryMap: " + e.getMessage()); }
+        return map;
+    }
+
     /** Nombre total d'entrées dans l'historique personnel. */
     public synchronized int historyCount() {
         if (conn == null) return 0;

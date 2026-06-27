@@ -33,7 +33,10 @@ public class AudioScanner {
     }
 
     private boolean isAudio(File f) {
-        String nom = f.getName().toLowerCase();
-        return EXTENSIONS.stream().anyMatch(nom::endsWith);
+        String nom = f.getName();
+        // Exclure les fichiers cachés et les resource forks macOS (._NomFichier)
+        if (nom.startsWith(".")) return false;
+        String lower = nom.toLowerCase();
+        return EXTENSIONS.stream().anyMatch(lower::endsWith);
     }
 }

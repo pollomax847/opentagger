@@ -92,15 +92,17 @@ public class AcoustIdClient {
         if (userToken.isBlank() || lastFingerprint.isBlank() || lastDuration.isBlank()) return;
 
         try {
+            // L'API AcoustID submit attend des tableaux 0-indexés : fingerprint[0], duration[0]
+            // (même convention que le client Python officiel de Picard)
             StringBuilder body = new StringBuilder()
                 .append("client=").append(URLEncoder.encode(Config.get().acoustidKey(), StandardCharsets.UTF_8))
                 .append("&user=").append(URLEncoder.encode(userToken, StandardCharsets.UTF_8))
-                .append("&fingerprint[]=").append(URLEncoder.encode(lastFingerprint, StandardCharsets.UTF_8))
-                .append("&duration[]=").append(URLEncoder.encode(lastDuration, StandardCharsets.UTF_8));
+                .append("&fingerprint[0]=").append(URLEncoder.encode(lastFingerprint, StandardCharsets.UTF_8))
+                .append("&duration[0]=").append(URLEncoder.encode(lastDuration, StandardCharsets.UTF_8));
             if (!recordingMbid.isBlank())
-                body.append("&mbid[]=").append(URLEncoder.encode(recordingMbid, StandardCharsets.UTF_8));
+                body.append("&mbid[0]=").append(URLEncoder.encode(recordingMbid, StandardCharsets.UTF_8));
             if (!lastAcoustId.isBlank())
-                body.append("&trackid[]=").append(URLEncoder.encode(lastAcoustId, StandardCharsets.UTF_8));
+                body.append("&trackid[0]=").append(URLEncoder.encode(lastAcoustId, StandardCharsets.UTF_8));
 
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(SUBMIT_URL))
