@@ -249,7 +249,9 @@ public class MainFrame extends JFrame {
         m.add(mitem("Ouvrir un dossier…",     "Ctrl+O",  e -> openFolder()));
         m.add(mitem("Vider la liste",          "Ctrl+W",  e -> clearFileList()));
         m.addSeparator();
-        m.add(mitem("Exporter CSV…",           "Ctrl+E",  e -> exportCsv()));
+        m.add(mitem("Exporter CSV…",            "Ctrl+E",  e -> exportCsv()));
+        m.add(mitem("Exporter playlist M3U…",  null,      e -> exportPlaylist("m3u")));
+        m.add(mitem("Exporter playlist XSPF…", null,      e -> exportPlaylist("xspf")));
         m.addSeparator();
         m.add(mitem("Quitter",                 null,      e -> System.exit(0)));
         return m;
@@ -1199,6 +1201,7 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 try {
                     int[] r = get();
+                    detectLocalCompilations();
                     setStatus(tableModel.getRowCount() + " fichier(s) — " + r[1] + " déjà tagué(s)");
                     refreshStats();
                     completeScanEntry(scanRow, dirName, r[0], r[1], null);
@@ -1429,9 +1432,72 @@ public class MainFrame extends JFrame {
         setStatus(String.format("Terminé — ✓ %d tagué(s)  ⚠ %d ignoré(s)  ✗ %d erreur(s)  — complétion albums…",
                 ok, skip, err));
         resetBtns();
+        detectLocalCompilations();
         refreshStats();
         // Lancer la complétion albums automatiquement après chaque session de tagging
         completeAlbums();
+    }
+
+    /**
+     * Heuristique locale : regroupe les fichiers par (dossier + album) et marque
+     * isCompilation = "1" quand ≥ 3 artistes distincts partagent le même album.
+     * Complète la détection MB (qui couvre les cas où MB renvoie "Various Artists"
+     * ou le type release-group "Compilation"), mais n'écrase pas les flags déjà posés.
+     */
+    private void detectLocalCompilations() {
+        // Grouper par (dossier parent, nom d'album normalisé)
+        java.util.Map<String, List<FileEntry>> byAlbum = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.current == null) continue;
+            java.nio.file.Path dir = (e.currentPath != null ? e.currentPath : e.file.toPath()).getParent();
+            String album = e.current.album.trim().toLowerCase();
+            String key   = dir.toString() + "\0" + album;
+            byAlbum.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(e);
+        }
+
+        int marked = 0;
+        for (List<FileEntry> group : byAlbum.values()) {
+            if (group.size() < 3) continue; // trop peu de fichiers pour conclure
+
+            // Si déjà marqué compilation dans au moins un fichier du groupe → ignorer
+            boolean alreadyKnown = group.stream().anyMatch(e ->
+                "1".equals(e.current.isCompilation)
+                || (e.result != null && "1".equals(e.result.isCompilation)));
+            if (alreadyKnown) continue;
+
+            // Compter les artistes distincts non génériques
+            java.util.Set<String> artists = new java.util.HashSet<>();
+            for (FileEntry e : group) {
+                // Préférer l'artiste du résultat MB si disponible
+                String a = (e.result != null && !e.result.artist.isBlank())
+                        ? e.result.artist : e.current.artist;
+                a = a.trim().toLowerCase();
+                if (!a.isBlank() && !isGenericLocalArtist(a)) artists.add(a);
+            }
+
+            // Seuil : ≥ 3 artistes distincts = compilation probable
+            if (artists.size() >= 3) {
+                for (FileEntry e : group) {
+                    e.current.isCompilation = "1";
+                    if (e.result != null) e.result.isCompilation = "1";
+                    tableModel.update(e);
+                    marked++;
+                }
+            }
+        }
+
+        if (marked > 0)
+            setStatus("Compilation locale détectée : " + marked + " fichier(s) marqués.");
+    }
+
+    private static boolean isGenericLocalArtist(String a) {
+        return a.isEmpty()
+            || a.equals("various") || a.equals("various artists") || a.equals("va")
+            || a.equals("unknown") || a.equals("unknown artist") || a.equals("no artist")
+            || a.equals("artiste inconnu") || a.equals("artiste") || a.equals("artist")
+            || a.matches("piste \\d+") || a.matches("track \\d+")
+            || a.length() <= 2;
     }
 
     private void resetBtns() {
@@ -1463,6 +1529,8 @@ public class MainFrame extends JFrame {
         // Collecter les dossiers sources pour le nettoyage ultérieur
         List<Path> sourceDirs = new ArrayList<>();
 
+        com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
+        try {
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
             if (e.status != FileEntry.Status.TAGGED) continue;
@@ -1476,6 +1544,11 @@ public class MainFrame extends JFrame {
                     e.currentPath = newPath;
                     renamed++;
                     tableModel.update(e);
+                    // Mettre à jour file_history : l'ancien chemin → nouveau chemin
+                    // Sinon, au redémarrage le fichier renommé n'est plus reconnu comme TAGGED
+                    String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
+                    if (mbid != null)
+                        cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
                 } else {
                     skipped++; // déjà au bon endroit
                 }
@@ -1485,6 +1558,7 @@ public class MainFrame extends JFrame {
                 tableModel.update(e);
             }
         }
+        } finally { cache.close(); }
 
         // Supprimer les dossiers vides laissés par les déplacements
         Set<Path> roots = new LinkedHashSet<>();
@@ -1591,6 +1665,8 @@ public class MainFrame extends JFrame {
         int moved = 0, skipped = 0, errors = 0;
         List<Path> sourceDirs = new ArrayList<>();
 
+        com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
+        try {
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
             if (e.status != FileEntry.Status.TAGGED) continue;
@@ -1603,6 +1679,9 @@ public class MainFrame extends JFrame {
                     e.currentPath = newPath;
                     moved++;
                     tableModel.update(e);
+                    String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
+                    if (mbid != null)
+                        cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
                 } else {
                     skipped++;
                 }
@@ -1612,6 +1691,7 @@ public class MainFrame extends JFrame {
                 tableModel.update(e);
             }
         }
+        } finally { cache.close(); }
 
         // Nettoyer les dossiers source devenus vides
         Set<Path> roots = new LinkedHashSet<>();
@@ -1940,6 +2020,46 @@ public class MainFrame extends JFrame {
         if (s == null) return "";
         s = s.replace("\"", "\"\"");
         return (s.contains(",") || s.contains("\"") || s.contains("\n")) ? "\"" + s + "\"" : s;
+    }
+
+    // ── Export playlist ───────────────────────────────────────────────────────
+
+    private void exportPlaylist(String format) {
+        long tagged = 0;
+        for (int i = 0; i < tableModel.getRowCount(); i++)
+            if (tableModel.get(i).status == FileEntry.Status.TAGGED) tagged++;
+        if (tagged == 0) { setStatus("Aucun fichier tagué à exporter."); return; }
+
+        JFileChooser fc = new JFileChooser();
+        String ext = format.equalsIgnoreCase("xspf") ? ".xspf" : ".m3u";
+        fc.setSelectedFile(new File("playlist" + ext));
+        fc.setDialogTitle("Exporter playlist " + format.toUpperCase());
+        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+
+        File out = fc.getSelectedFile();
+        if (!out.getName().toLowerCase().endsWith(ext))
+            out = new File(out.getAbsolutePath() + ext);
+
+        List<FileEntry> all = new ArrayList<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
+
+        final File outFinal = out;
+        setStatus("Export " + format.toUpperCase() + " en cours…");
+        new SwingWorker<Integer, Void>() {
+            @Override protected Integer doInBackground() throws Exception {
+                return format.equalsIgnoreCase("xspf")
+                    ? com.opentagger.PlaylistExporter.exportXspf(all, outFinal)
+                    : com.opentagger.PlaylistExporter.exportM3u(all, outFinal);
+            }
+            @Override protected void done() {
+                try {
+                    int n = get();
+                    setStatus(format.toUpperCase() + " exporté — " + n + " piste(s) → " + outFinal.getName());
+                } catch (Exception ex) {
+                    showError("Export " + format.toUpperCase() + " : " + ex.getMessage());
+                }
+            }
+        }.execute();
     }
 
     // ── Détection de doublons ─────────────────────────────────────────────────

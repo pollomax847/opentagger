@@ -26,6 +26,13 @@ public class TagWriter {
     }
 
     public TagInfo write(File fichier, TagInfo info, Path coverImage) throws Exception {
+        // Forcer UTF-8 (encoding=3) pour tous les frames ID3v2.
+        // Sans ça jaudiotagger écrit en Latin-1 → octets invalides → crash JSON Plex.
+        org.jaudiotagger.tag.TagOptionSingleton opts = org.jaudiotagger.tag.TagOptionSingleton.getInstance();
+        opts.setId3v23DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_8);
+        opts.setId3v24DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_8);
+        opts.setResetTextEncodingForExistingFrames(true);
+
         AudioFile audio = AudioFileIO.read(fichier);
         Tag tag = getOrCreateTag(audio);
 

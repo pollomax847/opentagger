@@ -88,10 +88,32 @@ public class MusicBrainzClient {
         return parseRecordings(mapper.readTree(lastRawJson));
     }
 
+    /** Surcharge avec album pour les fichiers sans artiste mais avec release connue. */
+    public List<TagInfo> searchRecording(String artist, String title, String album) throws Exception {
+        String query = buildQuery(artist, title, album);
+        if (query.isBlank()) return List.of();
+
+        String url = BASE_URL + "/recording?query="
+                + URLEncoder.encode(query, StandardCharsets.UTF_8)
+                + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
+                + "&inc=releases+artist-credits+isrcs+artist-rels";
+
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return List.of();
+
+        lastRawJson = response.body();
+        return parseRecordings(mapper.readTree(lastRawJson));
+    }
+
     private String buildQuery(String artist, String title) {
+        return buildQuery(artist, title, "");
+    }
+
+    private String buildQuery(String artist, String title, String album) {
         List<String> parts = new ArrayList<>();
         if (!title.isBlank())  parts.add("recording:\"" + escapeLucene(title)  + "\"");
         if (!artist.isBlank()) parts.add("artist:\""    + escapeLucene(artist) + "\"");
+        if (!album.isBlank())  parts.add("release:\""   + escapeLucene(album)  + "\"");
         return String.join(" AND ", parts);
     }
 
