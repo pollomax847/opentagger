@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.Config;
+import com.opentagger.FileRenamer;
 import com.opentagger.FpcalcInstaller;
 import com.opentagger.MusicBrainzOAuth;
 
@@ -43,7 +44,8 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spLastfmMaxGenres;
 
     // ── Onglet Renommage ─────────────────────────────────────────────────────
-    private JSpinner   spDefaultMask;
+    @SuppressWarnings("unchecked")
+    private JComboBox<String> cmbDefaultMask;
     private JCheckBox  chkAutoRename;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
@@ -631,25 +633,23 @@ public class SettingsDialog extends JDialog {
     }
 
     private JPanel buildRenamePanel() {
-        spDefaultMask  = new JSpinner(new SpinnerNumberModel(3, 0, 35, 1));
-        chkAutoRename  = new JCheckBox("Renommer automatiquement après le taguage");
+        // Peupler le dropdown avec les libellés de masques depuis FileRenamer
+        FileRenamer tmpRenamer = new FileRenamer();
+        int maskCount = tmpRenamer.maskCount();
+        String[] maskItems = new String[maskCount];
+        for (int i = 0; i < maskCount; i++) {
+            maskItems[i] = i + " — " + tmpRenamer.maskLabel(i);
+        }
+        cmbDefaultMask = new JComboBox<>(maskItems);
+        cmbDefaultMask.setMaximumRowCount(12);
 
-        // Activer/désactiver le spinner selon la checkbox
-        chkAutoRename.addActionListener(e -> spDefaultMask.setEnabled(chkAutoRename.isSelected()));
-
-        JLabel info = new JLabel("<html><i>0 = AlbumArtist-Album/Track-Title<br>"
-                + "3 = AA/Album/AA-Album-Track-Title<br>"
-                + "9 = AA/Album/Disc/Track-Title<br>"
-                + "34 = [Plex] AA/Album/Track-Title<br>"
-                + "35 = [iTunes] AA/Album/Track-Title</i></html>");
-        info.setBorder(new EmptyBorder(8, 0, 0, 0));
-        info.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        chkAutoRename = new JCheckBox("Renommer automatiquement après le taguage");
+        chkAutoRename.addActionListener(e -> cmbDefaultMask.setEnabled(chkAutoRename.isSelected()));
 
         JPanel p = form(
-            new String[]{"Masque par défaut (0–35) :", ""},
-            new JComponent[]{spDefaultMask, chkAutoRename},
+            new String[]{"Masque par défaut :", ""},
+            new JComponent[]{cmbDefaultMask, chkAutoRename},
             "Renommage automatique des fichiers");
-        p.add(info, BorderLayout.SOUTH);
         return p;
     }
 
@@ -971,9 +971,10 @@ public class SettingsDialog extends JDialog {
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
-        spDefaultMask   .setValue(cfg.num("rename.default_mask",       3));
+        cmbDefaultMask  .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
+                                                    cmbDefaultMask.getItemCount() - 1));
         chkAutoRename   .setSelected(cfg.bool("rename.auto_enabled",   false));
-        spDefaultMask   .setEnabled(chkAutoRename.isSelected());
+        cmbDefaultMask  .setEnabled(chkAutoRename.isSelected());
 
         startupFolderModel.clear();
         for (String f : cfg.startupFolders())
@@ -1079,7 +1080,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
-        p.setProperty("rename.default_mask",           String.valueOf(spDefaultMask.getValue()));
+        p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
 
         StringBuilder sb = new StringBuilder();

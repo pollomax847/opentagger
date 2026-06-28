@@ -89,6 +89,8 @@ public class TagInfo {
     // ── ReplayGain ────────────────────────────────────────────────────────────
     public String replayGainTrackGain = "";    // ex: "-4.73 dB"
     public String replayGainTrackPeak = "";    // ex: "0.983547"
+    public String replayGainAlbumGain = "";
+    public String replayGainAlbumPeak = "";
 
     // ── Paroles ──────────────────────────────────────────────────────────────
     public String lyrics              = "";

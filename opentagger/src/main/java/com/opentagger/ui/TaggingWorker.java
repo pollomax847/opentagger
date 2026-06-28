@@ -382,48 +382,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
-    /**
-     * Certains M4A ont l'atome mdat avant moov — jaudiotagger ne peut pas les lire.
-     * ffmpeg -c copy remet moov en tête (movflags faststart) et corrige le fichier sur place.
-     */
-    private boolean repairM4aIfNeeded(File f) {
-        if (!f.getName().toLowerCase().endsWith(".m4a")) return false;
-        try {
-            org.jaudiotagger.audio.AudioFileIO.read(f);
-            return false; // lecture OK, pas de réparation nécessaire
-        } catch (Exception e) {
-            if (!e.getMessage().contains("Unable to determine start of audio")) return false;
-        }
-        try {
-            log("  M4A corrompu (mdat<moov) → réparation ffmpeg…");
-            java.io.File tmp = java.io.File.createTempFile("ot_fix_", ".m4a",
-                                                            f.getParentFile());
-            ProcessBuilder pb = new ProcessBuilder(
-                "ffmpeg", "-y", "-i", f.getAbsolutePath(),
-                "-c", "copy", "-movflags", "+faststart", tmp.getAbsolutePath());
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
-            int rc = p.waitFor();
-            if (rc == 0 && tmp.length() > 0) {
-                java.nio.file.Files.move(tmp.toPath(), f.toPath(),
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                log("  M4A réparé OK");
-                return true;
-            } else {
-                tmp.delete();
-                log("  ffmpeg réparation échouée (rc=" + rc + ")");
-                return false;
-            }
-        } catch (Exception ex) {
-            log("  ffmpeg réparation erreur: " + ex.getMessage());
-            return false;
-        }
-    }
-
     private List<TagInfo> findTags(File fichier) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
-        repairM4aIfNeeded(fichier);
+        if (TagWriter.repairM4aIfNeeded(fichier)) log("  M4A réparé OK");
 
         // 0. Historique personnel — ce fichier a-t-il déjà été tagué par OpenTagger ?
         //    Retour instantané sans réseau : c'est le cœur de la "mémoire" personnelle.
