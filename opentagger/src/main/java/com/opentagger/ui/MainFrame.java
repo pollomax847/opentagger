@@ -1242,6 +1242,14 @@ public class MainFrame extends JFrame {
             entry -> {
                 tableModel.update(entry);
                 table.repaint();
+                if (entry.status == FileEntry.Status.PROCESSING) {
+                    int modelRow = tableModel.indexOf(entry);
+                    if (modelRow >= 0) {
+                        int viewRow = table.convertRowIndexToView(modelRow);
+                        if (viewRow >= 0)
+                            table.scrollRectToVisible(table.getCellRect(viewRow, 0, true));
+                    }
+                }
                 int sel = table.getSelectedRow();
                 if (sel >= 0 && tableModel.get(table.convertRowIndexToModel(sel)) == entry)
                     refreshDetail();
@@ -1843,7 +1851,7 @@ public class MainFrame extends JFrame {
         // ── Filtre statut (colonne 9 = COL_STATUS) ────────────────────────
         if (statusSel > 0) {
             String pat = switch (statusSel) {
-                case 1 -> "^—$";            // PENDING
+                case 1 -> "^—$|^⏳";         // PENDING + PROCESSING (reste visible)
                 case 2 -> "^✓";             // TAGGED
                 case 3 -> "^⚠";             // SKIPPED
                 case 4 -> "^✗";             // ERROR

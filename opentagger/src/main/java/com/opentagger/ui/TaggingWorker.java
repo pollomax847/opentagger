@@ -255,6 +255,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (best.mood.isBlank()) {
                 try { lastFm.enrichMood(best); log("  mood←lastfm=" + best.mood); } catch (Exception ignored) {}
             }
+            try { lastFm.enrichArtistUrls(best); } catch (Exception ignored) {}
 
             if (bpmEnabled && best.bpm.isBlank()) {
                 step.accept("BPM…");
@@ -292,18 +293,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             step.accept("pochette…");
             log("  fanart/caa...");
             Path cover = null;
-            // 0. Pochette locale existante dans le dossier du fichier (folder.jpg, cover.jpg…)
-            if (Config.get().coverSearchLocal()) {
+            // 1. Cover Art Archive en priorité (lié à la release exacte via MBID — plus fiable)
+            if (!best.releaseMbid.isBlank() || !best.releaseGroupMbid.isBlank()) {
+                try { cover = caa.downloadFront(best); } catch (Exception ignored) {}
+                if (cover != null) log("  cover←caa");
+            }
+            // 2. Pochette locale en fallback (folder.jpg, cover.jpg… dans le dossier du fichier)
+            if (cover == null && Config.get().coverSearchLocal()) {
                 try { cover = findLocalCover(fichier.getParentFile()); } catch (Exception ignored) {}
                 if (cover != null) log("  cover←local: " + cover.getFileName());
             }
-            // 1. Cover Art Archive (MB officiel, sans clé API, lié à la release exacte)
-            if (cover == null && (!best.releaseMbid.isBlank() || !best.releaseGroupMbid.isBlank())) {
-                try { cover = caa.downloadFront(best); } catch (Exception ignored) {}
-            }
-            // 2. FanArt.tv en fallback (meilleur pour les images artiste)
+            // 3. FanArt.tv en dernier recours
             if (cover == null && Config.get().fanartEnabled() && !best.artistMbid.isBlank()) {
                 try { cover = fanArt.downloadCover(best); } catch (Exception ignored) {}
+                if (cover != null) log("  cover←fanart");
             }
             // 3. Sauvegarde pochette en fichier séparé si configuré
             if (cover != null && Config.get().bool("cover.save_to_file", false)) {
@@ -332,7 +335,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             step.accept("écriture tags…");
             log("  write tags...");
-            writer.write(fichier, best, cover);
+            best = writer.write(fichier, best, cover);
 
             // ── Renommage optionnel ───────────────────────────────────────
             if (maskIndex >= 0) {
@@ -648,7 +651,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
                     if (changed) {
                         File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-                        writer.write(fichier, result);
+                        result = writer.write(fichier, result);
                         log("  cluster ok: " + fichier.getName() + " → piste " + result.track + "/" + result.trackTotal);
                         entry.result = result;
                         publish(entry);

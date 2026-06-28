@@ -21,11 +21,11 @@ import java.util.Map;
 
 public class TagWriter {
 
-    public void write(File fichier, TagInfo info) throws Exception {
-        write(fichier, info, null);
+    public TagInfo write(File fichier, TagInfo info) throws Exception {
+        return write(fichier, info, null);
     }
 
-    public void write(File fichier, TagInfo info, Path coverImage) throws Exception {
+    public TagInfo write(File fichier, TagInfo info, Path coverImage) throws Exception {
         AudioFile audio = AudioFileIO.read(fichier);
         Tag tag = getOrCreateTag(audio);
 
@@ -92,6 +92,7 @@ public class TagWriter {
             // TXXX:ALBUM_ARTISTS / ALBUM_ARTISTS_SORT
             if (!info.albumArtist.isBlank())     writeTxxx(id3, "ALBUM_ARTISTS",      info.albumArtist);
             if (!info.albumArtistSort.isBlank()) writeTxxx(id3, "ALBUM_ARTISTS_SORT", info.albumArtistSort);
+            if (!info.discogsId.isBlank())       writeTxxx(id3, "DISCOGS_RELEASE_ID", info.discogsId);
         }
 
         // Pochette : nouvelle image, pochette sauvegardée (preserve_images), ou inchangée
@@ -127,6 +128,7 @@ public class TagWriter {
 
         // Restaurer les timestamps du fichier (Picard : preserve_timestamps)
         if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+        return merged;
     }
 
     /**
@@ -295,7 +297,25 @@ public class TagWriter {
                 case ALBUM_SORT         -> "albumSort";
                 case ALBUM_ARTIST_SORT  -> "albumArtistSort";
                 case COMPOSER           -> "composer";
+                case COMPOSER_SORT      -> "composerSort";
                 case LYRICIST           -> "lyricist";
+                case LYRICIST_SORT      -> "lyricistSort";
+                case ARRANGER           -> "arranger";
+                case ARRANGER_SORT      -> "arrangerSort";
+                case CONDUCTOR          -> "conductor";
+                case CONDUCTOR_SORT     -> "conductorSort";
+                case PRODUCER           -> "producer";
+                case PRODUCER_SORT      -> "producerSort";
+                case ENGINEER           -> "engineer";
+                case MIXER              -> "mixer";
+                case MIXER_SORT         -> "mixerSort";
+                case DJMIXER            -> "djMixer";
+                case ORCHESTRA          -> "orchestra";
+                case ORCHESTRA_SORT     -> "orchestraSort";
+                case ENSEMBLE           -> "ensemble";
+                case ENSEMBLE_SORT      -> "ensembleSort";
+                case CHOIR              -> "choir";
+                case CHOIR_SORT         -> "choirSort";
                 case LANGUAGE           -> "language";
                 case ISRC               -> "isrc";
                 case BPM                -> "bpm";
@@ -358,6 +378,7 @@ public class TagWriter {
         m.put(FieldKey.ARRANGER,           i.arranger);
         m.put(FieldKey.ENGINEER,           i.engineer);
         m.put(FieldKey.MIXER,              i.mixer);
+        m.put(FieldKey.MIXER_SORT,         i.mixerSort);
         m.put(FieldKey.DJMIXER,            i.djMixer);
 
         // ── Classique ─────────────────────────────────────────────────────
@@ -385,6 +406,7 @@ public class TagWriter {
         if ("1".equals(i.isHD))           m.put(FieldKey.IS_HD,           "1");
         if ("1".equals(i.isSoundtrack))   m.put(FieldKey.IS_SOUNDTRACK,   "1");
         if ("1".equals(i.isGreatestHits)) m.put(FieldKey.IS_GREATEST_HITS,"1");
+        if ("1".equals(i.isInstrumental)) m.put(FieldKey.MOOD_INSTRUMENTAL,"instrumental");
 
         // ── Audio ─────────────────────────────────────────────────────────
         m.put(FieldKey.BPM,                i.bpm);
@@ -448,16 +470,49 @@ public class TagWriter {
         return m;
     }
 
+    // Descripteurs TXXX standards (Jaikoz/Picard/SongKong) pour les FieldKeys
+    // qui échouent silencieusement via tag.setField() en ID3v2.3.
+    private static final Map<FieldKey, String> TXXX_FALLBACK = Map.ofEntries(
+        Map.entry(FieldKey.MOOD,                          "MOOD"),
+        Map.entry(FieldKey.MUSICBRAINZ_ARTISTID,          "MusicBrainz Artist Id"),
+        Map.entry(FieldKey.MUSICBRAINZ_RELEASEID,         "MusicBrainz Album Id"),
+        Map.entry(FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID,  "MusicBrainz Release Group Id"),
+        Map.entry(FieldKey.MUSICBRAINZ_RELEASE_COUNTRY,   "MusicBrainz Album Release Country"),
+        Map.entry(FieldKey.MUSICBRAINZ_RELEASE_TYPE,      "MusicBrainz Album Type"),
+        Map.entry(FieldKey.BARCODE,                       "BARCODE"),
+        Map.entry(FieldKey.CATALOG_NO,                    "CATALOGNUMBER"),
+        Map.entry(FieldKey.SCRIPT,                        "SCRIPT"),
+        Map.entry(FieldKey.ORIGINAL_YEAR,                 "ORIGINALYEAR"),
+        Map.entry(FieldKey.ARRANGER,                      "ARRANGER"),
+        Map.entry(FieldKey.ARRANGER_SORT,                 "ARRANGER SORT"),
+        Map.entry(FieldKey.PRODUCER,                      "PRODUCER"),
+        Map.entry(FieldKey.PRODUCER_SORT,                 "PRODUCER SORT"),
+        Map.entry(FieldKey.ENGINEER,                      "ENGINEER"),
+        Map.entry(FieldKey.MIXER,                         "MIXER"),
+        Map.entry(FieldKey.MIXER_SORT,                    "MIXER SORT"),
+        Map.entry(FieldKey.DJMIXER,                       "DJMIXER"),
+        Map.entry(FieldKey.ORCHESTRA,                     "ORCHESTRA"),
+        Map.entry(FieldKey.ORCHESTRA_SORT,                "ORCHESTRA SORT"),
+        Map.entry(FieldKey.ENSEMBLE,                      "ENSEMBLE"),
+        Map.entry(FieldKey.ENSEMBLE_SORT,                 "ENSEMBLE SORT"),
+        Map.entry(FieldKey.CHOIR,                         "CHOIR"),
+        Map.entry(FieldKey.CHOIR_SORT,                    "CHOIR SORT"),
+        Map.entry(FieldKey.WORK,                          "WORK"),
+        Map.entry(FieldKey.MUSICBRAINZ_WORK_ID,           "MusicBrainz Work Id"),
+        Map.entry(FieldKey.GROUPING,                      "GROUPING")
+    );
+
     private void setIfNonBlank(Tag tag, FieldKey key, String value) {
         if (value == null || value.isBlank()) return;
-        // MOOD : toujours écrire TXXX:MOOD comme Jaikoz/SongKong (compatible v2.3 et v2.4)
-        if (key == FieldKey.MOOD && tag instanceof AbstractID3v2Tag id3) {
-            writeTxxx(id3, "MOOD", value);
-            return;
-        }
         try {
             tag.setField(key, value);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            // Fallback TXXX pour les champs non nativement supportés en ID3v2.3
+            if (tag instanceof AbstractID3v2Tag id3) {
+                String desc = TXXX_FALLBACK.get(key);
+                if (desc != null) writeTxxx(id3, desc, value);
+            }
+        }
     }
 
     private void writeTxxx(AbstractID3v2Tag id3tag, String description, String value) {
@@ -465,16 +520,15 @@ public class TagWriter {
             FrameBodyTXXX body = new FrameBodyTXXX();
             body.setDescription(description);
             body.setText(value);
-            // Utiliser le type de frame correspondant à la version du tag (v2.3 ou v2.4)
-            // Évite la corruption du fichier quand on insère un frame v2.3 dans un tag v2.4
+            // addField préserve les frames TXXX existants (contrairement à setFrame qui les remplace tous)
             if (id3tag instanceof ID3v24Tag) {
                 ID3v24Frame frame = new ID3v24Frame("TXXX");
                 frame.setBody(body);
-                id3tag.setFrame(frame);
+                id3tag.addField(frame);
             } else {
                 ID3v23Frame frame = new ID3v23Frame("TXXX");
                 frame.setBody(body);
-                id3tag.setFrame(frame);
+                id3tag.addField(frame);
             }
         } catch (Exception ignored) {}
     }

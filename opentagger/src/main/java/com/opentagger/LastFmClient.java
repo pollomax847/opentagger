@@ -61,6 +61,39 @@ public class LastFmClient {
         if (!genreTags.isEmpty()) info.genre = joinGenres(genreTags);
     }
 
+    /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible). */
+    public void enrichArtistUrls(TagInfo info) throws Exception {
+        if (!Config.get().lastfmEnabled()) return;
+        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank()) return;
+        if (info.artist.isBlank()) return;
+
+        JsonNode root = fetch(BASE_URL
+            + "?method=artist.getInfo"
+            + "&artist=" + encode(info.artist)
+            + "&api_key=" + Config.get().lastfmKey()
+            + "&format=json");
+        if (root == null) return;
+
+        JsonNode artist = root.path("artist");
+        if (info.artistOfficialUrl.isBlank()) {
+            String url = artist.path("url").asText("").trim();
+            if (!url.isBlank()) info.artistOfficialUrl = url;
+        }
+        // Last.fm inclut parfois un lien Wikipedia dans les "links"
+        if (info.artistWikipediaUrl.isBlank()) {
+            JsonNode links = artist.path("bio").path("links").path("link");
+            if (links.isArray()) {
+                for (JsonNode link : links) {
+                    String href = link.path("href").asText("").trim();
+                    if (href.contains("wikipedia.org")) {
+                        info.artistWikipediaUrl = href;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /** Enrichit le mood d'un TagInfo depuis les tags Last.fm. Ne modifie mood que si vide. */
     public void enrichMood(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
@@ -70,6 +103,9 @@ public class LastFmClient {
 
         for (String raw : allTags) {
             String t = raw.toLowerCase().trim();
+            if (t.equals("instrumental") || t.equals("no vocals")) {
+                info.isInstrumental = "1";
+            }
             for (int i = 0; i < MOOD_MAP.length; i++) {
                 for (String kw : MOOD_MAP[i]) {
                     if (t.contains(kw)) {

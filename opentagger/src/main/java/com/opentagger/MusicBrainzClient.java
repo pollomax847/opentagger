@@ -79,7 +79,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs";
+                + "&inc=releases+artist-credits+isrcs+artist-rels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -192,6 +192,14 @@ public class MusicBrainzClient {
                 // Media — piste, disc, totaux
                 extractMediaInfo(chosen, info);
             }
+
+            // Année de première sortie (disponible dans les résultats de recherche)
+            String frd = rec.path("first-release-date").asText("").trim();
+            if (frd.length() >= 4 && info.originalYear.isBlank())
+                info.originalYear = frd.substring(0, 4);
+
+            // Relations (compositeur, producteur, parolier…) si inclus dans la réponse
+            extractRelations(rec.path("relations"), info);
 
             results.add(info);
         }
@@ -363,6 +371,25 @@ public class MusicBrainzClient {
         }
     }
 
+    private void fillTrackPositionFromRelease(String recordingMbid, String releaseMbid, TagInfo info) {
+        try {
+            ReleaseTracklist tl = lookupRelease(releaseMbid);
+            if (tl == null || tl.tracks().isEmpty()) return;
+            long discCount = tl.tracks().stream().mapToInt(ReleaseTrack::disc).distinct().filter(d -> d > 0).count();
+            for (ReleaseTrack t : tl.tracks()) {
+                if (recordingMbid.equals(t.recordingMbid())) {
+                    info.track      = String.valueOf(t.trackNo());
+                    info.trackTotal = String.valueOf(t.trackTotal());
+                    if (t.disc() > 0) {
+                        info.discNo    = String.valueOf(t.disc());
+                        info.discTotal = String.valueOf(discCount);
+                    }
+                    break;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
     // ── Lookup d'une release complète (tracklist) ─────────────────────────────
 
     public record ReleaseTrack(int disc, int trackNo, int trackTotal, String title,
@@ -522,6 +549,12 @@ public class MusicBrainzClient {
             extractSecondaryTypes(chosen, info);
             extractReleaseDetails(chosen, info);
             extractMediaInfo(chosen, info);
+
+            // MB ne retourne pas media.track dans /recording?inc=releases (contrairement à la recherche).
+            // Si track est toujours vide, chercher la position exacte via lookupRelease.
+            if (info.track.isBlank() && !info.releaseMbid.isBlank()) {
+                fillTrackPositionFromRelease(info.recordingMbid, info.releaseMbid, info);
+            }
         }
         // originalYear : date de première sortie du recording
         String frd = rec.path("first-release-date").asText("").trim();
@@ -585,16 +618,21 @@ public class MusicBrainzClient {
             if (name.isBlank()) continue;
 
             switch (type) {
-                case "composer"   -> { if (info.composer.isBlank())   { info.composer    = name; info.composerSort    = sortName; } }
-                case "lyricist"   -> { if (info.lyricist.isBlank())   { info.lyricist    = name; info.lyricistSort    = sortName; } }
-                case "arranger"   -> { if (info.arranger.isBlank())   { info.arranger    = name; info.arrangerSort    = sortName; } }
-                case "conductor"  -> { if (info.conductor.isBlank())  { info.conductor   = name; info.conductorSort   = sortName; } }
-                case "producer"   -> { if (info.producer.isBlank())   { info.producer    = name; info.producerSort    = sortName; } }
-                case "engineer", "recording", "mix", "mastering"
-                                  -> { if (info.engineer.isBlank())   { info.engineer    = name; } }
+                case "composer"                    -> { if (info.composer.isBlank())   { info.composer    = name; info.composerSort    = sortName; } }
+                case "lyricist"                    -> { if (info.lyricist.isBlank())   { info.lyricist    = name; info.lyricistSort    = sortName; } }
+                case "arranger"                    -> { if (info.arranger.isBlank())   { info.arranger    = name; info.arrangerSort    = sortName; } }
+                case "conductor"                   -> { if (info.conductor.isBlank())  { info.conductor   = name; info.conductorSort   = sortName; } }
+                case "producer"                    -> { if (info.producer.isBlank())   { info.producer    = name; info.producerSort    = sortName; } }
+                case "mix"                         -> { if (info.mixer.isBlank())      { info.mixer       = name; info.mixerSort       = sortName; } }
+                case "dj-mix"                      -> { if (info.djMixer.isBlank())    info.djMixer       = name; }
+                case "performing orchestra"        -> { if (info.orchestra.isBlank())  { info.orchestra   = name; info.orchestraSort   = sortName; } }
+                case "ensemble"                    -> { if (info.ensemble.isBlank())   { info.ensemble    = name; info.ensembleSort    = sortName; } }
+                case "choir", "chorus master"      -> { if (info.choir.isBlank())      { info.choir       = name; info.choirSort       = sortName; } }
+                case "engineer", "recording", "mastering", "balance"
+                                                   -> { if (info.engineer.isBlank())   info.engineer      = name; }
                 case "performer", "instrument", "vocal"
-                                  -> { /* déjà géré par artist-credits */ }
-                default -> {} // ignorer les autres types de relation
+                                                   -> { /* géré par artist-credits */ }
+                default -> {}
             }
         }
     }

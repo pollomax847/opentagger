@@ -72,6 +72,29 @@ public class DiscogsClient {
             String catno = hit.path("catno").asText("").trim();
             if (!catno.isBlank() && !"none".equalsIgnoreCase(catno)) info.catalogNo = catno;
         }
+
+        // Pays de sortie
+        if (info.country.isBlank()) {
+            String co = hit.path("country").asText("").trim();
+            if (!co.isBlank()) info.country = co;
+        }
+
+        // Année (fallback si MB n'a pas fourni l'année)
+        if (info.year.isBlank()) {
+            String yr = hit.path("year").asText("").trim();
+            if (yr.matches("\\d{4}")) info.year = yr;
+        }
+
+        // Identifiant et URL Discogs
+        if (info.discogsId.isBlank()) {
+            long id = hit.path("id").asLong(0);
+            if (id > 0) {
+                info.discogsId = String.valueOf(id);
+                String uri = hit.path("uri").asText("").trim();
+                if (!uri.isBlank())
+                    info.releaseDiscogsUrl = "https://www.discogs.com" + uri;
+            }
+        }
     }
 
     private JsonNode searchBest(String artist, String album) throws Exception {

@@ -50,6 +50,7 @@ public class TagInfo {
     public String arranger            = "";
     public String engineer            = "";
     public String mixer               = "";
+    public String mixerSort           = "";
     public String djMixer             = "";
 
     // ── Classique — hiérarchie Work ──────────────────────────────────────────
