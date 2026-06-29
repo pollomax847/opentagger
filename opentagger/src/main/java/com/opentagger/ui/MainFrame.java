@@ -51,7 +51,7 @@ public class MainFrame extends JFrame {
     private int                     currentMask = Config.get().defaultRenameMask();
 
     // ── Composants header ────────────────────────────────────────────────────
-    private JButton    btnTagAll, btnTagSel, btnCancel;
+    private JButton    btnTagAll, btnTagSel, btnCancel, btnTranscode, btnRefresh;
     private JCheckBox  chkAcoustId;
     private JLabel     lblMask;
 
@@ -86,6 +86,8 @@ public class MainFrame extends JFrame {
     private final JPanel scanBanner  = new JPanel();
     private final JPanel scanEntries = new JPanel();
     private int          activeScanCount = 0;
+    // Workers de scan actifs — permettent l'annulation
+    private final java.util.List<SwingWorker<?,?>> activeScanWorkers = new java.util.ArrayList<>();
 
     // ── Entrée publique ───────────────────────────────────────────────────────
 
@@ -162,14 +164,20 @@ public class MainFrame extends JFrame {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { performRedo(); }
         });
 
-        // F5 = tagger tous les fichiers cochés
-        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F5, 0), "tagAll");
+        // F5 = rafraîchir les dossiers chargés
+        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F5, 0), "refresh");
+        actionMap.put("refresh", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { refreshFolders(); }
+        });
+
+        // F6 = tagger tous les fichiers cochés
+        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F6, 0), "tagAll");
         actionMap.put("tagAll", new javax.swing.AbstractAction() {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { startTagging(false); }
         });
 
-        // F6 = tagger la sélection
-        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F6, 0), "tagSel");
+        // F7 = tagger la sélection
+        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F7, 0), "tagSel");
         actionMap.put("tagSel", new javax.swing.AbstractAction() {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { startTagging(true); }
         });
@@ -229,6 +237,13 @@ public class MainFrame extends JFrame {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { completeAlbums(); }
         });
 
+        // Ctrl+T = transcoder
+        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_T,
+                java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "transcode");
+        actionMap.put("transcode", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { transcodeFiles(false); }
+        });
+
         undoManager.addListener(this::updateUndoButtons);
     }
 
@@ -246,8 +261,9 @@ public class MainFrame extends JFrame {
     private JMenu buildMenuFichier() {
         JMenu m = new JMenu("Fichier");
         m.setMnemonic('F');
-        m.add(mitem("Ouvrir un dossier…",     "Ctrl+O",  e -> openFolder()));
-        m.add(mitem("Vider la liste",          "Ctrl+W",  e -> clearFileList()));
+        m.add(mitem("Ouvrir un dossier…",       "Ctrl+O",  e -> openFolder()));
+        m.add(mitem("↺ Rafraîchir les dossiers","F5",       e -> refreshFolders()));
+        m.add(mitem("Vider la liste",            "Ctrl+W",  e -> clearFileList()));
         m.addSeparator();
         m.add(mitem("Exporter CSV…",            "Ctrl+E",  e -> exportCsv()));
         m.add(mitem("Exporter playlist M3U…",  null,      e -> exportPlaylist("m3u")));
@@ -264,8 +280,30 @@ public class MainFrame extends JFrame {
             return;
         }
         tableModel.clear();
+        btnRefresh.setEnabled(false);
         refreshStats();
         setStatus("Liste vidée.");
+    }
+
+    /**
+     * Rescanne tous les dossiers racines déjà chargés pour détecter les nouveaux fichiers.
+     * Les fichiers déjà présents dans la table sont ignorés (pas de doublons).
+     * Les fichiers supprimés du disque restent dans la table (pas de suppression automatique).
+     */
+    private void refreshFolders() {
+        // Collecter les racines uniques de tous les fichiers chargés
+        java.util.LinkedHashSet<File> roots = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            com.opentagger.model.FileEntry e = tableModel.get(i);
+            if (e.scanRoot != null) roots.add(e.scanRoot.toFile());
+            else if (e.file != null) roots.add(e.file.getParentFile());
+        }
+        if (roots.isEmpty()) {
+            setStatus("Aucun dossier chargé à rafraîchir.");
+            return;
+        }
+        setStatus("Rafraîchissement de " + roots.size() + " dossier(s)…");
+        for (File root : roots) loadDirectory(root);
     }
 
     private JMenu buildMenuEdition() {
@@ -295,8 +333,8 @@ public class MainFrame extends JFrame {
     private JMenu buildMenuTagger() {
         JMenu m = new JMenu("Tagger");
         m.setMnemonic('T');
-        m.add(mitem("Tout tagger (cochés)",    "F5",  e -> startTagging(false)));
-        m.add(mitem("Tagger la sélection",     "F6",  e -> startTagging(true)));
+        m.add(mitem("Tout tagger (cochés)",    "F6",  e -> startTagging(false)));
+        m.add(mitem("Tagger la sélection",     "F7",  e -> startTagging(true)));
         m.addSeparator();
         m.add(mitem("Arrêter",                 null,  e -> cancelTagging()));
         m.addSeparator();
@@ -305,6 +343,9 @@ public class MainFrame extends JFrame {
         m.add(mitem("Choisir le masque…",      null,      e -> chooseMask()));
         m.addSeparator();
         m.add(mitem("Compléter les albums…",   "Ctrl+L", e -> completeAlbums()));
+        m.addSeparator();
+        m.add(mitem("Transcoder les fichiers…",   "Ctrl+T", e -> transcodeFiles(false)));
+        m.add(mitem("Transcoder la sélection…",   null,     e -> transcodeFiles(true)));
         return m;
     }
 
@@ -375,21 +416,29 @@ public class MainFrame extends JFrame {
         JButton btnOpen = accentBtn("Ouvrir dossier", "Ctrl+O");
         btnOpen.addActionListener(e -> openFolder());
 
-        btnTagAll  = headerBtn("Tout tagger", "Tagger tous les fichiers cochés (F5)");
-        btnTagSel  = headerBtn("Tagger la sélection", "Tagger les lignes sélectionnées (F6)");
-        btnCancel  = headerBtn("Arrêter", "Annuler le traitement en cours");
+        btnRefresh   = headerBtn("↺ Rafraîchir", "Rescanner les dossiers chargés pour détecter les nouveaux fichiers (F5)");
+        btnTagAll    = headerBtn("Tout tagger", "Tagger tous les fichiers cochés (F6)");
+        btnTagSel    = headerBtn("Tagger la sélection", "Tagger les lignes sélectionnées (F7)");
+        btnCancel    = headerBtn("Arrêter", "Annuler le traitement en cours");
+        btnTranscode = headerBtn("Transcoder", "Transcoder les fichiers sélectionnés (Ctrl+T)");
+        btnRefresh.addActionListener(e -> refreshFolders());
         btnTagAll.addActionListener(e -> startTagging(false));
         btnTagSel.addActionListener(e -> startTagging(true));
         btnCancel.addActionListener(e -> cancelTagging());
+        btnTranscode.addActionListener(e -> transcodeFiles(false));
         btnCancel.setEnabled(false);
+        btnRefresh.setEnabled(false);
 
         JPanel actionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 6));
         actionsPanel.setBackground(HEADER_BG);
         actionsPanel.add(btnOpen);
+        actionsPanel.add(btnRefresh);
         actionsPanel.add(vSep());
         actionsPanel.add(btnTagAll);
         actionsPanel.add(btnTagSel);
         actionsPanel.add(btnCancel);
+        actionsPanel.add(vSep());
+        actionsPanel.add(btnTranscode);
 
         // ── Droite : undo/redo (boutons conservés pour updateUndoButtons) ────
         btnUndo = iconBtn("↩", "Annuler (Ctrl+Z)");
@@ -527,7 +576,15 @@ public class MainFrame extends JFrame {
 
     private JSplitPane buildMainSplit() {
         // ── Table (gauche) ────────────────────────────────────────────────────
-        table = new JTable(tableModel);
+        table = new JTable(tableModel) {
+            @Override
+            public String getToolTipText(java.awt.event.MouseEvent e) {
+                int row = rowAtPoint(e.getPoint());
+                if (row < 0) return null;
+                int mr = convertRowIndexToModel(row);
+                return tableModel.getTooltip(mr);
+            }
+        };
         configureTable();
         installContextMenu();
         // Propager le TransferHandler de la fenêtre à la table
@@ -1013,15 +1070,24 @@ public class MainFrame extends JFrame {
         lbl.setForeground(UIManager.getColor("Label.foreground"));
         lbl.setFont(lbl.getFont().deriveFont(11f));
 
+        JButton btnStop = new JButton("✕");
+        btnStop.setToolTipText("Arrêter ce scan");
+        btnStop.setFont(btnStop.getFont().deriveFont(9f));
+        btnStop.setMargin(new java.awt.Insets(1,4,1,4));
+        btnStop.setFocusable(false);
+        btnStop.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+
         row.add(spinner);
         row.add(lbl);
+        row.add(btnStop);
 
         String[] frames = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
         int[] fi = {0};
         Timer anim = new Timer(80, e -> { fi[0] = (fi[0]+1) % frames.length; spinner.setText(frames[fi[0]]); });
         anim.start();
-        row.putClientProperty("anim", anim);
-        row.putClientProperty("lbl",  lbl);
+        row.putClientProperty("anim",    anim);
+        row.putClientProperty("lbl",     lbl);
+        row.putClientProperty("btnStop", btnStop);
 
         SwingUtilities.invokeLater(() -> {
             scanEntries.add(row);
@@ -1136,39 +1202,45 @@ public class MainFrame extends JFrame {
         }
 
         // Publié type :
-        //   Object[]{ List<FileEntry> }       → phase 1 : ajouter les entrées vides
-        //   Object[]{ FileEntry, TagInfo, TagInfo|null } → phase 2 : mettre à jour les tags
-        new SwingWorker<int[], Object[]>() {
+        //   Object[]{ List<FileEntry> }                  → phase 1 : ajouter les entrées vides
+        //   Object[]{ FileEntry, TagInfo, Boolean }      → phase 2 : mettre à jour les tags
+        SwingWorker<int[], Object[]> scanWorker = new SwingWorker<>() {
+
+            // Entrées ajoutées par CE scan — permet le rollback si annulé
+            final java.util.Set<FileEntry> addedByThisScan = new java.util.LinkedHashSet<>();
 
             @Override protected int[] doInBackground() throws Exception {
                 // ── Phase 1 : lister les fichiers (filesystem seulement, ~instant) ──
                 List<File> files = new AudioScanner().scan(dir);
                 List<FileEntry> newEntries = new ArrayList<>(files.size());
                 for (File f : files) {
+                    if (isCancelled()) return new int[]{0, 0};
                     if (alreadyInTable.contains(f.toPath().toAbsolutePath())) continue;
                     FileEntry e = new FileEntry(f, new com.opentagger.model.TagInfo());
                     e.scanRoot = root;
                     newEntries.add(e);
                 }
+                if (isCancelled()) return new int[]{0, 0};
                 @SuppressWarnings("unchecked")
                 Object[] phase1 = new Object[]{ new ArrayList<>(newEntries) };
                 publish(phase1);  // → table peuplée instantanément avec noms seuls
 
-                // ── Cache en 2 requêtes SQL (au lieu de N requêtes unitaires) ─────
+                // ── Cache : juste les chemins → mbid (pas de TagInfo en RAM) ─────
+                // Optimisation mémoire : on ne charge pas toute la tagging_history en heap.
+                // Les fichiers déjà tagués sont marqués TAGGED ; leurs tags viennent de entry.current
+                // (déjà écrits dans le fichier), ce qui est identique à ce qu'on afficherait.
                 MetadataCache cache = new MetadataCache();
-                java.util.Map<String, String>  fileMap    = cache.loadFileHistoryMap();
-                java.util.Map<String, com.opentagger.model.TagInfo> taggingMap = cache.loadTaggingHistoryMap();
+                java.util.Set<String> taggedPaths = cache.loadTaggedPaths();
                 cache.close();
 
                 // ── Phase 2 : lecture des tags (1 thread, séquentiel, économe) ────
                 int tagged = 0;
                 for (FileEntry entry : newEntries) {
+                    if (isCancelled()) break;
                     com.opentagger.model.TagInfo ti = readTags(entry.file);
-                    String mbid = fileMap.get(entry.file.getAbsolutePath());
-                    com.opentagger.model.TagInfo cached = null;
-                    if (mbid != null) cached = taggingMap.get(mbid.trim());
-                    if (cached != null && (!cached.artist.isBlank() || !cached.title.isBlank())) tagged++;
-                    publish(new Object[]{ entry, ti, cached });  // → mise à jour de la ligne
+                    boolean wasPreviouslyTagged = taggedPaths.contains(entry.file.getAbsolutePath());
+                    if (wasPreviouslyTagged) tagged++;
+                    publish(new Object[]{ entry, ti, wasPreviouslyTagged });
                 }
                 return new int[]{ newEntries.size(), tagged };
             }
@@ -1179,16 +1251,20 @@ public class MainFrame extends JFrame {
                 for (Object[] chunk : chunks) {
                     if (chunk[0] instanceof List) {
                         // Phase 1 : ajouter toutes les entrées vides d'un coup
-                        tableModel.addAll((List<FileEntry>) chunk[0]);
+                        List<FileEntry> batch = (List<FileEntry>) chunk[0];
+                        tableModel.addAll(batch);
+                        addedByThisScan.addAll(batch);
+                        if (tableModel.getRowCount() > 0) btnRefresh.setEnabled(true);
                     } else {
                         // Phase 2 : appliquer les tags lus sur EDT (thread-safe)
-                        FileEntry entry = (FileEntry) chunk[0];
-                        com.opentagger.model.TagInfo ti     = (com.opentagger.model.TagInfo) chunk[1];
-                        com.opentagger.model.TagInfo cached = (com.opentagger.model.TagInfo) chunk[2];
+                        FileEntry entry    = (FileEntry) chunk[0];
+                        com.opentagger.model.TagInfo ti = (com.opentagger.model.TagInfo) chunk[1];
+                        boolean wasTagged  = Boolean.TRUE.equals(chunk[2]);
                         entry.current = ti;
-                        if (cached != null && (!cached.artist.isBlank() || !cached.title.isBlank())) {
-                            entry.result  = cached;
-                            entry.status  = FileEntry.Status.TAGGED;
+                        if (wasTagged) {
+                            // Les tags corrects sont DÉJÀ dans le fichier (entry.current)
+                            // Pas besoin de charger un TagInfo depuis l'historique en mémoire
+                            entry.status  = com.opentagger.model.FileEntry.Status.TAGGED;
                             entry.message = "";
                         }
                         tableModel.update(entry);
@@ -1199,6 +1275,18 @@ public class MainFrame extends JFrame {
             }
 
             @Override protected void done() {
+                activeScanWorkers.remove(this);
+                JButton btnStop = (JButton) scanRow.getClientProperty("btnStop");
+                if (btnStop != null) btnStop.setEnabled(false);
+                if (isCancelled()) {
+                    // Rollback : retirer toutes les entrées ajoutées par ce scan
+                    tableModel.removeEntries(addedByThisScan);
+                    if (tableModel.getRowCount() == 0) btnRefresh.setEnabled(false);
+                    refreshStats();
+                    completeScanEntry(scanRow, dirName, 0, 0, null);
+                    setStatus("Scan annulé.");
+                    return;
+                }
                 try {
                     int[] r = get();
                     detectLocalCompilations();
@@ -1210,7 +1298,19 @@ public class MainFrame extends JFrame {
                     showError(ex.getMessage());
                 }
             }
-        }.execute();
+        };
+
+        // Lier le bouton Stop au worker
+        JButton btnStop = (JButton) scanRow.getClientProperty("btnStop");
+        if (btnStop != null) btnStop.addActionListener(e -> {
+            scanWorker.cancel(false);
+            btnStop.setEnabled(false);
+            JLabel lbl2 = (JLabel) scanRow.getClientProperty("lbl");
+            if (lbl2 != null) lbl2.setText(dirName + " — annulation…");
+        });
+
+        activeScanWorkers.add(scanWorker);
+        scanWorker.execute();
     }
 
     private void startTagging(boolean selOnly) {
@@ -1515,77 +1615,137 @@ public class MainFrame extends JFrame {
         List<RenamePreviewDialog.PreviewRow> preview = RenamePreviewDialog.compute(tableModel, currentMask);
         if (preview.isEmpty()) { setStatus("Aucun fichier tagué à renommer."); return; }
 
-        // ── 2. Afficher l'aperçu et attendre confirmation ─────────────────────
-        RenamePreviewDialog dlg = new RenamePreviewDialog(this, preview, this::doRenameTagged);
-        dlg.setVisible(true); // bloquant (modal)
+        // ── 2. Afficher l'aperçu — non-modal avec barre de progression ───────
+        RenamePreviewDialog dlg = new RenamePreviewDialog(this, preview, buildRenameJob(currentMask, null));
+        dlg.setVisible(true);
     }
 
-    private void doRenameTagged() {
-        FileRenamer renamer    = new FileRenamer();
-        int         renamed    = 0;
-        int         skipped    = 0;
-        int         errors     = 0;
+    private RenamePreviewDialog.RenameJob buildRenameJob(int maskIndex, Path destRoot) {
+        return (onProgress, onDone) -> {
+            int[] done = {0};
+            List<Path> sourceDirs = new ArrayList<>();
+            com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
 
-        // Collecter les dossiers sources pour le nettoyage ultérieur
-        List<Path> sourceDirs = new ArrayList<>();
+            new SwingWorker<String, FileEntry>() {
+                int renamed = 0, skipped = 0, errors = 0;
 
-        com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
-        try {
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
-            if (e.status != FileEntry.Status.TAGGED) continue;
-
-            Path root = e.scanRoot != null ? e.scanRoot : e.currentPath.getParent();
-            try {
-                Path oldPath = e.currentPath;
-                Path newPath = renamer.rename(e.currentPath, e.activeTags(), currentMask, root);
-                if (newPath != null) {
-                    sourceDirs.add(oldPath.getParent());
-                    e.currentPath = newPath;
-                    renamed++;
-                    tableModel.update(e);
-                    // Mettre à jour file_history : l'ancien chemin → nouveau chemin
-                    // Sinon, au redémarrage le fichier renommé n'est plus reconnu comme TAGGED
-                    String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
-                    if (mbid != null)
-                        cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
-                } else {
-                    skipped++; // déjà au bon endroit
+                @Override
+                protected String doInBackground() {
+                    FileRenamer renamer = new FileRenamer();
+                    for (int i = 0; i < tableModel.getRowCount(); i++) {
+                        FileEntry e = tableModel.get(i);
+                        if (e.status != FileEntry.Status.TAGGED) continue;
+                        Path oldPath = e.currentPath;
+                        Path root = destRoot != null ? destRoot
+                                  : (e.scanRoot != null ? e.scanRoot : oldPath.getParent());
+                        try {
+                            Path newPath = renamer.rename(e.currentPath, e.activeTags(), maskIndex, root);
+                            if (newPath != null) {
+                                sourceDirs.add(oldPath.getParent());
+                                e.currentPath = newPath;
+                                renamed++;
+                                String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
+                                if (mbid != null)
+                                    cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
+                            } else {
+                                skipped++;
+                            }
+                        } catch (Exception ex) {
+                            errors++;
+                            e.message = "Renommage : " + (ex.getMessage() != null ? ex.getMessage() : "erreur");
+                        }
+                        publish(e);
+                    }
+                    return String.format("Renommage — ✓ %d  déjà OK %d  ✗ %d erreur(s)",
+                        renamed, skipped, errors);
                 }
-            } catch (Exception ex) {
-                errors++;
-                e.message = "Renommage : " + ex.getMessage();
-                tableModel.update(e);
-            }
-        }
-        } finally { cache.close(); }
 
-        // Supprimer les dossiers vides laissés par les déplacements
-        Set<Path> roots = new LinkedHashSet<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
-            if (e.scanRoot != null) roots.add(e.scanRoot);
-        }
-        int emptyCleaned = 0;
-        for (Path src : sourceDirs) {
-            for (Path r : roots) {
-                try {
-                    long before = countDirs(r);
-                    FileRenamer.deleteEmptyAncestors(src, r);
-                    emptyCleaned += (int)(before - countDirs(r));
-                } catch (Exception ignore) {}
-            }
-        }
+                @Override
+                protected void process(List<FileEntry> chunks) {
+                    done[0] += chunks.size();
+                    for (FileEntry e : chunks) tableModel.update(e);
+                    onProgress.accept(done[0]);
+                }
 
-        String msg = String.format("Renommage — ✓ %d  déjà OK %d  ✗ %d erreur(s)", renamed, skipped, errors);
-        if (emptyCleaned > 0) msg += "  |  🗑 " + emptyCleaned + " dossier(s) vide(s) supprimé(s)";
-        setStatus(msg);
+                @Override
+                protected void done() {
+                    cache.close();
+                    // Nettoyer dossiers vides
+                    Set<Path> roots = new LinkedHashSet<>();
+                    for (int i = 0; i < tableModel.getRowCount(); i++) {
+                        FileEntry e = tableModel.get(i);
+                        if (e.scanRoot != null) roots.add(e.scanRoot);
+                    }
+                    for (Path src : sourceDirs)
+                        for (Path r : roots)
+                            try { FileRenamer.deleteEmptyAncestors(src, r); } catch (Exception ignore) {}
+                    try { setStatus(get()); } catch (Exception ignore) {}
+                    onDone.run();
+                }
+            }.execute();
+        };
     }
 
-    private long countDirs(Path root) {
-        try (Stream<Path> s = Files.walk(root)) {
-            return s.filter(Files::isDirectory).count();
-        } catch (Exception e) { return 0; }
+    // ── Transcodage audio ─────────────────────────────────────────────────────
+
+    private TranscodeWorker transcodeWorker;
+
+    private void transcodeFiles(boolean selectionOnly) {
+        if (transcodeWorker != null && !transcodeWorker.isDone()) {
+            JOptionPane.showMessageDialog(this, "Un transcodage est déjà en cours.",
+                    "En cours", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        // Construire la liste des fichiers à transcoder
+        List<FileEntry> toTranscode = new ArrayList<>();
+        if (selectionOnly) {
+            for (int row : table.getSelectedRows()) {
+                int mi = table.convertRowIndexToModel(row);
+                FileEntry e = tableModel.get(mi);
+                if (e.currentPath != null) toTranscode.add(e);
+            }
+        } else {
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                FileEntry e = tableModel.get(i);
+                if (e.selected && e.currentPath != null) toTranscode.add(e);
+            }
+        }
+        if (toTranscode.isEmpty()) {
+            setStatus("Aucun fichier à transcoder."); return;
+        }
+
+        com.opentagger.Config cfg = com.opentagger.Config.get();
+        com.opentagger.AudioTranscoder.Format fmt =
+                com.opentagger.AudioTranscoder.Format.fromId(cfg.transcodeFormat());
+        int bitrate  = cfg.transcodeBitrate();
+        boolean del  = cfg.transcodeDeleteSource();
+
+        String confirm = String.format(
+            "<html>Transcoder <b>%d fichier(s)</b> → <b>%s</b>%s ?<br><br>" +
+            "<small>Format configuré dans Préférences → Transcodage.</small></html>",
+            toTranscode.size(),
+            fmt.id.toUpperCase(),
+            fmt.hasBitrate ? " " + bitrate + " kbps" : " (lossless)");
+
+        int r = JOptionPane.showConfirmDialog(this, confirm,
+                "Transcoder", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (r != JOptionPane.OK_OPTION) return;
+
+        int[] done = {0};
+        btnTranscode.setEnabled(false);
+        setStatus("⏳ Transcodage… 0 / " + toTranscode.size());
+
+        transcodeWorker = new TranscodeWorker(toTranscode, tableModel,
+            pr -> setStatus("⏳ Transcodage " + pr.done() + " / " + pr.total()),
+            () -> {
+                String summary;
+                try { summary = transcodeWorker.get(); } catch (Exception ex) { summary = "Transcodage terminé"; }
+                setStatus(summary);
+                btnTranscode.setEnabled(true);
+            }
+        );
+        transcodeWorker.execute();
     }
 
     // ── Compléter les albums ──────────────────────────────────────────────────
@@ -1656,53 +1816,8 @@ public class MainFrame extends JFrame {
         if (preview.isEmpty()) { setStatus("Aucun fichier à organiser."); return; }
 
         RenamePreviewDialog dlg = new RenamePreviewDialog(this,
-                preview, "Organiser en dossiers", () -> doOrganizeFiles(organizeDestRoot, organizeMask));
+                preview, "Organiser en dossiers", buildRenameJob(organizeMask, organizeDestRoot));
         dlg.setVisible(true);
-    }
-
-    private void doOrganizeFiles(Path destRoot, int maskIndex) {
-        FileRenamer renamer = new FileRenamer();
-        int moved = 0, skipped = 0, errors = 0;
-        List<Path> sourceDirs = new ArrayList<>();
-
-        com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
-        try {
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
-            if (e.status != FileEntry.Status.TAGGED) continue;
-
-            Path oldPath = e.currentPath;
-            try {
-                Path newPath = renamer.rename(e.currentPath, e.activeTags(), maskIndex, destRoot);
-                if (newPath != null) {
-                    sourceDirs.add(oldPath.getParent());
-                    e.currentPath = newPath;
-                    moved++;
-                    tableModel.update(e);
-                    String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
-                    if (mbid != null)
-                        cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
-                } else {
-                    skipped++;
-                }
-            } catch (Exception ex) {
-                errors++;
-                e.message = "Organisation : " + ex.getMessage();
-                tableModel.update(e);
-            }
-        }
-        } finally { cache.close(); }
-
-        // Nettoyer les dossiers source devenus vides
-        Set<Path> roots = new LinkedHashSet<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
-            if (e.scanRoot != null) roots.add(e.scanRoot);
-        }
-        for (Path src : sourceDirs)
-            for (Path r : roots) FileRenamer.deleteEmptyAncestors(src, r);
-
-        setStatus(String.format("Organisation — ✓ %d déplacé(s)  déjà OK %d  ✗ %d erreur(s)", moved, skipped, errors));
     }
 
     private void chooseMask() {

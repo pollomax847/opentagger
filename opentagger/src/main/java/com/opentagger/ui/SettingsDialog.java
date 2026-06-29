@@ -88,10 +88,19 @@ public class SettingsDialog extends JDialog {
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JCheckBox  chkReplayGainEnabled;
 
+    // ── Onglet Transcodage ────────────────────────────────────────────────────
+    private JCheckBox               chkTranscodeAuto;
+    @SuppressWarnings("unchecked")
+    private JComboBox<String>       cmbTranscodeFormat;
+    private JSpinner                spTranscodeBitrate;
+    private JCheckBox               chkTranscodeDeleteSource;
+    private JLabel                  lblTranscodeBitrate;
+
     // ── Onglet Matching — releases préférées + méta ───────────────────────────
     private JCheckBox  chkTranslateArtists;
     private JTextField tfTranslateLocale;
     private JCheckBox  chkAlbumCluster;
+    private JCheckBox  chkPrioritizeIncomplete;
     @SuppressWarnings("unchecked")
     private JComboBox<String>         cmbCountryPicker;
     private DefaultListModel<String>  lstCountriesModel = new DefaultListModel<>();
@@ -173,6 +182,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab("Tags",         scrollWrap(buildTagsPanel()));
         tabs.addTab("Renommage",    scrollWrap(buildRenamePanel()));
         tabs.addTab("Audio",        scrollWrap(buildAudioPanel()));
+        tabs.addTab("Transcodage",  scrollWrap(buildTranscodePanel()));
         tabs.addTab("Script",       scrollWrap(buildScriptPanel()));
         tabs.addTab("MusicBrainz",  scrollWrap(buildMbOAuthPanel()));
 
@@ -483,6 +493,22 @@ public class SettingsDialog extends JDialog {
         transInner.add(transHint, BorderLayout.SOUTH);
         transPanel.add(transInner, BorderLayout.CENTER);
 
+        // ── Priorité de traitement ────────────────────────────────────────────
+        chkPrioritizeIncomplete = new JCheckBox(
+            "Traiter en priorité les fichiers avec beaucoup de tags manquants (titre, artiste, album…)");
+        chkPrioritizeIncomplete.setToolTipText(
+            "<html>Quand activé, les fichiers sans titre/artiste/album sont traités <b>avant</b><br>" +
+            "ceux qui n'ont que quelques infos à compléter.<br>" +
+            "L'ordre d'affichage dans le tableau n'est pas modifié.</html>");
+        JLabel priorityHint = new JLabel(
+            "<html><i>Les fichiers sans titre/artiste ont la priorité maximale. " +
+            "Ceux avec titre+artiste+album sont traités en dernier.</i></html>");
+        priorityHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        priorityHint.setBorder(new EmptyBorder(0, 10, 4, 0));
+        JPanel priorityInner = form(new String[]{""}, new JComponent[]{chkPrioritizeIncomplete},
+            "Ordre de traitement");
+        priorityInner.add(priorityHint, BorderLayout.SOUTH);
+
         // ── Album clustering ──────────────────────────────────────────────────
         chkAlbumCluster = new JCheckBox("Grouper par album et corriger numéros de piste (passe 2 après taguage)");
         JLabel clusterHint = new JLabel("<html><i>Pour chaque groupe de ≥2 fichiers partageant le même releaseMbid,<br>" +
@@ -534,6 +560,7 @@ public class SettingsDialog extends JDialog {
         combined.add(genrePanel);
         combined.add(mbGenrePanel);
         combined.add(transPanel);
+        combined.add(priorityInner);
         combined.add(clusterPanel);
 
         JPanel wrap = new JPanel(new BorderLayout());
@@ -756,6 +783,67 @@ public class SettingsDialog extends JDialog {
                 btn.setText("Télécharger fpcalc…");
             }
         }.execute();
+    }
+
+    @SuppressWarnings("unchecked")
+    private JPanel buildTranscodePanel() {
+        chkTranscodeAuto = new JCheckBox("Transcoder automatiquement avant le taguage");
+        cmbTranscodeFormat = new JComboBox<>(new String[]{"MP3", "FLAC", "AAC (M4A)", "OGG", "OPUS"});
+        spTranscodeBitrate = new JSpinner(new SpinnerNumberModel(320, 64, 320, 32));
+        chkTranscodeDeleteSource = new JCheckBox("Supprimer le fichier source après transcodage");
+        lblTranscodeBitrate = new JLabel("Débit (kbps) :");
+
+        // Masquer le débit pour les formats sans débit (FLAC)
+        cmbTranscodeFormat.addActionListener(e -> {
+            boolean hasBitrate = cmbTranscodeFormat.getSelectedIndex() != 1; // 1 = FLAC
+            lblTranscodeBitrate.setEnabled(hasBitrate);
+            spTranscodeBitrate.setEnabled(hasBitrate);
+        });
+
+        JPanel inner = new JPanel(new GridBagLayout());
+        inner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Transcodage audio (via ffmpeg)"));
+
+        GridBagConstraints lc = gbc(0, 0); lc.anchor = GridBagConstraints.WEST;
+        GridBagConstraints fc = gbc(1, 0); fc.fill = GridBagConstraints.NONE;
+
+        Object[][] rows = {
+            { chkTranscodeAuto,         null },
+            { new JLabel("Format cible :"), cmbTranscodeFormat },
+            { lblTranscodeBitrate,      spTranscodeBitrate },
+            { chkTranscodeDeleteSource, null },
+        };
+
+        for (int i = 0; i < rows.length; i++) {
+            JComponent left  = (JComponent) rows[i][0];
+            JComponent right = (JComponent) rows[i][1];
+            lc.gridy = i; fc.gridy = i;
+            if (right == null) {
+                lc.gridwidth = 2; inner.add(left, lc); lc.gridwidth = 1;
+            } else {
+                inner.add(left,  lc);
+                inner.add(right, fc);
+            }
+        }
+
+        JLabel note = new JLabel("<html><i>Note : les tags existants sont préservés. " +
+                "Les deux fichiers sont conservés par défaut.</i></html>");
+        note.setBorder(new EmptyBorder(8, 12, 4, 8));
+        note.putClientProperty("FlatLaf.style", "foreground: #aaaaaa; font: 11 $defaultFont");
+
+        JPanel p = new JPanel(new BorderLayout(0, 8));
+        p.setBorder(new EmptyBorder(8, 8, 8, 8));
+        p.add(inner, BorderLayout.NORTH);
+        p.add(note,  BorderLayout.CENTER);
+        return p;
+    }
+
+    private GridBagConstraints gbc(int x, int y) {
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridx = x; c.gridy = y;
+        c.insets = new Insets(4, 10, 4, 8);
+        c.anchor = GridBagConstraints.WEST;
+        return c;
     }
 
     private JPanel buildScriptPanel() {
@@ -1022,7 +1110,20 @@ public class SettingsDialog extends JDialog {
         for (int i = 0; i < SECONDARY_TYPES.length; i++)
             chkExcludedSecondary[i].setSelected(excludedSecSet.contains(SECONDARY_TYPES[i]));
         tfTranslateLocale    .setText(cfg.translateLocale());
-        chkAlbumCluster      .setSelected(cfg.albumClusterEnabled());
+        chkAlbumCluster           .setSelected(cfg.albumClusterEnabled());
+        chkPrioritizeIncomplete   .setSelected(cfg.prioritizeIncomplete());
+
+        // ─ Transcodage ─
+        chkTranscodeAuto.setSelected(cfg.transcodeAutoBeforeTag());
+        String[] fmtIds = {"mp3", "flac", "aac", "ogg", "opus"};
+        String savedFmt = cfg.transcodeFormat();
+        for (int i = 0; i < fmtIds.length; i++)
+            if (fmtIds[i].equalsIgnoreCase(savedFmt)) { cmbTranscodeFormat.setSelectedIndex(i); break; }
+        spTranscodeBitrate.setValue(cfg.transcodeBitrate());
+        chkTranscodeDeleteSource.setSelected(cfg.transcodeDeleteSource());
+        boolean hasBitrate = cmbTranscodeFormat.getSelectedIndex() != 1;
+        lblTranscodeBitrate.setEnabled(hasBitrate);
+        spTranscodeBitrate.setEnabled(hasBitrate);
 
         // ─ MB Genres ─
         chkMbUseGenres   .setSelected(cfg.mbUseGenres());
@@ -1132,6 +1233,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("metadata.translate_artists",    String.valueOf(chkTranslateArtists.isSelected()));
         p.setProperty("metadata.translate_locale",     tfTranslateLocale.getText().trim().isEmpty() ? "en" : tfTranslateLocale.getText().trim());
         p.setProperty("albums.cluster",                String.valueOf(chkAlbumCluster.isSelected()));
+        p.setProperty("batch.prioritize_incomplete",   String.valueOf(chkPrioritizeIncomplete.isSelected()));
 
         // ─ MB Genres ─
         p.setProperty("mb.use_genres",       String.valueOf(chkMbUseGenres.isSelected()));
@@ -1157,6 +1259,13 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
 
         p.setProperty("tagger.script",                 taTaggerScript.getText());
+
+        // ─ Transcodage ─
+        String[] fmtIds2 = {"mp3", "flac", "aac", "ogg", "opus"};
+        p.setProperty("transcode.auto_before_tag", String.valueOf(chkTranscodeAuto.isSelected()));
+        p.setProperty("transcode.format",          fmtIds2[cmbTranscodeFormat.getSelectedIndex()]);
+        p.setProperty("transcode.bitrate_kbps",    String.valueOf(spTranscodeBitrate.getValue()));
+        p.setProperty("transcode.delete_source",   String.valueOf(chkTranscodeDeleteSource.isSelected()));
 
         p.setProperty("mb.oauth.client_id",            tfMbClientId.getText().trim());
         p.setProperty("mb.oauth.client_secret",        tfMbClientSecret.getText().trim());

@@ -135,6 +135,15 @@ public class Config {
     // --- Album clustering ---
     public boolean albumClusterEnabled(){ return bool("albums.cluster",           false); }
 
+    // --- Ordre de traitement : fichiers incomplets en priorité ---
+    public boolean prioritizeIncomplete(){ return bool("batch.prioritize_incomplete", true); }
+
+    // --- Transcodage audio ---
+    public boolean transcodeAutoBeforeTag() { return bool("transcode.auto_before_tag", false); }
+    public String  transcodeFormat()        { return str ("transcode.format",          "mp3"); }
+    public int     transcodeBitrate()       { return num ("transcode.bitrate_kbps",    320);   }
+    public boolean transcodeDeleteSource()  { return bool("transcode.delete_source",   false); }
+
     // --- Releases préférées (codes séparés par virgule) ---
     public String[] preferredCountries()    {
         String v = str("releases.preferred_countries", "");

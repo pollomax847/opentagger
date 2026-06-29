@@ -22,8 +22,10 @@ import java.io.File;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -109,9 +111,41 @@ public class TagWriter {
 
     // ── Écriture native jaudiotagger ──────────────────────────────────────────
 
+    /**
+     * Chaîne de fallback pour M4A :
+     *  1. jaudiotagger natif          → tous les champs
+     *  2. ffmpeg repair + retry       → tous les champs
+     *  3. AtomicParsley               → tous les champs (cover, MBIDs, ReplayGain)
+     *  4. ffmpeg direct               → tags standards seulement (dernier recours)
+     */
     private void writeNative(File fichier, TagInfo i, Path coverImage,
                               Map<String, String> preserved,
                               boolean clearExisting) throws Exception {
+        try {
+            doWriteNative(fichier, i, coverImage, preserved, clearExisting);
+            return;
+        } catch (Exception e) {
+            if (!fichier.getName().toLowerCase().endsWith(".m4a")) throw e;
+        }
+        // Fallback 1 : repair structure ffmpeg + retry jaudiotagger
+        if (forcedRepairM4a(fichier)) {
+            try {
+                doWriteNative(fichier, i, coverImage, preserved, clearExisting);
+                return;
+            } catch (Exception ignored) {}
+        }
+        // Fallback 2 : AtomicParsley — full support (cover + MBIDs + ReplayGain)
+        try {
+            writeM4aViaAtomicParsley(fichier, i, coverImage);
+            return;
+        } catch (Exception ignored) {}
+        // Fallback 3 : ffmpeg — tags standards seulement
+        writeM4aViaFfmpeg(fichier, i, coverImage);
+    }
+
+    private void doWriteNative(File fichier, TagInfo i, Path coverImage,
+                                Map<String, String> preserved,
+                                boolean clearExisting) throws Exception {
         AudioFile audio = AudioFileIO.read(fichier);
 
         Tag tag;
@@ -280,6 +314,178 @@ public class TagWriter {
         audio.commit();
     }
 
+    // ── Fallback M4A via AtomicParsley ───────────────────────────────────────
+
+    /**
+     * Écrit tous les champs M4A via AtomicParsley (fallback 2).
+     * Supporte : tags standards, sort fields, cover art, MusicBrainz IDs, ReplayGain,
+     * Acoustid, Discogs, flags custom — via atomes freeform ----:com.apple.iTunes:
+     */
+    private static void writeM4aViaAtomicParsley(File fichier, TagInfo i, Path coverImage)
+            throws Exception {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("AtomicParsley");
+        cmd.add(fichier.getAbsolutePath());
+
+        // Tags standards
+        apField(cmd, "--title",       i.title);
+        apField(cmd, "--artist",      i.artist);
+        apField(cmd, "--albumArtist", i.albumArtist);
+        apField(cmd, "--album",       i.album);
+        apField(cmd, "--year",        i.year);
+        apField(cmd, "--genre",       i.genre);
+        apField(cmd, "--composer",    i.composer);
+        apField(cmd, "--comment",     i.comment);
+        apField(cmd, "--lyrics",      i.lyrics);
+        apField(cmd, "--grouping",    i.grouping);
+
+        if (!i.track.isBlank()) {
+            String trk = i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal;
+            apField(cmd, "--tracknum", trk);
+        }
+        if (!i.discNo.isBlank()) {
+            String dsk = i.discTotal.isBlank() ? i.discNo : i.discNo + "/" + i.discTotal;
+            apField(cmd, "--disk", dsk);
+        }
+        if (!i.bpm.isBlank()) apField(cmd, "--BPM", i.bpm);
+        if (i.isCompilation.equals("1"))
+            apField(cmd, "--compilation", "true");
+
+        // Sort fields
+        apField(cmd, "--sortTitle",       i.titleSort);
+        apField(cmd, "--sortArtist",      i.artistSort);
+        apField(cmd, "--sortAlbum",       i.albumSort);
+        apField(cmd, "--sortAlbumArtist", i.albumArtistSort);
+        apField(cmd, "--sortComposer",    i.composerSort);
+
+        // Pochette
+        if (coverImage != null && coverImage.toFile().exists())
+            apField(cmd, "--artwork", coverImage.toAbsolutePath().toString());
+
+        // MusicBrainz IDs
+        apFreeform(cmd, "MusicBrainz Track Id",        i.recordingMbid);
+        apFreeform(cmd, "MusicBrainz Album Id",         i.releaseMbid);
+        apFreeform(cmd, "MusicBrainz Release Group Id", i.releaseGroupMbid);
+        apFreeform(cmd, "MusicBrainz Artist Id",        i.artistMbid);
+
+        // ReplayGain
+        apFreeform(cmd, "REPLAYGAIN_TRACK_GAIN", i.replayGainTrackGain);
+        apFreeform(cmd, "REPLAYGAIN_TRACK_PEAK", i.replayGainTrackPeak);
+        apFreeform(cmd, "REPLAYGAIN_ALBUM_GAIN", i.replayGainAlbumGain);
+        apFreeform(cmd, "REPLAYGAIN_ALBUM_PEAK", i.replayGainAlbumPeak);
+
+        // Custom
+        apFreeform(cmd, "IS_INSTRUMENTAL",    i.isInstrumental);
+        apFreeform(cmd, "DISCOGS_RELEASE_ID", i.discogsId);
+        apFreeform(cmd, "ACOUSTID_ID",        i.acoustidId);
+
+        cmd.add("--overWrite");
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        Thread.ofVirtual().start(() -> {
+            try { p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream()); }
+            catch (Exception ignored) {}
+        });
+        boolean done = p.waitFor(120, TimeUnit.SECONDS);
+        if (!done) { p.destroyForcibly(); throw new Exception("AtomicParsley timeout"); }
+        if (p.exitValue() != 0) throw new Exception("AtomicParsley exit=" + p.exitValue());
+    }
+
+    private static void apField(List<String> cmd, String flag, String value) {
+        if (value != null && !value.isBlank()) {
+            cmd.add(flag); cmd.add(value);
+        }
+    }
+
+    private static void apFreeform(List<String> cmd, String name, String value) {
+        if (value == null || value.isBlank()) return;
+        cmd.add("--freeForm"); cmd.add(name);
+        cmd.add("--freeFormMeaning"); cmd.add("com.apple.iTunes");
+        cmd.add("--freeFormValue"); cmd.add(value);
+    }
+
+    // ── Fallback M4A via ffmpeg ───────────────────────────────────────────────
+
+    /**
+     * Écrit les tags M4A standards via ffmpeg (fallback quand jaudiotagger échoue).
+     * Champs supportés : titre, artiste, artiste album, album, année, genre, piste,
+     * disque, commentaire, compositeur, paroles, BPM, grouping.
+     * Champs NON supportés : MusicBrainz IDs, ReplayGain, sort fields, moods, pochette.
+     */
+    private static void writeM4aViaFfmpeg(File fichier, TagInfo i, Path coverImage)
+            throws Exception {
+        // Sortie dans un fichier temporaire — créé avant la commande pour gérer le cas
+        // où ffmpeg ne peut pas créer le fichier lui-même (permissions, espace disque)
+        File tmp = File.createTempFile("ot_m4a_", ".m4a", fichier.getParentFile());
+        tmp.delete(); // ffmpeg crée le fichier lui-même
+
+        List<String> cmd = new ArrayList<>();
+        cmd.add("ffmpeg"); cmd.add("-y");
+        cmd.add("-i"); cmd.add(fichier.getAbsolutePath());
+        // Pas de second input cover : ffmpeg nécessite -map et -disposition pour ça,
+        // trop fragile ; la pochette sera ignorée dans ce fallback.
+        cmd.add("-c"); cmd.add("copy");
+        cmd.add("-movflags"); cmd.add("+faststart"); // moov avant mdat — garanti lisible
+        cmd.add("-map_metadata"); cmd.add("-1"); // effacer tags existants
+
+        // Champs standards ffmpeg → M4A
+        ffMeta(cmd, "title",        i.title);
+        ffMeta(cmd, "artist",       i.artist);
+        ffMeta(cmd, "album_artist", i.albumArtist);
+        ffMeta(cmd, "album",        i.album);
+        ffMeta(cmd, "date",         i.year);
+        ffMeta(cmd, "genre",        i.genre);
+        ffMeta(cmd, "composer",     i.composer);
+        ffMeta(cmd, "comment",      i.comment);
+        ffMeta(cmd, "lyrics",       i.lyrics);
+        ffMeta(cmd, "grouping",     i.grouping);
+
+        // Piste : "numéro/total"
+        if (!i.track.isBlank()) {
+            String trk = i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal;
+            ffMeta(cmd, "track", trk);
+        }
+        // Disque : "numéro/total"
+        if (!i.discNo.isBlank()) {
+            String dsk = i.discTotal.isBlank() ? i.discNo : i.discNo + "/" + i.discTotal;
+            ffMeta(cmd, "disc", dsk);
+        }
+        if (!i.bpm.isBlank())           ffMeta(cmd, "bpm", i.bpm);
+        if (!i.isCompilation.isBlank()) ffMeta(cmd, "compilation", i.isCompilation);
+        if (!i.language.isBlank())      ffMeta(cmd, "language", i.language);
+
+        cmd.add(tmp.getAbsolutePath());
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        try {
+            Process p = pb.start();
+            Thread.ofVirtual().start(() -> {
+                try { p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream()); }
+                catch (Exception ignored) {}
+            });
+            boolean done = p.waitFor(120, TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); tmp.delete(); throw new Exception("timeout"); }
+            if (p.exitValue() != 0 || !tmp.exists() || tmp.length() == 0) {
+                tmp.delete();
+                throw new Exception("ffmpeg exit=" + p.exitValue());
+            }
+            Files.move(tmp.toPath(), fichier.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) {
+            tmp.delete();
+            throw new Exception("ffmpeg M4A fallback: " + e.getMessage());
+        }
+    }
+
+    private static void ffMeta(List<String> cmd, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            cmd.add("-metadata"); cmd.add(key + "=" + value);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /** setField via FieldKey, ignore valeurs vides ou clé non supportée par ce format. */
@@ -337,20 +543,32 @@ public class TagWriter {
         } catch (Exception ignored) {}
     }
 
-    // ── Réparation M4A (copie de TaggingWorker pour usage indépendant) ───────
+    // ── Réparation M4A ────────────────────────────────────────────────────────
+
+    /**
+     * Passe toujours par ffmpeg (même si jaudiotagger peut lire le fichier).
+     * Utilisé en fallback quand le writer jaudiotagger échoue (mdat<moov lisible mais non écrivable).
+     */
+    private static boolean forcedRepairM4a(File f) {
+        return runFfmpegRepair(f);
+    }
 
     /**
      * Répare les M4A illisibles par jaudiotagger via ffmpeg -movflags +faststart.
-     * Idempotent : si le fichier est déjà lisible, ne fait rien.
+     * Idempotent : si le fichier est déjà lisible ET écrivable, ne fait rien.
      */
     public static boolean repairM4aIfNeeded(File f) {
         if (!f.getName().toLowerCase().endsWith(".m4a")) return false;
         try {
             AudioFileIO.read(f);
-            return false; // lecture OK
+            return false; // lecture OK — on tente quand même l'écriture normalement
         } catch (Exception e) {
-            // Tenter ffmpeg pour toute erreur sur M4A
+            // Lecture impossible → forcer la réparation
         }
+        return runFfmpegRepair(f);
+    }
+
+    private static boolean runFfmpegRepair(File f) {
         try {
             File tmp = File.createTempFile("ot_fix_", ".m4a", f.getParentFile());
             ProcessBuilder pb = new ProcessBuilder(

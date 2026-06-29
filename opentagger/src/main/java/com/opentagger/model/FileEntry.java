@@ -23,6 +23,9 @@ public class FileEntry {
     /** Candidats non retenus par le batch (score < seuil) — pour sélection manuelle. */
     public List<TagInfo> candidates;
 
+    /** Suggestions d'amélioration générées après l'analyse (pochette absente, MBID manquant…). */
+    public List<String> suggestions;
+
     /**
      * Racine du dossier scanné — le renommage par masque est relatif à cette racine.
      * Ex : racine=/musique, masque={artist}/{album}/{track} - {title}

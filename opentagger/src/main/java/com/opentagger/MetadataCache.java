@@ -94,10 +94,14 @@ public class MetadataCache {
                     )""");
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS file_history (
-                        path TEXT PRIMARY KEY,
-                        mbid TEXT,
-                        ts   INTEGER NOT NULL
+                        path          TEXT PRIMARY KEY,
+                        mbid          TEXT,
+                        ts            INTEGER NOT NULL,
+                        identified_by TEXT    DEFAULT 'text'
                     )""");
+                // Migration silencieuse pour les bases existantes (SQLite ALTER TABLE)
+                try { st.execute("ALTER TABLE file_history ADD COLUMN identified_by TEXT DEFAULT 'text'"); }
+                catch (SQLException ignored) { /* colonne déjà présente */ }
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_artist ON tagging_history(artist)");
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_title  ON tagging_history(title)");
             }
@@ -226,14 +230,32 @@ public class MetadataCache {
         return null;
     }
 
+    /**
+     * Source d'identification — détermine le niveau de confiance dans le cache :
+     *  "songrec"  : empreinte Shazam  → confiance totale (audio content)
+     *  "acoustid" : empreinte AcoustID → confiance totale (audio content)
+     *  "mbid"     : MBID existant dans le fichier → confiance totale
+     *  "text"     : recherche MB par texte seulement → faible confiance (tags peuvent être faux)
+     */
+    public static final String SOURCE_SONGREC  = "songrec";
+    public static final String SOURCE_ACOUSTID = "acoustid";
+    public static final String SOURCE_MBID     = "mbid";
+    public static final String SOURCE_TEXT     = "text";
+
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {
+        recordFileTagging(path, mbid, SOURCE_TEXT);
+    }
+
+    /** Enregistre l'association chemin de fichier → MBID avec la source d'identification. */
+    public synchronized void recordFileTagging(String path, String mbid, String source) {
         if (conn == null || path == null) return;
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT OR REPLACE INTO file_history(path,mbid,ts) VALUES(?,?,?)")) {
+                "INSERT OR REPLACE INTO file_history(path,mbid,ts,identified_by) VALUES(?,?,?,?)")) {
             ps.setString(1, path);
             ps.setString(2, mbid != null ? mbid : "");
             ps.setLong(3, System.currentTimeMillis());
+            ps.setString(4, source != null ? source : SOURCE_TEXT);
             ps.executeUpdate();
         } catch (Exception ignored) {}
     }
@@ -255,6 +277,41 @@ public class MetadataCache {
             }
         } catch (Exception e) { /* silencieux */ }
         return null;
+    }
+
+    /**
+     * Retourne la source d'identification pour un chemin donné.
+     * "songrec" / "acoustid" / "mbid" → confiance totale
+     * "text" / null → faible confiance, SongRec doit re-vérifier
+     */
+    public synchronized String getFileTaggingSource(String path) {
+        if (conn == null || path == null) return SOURCE_TEXT;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT identified_by FROM file_history WHERE path=?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String s = rs.getString(1);
+                    return (s != null && !s.isBlank()) ? s : SOURCE_TEXT;
+                }
+            }
+        } catch (Exception e) { /* silencieux */ }
+        return SOURCE_TEXT;
+    }
+
+    /**
+     * Charge uniquement les chemins des fichiers déjà tagués (Set<path>).
+     * Version légère pour le scan initial : évite de charger les TagInfo en RAM.
+     */
+    public synchronized java.util.Set<String> loadTaggedPaths() {
+        java.util.Set<String> set = new java.util.HashSet<>();
+        if (conn == null) return set;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT path FROM file_history WHERE mbid IS NOT NULL AND mbid != ''")) {
+            while (rs.next()) set.add(rs.getString(1));
+        } catch (Exception e) { LOG.warning("loadTaggedPaths: " + e.getMessage()); }
+        return set;
     }
 
     /**

@@ -20,11 +20,11 @@ import java.util.function.BiConsumer;
  * et notifie l'UI après chaque fichier via publish/process.
  *
  * Pipeline complet :
- *  1. Cache SQLite   → résultat instantané si déjà connu
- *  2. AcoustID       → fingerprint (optionnel)
- *  3. MusicBrainz    → recherche par texte
- *  4. Shazam         → fallback si non identifié par AcoustID/MB (nécessite clé RapidAPI)
- *  5. LocalCorrector → corrections scripts Jaikoz (5 scripts)
+ *  0. Cache SQLite   → résultat instantané si déjà connu (après forceRetag, le cache est vidé)
+ *  1. SongRec/Shazam → empreinte audio, source principale — identifie même avec de faux tags
+ *  2. AcoustID       → fingerprint alternatif (optionnel)
+ *  3. MusicBrainz    → recherche par texte + enrichissement des résultats SongRec/AcoustID
+ *  4. LocalCorrector → corrections scripts Jaikoz (5 scripts)
  *  6. Discogs        → genres
  *  7. Last.fm        → genres (fallback)
  *  8. BPM            → détection locale (ffmpeg)
@@ -45,6 +45,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final AcoustIdClient           acoustId         = new AcoustIdClient();
     private final SongRecClient            songRec          = new SongRecClient();
     private final AudioRecognitionChain    recognitionChain = new AudioRecognitionChain();
+
+    // Source d'identification du dernier findTags() — utilisée pour enregistrer le niveau de confiance
+    private String lastFindTagsSource = MetadataCache.SOURCE_TEXT;
     private final DiscogsClient      discogs   = new DiscogsClient();
     private final LastFmClient       lastFm    = new LastFmClient();
     private final FanArtClient       fanArt    = new FanArtClient();
@@ -66,6 +69,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // Cache alias artiste : artistMbid → nom Latin (évite un appel MB par fichier)
     private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
 
+    // ── Journal de corrections ────────────────────────────────────────────────
+    private final com.opentagger.CorrectionLog correctionLog = new com.opentagger.CorrectionLog();
+
     public TaggingWorker(List<FileEntry> entries, boolean useAcoustId, int maskIndex,
                          Consumer<String> onProgress, Consumer<FileEntry> onUpdate) {
         this.entries     = entries;
@@ -77,10 +83,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     @Override
     protected Void doInBackground() {
-        int total = entries.size();
+        // Trier l'ordre de traitement : fichiers très incomplets en premier, presque complets en dernier.
+        // L'ordre d'affichage dans le tableau n'est pas modifié (deux listes distinctes).
+        List<FileEntry> queue;
+        if (Config.get().prioritizeIncomplete()) {
+            queue = new java.util.ArrayList<>(entries);
+            queue.sort((a, b) -> incompletenessScore(b.current) - incompletenessScore(a.current));
+            long incomplete = queue.stream().filter(e -> incompletenessScore(e.current) >= 4).count();
+            if (incomplete > 0)
+                onProgress.accept("Priorité : " + incomplete + " fichier(s) très incomplet(s) traité(s) en premier");
+        } else {
+            queue = entries;
+        }
+
+        int total = queue.size();
         int done  = 0;
 
-        for (FileEntry entry : entries) {
+        for (FileEntry entry : queue) {
             if (isCancelled()) break;
 
             entry.status = FileEntry.Status.PROCESSING;
@@ -100,6 +119,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 entry.message = "";
             }
 
+            correctionLog.addEntry(entry);
+
             setProgress((++done * 100) / total);
             publish(entry);
 
@@ -108,7 +129,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
 
         // Remettre en attente toute entrée restée bloquée en PROCESSING
-        for (FileEntry entry : entries) {
+        for (FileEntry entry : queue) {
             if (entry.status == FileEntry.Status.PROCESSING) {
                 entry.status  = FileEntry.Status.PENDING;
                 entry.message = "";
@@ -124,6 +145,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         cache.purgeExpired();
         cache.close();
         return null;
+    }
+
+    @Override
+    protected void done() {
+        // Écrire le journal de corrections dans le dossier de la première piste
+        try {
+            java.nio.file.Path folder = entries.stream()
+                .filter(e -> e.file != null)
+                .map(e -> e.file.getParentFile().toPath())
+                .findFirst()
+                .orElse(null);
+            java.nio.file.Path logPath = correctionLog.flush(folder);
+            if (logPath != null)
+                onProgress.accept("Journal écrit → " + logPath.getFileName());
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -143,6 +179,27 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 return;
             }
 
+            // Transcodage automatique avant taguage si activé
+            if (Config.get().transcodeAutoBeforeTag()) {
+                try {
+                    com.opentagger.AudioTranscoder.Format fmt =
+                        com.opentagger.AudioTranscoder.Format.fromId(Config.get().transcodeFormat());
+                    step.accept("transcodage → " + fmt.id.toUpperCase() + "…");
+                    java.nio.file.Path transcoded = new com.opentagger.AudioTranscoder()
+                        .transcode(entry.currentPath != null ? entry.currentPath
+                                   : entry.file.toPath(),
+                                   fmt, Config.get().transcodeBitrate(),
+                                   Config.get().transcodeDeleteSource());
+                    if (transcoded != null) {
+                        entry.currentPath = transcoded;
+                        fichier = transcoded.toFile();
+                        log("  transcoded → " + transcoded.getFileName());
+                    }
+                } catch (Exception txEx) {
+                    log("  transcode WARN: " + txEx.getMessage() + " — poursuite sans transcodage");
+                }
+            }
+
             log("▶ START  " + fichier.getName());
 
             log("  findTags...");
@@ -151,14 +208,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 (results.isEmpty() ? "" : " score=" + results.get(0).score));
 
             int seuil = Config.get().minScoreAuto();
-
-            if (results.isEmpty() || results.get(0).score < seuil) {
-                step.accept("reconnaissance SongRec/Shazam/AudD…");
-                log("  chain SongRec→Shazam→AudD...");
-                List<TagInfo> chain = recognitionChain.recognize(fichier);
-                log("  chain → " + chain.size() + " résultat(s)");
-                if (!chain.isEmpty()) results = chain;
-            }
 
             if (results.isEmpty()) {
                 entry.status  = FileEntry.Status.SKIPPED;
@@ -353,9 +402,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 } catch (Exception ignored) {}
             }
 
+            // ── Suggestions d'amélioration ────────────────────────────────────
+            List<String> sugg = buildSuggestions(best, cover, seuil);
+            if (!sugg.isEmpty()) {
+                entry.suggestions = sugg;
+                String sep = entry.message.isBlank() ? "" : " · ";
+                entry.message += sep + "⚠" + sugg.size();
+            }
+
             entry.result = best;
             entry.status = FileEntry.Status.TAGGED;
-            log("  ✔ TAGGED " + fichier.getName());
+            log("  ✔ TAGGED " + fichier.getName() + (sugg.isEmpty() ? "" : " (" + sugg.size() + " suggestion(s))"));
 
             // Clé cache : MBID réel si disponible, sinon clé synthétique artist+title
             // Garantit que même les résultats SongRec-only sont mémorisés et ne repassent pas en PENDING
@@ -363,7 +420,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 ? best.recordingMbid
                 : MetadataCache.syntheticKey(best.artist, best.title);
             cache.saveTaggingHistory(best, cacheKey);
-            cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey);
+            cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey, lastFindTagsSource);
 
             if (!best.recordingMbid.isBlank()) acoustId.submit(best.recordingMbid);
             submitToMusicBrainz(best);
@@ -387,18 +444,75 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         if (TagWriter.repairM4aIfNeeded(fichier)) log("  M4A réparé OK");
 
         // 0. Historique personnel — ce fichier a-t-il déjà été tagué par OpenTagger ?
-        //    Retour instantané sans réseau : c'est le cœur de la "mémoire" personnelle.
+        //    Confiance totale SEULEMENT si identifié par empreinte audio (songrec/acoustid/mbid).
+        //    Si identifié par texte ("text"), SongRec doit vérifier car les tags peuvent être faux.
+        lastFindTagsSource = MetadataCache.SOURCE_TEXT;
         String knownMbid = cache.getFileTagging(fichier.getAbsolutePath());
         if (knownMbid != null) knownMbid = knownMbid.trim();
         if (knownMbid != null && !knownMbid.isBlank()) {
+            String cachedSource = cache.getFileTaggingSource(fichier.getAbsolutePath());
+            boolean trustedSource = MetadataCache.SOURCE_SONGREC.equals(cachedSource)
+                                 || MetadataCache.SOURCE_ACOUSTID.equals(cachedSource)
+                                 || MetadataCache.SOURCE_MBID.equals(cachedSource);
             TagInfo hist = cache.getTaggingHistory(knownMbid);
-            // Valider : ne pas utiliser un TagInfo avec artist ET title vides
             if (hist != null && (!hist.artist.isBlank() || !hist.title.isBlank())) {
-                hist.score = 100;
-                log("  cache hit: " + hist.artist + " – " + hist.title);
-                return List.of(hist);
+                if (trustedSource) {
+                    // Empreinte audio → confiance totale, retour instantané
+                    hist.score = 100;
+                    lastFindTagsSource = cachedSource;
+                    log("  cache hit [" + cachedSource + "] ✓ : " + hist.artist + " – " + hist.title);
+                    return List.of(hist);
+                } else {
+                    // Identification textuelle → on continue vers SongRec pour vérifier
+                    log("  cache hit [text] → SongRec va vérifier : " + hist.artist + " – " + hist.title);
+                }
             } else if (hist != null) {
                 log("  cache hit IGNORÉ (artiste+titre vides) pour mbid=" + knownMbid);
+            }
+        }
+
+        // 1. SongRec (Shazam) — empreinte audio, identifie la musique commerciale même avec
+        //    de faux tags existants. Placé AVANT AcoustID pour être la source principale.
+        if (SongRecClient.isAvailable()) {
+            try {
+                log("  SongRec...");
+                TagInfo sr = songRec.recognize(fichier);
+                if (sr != null && !sr.artist.isBlank() && !sr.title.isBlank()) {
+                    log("  SongRec → " + sr.artist + " – " + sr.title);
+                    // Enrichir avec MusicBrainz (ajoute MBIDs, piste, disque, etc.)
+                    String srHash = MetadataCache.queryHash(sr.artist, sr.title);
+                    String srCached = cache.getRecordingSearch(srHash);
+                    List<TagInfo> srMb;
+                    if (srCached != null) {
+                        srMb = mb.parseFromCache(srCached);
+                    } else {
+                        srMb = mb.searchRecording(sr.artist, sr.title);
+                        if (!srMb.isEmpty()) cache.putRecordingSearch(srHash, mb.lastRawJson());
+                    }
+                    if (!srMb.isEmpty() && srMb.get(0).score >= 50) {
+                        TagInfo best = srMb.get(0);
+                        // SongRec comble ce que MB n'a pas (genre, année Shazam, album Shazam)
+                        if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
+                        if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
+                        if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
+                        if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
+                        best.score = 90;
+                        log("  SongRec→MB: " + best.artist + " – " + best.title + " [" + best.album + "] score=" + best.score);
+                        lastFindTagsSource = MetadataCache.SOURCE_SONGREC;
+                        return srMb;
+                    }
+                    // MB n'a rien enrichi : garder le résultat SongRec seul
+                    sr.score = 85;
+                    log("  SongRec seul (MB sans match): " + sr.artist + " – " + sr.title);
+                    if (sr.genre.isBlank()) { try { discogs.enrichGenres(sr); } catch (Exception ignored) {} }
+                    if (sr.genre.isBlank()) { try { lastFm.enrichGenres(sr);  } catch (Exception ignored) {} }
+                    lastFindTagsSource = MetadataCache.SOURCE_SONGREC;
+                    return List.of(sr);
+                } else {
+                    log("  SongRec → rien trouvé");
+                }
+            } catch (Exception e) {
+                log("  SongRec WARN: " + e.getMessage());
             }
         }
 
@@ -416,6 +530,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (t != null && (!t.artist.isBlank() || !t.title.isBlank())) {
                 log("  MBID lookup: " + t.artist + " – " + t.title);
                 t.score = 100;
+                lastFindTagsSource = MetadataCache.SOURCE_MBID;
                 return List.of(t);
             } else if (t != null) {
                 log("  MBID lookup IGNORÉ (artiste+titre vides) mbid=" + existingMbid);
@@ -428,7 +543,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
             if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
                 List<TagInfo> r = acoustId.identify(fichier);
-                if (!r.isEmpty()) return r;
+                if (!r.isEmpty()) {
+                    lastFindTagsSource = MetadataCache.SOURCE_ACOUSTID;
+                    return r;
+                }
             }
         }
 
@@ -797,6 +915,45 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     }
 
     /** Extrait le premier artiste si l'artiste contient " and ", " & ", " feat", "/" etc. */
+    /**
+     * Génère une liste de suggestions d'amélioration pour un fichier tagué.
+     * Chaque suggestion décrit un point qui mérite vérification manuelle.
+     */
+    private static List<String> buildSuggestions(TagInfo best, Path cover, int seuil) {
+        List<String> s = new java.util.ArrayList<>();
+        if (best.score > 0 && best.score < seuil + 20)
+            s.add("Score modéré (" + best.score + "%) — vérifier l'identification");
+        if (cover == null)
+            s.add("Pochette non trouvée");
+        if (best.recordingMbid.isBlank())
+            s.add("MBID d'enregistrement manquant");
+        if (best.album.isBlank())
+            s.add("Album inconnu");
+        if (best.year.isBlank())
+            s.add("Année manquante");
+        if (best.genre.isBlank())
+            s.add("Genre manquant");
+        return s;
+    }
+
+    /**
+     * Score d'incomplétude : plus le score est élevé, plus le fichier manque d'infos.
+     * Utilisé pour traiter les fichiers les plus incomplets en priorité.
+     *   titre/artiste manquants  → +3 chacun (critique)
+     *   album manquant           → +2
+     *   année/genre manquants    → +1 chacun
+     */
+    private static int incompletenessScore(com.opentagger.model.TagInfo t) {
+        if (t == null) return 10;
+        int s = 0;
+        if (t.title.isBlank())  s += 3;
+        if (t.artist.isBlank()) s += 3;
+        if (t.album.isBlank())  s += 2;
+        if (t.year.isBlank())   s += 1;
+        if (t.genre.isBlank())  s += 1;
+        return s;
+    }
+
     private String simplifyArtist(String artist) {
         if (artist.isBlank()) return artist;
         // Couper sur les séparateurs communs et retourner le premier segment

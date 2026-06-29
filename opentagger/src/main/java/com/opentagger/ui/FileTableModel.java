@@ -47,6 +47,13 @@ public class FileTableModel extends AbstractTableModel {
         fireTableRowsInserted(from, entries.size() - 1);
     }
 
+    /** Supprime un ensemble d'entrées par référence (rollback d'un scan annulé). */
+    public void removeEntries(java.util.Set<FileEntry> toRemove) {
+        if (toRemove.isEmpty()) return;
+        entries.removeIf(toRemove::contains);
+        fireTableDataChanged();
+    }
+
     // ── AbstractTableModel ───────────────────────────────────────────────────
 
     @Override public int getRowCount()    { return entries.size(); }
@@ -78,7 +85,7 @@ public class FileTableModel extends AbstractTableModel {
             case COL_YEAR         -> ti.year;
             case COL_GENRE        -> ti.genre;
             case COL_TRACK        -> ti.track;
-            case COL_STATUS       -> statusLabel(e.status, e.message);
+            case COL_STATUS       -> statusLabel(e.status, e.message, e.suggestions);
             default               -> "";
         };
     }
@@ -118,13 +125,25 @@ public class FileTableModel extends AbstractTableModel {
         return e.result;
     }
 
-    private String statusLabel(FileEntry.Status s, String msg) {
+    private String statusLabel(FileEntry.Status s, String msg, java.util.List<String> sugg) {
+        boolean hasSugg = sugg != null && !sugg.isEmpty();
+        String warn = hasSugg ? " ⚠" + sugg.size() : "";
         return switch (s) {
             case PENDING    -> "—";
             case PROCESSING -> "⏳ En cours...";
-            case TAGGED     -> "✓ Tagué";
+            case TAGGED     -> (msg.isBlank() ? "✓ Tagué" : "✓ " + msg) + warn;
             case SKIPPED    -> "⚠ " + (msg.isBlank() ? "Ignoré" : msg);
             case ERROR      -> "✗ " + (msg.isBlank() ? "Erreur" : msg);
         };
+    }
+
+    /** Retourne le tooltip HTML pour une ligne (suggestions si présentes). */
+    public String getTooltip(int row) {
+        FileEntry e = entries.get(row);
+        if (e.suggestions == null || e.suggestions.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder("<html><b>Suggestions d'amélioration :</b><br>");
+        for (String s : e.suggestions) sb.append("&nbsp;⚠&nbsp;").append(s).append("<br>");
+        sb.append("</html>");
+        return sb.toString();
     }
 }

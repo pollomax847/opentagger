@@ -10,16 +10,14 @@ import java.awt.*;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntConsumer;
 
 /**
  * Dialogue d'aperçu du renommage avant application.
  *
- * Affiche un tableau "Chemin actuel → Nouveau chemin" avec code couleur :
- *  - Vert  : fichier qui sera renommé/déplacé
- *  - Gris  : déjà au bon endroit, aucun changement
- *  - Rouge : erreur de calcul du nouveau nom
- *
- * Le bouton "Appliquer" n'est actif que si au moins un fichier sera modifié.
+ * Affiche un tableau "Chemin actuel → Nouveau chemin" avec code couleur.
+ * Pendant l'exécution du renommage, affiche une barre de progression.
+ * Le bouton "Fermer" est toujours actif.
  */
 public class RenamePreviewDialog extends JDialog {
 
@@ -28,71 +26,129 @@ public class RenamePreviewDialog extends JDialog {
     public record PreviewRow(FileEntry entry, String oldName, String newName,
                              String newPath, RowState state, String errorMsg) {}
 
-    private final List<PreviewRow>  rows;
-    private final Runnable          onApply;
-    private final JLabel            lblSummary;
-
-    public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, Runnable onApply) {
-        this(owner, rows, "Aperçu du renommage", onApply);
+    /**
+     * Contrat du renommage exécuté en arrière-plan.
+     * onProgress(n) : appelé sur l'EDT après chaque fichier (n = nombre traités)
+     * onDone()      : appelé sur l'EDT à la fin
+     */
+    @FunctionalInterface
+    public interface RenameJob {
+        void start(IntConsumer onProgress, Runnable onDone);
     }
 
-    public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, String title, Runnable onApply) {
-        super(owner, title, true);
-        this.rows    = rows;
-        this.onApply = onApply;
+    private final List<PreviewRow>  rows;
+    private final long              willRenameCount;
+
+    // Composants footer
+    private JButton      btnApply;
+    private JButton      btnClose;
+    private JProgressBar progressBar;
+    private JLabel       lblProgress;
+    private JPanel       progressPanel;
+
+    public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, RenameJob job) {
+        this(owner, rows, "Aperçu du renommage", job);
+    }
+
+    public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, String title, RenameJob job) {
+        super(owner, title, false); // non-modal → fermeture libre
+        this.rows            = rows;
+        this.willRenameCount = rows.stream().filter(r -> r.state() == RowState.WILL_RENAME).count();
+
         setSize(900, 560);
         setMinimumSize(new Dimension(640, 360));
         setLocationRelativeTo(owner);
 
-        long willRename = rows.stream().filter(r -> r.state() == RowState.WILL_RENAME).count();
-        long errors     = rows.stream().filter(r -> r.state() == RowState.ERROR).count();
-        lblSummary = new JLabel(buildSummaryText(willRename, errors, rows.size()));
+        long errors = rows.stream().filter(r -> r.state() == RowState.ERROR).count();
+        JLabel lblSummary = new JLabel(buildSummaryText(willRenameCount, errors, rows.size()));
         lblSummary.setBorder(new EmptyBorder(8, 12, 8, 12));
 
-        JTable previewTable = buildTable();
-        JScrollPane scroll  = new JScrollPane(previewTable);
+        JScrollPane scroll = new JScrollPane(buildTable());
         scroll.setBorder(null);
-
-        JButton btnApply  = new JButton("Appliquer (" + willRename + " renommage(s))");
-        JButton btnCancel = new JButton("Annuler");
-        btnApply.setEnabled(willRename > 0);
-        if (willRename > 0)
-            btnApply.putClientProperty("FlatLaf.style", "background: #1a6030");
-
-        btnApply.addActionListener(e -> { onApply.run(); dispose(); });
-        btnCancel.addActionListener(e -> dispose());
-
-        JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
-        footer.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
-        footer.add(btnCancel);
-        footer.add(btnApply);
-
-        getRootPane().setDefaultButton(btnApply);
-        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
-        getRootPane().getActionMap().put("close",
-                new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
 
         getContentPane().setLayout(new BorderLayout());
         getContentPane().add(lblSummary, BorderLayout.NORTH);
         getContentPane().add(scroll,     BorderLayout.CENTER);
-        getContentPane().add(footer,     BorderLayout.SOUTH);
+        getContentPane().add(buildFooter(job), BorderLayout.SOUTH);
+
+        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
+        getRootPane().getActionMap().put("close",
+                new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
+    }
+
+    // ── Footer avec barre de progression ──────────────────────────────────────
+
+    private JPanel buildFooter(RenameJob job) {
+        btnApply = new JButton("Appliquer (" + willRenameCount + " renommage(s))");
+        btnClose = new JButton("Fermer");
+        btnApply.setEnabled(willRenameCount > 0);
+        if (willRenameCount > 0)
+            btnApply.putClientProperty("FlatLaf.style", "background: #1a6030");
+
+        progressBar = new JProgressBar(0, (int) willRenameCount);
+        progressBar.setStringPainted(true);
+        progressBar.setString("");
+        progressBar.setPreferredSize(new Dimension(200, 18));
+
+        lblProgress = new JLabel("  ");
+        lblProgress.putClientProperty("FlatLaf.style", "foreground: #aaaaaa; font: 11 $defaultFont");
+
+        progressPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        progressPanel.add(progressBar);
+        progressPanel.add(lblProgress);
+        progressPanel.setVisible(false);
+
+        btnApply.addActionListener(e -> startRename(job));
+        btnClose.addActionListener(e -> dispose());
+        getRootPane().setDefaultButton(btnApply);
+
+        JPanel left  = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
+        left.add(progressPanel);
+
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
+        right.add(btnClose);
+        right.add(btnApply);
+
+        JPanel footer = new JPanel(new BorderLayout());
+        footer.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
+        footer.add(left,  BorderLayout.WEST);
+        footer.add(right, BorderLayout.EAST);
+        return footer;
+    }
+
+    private void startRename(RenameJob job) {
+        btnApply.setEnabled(false);
+        btnApply.setText("En cours…");
+        progressBar.setValue(0);
+        progressPanel.setVisible(true);
+
+        job.start(
+            // onProgress — appelé sur EDT après chaque fichier
+            done -> {
+                progressBar.setValue(done);
+                progressBar.setString(done + " / " + willRenameCount);
+                lblProgress.setText("✓ " + done + " renommé(s)");
+            },
+            // onDone — appelé sur EDT à la fin
+            () -> {
+                progressBar.setValue((int) willRenameCount);
+                progressBar.setString("Terminé");
+                lblProgress.setText("✓ Terminé");
+                btnApply.setVisible(false);
+                btnClose.setText("Fermer");
+                btnClose.putClientProperty("FlatLaf.style", "background: #1a6030");
+                getRootPane().setDefaultButton(btnClose);
+            }
+        );
     }
 
     // ── Factory ───────────────────────────────────────────────────────────────
 
-    /**
-     * Calcule l'aperçu pour tous les fichiers TAGGED de la liste.
-     * Utilise FileRenamer.preview() — aucun fichier n'est déplacé.
-     */
     public static List<PreviewRow> compute(FileTableModel model, int maskIndex) {
         return compute(model, maskIndex, null);
     }
 
-    /**
-     * Variante avec destRoot explicite (pour "Organiser en dossiers").
-     * Si destRoot == null, utilise le scanRoot de chaque fichier.
-     */
     public static List<PreviewRow> compute(FileTableModel model, int maskIndex, Path destRoot) {
         FileRenamer renamer = new FileRenamer();
         List<PreviewRow> result = new ArrayList<>();
@@ -102,15 +158,15 @@ public class RenamePreviewDialog extends JDialog {
             if (e.status != FileEntry.Status.TAGGED) continue;
             if (e.currentPath == null) continue;
 
-            Path current  = e.currentPath;
-            Path root     = destRoot != null ? destRoot
-                          : (e.scanRoot != null ? e.scanRoot : current.getParent());
+            Path current = e.currentPath;
+            Path root    = destRoot != null ? destRoot
+                         : (e.scanRoot != null ? e.scanRoot : current.getParent());
             String curName = current.getFileName().toString();
             String ext     = curName.contains(".") ? curName.substring(curName.lastIndexOf('.')) : "";
 
             try {
                 String newName = renamer.preview(e.activeTags(), maskIndex, ext);
-                Path newPath = root.resolve(newName).normalize();
+                Path newPath   = root.resolve(newName).normalize();
                 if (newName.isBlank()) {
                     result.add(new PreviewRow(e, current.toString(), "—", "—",
                         RowState.ERROR, "Masque vide — tags incomplets ?"));
@@ -129,7 +185,7 @@ public class RenamePreviewDialog extends JDialog {
         return result;
     }
 
-    // ── Construction du tableau ───────────────────────────────────────────────
+    // ── Tableau prévisualisation ───────────────────────────────────────────────
 
     private JTable buildTable() {
         String[] cols = {"Statut", "Fichier actuel", "Nouveau nom"};
@@ -157,7 +213,6 @@ public class RenamePreviewDialog extends JDialog {
         t.setShowGrid(false);
         t.setIntercellSpacing(new Dimension(0, 1));
 
-        // Tooltip sur la cellule = chemin complet
         t.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
             @Override public void mouseMoved(java.awt.event.MouseEvent e) {
                 int row = t.rowAtPoint(e.getPoint());
@@ -168,16 +223,15 @@ public class RenamePreviewDialog extends JDialog {
             }
         });
 
-        // Renderer coloré par état
         DefaultTableCellRenderer renderer = new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(
                     JTable tbl, Object val, boolean sel, boolean focus, int row, int col) {
                 super.getTableCellRendererComponent(tbl, val, sel, focus, row, col);
                 if (!sel && row < rows.size()) {
                     setForeground(switch (rows.get(row).state()) {
-                        case WILL_RENAME -> new Color(0x81c784);  // vert clair
+                        case WILL_RENAME -> new Color(0x81c784);
                         case ALREADY_OK  -> UIManager.getColor("Label.disabledForeground");
-                        case ERROR       -> new Color(0xef9a9a);  // rouge clair
+                        case ERROR       -> new Color(0xef9a9a);
                     });
                 }
                 return this;
