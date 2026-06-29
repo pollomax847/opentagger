@@ -35,6 +35,9 @@ import java.util.stream.Stream;
 
 public class MainFrame extends JFrame {
 
+    private static final java.util.logging.Logger LOG =
+        java.util.logging.Logger.getLogger(MainFrame.class.getName());
+
     // ── Palette ──────────────────────────────────────────────────────────────
     private static final Color COL_TAGGED     = new Color(40,  180, 100, 55);
     private static final Color COL_ERROR      = new Color(220, 60,  60,  55);
@@ -89,6 +92,9 @@ public class MainFrame extends JFrame {
     // Workers de scan actifs — permettent l'annulation
     private final java.util.List<SwingWorker<?,?>> activeScanWorkers = new java.util.ArrayList<>();
 
+    // Surveillance automatique des dossiers chargés (WatchService)
+    private com.opentagger.FolderWatcher folderWatcher;
+
     // ── Entrée publique ───────────────────────────────────────────────────────
 
     public static void launch(java.io.File[] initialDirs) {
@@ -123,8 +129,41 @@ public class MainFrame extends JFrame {
         setMinimumSize(new Dimension(960, 600));
         restoreWindowGeometry();  // taille/position sauvegardées, ou 85% écran par défaut
         addWindowListener(new java.awt.event.WindowAdapter() {
-            @Override public void windowClosing(java.awt.event.WindowEvent e) { saveWindowGeometry(); }
+            @Override public void windowClosing(java.awt.event.WindowEvent e) {
+                saveWindowGeometry();
+                if (folderWatcher != null) try { folderWatcher.close(); } catch (Exception ignored) {}
+            }
         });
+
+        // Initialiser le FolderWatcher (auto-détection des nouveaux fichiers)
+        try {
+            folderWatcher = new com.opentagger.FolderWatcher(p -> SwingUtilities.invokeLater(() -> {
+                java.io.File f = p.toFile();
+                // Vérifier que ce fichier n'est pas déjà dans la table
+                for (int i = 0; i < tableModel.getRowCount(); i++) {
+                    if (tableModel.get(i).file.equals(f)) return;
+                }
+                com.opentagger.model.FileEntry e = new com.opentagger.model.FileEntry(f, new com.opentagger.model.TagInfo());
+                // Déterminer la racine : trouver le scanRoot du dossier parent
+                Path parent = p.getParent();
+                for (int i = 0; i < tableModel.getRowCount(); i++) {
+                    com.opentagger.model.FileEntry ex = tableModel.get(i);
+                    if (ex.scanRoot != null && parent.startsWith(ex.scanRoot)) { e.scanRoot = ex.scanRoot; break; }
+                }
+                tableModel.add(e);
+                // Lire les tags en arrière-plan
+                new SwingWorker<com.opentagger.model.TagInfo, Void>() {
+                    @Override protected com.opentagger.model.TagInfo doInBackground() { return readTags(f); }
+                    @Override protected void done() {
+                        try { e.current = get(); tableModel.update(e); refreshStats(); } catch (Exception ignored) {}
+                    }
+                }.execute();
+                setStatus("Nouveau fichier détecté : " + f.getName());
+            }));
+            folderWatcher.start();
+        } catch (Exception ex) {
+            LOG.warning("FolderWatcher non disponible : " + ex.getMessage());
+        }
         setLayout(new BorderLayout(0, 0));
 
         setJMenuBar(buildMenuBar());
@@ -280,6 +319,7 @@ public class MainFrame extends JFrame {
             return;
         }
         tableModel.clear();
+        if (folderWatcher != null) folderWatcher.clearAll();
         btnRefresh.setEnabled(false);
         refreshStats();
         setStatus("Liste vidée.");
@@ -290,6 +330,90 @@ public class MainFrame extends JFrame {
      * Les fichiers déjà présents dans la table sont ignorés (pas de doublons).
      * Les fichiers supprimés du disque restent dans la table (pas de suppression automatique).
      */
+    /**
+     * Rafraîchit les métadonnées et la pochette de la sélection en utilisant
+     * les MBIDs déjà présents dans les fichiers, sans ré-identification complète.
+     *  - recordingMbid → lookup MusicBrainz pour tags frais
+     *  - releaseMbid   → Cover Art Archive pour pochette fraîche
+     */
+    private void refreshSelectedMeta() {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) { setStatus("Sélectionnez d'abord des fichiers."); return; }
+
+        java.util.List<com.opentagger.model.FileEntry> targets = new java.util.ArrayList<>();
+        for (int r : rows) {
+            com.opentagger.model.FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
+            com.opentagger.model.TagInfo   ti = e.activeTags();
+            if (!ti.recordingMbid.isBlank() || !ti.releaseMbid.isBlank()) targets.add(e);
+        }
+        if (targets.isEmpty()) {
+            setStatus("Aucun fichier sélectionné n'a de MBID — faites d'abord un taguage.");
+            return;
+        }
+
+        setStatus("Rafraîchissement de " + targets.size() + " fichier(s)…");
+
+        new SwingWorker<Void, com.opentagger.model.FileEntry>() {
+            final com.opentagger.MusicBrainzClient mbClient = new com.opentagger.MusicBrainzClient();
+            final com.opentagger.CaaClient         caa      = new com.opentagger.CaaClient();
+            final com.opentagger.TagWriter         writer   = new com.opentagger.TagWriter();
+            int done = 0;
+
+            @Override protected Void doInBackground() throws Exception {
+                for (com.opentagger.model.FileEntry e : targets) {
+                    com.opentagger.model.TagInfo current = e.activeTags();
+
+                    // 1. Tags frais depuis MB via recordingMbid
+                    if (!current.recordingMbid.isBlank()) {
+                        try {
+                            com.opentagger.model.TagInfo fresh = mbClient.lookupRecording(current.recordingMbid);
+                            if (fresh != null) {
+                                // Ne mettre à jour que les champs clés — ne pas écraser les données manuelles
+                                if (!fresh.title.isBlank())       current.title       = fresh.title;
+                                if (!fresh.artist.isBlank())      current.artist      = fresh.artist;
+                                if (!fresh.albumArtist.isBlank()) current.albumArtist = fresh.albumArtist;
+                                if (!fresh.album.isBlank())       current.album       = fresh.album;
+                                if (!fresh.year.isBlank())        current.year        = fresh.year;
+                                if (!fresh.track.isBlank())       current.track       = fresh.track;
+                                if (!fresh.trackTotal.isBlank())  current.trackTotal  = fresh.trackTotal;
+                                if (!fresh.releaseMbid.isBlank()) current.releaseMbid = fresh.releaseMbid;
+                                if (!fresh.releaseGroupMbid.isBlank()) current.releaseGroupMbid = fresh.releaseGroupMbid;
+                                e.result = current;
+                                e.status = com.opentagger.model.FileEntry.Status.TAGGED;
+                            }
+                        } catch (Exception ignored) {}
+                        try { Thread.sleep(1100); } catch (InterruptedException ie) { break; } // MB rate-limit
+                    }
+
+                    // 2. Pochette fraîche depuis CAA via releaseMbid
+                    if (!current.releaseMbid.isBlank()) {
+                        try {
+                            java.nio.file.Path img = caa.downloadFront(current);
+                            if (img != null) {
+                                writer.writeCoverOnly(e.file, img);
+                                java.nio.file.Files.deleteIfExists(img);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    done++;
+                    publish(e);
+                }
+                return null;
+            }
+
+            @Override protected void process(java.util.List<com.opentagger.model.FileEntry> chunks) {
+                for (com.opentagger.model.FileEntry e : chunks) tableModel.update(e);
+                setStatus("Rafraîchissement : " + done + "/" + targets.size() + "…");
+            }
+
+            @Override protected void done() {
+                refreshStats();
+                setStatus("Rafraîchissement terminé — " + done + " fichier(s) mis à jour.");
+            }
+        }.execute();
+    }
+
     private void refreshFolders() {
         // Collecter les racines uniques de tous les fichiers chargés
         java.util.LinkedHashSet<File> roots = new java.util.LinkedHashSet<>();
@@ -723,6 +847,9 @@ public class MainFrame extends JFrame {
         JMenuItem miCover = new JMenuItem("🖼  Gérer la pochette…");
         miCover.addActionListener(e -> openCoverDialog());
 
+        JMenuItem miRefreshMeta = new JMenuItem("↺  Rafraîchir tags + pochette (sélection)");
+        miRefreshMeta.addActionListener(e -> refreshSelectedMeta());
+
         JMenuItem miMbEdit = new JMenuItem("✏  Modifier sur MusicBrainz");
         miMbEdit.addActionListener(e -> openMbEditPage());
 
@@ -730,7 +857,8 @@ public class MainFrame extends JFrame {
         miMbContrib.addActionListener(e -> openMbContribute());
 
         menu.add(miTag); menu.add(miRename); menu.addSeparator();
-        menu.add(miMatch); menu.add(miCover); menu.addSeparator();
+        menu.add(miMatch); menu.add(miCover);
+        menu.add(miRefreshMeta); menu.addSeparator();
         menu.add(miMbEdit); menu.add(miMbContrib); menu.addSeparator();
         menu.add(miAcoustId); menu.addSeparator();
         menu.add(miReveal); menu.add(miRemove);
@@ -1221,6 +1349,10 @@ public class MainFrame extends JFrame {
                     newEntries.add(e);
                 }
                 if (isCancelled()) return new int[]{0, 0};
+
+                // Enregistrer le dossier pour l'auto-watch (hors EDT — walkFileTree peut être long)
+                if (folderWatcher != null) folderWatcher.watch(dir.toPath());
+
                 @SuppressWarnings("unchecked")
                 Object[] phase1 = new Object[]{ new ArrayList<>(newEntries) };
                 publish(phase1);  // → table peuplée instantanément avec noms seuls

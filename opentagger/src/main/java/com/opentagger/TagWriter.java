@@ -81,6 +81,30 @@ public class TagWriter {
         return merged;
     }
 
+    /**
+     * Écrit uniquement la pochette (cover art) dans le fichier sans toucher aux autres tags.
+     * Utilisé par le rafraîchissement de pochette depuis le Cover Art Archive.
+     */
+    public void writeCoverOnly(java.io.File fichier, java.nio.file.Path coverImage) throws Exception {
+        if (coverImage == null || !java.nio.file.Files.exists(coverImage)) return;
+        long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
+        repairM4aIfNeeded(fichier);
+        AudioFile audio = AudioFileIO.read(fichier);
+        Tag tag = audio.getTagOrCreateAndSetDefault();
+        // Supprimer les pochettes existantes et ajouter la nouvelle
+        tag.deleteArtworkField();
+        byte[] imgBytes = java.nio.file.Files.readAllBytes(coverImage);
+        String name = coverImage.getFileName().toString().toLowerCase();
+        String mime = name.endsWith(".png") ? "image/png" : "image/jpeg";
+        org.jaudiotagger.tag.images.Artwork art = org.jaudiotagger.tag.images.ArtworkFactory.createArtworkFromFile(coverImage.toFile());
+        art.setBinaryData(imgBytes);
+        art.setMimeType(mime);
+        art.setPictureType(3); // Front cover
+        tag.setField(art);
+        audio.commit();
+        if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+    }
+
     /** Écrit uniquement les champs ReplayGain Track sans toucher aux autres tags. */
     public void writeReplayGain(File fichier, String trackGain, String trackPeak) {
         if ((trackGain == null || trackGain.isBlank())
