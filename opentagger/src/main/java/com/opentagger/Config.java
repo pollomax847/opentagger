@@ -76,8 +76,10 @@ public class Config {
     public int    discogsMaxGenres()   { return num("discogs.max_genres", 3); }
     public boolean fanartEnabled()     { return bool("fanart.download_cover", true); }
     public boolean lastfmEnabled()     { return bool("lastfm.use_tags", true); }
-    public int    defaultRenameMask()  { return num("rename.default_mask", 3); }
-    public boolean autoRenameEnabled() { return bool("rename.auto_enabled", false); }
+    public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
+    public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
+    public boolean deleteEmptyDirsAfterRename() { return bool("rename.delete_empty_dirs", true); }
+    public boolean followLogAfterRename()   { return bool("rename.follow_log",          true); }
     public String[] startupFolders()   {
         String v = str("startup.folders");
         return v.isBlank() ? new String[0] : v.split("\\|");

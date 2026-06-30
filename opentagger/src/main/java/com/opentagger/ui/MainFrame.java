@@ -1365,11 +1365,30 @@ public class MainFrame extends JFrame {
                 java.util.Set<String> taggedPaths = cache.loadTaggedPaths();
                 cache.close();
 
-                // ── Phase 2 : lecture des tags (1 thread, séquentiel, économe) ────
-                int tagged = 0;
+                // ── Phase 2 : lecture des tags (parallèle — N threads I/O) ─────────
+                // On soumet tous les readTags en parallèle, puis on parcourt les futures
+                // dans l'ordre pour publish() sur le SwingWorker (thread-safe car chaque
+                // readTags() crée ses propres objets JAudioTagger indépendants).
+                int threads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+                java.util.concurrent.ExecutorService tagPool =
+                    java.util.concurrent.Executors.newFixedThreadPool(threads);
+
+                // Soumettre toutes les tâches de lecture avant de collecter les résultats
+                java.util.List<java.util.concurrent.Future<com.opentagger.model.TagInfo>> tagFutures =
+                    new java.util.ArrayList<>(newEntries.size());
                 for (FileEntry entry : newEntries) {
-                    if (isCancelled()) break;
-                    com.opentagger.model.TagInfo ti = readTags(entry.file);
+                    final File f = entry.file;
+                    tagFutures.add(tagPool.submit(() -> readTags(f)));
+                }
+                tagPool.shutdown();
+
+                int tagged = 0;
+                for (int i = 0; i < newEntries.size(); i++) {
+                    if (isCancelled()) { tagPool.shutdownNow(); break; }
+                    FileEntry entry = newEntries.get(i);
+                    com.opentagger.model.TagInfo ti;
+                    try { ti = tagFutures.get(i).get(); }
+                    catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
                     boolean wasPreviouslyTagged = taggedPaths.contains(entry.file.getAbsolutePath());
                     if (wasPreviouslyTagged) tagged++;
                     publish(new Object[]{ entry, ti, wasPreviouslyTagged });

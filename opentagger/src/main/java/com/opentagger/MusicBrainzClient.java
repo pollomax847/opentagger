@@ -24,10 +24,17 @@ public class MusicBrainzClient {
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private String lastRawJson = "";
+    private String  lastRawJson      = "";
+    private boolean networkCallMade  = false;
 
     /** Dernier JSON brut reçu — utilisé par TaggingWorker pour la mise en cache. */
     public String lastRawJson() { return lastRawJson; }
+
+    /** Retourne true si au moins un appel HTTP réel a eu lieu depuis le dernier reset. */
+    public boolean wasNetworkCalled() { return networkCallMade; }
+
+    /** Remet à zéro le compteur d'appels réseau (à appeler avant chaque fichier). */
+    public void resetNetworkFlag() { networkCallMade = false; }
 
     /** Désérialise une réponse Recording Search MB déjà mise en cache. */
     public List<TagInfo> parseFromCache(String json) {
@@ -157,6 +164,7 @@ public class MusicBrainzClient {
                     .header("User-Agent", Config.get().userAgent())
                     .GET()
                     .build();
+            networkCallMade = true; // au moins un vrai appel HTTP MB
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             int status = response.statusCode();
             if (status == 200) return response;

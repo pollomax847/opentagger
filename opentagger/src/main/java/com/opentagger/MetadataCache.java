@@ -260,6 +260,15 @@ public class MetadataCache {
         } catch (Exception ignored) {}
     }
 
+    /** Supprime l'entrée d'un chemin de fichier dans file_history (après renommage). */
+    public synchronized void deleteFileHistory(String path) {
+        if (conn == null || path == null) return;
+        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM file_history WHERE path=?")) {
+            ps.setString(1, path);
+            ps.executeUpdate();
+        } catch (Exception ignored) {}
+    }
+
     /**
      * Retourne le MBID précédemment appliqué à ce chemin, ou null.
      * Permet de re-tagger instantanément depuis l'historique sans appel réseau.

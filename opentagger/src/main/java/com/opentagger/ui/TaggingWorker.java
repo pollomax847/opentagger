@@ -47,7 +47,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final AudioRecognitionChain    recognitionChain = new AudioRecognitionChain();
 
     // Source d'identification du dernier findTags() — utilisée pour enregistrer le niveau de confiance
-    private String lastFindTagsSource = MetadataCache.SOURCE_TEXT;
+    private String  lastFindTagsSource   = MetadataCache.SOURCE_TEXT;
     private final DiscogsClient      discogs   = new DiscogsClient();
     private final LastFmClient       lastFm    = new LastFmClient();
     private final FanArtClient       fanArt    = new FanArtClient();
@@ -111,6 +111,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 String.format("[%d/%d] %s — %s", fileIdx, fileTotal, fname, s));
             step.accept("identification…");
 
+            // Reset avant chaque fichier : on mesure tous les appels MB de processEntry entier
+            mb.resetNetworkFlag();
+
             processEntry(entry, step);
 
             // Si annulé pendant processEntry, remettre l'entrée en attente
@@ -124,8 +127,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             setProgress((++done * 100) / total);
             publish(entry);
 
-            // Rate-limit MusicBrainz (1 req/s max)
-            if (!isCancelled() && done < total) sleep(1100);
+            // Rate-limit MusicBrainz : sleep SEULEMENT si un vrai appel HTTP a eu lieu
+            // Cache hits (source fiable) = 0 ms d'attente
+            boolean usedNet = mb.wasNetworkCalled();
+            if (!isCancelled() && done < total && usedNet) {
+                log("  [rate-limit] appel réseau MB → pause 1.1s");
+                sleep(1100);
+            } else if (!isCancelled() && done < total) {
+                log("  [rate-limit] cache hit → pas de pause");
+            }
         }
 
         // Remettre en attente toute entrée restée bloquée en PROCESSING
@@ -257,10 +267,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 } catch (Exception ignored) {}
             }
 
-            // Fallback MB search : si album ou artistMbid toujours vides après lookup
-            // (pas de release dans MB, ou SongRec-only sans MBID).
-            // Pause rate-limit MB entre les deux blocs pour ne pas envoyer deux requêtes à la suite.
-            if ((best.album.isBlank() || best.year.isBlank()) && !best.recordingMbid.isBlank()) {
+            // Fallback MB search : si album ou artistMbid toujours vides après lookup.
+            // Ne pause que si un vrai appel MB a eu lieu (évite d'attendre pour un cache hit).
+            if ((best.album.isBlank() || best.year.isBlank()) && !best.recordingMbid.isBlank()
+                    && mb.wasNetworkCalled()) {
+                mb.resetNetworkFlag(); // flag réinitialisé : le prochain appel en bénéficiera aussi
                 sleep(1100);
             }
             if (!best.artist.isBlank()
@@ -387,6 +398,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             best = writer.write(fichier, best, cover);
 
             // ── Renommage optionnel ───────────────────────────────────────
+            String oldFilePath = fichier.getAbsolutePath();
             if (maskIndex >= 0) {
                 step.accept("renommage…");
                 try {
@@ -396,7 +408,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     if (newPath != null) {
                         Path oldParent    = fichier.toPath().getParent();
                         entry.currentPath = newPath;
-                        FileRenamer.deleteEmptyAncestors(oldParent, root);
+                        if (Config.get().deleteEmptyDirsAfterRename()) {
+                            FileRenamer.deleteEmptyAncestors(oldParent, root);
+                        }
                         entry.message = "→ " + newPath.getFileName();
                     }
                 } catch (Exception ignored) {}
@@ -420,7 +434,16 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 ? best.recordingMbid
                 : MetadataCache.syntheticKey(best.artist, best.title);
             cache.saveTaggingHistory(best, cacheKey);
-            cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey, lastFindTagsSource);
+
+            // Utiliser le chemin effectif (post-renommage) pour le log — pas l'ancien chemin
+            String effectivePath = entry.currentPath != null
+                ? entry.currentPath.toAbsolutePath().toString()
+                : oldFilePath;
+            if (Config.get().followLogAfterRename() && !effectivePath.equals(oldFilePath)) {
+                // Supprimer l'entrée de l'ancien chemin pour ne pas laisser d'orphelin
+                cache.deleteFileHistory(oldFilePath);
+            }
+            cache.recordFileTagging(effectivePath, cacheKey, lastFindTagsSource);
 
             if (!best.recordingMbid.isBlank()) acoustId.submit(best.recordingMbid);
             submitToMusicBrainz(best);
@@ -811,7 +834,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     }
                 }
 
-                sleep(1100);
+                if (mb.wasNetworkCalled()) { mb.resetNetworkFlag(); sleep(1100); }
             } catch (Exception e) {
                 log("  cluster erreur: " + e.getMessage());
             }

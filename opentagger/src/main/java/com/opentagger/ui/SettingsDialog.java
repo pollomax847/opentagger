@@ -47,6 +47,8 @@ public class SettingsDialog extends JDialog {
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbDefaultMask;
     private JCheckBox  chkAutoRename;
+    private JCheckBox  chkDeleteEmptyDirs;
+    private JCheckBox  chkFollowLog;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JTextField tfFfmpegPath;
@@ -670,12 +672,14 @@ public class SettingsDialog extends JDialog {
         cmbDefaultMask = new JComboBox<>(maskItems);
         cmbDefaultMask.setMaximumRowCount(12);
 
-        chkAutoRename = new JCheckBox("Renommer automatiquement après le taguage");
+        chkAutoRename     = new JCheckBox("Renommer automatiquement après le taguage");
         chkAutoRename.addActionListener(e -> cmbDefaultMask.setEnabled(chkAutoRename.isSelected()));
+        chkDeleteEmptyDirs = new JCheckBox("Supprimer les dossiers vides après déplacement");
+        chkFollowLog       = new JCheckBox("Mettre à jour le log avec le nouveau chemin (suivi après renommage)");
 
         JPanel p = form(
-            new String[]{"Masque par défaut :", ""},
-            new JComponent[]{cmbDefaultMask, chkAutoRename},
+            new String[]{"Masque par défaut :", "", "", ""},
+            new JComponent[]{cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
             "Renommage automatique des fichiers");
         return p;
     }
@@ -1059,10 +1063,12 @@ public class SettingsDialog extends JDialog {
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
-        cmbDefaultMask  .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
-                                                    cmbDefaultMask.getItemCount() - 1));
-        chkAutoRename   .setSelected(cfg.bool("rename.auto_enabled",   false));
-        cmbDefaultMask  .setEnabled(chkAutoRename.isSelected());
+        cmbDefaultMask    .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
+                                                     cmbDefaultMask.getItemCount() - 1));
+        chkAutoRename     .setSelected(cfg.bool("rename.auto_enabled",       false));
+        chkDeleteEmptyDirs.setSelected(cfg.bool("rename.delete_empty_dirs",  true));
+        chkFollowLog      .setSelected(cfg.bool("rename.follow_log",         true));
+        cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
 
         startupFolderModel.clear();
         for (String f : cfg.startupFolders())
@@ -1183,6 +1189,8 @@ public class SettingsDialog extends JDialog {
 
         p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
+        p.setProperty("rename.delete_empty_dirs",      String.valueOf(chkDeleteEmptyDirs.isSelected()));
+        p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < startupFolderModel.size(); i++) {
