@@ -156,7 +156,9 @@ public class EssentiaClient {
     public static boolean isOnPath() {
         String binary = Config.get().str("audio.essentia_path", "essentia_streaming_extractor_music");
         try {
-            Process p = new ProcessBuilder("which", binary)
+            // "which" sur Linux/macOS, "where" sur Windows
+            String finder = System.getProperty("os.name","").toLowerCase().contains("win") ? "where" : "which";
+            Process p = new ProcessBuilder(finder, binary)
                     .redirectErrorStream(true)
                     .start();
             p.getInputStream().transferTo(OutputStream.nullOutputStream());

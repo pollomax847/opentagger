@@ -25,6 +25,8 @@ import java.util.List;
 public class DuplicatesDialog extends JDialog {
 
     private static final DecimalFormat SZ = new DecimalFormat("0.0");
+    private static final java.util.logging.Logger LOG =
+        java.util.logging.Logger.getLogger(DuplicatesDialog.class.getName());
 
     private final FileTableModel        tableModel;
     private final List<DuplicateGroup>  groups;
@@ -285,6 +287,7 @@ public class DuplicatesDialog extends JDialog {
         String msg = deleted + " fichier(s) " + where
             + (dirsRemoved > 0 ? ", " + dirsRemoved + " dossier(s) vide(s) supprimé(s)" : "")
             + (errors > 0 ? ", " + errors + " erreur(s)" : "") + ".";
+        LOG.info("[Doublons] " + msg);
         JOptionPane.showMessageDialog(this, msg, "Résultat", JOptionPane.INFORMATION_MESSAGE);
         dispose();
     }

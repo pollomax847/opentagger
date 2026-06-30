@@ -609,7 +609,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 step.accept("renommage…");
                 try {
                     Path curPath = fichier.toPath();
-                    Path root    = entry.scanRoot != null ? entry.scanRoot : curPath.getParent();
+                    String libRoot = Config.get().libraryRoot();
+                    Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                            ? java.nio.file.Paths.get(libRoot)
+                            : (entry.scanRoot != null ? entry.scanRoot : curPath.getParent());
                     Path newPath = renamer.rename(curPath, best, maskIndex, root);
                     if (newPath != null) {
                         Path oldParent    = fichier.toPath().getParent();

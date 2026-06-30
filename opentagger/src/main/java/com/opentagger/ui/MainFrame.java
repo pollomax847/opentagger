@@ -2335,8 +2335,14 @@ public class MainFrame extends JFrame {
         List<FileEntry> all = new ArrayList<>();
         for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
         List<DuplicateDetector.DuplicateGroup> groups = DuplicateDetector.detect(all);
-        if (groups.isEmpty()) { setStatus("Aucun doublon détecté."); return; }
+        if (groups.isEmpty()) { setStatus("Aucun doublon détecté."); LOG.info("[Doublons] Aucun doublon parmi " + all.size() + " fichiers."); return; }
         int total = groups.stream().mapToInt(g -> g.files().size()).sum();
+        LOG.info("[Doublons] " + groups.size() + " groupe(s), " + total + " fichier(s) sur " + all.size() + " analysés.");
+        for (DuplicateDetector.DuplicateGroup g : groups) {
+            LOG.info("[Doublons] Groupe " + g.confidence().badge + ": " + g.files().stream()
+                .map(e -> (e.currentPath != null ? e.currentPath : e.file.toPath()).getFileName().toString())
+                .collect(java.util.stream.Collectors.joining(" | ")));
+        }
         setStatus(groups.size() + " groupe(s) de doublons, " + total + " fichier(s) concerné(s).");
         new DuplicatesDialog(this, groups, tableModel).setVisible(true);
         refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture

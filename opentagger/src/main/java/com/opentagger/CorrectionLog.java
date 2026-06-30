@@ -104,7 +104,7 @@ public class CorrectionLog {
             if (Files.isWritable(folder)) return p;
         }
         // Fallback : ~/.opentagger/logs/
-        return Path.of(System.getProperty("user.home"), ".opentagger", "logs", filename);
+        return Path.of(Config.configDir(), "logs", filename);
     }
 
     // ── Helpers privés ────────────────────────────────────────────────────────

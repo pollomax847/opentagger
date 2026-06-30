@@ -21,7 +21,7 @@ import java.util.Properties;
 public class SettingsDialog extends JDialog {
 
     private static final String SETTINGS_FILE =
-            System.getProperty("user.home") + "/.opentagger/settings.properties";
+            com.opentagger.Config.configDir() + java.io.File.separator + "settings.properties";
 
     // ── Onglet APIs ──────────────────────────────────────────────────────────
     private JTextField tfMbUserAgent, tfAcoustIdKey, tfAcoustIdUserToken;
@@ -49,6 +49,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkAutoRename;
     private JCheckBox  chkDeleteEmptyDirs;
     private JCheckBox  chkFollowLog;
+    private JTextField tfLibraryRoot;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JTextField tfFfmpegPath;
@@ -678,54 +679,79 @@ public class SettingsDialog extends JDialog {
         cmbDefaultMask = new JComboBox<>(maskItems);
         cmbDefaultMask.setMaximumRowCount(maskCount);
 
-        // ── Aperçu en temps réel du masque sélectionné ─────────────────────────
-        // Deux exemples : album standard + compilation Various Artists
-        com.opentagger.model.TagInfo sampleAlbum = new com.opentagger.model.TagInfo();
-        sampleAlbum.artist      = "Coldplay";
-        sampleAlbum.albumArtist = "Coldplay";
-        sampleAlbum.album       = "Parachutes";
-        sampleAlbum.title       = "Yellow";
-        sampleAlbum.track       = "05";
-        sampleAlbum.year        = "2000";
-        sampleAlbum.genre       = "Alternative Rock";
-
-        com.opentagger.model.TagInfo sampleComp = new com.opentagger.model.TagInfo();
-        sampleComp.artist      = "Daft Punk";
-        sampleComp.albumArtist = "Various Artists";
-        sampleComp.album       = "100 Club Hits Edition 2022";
-        sampleComp.title       = "Get Lucky";
-        sampleComp.track       = "01";
-        sampleComp.year        = "2022";
-        sampleComp.genre       = "Pop";
-
-        JTextArea lblMaskPreview = new JTextArea(3, 40);
-        lblMaskPreview.setEditable(false);
-        lblMaskPreview.setOpaque(false);
-        lblMaskPreview.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-        lblMaskPreview.setForeground(new Color(0x555555));
-        lblMaskPreview.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
-
-        Runnable updatePreview = () -> {
-            int idx = cmbDefaultMask.getSelectedIndex();
-            if (idx < 0) return;
-            String p1 = tmpRenamer.preview(sampleAlbum, idx, ".mp3");
-            String p2 = tmpRenamer.preview(sampleComp,  idx, ".mp3");
-            lblMaskPreview.setText(
-                "Album  : " + p1 + "\n" +
-                "Compil : " + p2);
-        };
-        cmbDefaultMask.addActionListener(e -> updatePreview.run());
-        updatePreview.run(); // aperçu initial
-
-        chkAutoRename     = new JCheckBox("Renommer automatiquement après le taguage");
+        chkAutoRename      = new JCheckBox("Renommer automatiquement après le taguage");
         chkAutoRename.addActionListener(e -> cmbDefaultMask.setEnabled(chkAutoRename.isSelected()));
         chkDeleteEmptyDirs = new JCheckBox("Supprimer les dossiers vides après déplacement");
         chkFollowLog       = new JCheckBox("Mettre à jour le log avec le nouveau chemin (suivi après renommage)");
 
+        // ── Exemples en temps réel ──────────────────────────────────────────────
+        com.opentagger.model.TagInfo ex1 = new com.opentagger.model.TagInfo();
+        ex1.artist = "Coldplay"; ex1.albumArtist = "Coldplay";
+        ex1.album = "Parachutes"; ex1.title = "Yellow";
+        ex1.track = "05"; ex1.year = "2000";
+
+        com.opentagger.model.TagInfo ex2 = new com.opentagger.model.TagInfo();
+        ex2.artist = "Daft Punk"; ex2.albumArtist = "Various Artists";
+        ex2.album = "100 Club Hits"; ex2.title = "Get Lucky";
+        ex2.track = "01"; ex2.year = "2022";
+        ex2.isCompilation = "1";
+
+        com.opentagger.model.TagInfo ex3 = new com.opentagger.model.TagInfo();
+        ex3.artist = "Pink Floyd"; ex3.albumArtist = "Pink Floyd";
+        ex3.album = "The Wall"; ex3.title = "Another Brick in the Wall";
+        ex3.track = "06"; ex3.discNo = "01"; ex3.discTotal = "2"; ex3.year = "1979";
+
+        com.opentagger.model.TagInfo ex4 = new com.opentagger.model.TagInfo();
+        ex4.artist = "Adele"; ex4.albumArtist = "Adele";
+        ex4.album = "25"; ex4.title = "Hello";
+        ex4.track = "01"; ex4.year = "2015";
+
+        JTextArea previewArea = new JTextArea(6, 60);
+        previewArea.setEditable(false);
+        previewArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        previewArea.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+
+        JScrollPane previewScroll = new JScrollPane(previewArea,
+            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+            JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        previewScroll.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createEtchedBorder(), "Exemples de résultat"));
+
+        Runnable updatePreview = () -> {
+            int idx = cmbDefaultMask.getSelectedIndex();
+            if (idx < 0) return;
+            previewArea.setText(
+                "Album normal   : " + tmpRenamer.preview(ex1, idx, ".mp3") + "\n" +
+                "Compilation    : " + tmpRenamer.preview(ex2, idx, ".mp3") + "\n" +
+                "Multi-disc     : " + tmpRenamer.preview(ex3, idx, ".mp3") + "\n" +
+                "Album/Single   : " + tmpRenamer.preview(ex4, idx, ".mp3"));
+            previewArea.setCaretPosition(0);
+        };
+        cmbDefaultMask.addActionListener(e -> updatePreview.run());
+        updatePreview.run();
+
+        // ── Dossier racine de la bibliothèque ──────────────────────────────────
+        tfLibraryRoot = tf();
+        tfLibraryRoot.setToolTipText("Dossier racine où tous les fichiers seront déplacés/organisés. Laisser vide = utiliser le dossier scanné.");
+        JButton btnBrowseRoot = new JButton("…");
+        btnBrowseRoot.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser(tfLibraryRoot.getText().isBlank()
+                    ? System.getProperty("user.home") : tfLibraryRoot.getText());
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfLibraryRoot.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel rootPanel = new JPanel(new BorderLayout(4, 0));
+        rootPanel.add(tfLibraryRoot, BorderLayout.CENTER);
+        rootPanel.add(btnBrowseRoot, BorderLayout.EAST);
+
         JPanel p = form(
-            new String[]{"Masque par défaut :", "Aperçu :", "", "", ""},
-            new JComponent[]{cmbDefaultMask, lblMaskPreview, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
+            new String[]{"Dossier racine bibliothèque :", "Masque par défaut :", "", "", ""},
+            new JComponent[]{rootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
             "Renommage automatique des fichiers");
+
+        // Ajouter l'encart exemples en dessous des cases à cocher
+        p.add(previewScroll, BorderLayout.CENTER);
         return p;
     }
 
@@ -914,28 +940,74 @@ public class SettingsDialog extends JDialog {
         lblDesc.putClientProperty("FlatLaf.style", "foreground: #888888");
         lblDesc.setBorder(new EmptyBorder(0, 0, 8, 0));
 
-        JTextArea taExamples = new JTextArea(
-            "// Synchroniser albumArtist si vide\n" +
-            "if (!tags.albumArtist) tags.albumArtist = tags.artist;\n\n" +
-            "// Supprimer \"(feat. ...)\" du titre\n" +
-            "tags.title = tags.title.replace(/\\s*\\(feat\\..*?\\)/gi, '').trim();\n\n" +
-            "// Forcer le genre Classical si le compositeur est renseigné\n" +
-            "if (tags.composer && !tags.genre) tags.genre = 'Classical';\n\n" +
-            "// Corriger les apostrophes typographiques\n" +
-            "tags.title = tags.title.replace(/[\\u2018\\u2019]/g, \"'\");\n\n" +
-            "// Mettre le genre en minuscules\n" +
-            "// tags.genre = tags.genre.toLowerCase();"
-        );
-        taExamples.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-        taExamples.setEditable(false);
-        taExamples.setBackground(UIManager.getColor("TextArea.background") != null
-            ? UIManager.getColor("TextArea.background").darker() : java.awt.Color.LIGHT_GRAY);
-        taExamples.setForeground(java.awt.Color.GRAY);
-        taExamples.setBorder(new EmptyBorder(6, 8, 6, 8));
+        // ── Exemples prêts à insérer ────────────────────────────────────────────
+        String[][] scriptExamples = {
+            {
+                "Synchroniser albumArtist",
+                "// Si albumArtist est vide, copier l'artiste\nif (!tags.albumArtist) tags.albumArtist = tags.artist;"
+            },
+            {
+                "Supprimer (feat. ...)",
+                "// Supprimer les mentions feat. du titre\ntags.title = tags.title.replace(/\\s*\\(feat\\..*?\\)/gi, '').trim();\ntags.artist = tags.artist.replace(/\\s*(feat\\.|ft\\.).*$/gi, '').trim();"
+            },
+            {
+                "Marquer compilations",
+                "// Forcer isCompilation si l'albumArtist est Various Artists\nif (tags.albumArtist === 'Various Artists') tags.isCompilation = '1';"
+            },
+            {
+                "Nettoyer apostrophes",
+                "// Remplacer apostrophes typographiques par apostrophe droite\ntags.title  = tags.title.replace(/[\\u2018\\u2019\\u02BC]/g, \"'\");\ntags.artist = tags.artist.replace(/[\\u2018\\u2019\\u02BC]/g, \"'\");\ntags.album  = tags.album.replace(/[\\u2018\\u2019\\u02BC]/g, \"'\");"
+            },
+            {
+                "Genre Classical auto",
+                "// Si compositeur renseigné et genre vide → Classical\nif (tags.composer && !tags.genre) tags.genre = 'Classical';"
+            },
+            {
+                "Supprimer numéro du titre",
+                "// Supprimer le numéro de piste en début de titre : '01 - Titre' → 'Titre'\ntags.title = tags.title.replace(/^\\d{1,3}[\\s\\-\\.]+/, '').trim();"
+            },
+            {
+                "Forcer majuscule titre",
+                "// Première lettre du titre en majuscule\nif (tags.title.length > 0) tags.title = tags.title.charAt(0).toUpperCase() + tags.title.slice(1);"
+            },
+            {
+                "Année originale seulement",
+                "// Garder seulement les 4 chiffres de l'année\nif (tags.year) tags.year = tags.year.replace(/.*?(\\d{4}).*/, '$1');"
+            },
+        };
+
+        JPanel examplesGrid = new JPanel(new java.awt.GridLayout(0, 1, 0, 2));
+        for (String[] ex : scriptExamples) {
+            String label = ex[0];
+            String code  = ex[1];
+            JPanel row = new JPanel(new BorderLayout(6, 0));
+            JButton btnInsert = new JButton("+ Insérer");
+            btnInsert.setFont(btnInsert.getFont().deriveFont(10f));
+            btnInsert.setMargin(new java.awt.Insets(1, 6, 1, 6));
+            btnInsert.setToolTipText(code);
+            btnInsert.addActionListener(e -> {
+                String current = taTaggerScript.getText();
+                String insert  = (current.isBlank() ? "" : "\n\n") + "// ── " + label + " ──\n" + code;
+                taTaggerScript.append(insert);
+                taTaggerScript.setCaretPosition(taTaggerScript.getText().length());
+            });
+            JLabel lbl = new JLabel("<html><b>" + label + "</b>&nbsp;&nbsp;<font color='#888888'><code>"
+                    + code.replace("\n", " | ").replace("<", "&lt;").substring(0, Math.min(70, code.length())) + "…</code></font></html>");
+            lbl.setFont(lbl.getFont().deriveFont(11f));
+            row.add(lbl,       BorderLayout.CENTER);
+            row.add(btnInsert, BorderLayout.EAST);
+            examplesGrid.add(row);
+        }
+
+        JScrollPane exScroll = new JScrollPane(examplesGrid,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        exScroll.setPreferredSize(new java.awt.Dimension(0, 180));
 
         JPanel exBox = new JPanel(new BorderLayout());
-        exBox.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(), "Exemples"));
-        exBox.add(taExamples, BorderLayout.CENTER);
+        exBox.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(),
+                "Exemples — cliquez « + Insérer » pour ajouter dans le script"));
+        exBox.add(exScroll, BorderLayout.CENTER);
 
         JPanel scriptBox = new JPanel(new BorderLayout(0, 6));
         scriptBox.setBorder(BorderFactory.createTitledBorder(
@@ -1108,6 +1180,7 @@ public class SettingsDialog extends JDialog {
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
+        tfLibraryRoot     .setText(cfg.str ("rename.library_root",           ""));
         cmbDefaultMask    .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
                                                      cmbDefaultMask.getItemCount() - 1));
         chkAutoRename     .setSelected(cfg.bool("rename.auto_enabled",       false));
@@ -1234,6 +1307,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
+        p.setProperty("rename.library_root",            tfLibraryRoot.getText().trim());
         p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
         p.setProperty("rename.delete_empty_dirs",      String.valueOf(chkDeleteEmptyDirs.isSelected()));
@@ -1337,7 +1411,7 @@ public class SettingsDialog extends JDialog {
                 java.util.Arrays.asList(Config.get().startupFolders()));
 
         try {
-            Path dir = Paths.get(System.getProperty("user.home") + "/.opentagger");
+            Path dir = Paths.get(com.opentagger.Config.configDir());
             if (!Files.exists(dir)) Files.createDirectories(dir);
             try (Writer w = Files.newBufferedWriter(Paths.get(SETTINGS_FILE))) {
                 p.store(w, "OpenTagger user settings");

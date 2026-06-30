@@ -45,7 +45,7 @@ public class FileRenamer {
         } catch (IOException e) { /* ignore */ }
 
         // 2. Surcharge utilisateur ~/.opentagger/renamemask.properties
-        Path userFile = Paths.get(System.getProperty("user.home") + "/.opentagger/renamemask.properties");
+        Path userFile = Paths.get(Config.configDir() + java.io.File.separator + "renamemask.properties");
         if (Files.exists(userFile)) {
             try (InputStream in = Files.newInputStream(userFile)) { props.load(in); }
             catch (IOException e) { /* ignore */ }
@@ -279,7 +279,16 @@ public class FileRenamer {
         try {
             Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
-            Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
+            // NAS (NFS/SMB) ou MergerFS cross-device : fallback copy+delete sécurisé
+            long srcSize = Files.size(src);
+            Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING,
+                                 StandardCopyOption.COPY_ATTRIBUTES);
+            long dstSize = Files.size(dst);
+            if (dstSize != srcSize) {
+                Files.deleteIfExists(dst);
+                throw new IOException("Copie incomplète (src=" + srcSize
+                        + " dst=" + dstSize + ") — fichier source conservé : " + src);
+            }
             Files.delete(src);
         }
     }

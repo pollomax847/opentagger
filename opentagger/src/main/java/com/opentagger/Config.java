@@ -11,8 +11,19 @@ import java.util.Properties;
  */
 public class Config {
 
-    private static final String CONFIG_DIR  = System.getProperty("user.home") + "/.opentagger";
+    private static final String CONFIG_DIR  = configDir();
     private static final String CONFIG_FILE = CONFIG_DIR + "/settings.properties";
+
+    public static String configDir() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (os.contains("win")) {
+            // Windows : %APPDATA%\OpenTagger
+            String appdata = System.getenv("APPDATA");
+            return (appdata != null ? appdata : System.getProperty("user.home")) + "\\OpenTagger";
+        }
+        // Linux / macOS : ~/.opentagger
+        return System.getProperty("user.home") + "/.opentagger";
+    }
 
     // Holder idiom — thread-safe sans synchronized, initialisation paresseuse
     private static final class Holder {
@@ -80,6 +91,7 @@ public class Config {
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
     public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
+    public String libraryRoot()                    { return str ("rename.library_root",            ""); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }

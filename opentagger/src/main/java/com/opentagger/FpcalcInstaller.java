@@ -26,7 +26,7 @@ public class FpcalcInstaller {
     private static final String BASE_URL =
         "https://github.com/acoustid/chromaprint/releases/download/v" + VERSION + "/";
     private static final String BIN_DIR  =
-        System.getProperty("user.home") + "/.opentagger/bin";
+        Config.configDir() + java.io.File.separator + "bin";
 
     // ── Recherche du binaire ──────────────────────────────────────────────────
 
@@ -149,7 +149,8 @@ public class FpcalcInstaller {
     }
 
     private static String extractTarGz(Path archive, Path dest) throws Exception {
-        // Utiliser la commande tar système (disponible sur Linux/macOS)
+        // Windows télécharge du .zip → cette méthode n'est jamais appelée sur Windows
+        // Linux/macOS : utiliser tar système
         ProcessBuilder pb = new ProcessBuilder("tar", "xzf", archive.toString(), "-C", dest.toString());
         pb.redirectErrorStream(true);
         Process p = pb.start();

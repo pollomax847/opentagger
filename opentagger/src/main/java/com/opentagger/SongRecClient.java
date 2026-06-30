@@ -98,6 +98,8 @@ public class SongRecClient {
     }
 
     public static boolean isAvailable() {
+        // SongRec n'a pas de build Windows officiel → désactivé silencieusement
+        if (System.getProperty("os.name","").toLowerCase().contains("win")) return false;
         String bin = Config.get().str("songrec.path", SONGREC_BIN);
         try {
             Process p = new ProcessBuilder(bin, "--version")

@@ -30,14 +30,25 @@ public class App {
             return;
         }
 
-        // --- Mode UI avec dossiers pré-chargés : opentagger /dir1 /dir2 ... ---
-        if (!args[0].startsWith("--") && new File(args[0]).isDirectory()) {
-            File[] cli = java.util.Arrays.stream(args)
-                .map(File::new)
-                .filter(File::isDirectory)
-                .toArray(File[]::new);
-            MainFrame.launch(startupDirs(cli));
-            return;
+        // --- Mode UI lancé depuis clic-droit OS : opentagger /fichier.mp3 ou /dossier ---
+        // Accepte fichiers audio ET dossiers. NE charge PAS les dossiers de démarrage
+        // automatiques pour ne pas polluer la vue quand l'utilisateur ouvre un fichier spécifique.
+        if (!args[0].startsWith("--")) {
+            java.util.LinkedHashSet<File> dirs = new java.util.LinkedHashSet<>();
+            for (String arg : args) {
+                File f = new File(arg);
+                if (f.isDirectory()) {
+                    dirs.add(f);
+                } else if (f.isFile()) {
+                    // fichier audio → charger son dossier parent
+                    File parent = f.getParentFile();
+                    if (parent != null && parent.isDirectory()) dirs.add(parent);
+                }
+            }
+            if (!dirs.isEmpty()) {
+                MainFrame.launch(dirs.toArray(new File[0])); // sans dossiers de démarrage auto
+                return;
+            }
         }
 
         // --- Mode dossier : opentagger --dossier /chemin [--acoustid] [--masque N] ---

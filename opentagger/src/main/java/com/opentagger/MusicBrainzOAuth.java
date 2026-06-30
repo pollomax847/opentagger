@@ -122,33 +122,39 @@ public class MusicBrainzOAuth {
         throw new Exception("Délai dépassé (2 min). Vérifiez que l'app est bien autorisée dans le navigateur.");
     }
 
-    /** Installe le handler xdg-mime pour org.opentagger.app:// (Linux). */
+    /** Installe le handler URL scheme pour OAuth (Linux via xdg-mime, Windows via registre). */
     private void registerSchemeHandler() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase();
+
+        if (os.contains("win")) {
+            // Windows : enregistrer org.opentagger.app:// dans le registre
+            String jar = new java.io.File(
+                    MusicBrainzOAuth.class.getProtectionDomain().getCodeSource().getLocation().toURI()
+            ).getAbsolutePath();
+            String cmd = "javaw -jar \"" + jar + "\" --oauth-callback \"%1\"";
+            String base = "HKCU\\Software\\Classes\\org.opentagger.app";
+            new ProcessBuilder("reg","add",base,"/ve","/d","URL:OpenTagger OAuth","/f").start().waitFor();
+            new ProcessBuilder("reg","add",base,"/v","URL Protocol","/d","","/f").start().waitFor();
+            new ProcessBuilder("reg","add",base+"\\shell\\open\\command","/ve","/d",cmd,"/f").start().waitFor();
+            return;
+        }
+
+        // Linux / macOS : xdg-mime
         String home = System.getProperty("user.home");
         Path appsDir = Paths.get(home, ".local", "share", "applications");
         Files.createDirectories(appsDir);
 
-        // Script shell : extrait le code de l'URL et l'écrit dans CODE_FILE
-        Path script = Paths.get(home, ".opentagger", "oauth-handler.sh");
-        String sh = "#!/bin/bash\n"
-            + "url=\"$1\"\n"
-            + "code=\"${url#*code=}\"\n"
-            + "code=\"${code%%&*}\"\n"
-            + "echo \"$code\" > '" + CODE_FILE + "'\n";
+        Path script = Paths.get(Config.configDir(), "oauth-handler.sh");
+        String sh = "#!/bin/bash\nurl=\"$1\"\ncode=\"${url#*code=}\"\ncode=\"${code%%&*}\"\necho \"$code\" > '" + CODE_FILE + "'\n";
         Files.writeString(script, sh);
         new ProcessBuilder("chmod", "+x", script.toString()).start().waitFor();
 
-        // Fichier .desktop pour le handler
         Path desktop = appsDir.resolve("opentagger-oauth.desktop");
-        String dt = "[Desktop Entry]\nVersion=1.0\nType=Application\n"
-            + "Name=OpenTagger OAuth\n"
-            + "Exec=" + script + " %u\n"
-            + "MimeType=x-scheme-handler/org.opentagger.app;\n"
-            + "NoDisplay=true\n"
-            + "Terminal=false\n";
-        Files.writeString(desktop, dt);
+        Files.writeString(desktop, "[Desktop Entry]\nVersion=1.0\nType=Application\n"
+            + "Name=OpenTagger OAuth\nExec=" + script + " %u\n"
+            + "MimeType=x-scheme-handler/org.opentagger.app;\nNoDisplay=true\nTerminal=false\n");
 
-        new ProcessBuilder("xdg-mime", "default", "opentagger-oauth.desktop",
+        new ProcessBuilder("xdg-mime","default","opentagger-oauth.desktop",
                            "x-scheme-handler/org.opentagger.app").start().waitFor();
         new ProcessBuilder("update-desktop-database", appsDir.toString()).start().waitFor();
     }

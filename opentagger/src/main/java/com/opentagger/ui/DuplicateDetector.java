@@ -39,23 +39,25 @@ public class DuplicateDetector {
         Map<String, List<FileEntry>> byAcoustId = new LinkedHashMap<>();
         Map<String, List<FileEntry>> byTitle    = new LinkedHashMap<>();
 
-        // 1. MBID exact — indépendant des autres critères
+        // 1. MBID exact
         for (FileEntry e : entries) {
             TagInfo ti = e.activeTags();
             if (!ti.recordingMbid.isBlank())
                 byMbid.computeIfAbsent(ti.recordingMbid, k -> new ArrayList<>()).add(e);
         }
 
-        // 2. AcoustID exact — indépendant du MBID (un fichier peut avoir les deux)
+        // 2. AcoustID exact — seulement si pas déjà groupé par MBID (évite les doublons de groupes)
+        Set<FileEntry> mbidGrouped = new HashSet<>();
+        for (List<FileEntry> g : byMbid.values()) if (g.size() >= 2) mbidGrouped.addAll(g);
         for (FileEntry e : entries) {
+            if (mbidGrouped.contains(e)) continue;
             TagInfo ti = e.activeTags();
             if (!ti.acoustidId.isBlank())
                 byAcoustId.computeIfAbsent(ti.acoustidId, k -> new ArrayList<>()).add(e);
         }
 
         // 3. Artiste + titre normalisés — seulement si pas déjà groupé par MBID ou AcoustID
-        Set<FileEntry> alreadyGrouped = new HashSet<>();
-        for (List<FileEntry> g : byMbid.values())     if (g.size() >= 2) alreadyGrouped.addAll(g);
+        Set<FileEntry> alreadyGrouped = new HashSet<>(mbidGrouped);
         for (List<FileEntry> g : byAcoustId.values()) if (g.size() >= 2) alreadyGrouped.addAll(g);
         for (FileEntry e : entries) {
             if (alreadyGrouped.contains(e)) continue;
