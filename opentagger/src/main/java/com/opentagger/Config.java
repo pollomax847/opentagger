@@ -78,8 +78,12 @@ public class Config {
     public boolean lastfmEnabled()     { return bool("lastfm.use_tags", true); }
     public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
-    public boolean deleteEmptyDirsAfterRename() { return bool("rename.delete_empty_dirs", true); }
-    public boolean followLogAfterRename()   { return bool("rename.follow_log",          true); }
+    public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
+    public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
+    public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
+    public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
+    public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }
+    public int     albumFirstPassMinFiles()        { return num ("albums.album_first_pass_min",    2);    }
     public String[] startupFolders()   {
         String v = str("startup.folders");
         return v.isBlank() ? new String[0] : v.split("\\|");

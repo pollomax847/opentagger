@@ -96,10 +96,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             queue = entries;
         }
 
+        // Phase A — Album-first : 1 recherche MB par dossier au lieu de 1 par piste.
+        // Cible les dossiers ≥ N fichiers dont les pistes n'ont pas encore de releaseMbid.
+        java.util.Set<FileEntry> taggedByAlbum = Config.get().albumFirstPassEnabled()
+                ? albumFirstPass(queue) : new java.util.HashSet<>();
+
         int total = queue.size();
         int done  = 0;
 
         for (FileEntry entry : queue) {
+            if (taggedByAlbum.contains(entry)) {
+                setProgress((++done * 100) / total);
+                correctionLog.addEntry(entry);
+                continue;
+            }
             if (isCancelled()) break;
 
             entry.status = FileEntry.Status.PROCESSING;
@@ -177,6 +187,177 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         for (FileEntry e : chunks) onUpdate.accept(e);
     }
 
+    // ── Phase album-first ─────────────────────────────────────────────────────
+
+    /**
+     * Groupe les fichiers en attente par dossier parent.
+     * Pour chaque groupe ≥ albumFirstPassMinFiles, cherche la release dans MB
+     * par nom d'album (dossier ou tag existant), récupère la tracklist complète
+     * et apparie chaque fichier à une piste (numéro, puis titre).
+     * Résultat : ensemble des FileEntry tagués — ils seront sautés dans la boucle per-track.
+     */
+    private java.util.Set<FileEntry> albumFirstPass(List<FileEntry> queue) {
+        java.util.Set<FileEntry> done = new java.util.HashSet<>();
+        int minFiles = Config.get().albumFirstPassMinFiles();
+
+        // Grouper par dossier parent
+        java.util.Map<java.nio.file.Path, List<FileEntry>> byFolder = new java.util.LinkedHashMap<>();
+        for (FileEntry e : queue) {
+            java.nio.file.Path folder =
+                (e.currentPath != null ? e.currentPath : e.file.toPath()).getParent();
+            byFolder.computeIfAbsent(folder, k -> new java.util.ArrayList<>()).add(e);
+        }
+
+        for (java.util.Map.Entry<java.nio.file.Path, List<FileEntry>> group : byFolder.entrySet()) {
+            if (isCancelled()) break;
+            List<FileEntry> files = group.getValue();
+            if (files.size() < minFiles) continue;
+
+            java.nio.file.Path folder = group.getKey();
+            String folderName = folder.getFileName() != null ? folder.getFileName().toString() : "";
+
+            // Déterminer le nom d'album et l'artiste hint depuis les tags existants
+            String albumName  = "";
+            String artistHint = "";
+            for (FileEntry e : files) {
+                if (e.current != null) {
+                    if (albumName.isBlank()  && !e.current.album.isBlank())       albumName  = e.current.album;
+                    if (artistHint.isBlank() && !e.current.albumArtist.isBlank()) artistHint = e.current.albumArtist;
+                    if (artistHint.isBlank() && !e.current.artist.isBlank())      artistHint = e.current.artist;
+                }
+            }
+            if (albumName.isBlank()) albumName = folderName;
+            if (albumName.isBlank()) continue;
+
+            onProgress.accept(String.format("[album-first] \"%s\" (%d fichiers) — recherche MB…",
+                    albumName, files.size()));
+
+            try {
+                mb.resetNetworkFlag();
+                String relMbid = mb.searchBestRelease(albumName, artistHint);
+                if (mb.wasNetworkCalled()) { mb.resetNetworkFlag(); sleep(1100); }
+                if (relMbid == null || relMbid.isBlank()) {
+                    onProgress.accept(String.format(
+                            "[album-first] \"%s\" — non trouvé dans MB (score < 70) → fallback piste/piste",
+                            albumName));
+                    continue;
+                }
+
+                mb.resetNetworkFlag();
+                MusicBrainzClient.ReleaseTracklist tl = mb.lookupRelease(relMbid);
+                if (mb.wasNetworkCalled()) { mb.resetNetworkFlag(); sleep(1100); }
+                if (tl == null || tl.tracks().isEmpty()) continue;
+
+                onProgress.accept(String.format(
+                        "[album-first] \"%s\" trouvé — %d pistes, appariement…", tl.album(), tl.tracks().size()));
+
+                for (FileEntry entry : files) {
+                    if (isCancelled()) break;
+                    MusicBrainzClient.ReleaseTrack track = matchFileToTrack(entry, tl.tracks());
+                    if (track == null) {
+                        log("[album-first] " + entry.filename() + " → pas d'appariement dans tracklist");
+                        continue;
+                    }
+
+                    TagInfo ti = new TagInfo();
+                    ti.title            = track.title();
+                    ti.artist           = track.artist();
+                    ti.albumArtist      = tl.albumArtist();
+                    ti.albumArtistSort  = tl.albumArtistSort();
+                    ti.album            = tl.album();
+                    ti.year             = tl.year();
+                    ti.track            = track.trackNo()  > 0 ? String.valueOf(track.trackNo())  : "";
+                    ti.trackTotal       = track.trackTotal()> 0 ? String.valueOf(track.trackTotal()): "";
+                    ti.discNo           = track.disc()     > 0 ? String.valueOf(track.disc())     : "";
+                    ti.releaseMbid      = tl.releaseMbid();
+                    ti.releaseGroupMbid = tl.releaseGroupMbid();
+                    ti.recordingMbid    = track.recordingMbid();
+                    ti.isCompilation    = tl.isCompilation() ? "1" : "";
+                    ti.score            = 100;
+
+                    File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+                    writer.write(fichier, ti);
+                    String recMbid = track.recordingMbid();
+                    cache.saveTaggingHistory(ti, recMbid.isBlank()
+                            ? MetadataCache.syntheticKey(ti.artist, ti.title) : recMbid);
+                    cache.recordFileTagging(fichier.getAbsolutePath(),
+                            recMbid.isBlank() ? MetadataCache.syntheticKey(ti.artist, ti.title) : recMbid,
+                            MetadataCache.SOURCE_MBID);
+
+                    entry.result  = ti;
+                    entry.status  = FileEntry.Status.TAGGED;
+                    entry.message = "";
+                    publish(entry);
+                    done.add(entry);
+                    log("[album-first] ✓ " + entry.filename()
+                        + " → piste " + track.trackNo() + " \"" + track.title() + "\"");
+                }
+
+            } catch (Exception ex) {
+                onProgress.accept(String.format("[album-first] Erreur \"%s\" : %s", albumName, ex.getMessage()));
+                log("[album-first] exception : " + ex.getMessage());
+            }
+        }
+
+        if (!done.isEmpty())
+            onProgress.accept(String.format("[album-first] %d fichier(s) tagué(s) par album — %d restant(s) en pipeline normal",
+                    done.size(), queue.size() - done.size()));
+        return done;
+    }
+
+    /** Apparie un fichier à une piste de la tracklist : d'abord par numéro, puis par titre. */
+    private MusicBrainzClient.ReleaseTrack matchFileToTrack(
+            FileEntry entry, List<MusicBrainzClient.ReleaseTrack> tracks) {
+        // 1. Par numéro de piste (tag existant ou préfixe dans le nom de fichier)
+        int num = extractTrackNumber(entry);
+        if (num > 0) {
+            for (MusicBrainzClient.ReleaseTrack t : tracks)
+                if (t.trackNo() == num) return t;
+        }
+
+        // 2. Par titre normalisé
+        String title = (entry.current != null && !entry.current.title.isBlank())
+                ? entry.current.title : filenameToTitle(entry.filename());
+        if (title.isBlank()) return null;
+        String normTitle = AlbumCompletionWorker.normalize(title);
+
+        // Correspondance exacte
+        for (MusicBrainzClient.ReleaseTrack t : tracks)
+            if (normTitle.equals(AlbumCompletionWorker.normalize(t.title()))) return t;
+
+        // Correspondance par inclusion (longueur min 8 pour éviter les faux positifs)
+        for (MusicBrainzClient.ReleaseTrack t : tracks) {
+            String normMb = AlbumCompletionWorker.normalize(t.title());
+            if (normTitle.length() >= 8 && (normTitle.contains(normMb) || normMb.contains(normTitle)))
+                return t;
+        }
+        return null;
+    }
+
+    /** Extrait le numéro de piste depuis le tag ou le nom de fichier ("01 - title.mp3"). */
+    private int extractTrackNumber(FileEntry entry) {
+        if (entry.current != null && !entry.current.track.isBlank()) {
+            try { return Integer.parseInt(entry.current.track.replaceAll("[^0-9]", "")); }
+            catch (NumberFormatException ignored) {}
+        }
+        java.util.regex.Matcher m =
+            java.util.regex.Pattern.compile("^(\\d{1,3})[\\s.\\-_]").matcher(entry.filename());
+        if (m.find()) {
+            try { return Integer.parseInt(m.group(1)); }
+            catch (NumberFormatException ignored) {}
+        }
+        return 0;
+    }
+
+    /** Titre à partir du nom de fichier (retire extension, numéro de piste, "Artiste - "). */
+    private String filenameToTitle(String filename) {
+        int dot = filename.lastIndexOf('.');
+        String name = dot > 0 ? filename.substring(0, dot) : filename;
+        name = name.replaceAll("^\\d{1,3}[\\s.\\-_]+", "");
+        name = name.replaceAll("^[^-]+ - ", "");
+        return name.trim();
+    }
+
     private void processEntry(FileEntry entry, Consumer<String> step) {
         try {
             File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
@@ -213,7 +394,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             log("▶ START  " + fichier.getName());
 
             log("  findTags...");
-            List<TagInfo> results = findTags(fichier);
+            List<TagInfo> results = findTags(fichier, entry.current);
+            mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
             log("  findTags → " + results.size() + " résultat(s)" +
                 (results.isEmpty() ? "" : " score=" + results.get(0).score));
 
@@ -296,6 +478,30 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         log("  enrichi←MB search: album='" + best.album + "' année='" + best.year + "' artistMbid='" + best.artistMbid + "'");
                     }
                 } catch (Exception ignored) {}
+            }
+
+            // ── Préservation des compilations ─────────────────────────────────────
+            // Si le fichier original était dans une compilation (albumArtist = Various Artists,
+            // ou tag IS_COMPILATION = 1) et que MB n'a pas trouvé de release compilation,
+            // on restaure l'album et albumArtist originaux pour ne pas perdre la structure.
+            if (Config.get().preserveCompilationAlbum()) {
+                String origAlbumArtist   = readTag(fichier, FieldKey.ALBUM_ARTIST);
+                String origIsCompilation = readTag(fichier, FieldKey.IS_COMPILATION);
+                String origAlbum         = cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
+                boolean origWasCompilation =
+                    "1".equals(origIsCompilation.trim())
+                    || Config.get().vaName().equalsIgnoreCase(origAlbumArtist)
+                    || "Various Artists".equalsIgnoreCase(origAlbumArtist);
+                // MB n'a pas retourné de release compilation → restaurer contexte original
+                if (origWasCompilation && !origAlbum.isBlank() && !"1".equals(best.isCompilation)) {
+                    log("  compilation restaurée : album='" + origAlbum
+                        + "' albumArtist='" + origAlbumArtist + "'");
+                    best.album         = origAlbum;
+                    best.albumArtist   = origAlbumArtist.isBlank()
+                        ? Config.get().vaName() : origAlbumArtist;
+                    best.isCompilation = "1";
+                    // track#, disc#, MBID, artist, title restent ceux de MB
+                }
             }
 
             log("  corrector...");
@@ -462,9 +668,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
-    private List<TagInfo> findTags(File fichier) throws Exception {
+    private List<TagInfo> findTags(File fichier, TagInfo existingTags) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
         if (TagWriter.repairM4aIfNeeded(fichier)) log("  M4A réparé OK");
+
+        // Indice d'album : tag existant > nom du dossier parent.
+        // Permet à pickBestRelease() de favoriser la release MB qui correspond au dossier iTunes.
+        // Ex. : dossier "100 Club Hits Edition 2022" → MB préfère cette compilation si elle existe.
+        {
+            String tagAlbum    = cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
+            String folderAlbum = fichier.getParentFile() != null
+                ? fichier.getParentFile().getName() : "";
+            // Le tag existant prime ; le dossier parent sert de fallback si tag vide
+            String albumHint = tagAlbum.isBlank() ? folderAlbum : tagAlbum;
+            mb.setPreferredAlbum(albumHint);
+            if (!albumHint.isBlank()) log("  indice album : '" + albumHint + "'");
+        }
 
         // 0. Historique personnel — ce fichier a-t-il déjà été tagué par OpenTagger ?
         //    Confiance totale SEULEMENT si identifié par empreinte audio (songrec/acoustid/mbid).
@@ -492,6 +711,27 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             } else if (hist != null) {
                 log("  cache hit IGNORÉ (artiste+titre vides) pour mbid=" + knownMbid);
             }
+        }
+
+        // 0.5. Tags MB existants complets (Picard, MusicBrainz Tagger, session précédente).
+        // Si le fichier a déjà releaseMbid + artist + title + album valides → confiance totale.
+        // On ne ré-identifie pas ce que Picard a déjà fait : on garde l'album de compilation
+        // tel quel, on évite deux allers-retours MB inutiles, et le taguage est instantané.
+        if (Config.get().trustExistingMbTags() && existingTags != null
+                && !existingTags.releaseMbid.isBlank()
+                && !existingTags.artist.isBlank()
+                && !existingTags.title.isBlank()
+                && !existingTags.album.isBlank()
+                && !isGenericTag(existingTags.artist)
+                && !isGenericTag(existingTags.title)) {
+            TagInfo t = existingTags.copy();
+            t.score = 100;
+            lastFindTagsSource = MetadataCache.SOURCE_MBID;
+            log("  tags MB existants ✓ [releaseMbid=" + existingTags.releaseMbid.substring(0,
+                    Math.min(8, existingTags.releaseMbid.length())) + "…] "
+                + existingTags.artist + " – " + existingTags.title
+                + " [" + existingTags.album + "] → skip identification");
+            return List.of(t);
         }
 
         // 1. SongRec (Shazam) — empreinte audio, identifie la musique commerciale même avec

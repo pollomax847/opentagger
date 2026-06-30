@@ -69,6 +69,8 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkPreserveTimestamps;
     private JCheckBox  chkClearExistingTags;
     private JCheckBox  chkPreserveImages;
+    private JCheckBox  chkPreserveCompilation;
+    private JCheckBox  chkTrustExistingMbTags;
     private JCheckBox  chkCorrectPunctuation;
     private JCheckBox  chkRemoveId3v1;
     private JCheckBox  chkSaveAcoustidFingerprints;
@@ -576,6 +578,8 @@ public class SettingsDialog extends JDialog {
         chkPreserveTimestamps      = new JCheckBox("Préserver la date de modification du fichier");
         chkClearExistingTags       = new JCheckBox("Effacer les tags existants avant écriture (repartir de zéro)");
         chkPreserveImages          = new JCheckBox("Conserver la pochette existante si aucune nouvelle");
+        chkPreserveCompilation     = new JCheckBox("Conserver le nom d'album des compilations (Various Artists / IS_COMPILATION=1)");
+        chkTrustExistingMbTags     = new JCheckBox("Faire confiance aux tags MB existants (releaseMbid présent = skip ré-identification)");
         chkCorrectPunctuation      = new JCheckBox("Normaliser la ponctuation (‘ ’ “ ” – … → ASCII)");
         chkRemoveId3v1             = new JCheckBox("Supprimer le tag ID3v1 des MP3 (footer 128 octets inutile)");
         chkSaveAcoustidFingerprints   = new JCheckBox("Sauvegarder l'empreinte AcoustID dans les tags");
@@ -594,11 +598,13 @@ public class SettingsDialog extends JDialog {
         Object[][] rows = {
             { "Version ID3 (MP3) :", cmbId3Version },
             { null, id3Hint },
-            { "", chkPreserveTimestamps  },
-            { "", chkClearExistingTags   },
-            { "", chkPreserveImages      },
-            { "", chkCorrectPunctuation  },
-            { "", chkRemoveId3v1         },
+            { "", chkPreserveTimestamps   },
+            { "", chkClearExistingTags    },
+            { "", chkPreserveImages       },
+            { "", chkTrustExistingMbTags  },
+            { "", chkPreserveCompilation  },
+            { "", chkCorrectPunctuation   },
+            { "", chkRemoveId3v1          },
         };
         for (int i = 0; i < rows.length; i++) {
             if (rows[i][0] != null) {
@@ -670,7 +676,46 @@ public class SettingsDialog extends JDialog {
             maskItems[i] = i + " — " + tmpRenamer.maskLabel(i);
         }
         cmbDefaultMask = new JComboBox<>(maskItems);
-        cmbDefaultMask.setMaximumRowCount(12);
+        cmbDefaultMask.setMaximumRowCount(maskCount);
+
+        // ── Aperçu en temps réel du masque sélectionné ─────────────────────────
+        // Deux exemples : album standard + compilation Various Artists
+        com.opentagger.model.TagInfo sampleAlbum = new com.opentagger.model.TagInfo();
+        sampleAlbum.artist      = "Coldplay";
+        sampleAlbum.albumArtist = "Coldplay";
+        sampleAlbum.album       = "Parachutes";
+        sampleAlbum.title       = "Yellow";
+        sampleAlbum.track       = "05";
+        sampleAlbum.year        = "2000";
+        sampleAlbum.genre       = "Alternative Rock";
+
+        com.opentagger.model.TagInfo sampleComp = new com.opentagger.model.TagInfo();
+        sampleComp.artist      = "Daft Punk";
+        sampleComp.albumArtist = "Various Artists";
+        sampleComp.album       = "100 Club Hits Edition 2022";
+        sampleComp.title       = "Get Lucky";
+        sampleComp.track       = "01";
+        sampleComp.year        = "2022";
+        sampleComp.genre       = "Pop";
+
+        JTextArea lblMaskPreview = new JTextArea(3, 40);
+        lblMaskPreview.setEditable(false);
+        lblMaskPreview.setOpaque(false);
+        lblMaskPreview.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        lblMaskPreview.setForeground(new Color(0x555555));
+        lblMaskPreview.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
+
+        Runnable updatePreview = () -> {
+            int idx = cmbDefaultMask.getSelectedIndex();
+            if (idx < 0) return;
+            String p1 = tmpRenamer.preview(sampleAlbum, idx, ".mp3");
+            String p2 = tmpRenamer.preview(sampleComp,  idx, ".mp3");
+            lblMaskPreview.setText(
+                "Album  : " + p1 + "\n" +
+                "Compil : " + p2);
+        };
+        cmbDefaultMask.addActionListener(e -> updatePreview.run());
+        updatePreview.run(); // aperçu initial
 
         chkAutoRename     = new JCheckBox("Renommer automatiquement après le taguage");
         chkAutoRename.addActionListener(e -> cmbDefaultMask.setEnabled(chkAutoRename.isSelected()));
@@ -678,8 +723,8 @@ public class SettingsDialog extends JDialog {
         chkFollowLog       = new JCheckBox("Mettre à jour le log avec le nouveau chemin (suivi après renommage)");
 
         JPanel p = form(
-            new String[]{"Masque par défaut :", "", "", ""},
-            new JComponent[]{cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
+            new String[]{"Masque par défaut :", "Aperçu :", "", "", ""},
+            new JComponent[]{cmbDefaultMask, lblMaskPreview, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
             "Renommage automatique des fichiers");
         return p;
     }
@@ -1150,6 +1195,8 @@ public class SettingsDialog extends JDialog {
         chkPreserveTimestamps     .setSelected(cfg.preserveTimestamps());
         chkClearExistingTags      .setSelected(cfg.clearExistingTags());
         chkPreserveImages         .setSelected(cfg.preserveImages());
+        chkTrustExistingMbTags    .setSelected(cfg.trustExistingMbTags());
+        chkPreserveCompilation    .setSelected(cfg.preserveCompilationAlbum());
         chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
         chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
@@ -1262,6 +1309,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("tags.preserve_timestamps",      String.valueOf(chkPreserveTimestamps.isSelected()));
         p.setProperty("tags.clear_existing_tags",      String.valueOf(chkClearExistingTags.isSelected()));
         p.setProperty("tags.preserve_images",          String.valueOf(chkPreserveImages.isSelected()));
+        p.setProperty("tags.trust_existing_mb_tags",   String.valueOf(chkTrustExistingMbTags.isSelected()));
+        p.setProperty("tags.preserve_compilation",     String.valueOf(chkPreserveCompilation.isSelected()));
         p.setProperty("acoustid.save_fingerprints",    String.valueOf(chkSaveAcoustidFingerprints.isSelected()));
         p.setProperty("acoustid.ignore_existing",      String.valueOf(chkIgnoreExistingFingerprints.isSelected()));
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));

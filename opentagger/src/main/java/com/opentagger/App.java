@@ -16,7 +16,14 @@ import java.util.logging.Logger;
 public class App {
 
     public static void main(String[] args) throws Exception {
+        // Supprimer tous les logs JAudioTagger (scan warnings + write GRAVE errors sur M4A)
         Logger.getLogger("org.jaudiotagger").setLevel(Level.OFF);
+        // Les loggers enfants sont souvent créés avant cette ligne → les silencer explicitement
+        java.util.logging.LogManager.getLogManager().getLoggerNames().asIterator()
+            .forEachRemaining(n -> {
+                if (n.startsWith("org.jaudiotagger"))
+                    Logger.getLogger(n).setLevel(Level.OFF);
+            });
 
         if (args.length == 0) {
             MainFrame.launch(startupDirs(new File[0]));

@@ -26,6 +26,8 @@ public class MusicBrainzClient {
 
     private String  lastRawJson      = "";
     private boolean networkCallMade  = false;
+    /** Album préféré fourni par TaggingWorker pour orienter pickBestRelease(). */
+    private String  preferredAlbum   = "";
 
     /** Dernier JSON brut reçu — utilisé par TaggingWorker pour la mise en cache. */
     public String lastRawJson() { return lastRawJson; }
@@ -35,6 +37,15 @@ public class MusicBrainzClient {
 
     /** Remet à zéro le compteur d'appels réseau (à appeler avant chaque fichier). */
     public void resetNetworkFlag() { networkCallMade = false; }
+
+    /**
+     * Définit l'album préféré avant les appels de recherche — utilisé pour favoriser
+     * la release MB dont le nom d'album correspond (ex. nom de dossier iTunes).
+     * Passer "" pour désactiver l'indice.
+     */
+    public void setPreferredAlbum(String album) {
+        this.preferredAlbum = album != null ? album.trim() : "";
+    }
 
     /** Désérialise une réponse Recording Search MB déjà mise en cache. */
     public List<TagInfo> parseFromCache(String json) {
@@ -366,6 +377,20 @@ public class MusicBrainzClient {
                 }
             }
 
+            // Bonus album préféré — fort bonus si le nom d'album MB correspond à l'indice
+            // fourni (tag existant ou nom de dossier iTunes). Permet de préférer la release
+            // compilation quand le fichier vient d'un dossier "100 Club Hits Edition 2022".
+            if (!preferredAlbum.isBlank()) {
+                String mbAlbum = r.path("title").asText("").trim();
+                if (!mbAlbum.isBlank()) {
+                    String normMb   = normalizeAlbumName(mbAlbum);
+                    String normPref = normalizeAlbumName(preferredAlbum);
+                    if (normMb.equals(normPref))              score += 300; // correspondance exacte
+                    else if (normMb.contains(normPref)
+                          || normPref.contains(normMb))       score += 80;  // correspondance partielle
+                }
+            }
+
             if (best == null || score > bestScore) { bestScore = score; best = r; }
         }
         if (best != null) return best;
@@ -418,6 +443,36 @@ public class MusicBrainzClient {
                 }
             }
         } catch (Exception ignored) {}
+    }
+
+    // ── Recherche d'une release par nom d'album ───────────────────────────────
+
+    /**
+     * Cherche la meilleure release MB pour un nom d'album donné.
+     * @param albumName  nom de l'album (dossier ou tag existant)
+     * @param artistHint artiste indicatif — ignoré pour Various Artists
+     * @return releaseMbid si score ≥ 70, sinon null
+     */
+    public String searchBestRelease(String albumName, String artistHint) throws Exception {
+        if (albumName == null || albumName.isBlank()) return null;
+        StringBuilder q = new StringBuilder("release:\"").append(escapeLucene(albumName)).append("\"");
+        if (artistHint != null && !artistHint.isBlank()
+                && !"Various Artists".equalsIgnoreCase(artistHint)
+                && !Config.get().vaName().equalsIgnoreCase(artistHint)) {
+            q.append(" AND artist:\"").append(escapeLucene(artistHint)).append("\"");
+        }
+        String url = BASE_URL + "/release?query="
+                + URLEncoder.encode(q.toString(), StandardCharsets.UTF_8)
+                + "&limit=5&fmt=json";
+        HttpResponse<String> resp = getWithRetry(url);
+        if (resp == null) return null;
+        JsonNode root  = mapper.readTree(resp.body());
+        JsonNode list  = root.path("releases");
+        if (!list.isArray() || list.isEmpty()) return null;
+        JsonNode best  = list.get(0);
+        int      score = best.path("score").asInt(0);
+        if (score < 70) return null;
+        return best.path("id").asText("").trim();
     }
 
     // ── Lookup d'une release complète (tracklist) ─────────────────────────────
@@ -707,6 +762,15 @@ public class MusicBrainzClient {
      * Utilisé en fallback quand un titre n'est pas dans MB (démo, bootleg) :
      * on récupère au moins l'artistMbid pour la pochette (FanArt/CAA).
      */
+    /** Normalise un nom d'album pour comparaison : minuscules, sans ponctuation, sans espaces superflus. */
+    private static String normalizeAlbumName(String s) {
+        if (s == null) return "";
+        return s.toLowerCase()
+                .replaceAll("[^a-z0-9\\u00e0-\\u024f]", " ") // garde lettres + diacritiques
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     public String searchArtistMbid(String artistName) throws Exception {
         if (artistName == null || artistName.isBlank()) return "";
         String url = BASE_URL + "/artist?query=artist:"

@@ -52,18 +52,32 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
         List<FileEntry> candidates = new ArrayList<>(); // SKIPPED/PENDING à compléter
 
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
-            if (e.status == FileEntry.Status.TAGGED) {
-                String rMbid = e.result != null ? e.result.releaseMbid : "";
-                if (!rMbid.isBlank()) {
-                    releaseGroups
-                        .computeIfAbsent(rMbid, k -> new LinkedHashMap<>())
-                        .put(e.result.recordingMbid, e);
+        // Ouvrir le cache ici pour vérifier la source d'identification des ancres
+        MetadataCache cacheForSrc = new MetadataCache();
+        try {
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                FileEntry e = tableModel.get(i);
+                if (e.status == FileEntry.Status.TAGGED) {
+                    // N'utiliser comme ancre de release que les fichiers identifiés par source FIABLE.
+                    // SOURCE_TEXT = recherche texte = releaseMbid potentiellement faux → faux positifs.
+                    String path   = (e.currentPath != null ? e.currentPath : e.file.toPath()).toString();
+                    String source = cacheForSrc.getFileTaggingSource(path);
+                    if (MetadataCache.SOURCE_TEXT.equals(source) || source == null || source.isBlank()) continue;
+
+                    TagInfo ref    = e.result != null ? e.result : e.current;
+                    String rMbid   = ref != null ? ref.releaseMbid   : "";
+                    String recMbid = ref != null ? ref.recordingMbid : "";
+                    if (!rMbid.isBlank() && !recMbid.isBlank()) {
+                        releaseGroups
+                            .computeIfAbsent(rMbid, k -> new LinkedHashMap<>())
+                            .put(recMbid, e);
+                    }
+                } else if (e.status == FileEntry.Status.SKIPPED || e.status == FileEntry.Status.PENDING) {
+                    candidates.add(e);
                 }
-            } else if (e.status == FileEntry.Status.SKIPPED || e.status == FileEntry.Status.PENDING) {
-                candidates.add(e);
             }
+        } finally {
+            cacheForSrc.close();
         }
 
         if (releaseGroups.isEmpty()) {
@@ -151,6 +165,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
                         // Retirer du pool de candidats
                         candidateIndex.values().remove(hit);
+                    } catch (org.jaudiotagger.audio.exceptions.CannotReadException ex) {
+                        // M4A/MP4 avec en-tête non standard (iTunes DRM ou espace insuffisant)
+                        // → skippé silencieusement, format non supporté par JAudioTagger
+                        hit.status  = FileEntry.Status.SKIPPED;
+                        hit.message = "format M4A non supporté";
+                        final FileEntry hitFinal2 = hit;
+                        SwingUtilities.invokeLater(() -> tableModel.update(hitFinal2));
                     } catch (Exception ex) {
                         publish("  ✗ " + hit.filename() + " : " + ex.getMessage());
                     }
