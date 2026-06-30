@@ -50,6 +50,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkDeleteEmptyDirs;
     private JCheckBox  chkFollowLog;
     private JTextField tfLibraryRoot;
+    private JTextField tfPodcastLibraryRoot;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JTextField tfFfmpegPath;
@@ -745,9 +746,24 @@ public class SettingsDialog extends JDialog {
         rootPanel.add(tfLibraryRoot, BorderLayout.CENTER);
         rootPanel.add(btnBrowseRoot, BorderLayout.EAST);
 
+        // ── Dossier racine des podcasts ────────────────────────────────────────
+        tfPodcastLibraryRoot = tf();
+        tfPodcastLibraryRoot.setToolTipText("Dossier racine où les podcasts seront organisés (ex: /nas/Podcasts). Laisser vide = même racine que la musique.");
+        JButton btnBrowsePodcast = new JButton("…");
+        btnBrowsePodcast.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser(tfPodcastLibraryRoot.getText().isBlank()
+                    ? System.getProperty("user.home") : tfPodcastLibraryRoot.getText());
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfPodcastLibraryRoot.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel podcastRootPanel = new JPanel(new BorderLayout(4, 0));
+        podcastRootPanel.add(tfPodcastLibraryRoot, BorderLayout.CENTER);
+        podcastRootPanel.add(btnBrowsePodcast,     BorderLayout.EAST);
+
         JPanel p = form(
-            new String[]{"Dossier racine bibliothèque :", "Masque par défaut :", "", "", ""},
-            new JComponent[]{rootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
+            new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :", "", "", ""},
+            new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -1180,7 +1196,8 @@ public class SettingsDialog extends JDialog {
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
-        tfLibraryRoot     .setText(cfg.str ("rename.library_root",           ""));
+        tfLibraryRoot        .setText(cfg.str("rename.library_root",  ""));
+        tfPodcastLibraryRoot .setText(cfg.str("podcast.library_root", ""));
         cmbDefaultMask    .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
                                                      cmbDefaultMask.getItemCount() - 1));
         chkAutoRename     .setSelected(cfg.bool("rename.auto_enabled",       false));
@@ -1307,7 +1324,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
-        p.setProperty("rename.library_root",            tfLibraryRoot.getText().trim());
+        p.setProperty("rename.library_root",   tfLibraryRoot.getText().trim());
+        p.setProperty("podcast.library_root",  tfPodcastLibraryRoot.getText().trim());
         p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
         p.setProperty("rename.delete_empty_dirs",      String.valueOf(chkDeleteEmptyDirs.isSelected()));

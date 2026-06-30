@@ -482,6 +482,7 @@ public class MainFrame extends JFrame {
         m.add(mitem("Forcer le re-taguage…",    null,      e -> forceRetag()));
         m.add(mitem("Passe complète…",          "Ctrl+P",  e -> completeAllInfo()));
         m.addSeparator();
+        m.add(mitem("Tagger comme podcast…",    null,      e -> openPodcastDialog()));
         m.add(mitem("Détecter les doublons…",  null,      e -> detectDuplicates()));
         m.add(mitem("Supprimer les fichiers illisibles…", null, e -> deleteErrorFiles()));
         m.add(mitem("Historique de taguage…",  null,      e -> new HistoryDialog(this).setVisible(true)));
@@ -2326,6 +2327,16 @@ public class MainFrame extends JFrame {
                 }
             }
         }.execute();
+    }
+
+    // ── Podcast ───────────────────────────────────────────────────────────────
+
+    private void openPodcastDialog() {
+        if (tableModel.getRowCount() == 0) { setStatus("Chargez d'abord les fichiers audio à tagger."); return; }
+        List<com.opentagger.model.FileEntry> all = new ArrayList<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
+        new PodcastDialog(this, all, tableModel).setVisible(true);
+        refreshStats();
     }
 
     // ── Détection de doublons ─────────────────────────────────────────────────

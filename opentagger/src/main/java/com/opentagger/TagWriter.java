@@ -311,6 +311,13 @@ public class TagWriter {
         sf(tag, FieldKey.MUSICBRAINZ_RELEASEID,        i.releaseMbid);
         sf(tag, FieldKey.MUSICBRAINZ_TRACK_ID,         i.recordingMbid);
 
+        // ── Podcast ───────────────────────────────────────────────────────────
+        setCustomField(tag, "PODCAST_URL",   i.podcastUrl);
+        setCustomField(tag, "SEASON",        i.podcastSeason);
+        setCustomField(tag, "EPISODE",       i.podcastEpisode);
+        setCustomField(tag, "EPISODETYPE",   i.podcastEpisodeType);
+        setCustomField(tag, "KEYWORDS",      i.podcastKeywords);
+
         // ── URLs ──────────────────────────────────────────────────────────────
         sf(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE,   i.artistOfficialUrl);
         sf(tag, FieldKey.URL_WIKIPEDIA_ARTIST_SITE,  i.artistWikipediaUrl);
@@ -402,6 +409,13 @@ public class TagWriter {
         apFreeform(cmd, "IS_INSTRUMENTAL",    i.isInstrumental);
         apFreeform(cmd, "DISCOGS_RELEASE_ID", i.discogsId);
         apFreeform(cmd, "ACOUSTID_ID",        i.acoustidId);
+
+        // Podcast
+        apFreeform(cmd, "PODCAST_URL",  i.podcastUrl);
+        apFreeform(cmd, "SEASON",       i.podcastSeason);
+        apFreeform(cmd, "EPISODE",      i.podcastEpisode);
+        apFreeform(cmd, "EPISODETYPE",  i.podcastEpisodeType);
+        apFreeform(cmd, "KEYWORDS",     i.podcastKeywords);
 
         cmd.add("--overWrite");
 

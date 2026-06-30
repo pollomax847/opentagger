@@ -92,6 +92,7 @@ public class Config {
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
     public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
     public String libraryRoot()                    { return str ("rename.library_root",            ""); }
+    public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }

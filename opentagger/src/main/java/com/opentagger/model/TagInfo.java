@@ -146,6 +146,13 @@ public class TagInfo {
     public String releaseMbid         = "";
     public String recordingMbid       = "";
 
+    // ── Podcast ──────────────────────────────────────────────────────────────
+    public String podcastUrl          = "";    // URL du flux RSS (TXXX:PODCAST_URL)
+    public String podcastSeason       = "";    // numéro de saison (TXXX:SEASON)
+    public String podcastEpisode      = "";    // numéro d'épisode (TXXX:EPISODE)
+    public String podcastEpisodeType  = "";    // full/trailer/bonus (TXXX:EPISODETYPE)
+    public String podcastKeywords     = "";    // mots-clés (TXXX:KEYWORDS)
+
     /** Copie superficielle — tous les champs String sont indépendants (immutables). */
     public TagInfo copy() {
         try {
