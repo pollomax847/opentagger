@@ -959,6 +959,7 @@ public class MainFrame extends JFrame {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(new MatteBorder(0, 1, 0, 0, new Color(0x3A3B3E)));
         panel.add(scroll, BorderLayout.CENTER);
+        panel.add(detailPanel.buildFooter(), BorderLayout.SOUTH);
         return panel;
     }
 

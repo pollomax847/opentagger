@@ -145,7 +145,6 @@ public class DetailPanel extends JPanel {
         tabs.addTab("Paroles",       buildLyricsTab());
         tabs.addTab("URLs & IDs",    buildIdsTab());
         add(tabs, BorderLayout.CENTER);
-        add(buildFooter(), BorderLayout.SOUTH);
 
         // Champs mood en lecture seule
         for (JTextField tf : new JTextField[]{
@@ -704,7 +703,7 @@ public class DetailPanel extends JPanel {
 
     // ── Footer avec bouton Appliquer ─────────────────────────────────────────
 
-    private JPanel buildFooter() {
+    public JPanel buildFooter() {
         JButton btnApply = new JButton("Appliquer les modifications");
         btnApply.addActionListener(e -> { if (onApply != null) onApply.run(); });
         JPanel p = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
