@@ -18,7 +18,7 @@ public class FanArtClient {
     private static final String BASE_URL  = "https://webservice.fanart.tv/v3/music";
     private static final String CAA_URL   = "https://coverartarchive.org";
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .followRedirects(HttpClient.Redirect.ALWAYS)
             .build();

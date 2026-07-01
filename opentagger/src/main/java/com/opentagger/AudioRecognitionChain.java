@@ -24,6 +24,7 @@ public class AudioRecognitionChain {
     private final SongRecClient     songRec = new SongRecClient();
     private final DiscogsClient     discogs = new DiscogsClient();
     private final LastFmClient      lastFm  = new LastFmClient();
+    private final AudDClient        audd    = new AudDClient();
 
     /**
      * Tente de reconnaître le fichier via SongRec → AudD,
@@ -39,7 +40,7 @@ public class AudioRecognitionChain {
 
         // ── 1b. AudD (algorithme différent, en fallback) ─────────────────
         if (AudDClient.isAvailable()) {
-            List<TagInfo> r = tryService(() -> new AudDClient().recognize(fichier),
+            List<TagInfo> r = tryService(() -> audd.recognize(fichier),
                     fichier.getName(), "AudD");
             if (!r.isEmpty()) return r;
         }

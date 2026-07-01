@@ -20,7 +20,7 @@ public class CaaClient {
 
     private static final String CAA_URL = "https://coverartarchive.org";
 
-    private final HttpClient http = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .followRedirects(HttpClient.Redirect.ALWAYS)
             .build();

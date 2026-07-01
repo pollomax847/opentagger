@@ -19,7 +19,7 @@ public class MusicBrainzClient {
     private static final String BASE_URL    = "https://musicbrainz.org/ws/2";
     private static final int    MAX_RETRIES = 3;
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();

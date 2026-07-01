@@ -30,7 +30,7 @@ public class AcoustIdSubmitter {
 
     private static final String SUBMIT_URL = "https://api.acoustid.org/v2/submit";
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();

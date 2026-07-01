@@ -36,7 +36,7 @@ public class LastFmClient {
         "Romantic", "Party", "Dark", "Acoustic", "Instrumental"
     };
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();

@@ -22,7 +22,7 @@ public class DiscogsClient {
         return "Discogs key=" + Config.get().discogsKey() + ", secret=" + Config.get().discogsSecret();
     }
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();

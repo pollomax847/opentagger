@@ -20,7 +20,7 @@ public class AcoustIdClient {
     private static final String LOOKUP_URL = "https://api.acoustid.org/v2/lookup";
     private static final String SUBMIT_URL = "https://api.acoustid.org/v2/submit";
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();

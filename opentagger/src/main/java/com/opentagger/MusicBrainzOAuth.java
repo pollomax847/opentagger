@@ -50,7 +50,7 @@ public class MusicBrainzOAuth {
     private static final String TAG_URL   = "https://musicbrainz.org/ws/2/tag?client=OpenTagger-" + APP_VER;
     private static final String RATE_URL  = "https://musicbrainz.org/ws/2/rating?client=OpenTagger-" + APP_VER;
 
-    private final HttpClient http = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();

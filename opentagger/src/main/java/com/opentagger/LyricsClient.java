@@ -23,7 +23,7 @@ public class LyricsClient {
     private static final String LYRICSOVH = "https://api.lyrics.ovh/v1/";
     private static final String LRCLIB    = "https://lrclib.net/api/get";
 
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(6))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();

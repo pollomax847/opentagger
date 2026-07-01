@@ -28,7 +28,7 @@ public class AudDClient {
     private static final String API_URL = "https://api.audd.io/";
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final HttpClient   http   = HttpClient.newBuilder()
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(30))
             .followRedirects(HttpClient.Redirect.ALWAYS)
             .build();
