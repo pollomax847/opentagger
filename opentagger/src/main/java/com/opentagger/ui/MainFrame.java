@@ -2450,7 +2450,19 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        // Collecter les fichiers candidats (sélection, ou tous les TAGGED si rien sélectionné)
+        // Pré-vérification du token utilisateur — évite de lancer le worker pour rien
+        String userToken = Config.get().str("acoustid.user_token", "").trim();
+        if (userToken.isBlank()) {
+            JOptionPane.showMessageDialog(this,
+                "<html><b>Token utilisateur AcoustID manquant.</b><br><br>" +
+                "1. Connectez-vous sur <tt>https://acoustid.org/api-key</tt><br>" +
+                "2. Copiez votre clé utilisateur<br>" +
+                "3. Collez-la dans <b>Préférences → APIs → AcoustID User Token</b></html>",
+                "Configuration requise", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        // Collecter les fichiers candidats (sélection, ou tous si rien sélectionné)
         int[] sel = table.getSelectedRows();
         List<FileEntry> candidates = new ArrayList<>();
         if (sel.length > 0) {
@@ -2466,7 +2478,7 @@ public class MainFrame extends JFrame {
         int skippedNotTagged = 0, skippedNoMbid = 0;
         for (FileEntry e : candidates) {
             if (e.status != FileEntry.Status.TAGGED) { skippedNotTagged++; continue; }
-            TagInfo ti = e.activeTags();
+            com.opentagger.model.TagInfo ti = e.activeTags();
             if (ti == null || ti.recordingMbid.isBlank()) { skippedNoMbid++; continue; }
             toSubmit.add(e);
         }
@@ -2486,28 +2498,42 @@ public class MainFrame extends JFrame {
         setStatus("Soumission AcoustID : " + info + "…");
 
         new SwingWorker<String, String>() {
+            private final java.util.List<String> errors = new java.util.ArrayList<>();
+
             @Override protected String doInBackground() {
                 com.opentagger.AcoustIdSubmitter sub = new com.opentagger.AcoustIdSubmitter();
-                int ok = 0, failed = 0;
+                int ok = 0;
                 for (FileEntry e : toSubmit) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
                     try {
                         sub.submit(f, e.activeTags());
                         ok++;
-                        publish("  ✔ " + f.getName());
+                        publish("✔ " + f.getName());
                     } catch (Exception ex) {
-                        failed++;
-                        publish("  ✗ " + f.getName() + " : " + ex.getMessage());
+                        String errMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                        errors.add(f.getName() + " : " + errMsg);
+                        publish("✗ " + f.getName() + " : " + errMsg);
                     }
                 }
-                return "Soumission terminée — ✔ " + ok + " envoyé(s)" + (failed > 0 ? "  ✗ " + failed + " erreur(s)" : "");
+                return "Soumission AcoustID — ✔ " + ok + " envoyé(s)" +
+                       (!errors.isEmpty() ? "  ✗ " + errors.size() + " erreur(s)" : "");
             }
             @Override protected void process(List<String> chunks) {
-                chunks.forEach(System.out::println);
+                setStatus(chunks.get(chunks.size() - 1));
             }
             @Override protected void done() {
-                try { setStatus(get()); }
-                catch (Exception ex) { setStatus("Soumission AcoustID : erreur inattendue"); }
+                try {
+                    setStatus(get());
+                    if (!errors.isEmpty()) {
+                        StringBuilder sb = new StringBuilder("<html><b>Erreurs lors de la soumission :</b><br><br>");
+                        for (String e : errors) sb.append("• ").append(e).append("<br>");
+                        sb.append("</html>");
+                        JOptionPane.showMessageDialog(MainFrame.this,
+                            sb.toString(), "Soumission AcoustID", JOptionPane.ERROR_MESSAGE);
+                    }
+                } catch (Exception ex) {
+                    setStatus("Soumission AcoustID : erreur inattendue");
+                }
             }
         }.execute();
     }
