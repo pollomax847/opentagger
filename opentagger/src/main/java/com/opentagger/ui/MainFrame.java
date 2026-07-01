@@ -1311,8 +1311,42 @@ public class MainFrame extends JFrame {
         for (File f : selected) {
             if (f == null) continue;
             if (f.isDirectory()) loadDirectory(f);
-            else if (f.isFile()) loadDirectory(f.getParentFile());
+            else if (f.isFile()) loadSingleFile(f);
         }
+    }
+
+    /** Charge un fichier audio unique directement (clic-droit OS, drag & drop sur un fichier seul). */
+    private void loadSingleFile(File f) {
+        if (f == null || !f.isFile()) return;
+        Path filePath = f.toPath().toAbsolutePath();
+        // Ignorer si déjà dans la table
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry fe = tableModel.get(i);
+            if (filePath.equals((fe.currentPath != null ? fe.currentPath : fe.file.toPath()).toAbsolutePath())) return;
+        }
+        FileEntry entry = new FileEntry(f, new com.opentagger.model.TagInfo());
+        entry.scanRoot = f.getParentFile().toPath();
+        tableModel.add(entry);
+        btnRefresh.setEnabled(true);
+
+        // Lire les tags en arrière-plan
+        new SwingWorker<com.opentagger.model.TagInfo, Void>() {
+            @Override protected com.opentagger.model.TagInfo doInBackground() {
+                try {
+                    com.opentagger.model.TagInfo ti = readTags(f);
+                    MetadataCache cache = new MetadataCache();
+                    boolean wasTagged = cache.loadTaggedPaths().contains(f.getAbsolutePath());
+                    cache.close();
+                    if (wasTagged) entry.status = FileEntry.Status.TAGGED;
+                    return ti;
+                } catch (Exception e) { return new com.opentagger.model.TagInfo(); }
+            }
+            @Override protected void done() {
+                try { entry.current = get(); } catch (Exception ignored) {}
+                tableModel.update(entry);
+                refreshStats();
+            }
+        }.execute();
     }
 
     /** Charge un dossier (récursivement) dans la table — toujours en mode ajout. */

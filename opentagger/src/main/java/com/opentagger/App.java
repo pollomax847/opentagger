@@ -34,19 +34,17 @@ public class App {
         // Accepte fichiers audio ET dossiers. NE charge PAS les dossiers de démarrage
         // automatiques pour ne pas polluer la vue quand l'utilisateur ouvre un fichier spécifique.
         if (!args[0].startsWith("--")) {
-            java.util.LinkedHashSet<File> dirs = new java.util.LinkedHashSet<>();
+            java.util.LinkedHashSet<File> targets = new java.util.LinkedHashSet<>();
             for (String arg : args) {
                 File f = new File(arg);
                 if (f.isDirectory()) {
-                    dirs.add(f);
+                    targets.add(f);           // dossier → chargé en entier
                 } else if (f.isFile()) {
-                    // fichier audio → charger son dossier parent
-                    File parent = f.getParentFile();
-                    if (parent != null && parent.isDirectory()) dirs.add(parent);
+                    targets.add(f);           // fichier seul → chargé tel quel (pas le parent)
                 }
             }
-            if (!dirs.isEmpty()) {
-                MainFrame.launch(dirs.toArray(new File[0])); // sans dossiers de démarrage auto
+            if (!targets.isEmpty()) {
+                MainFrame.launch(targets.toArray(new File[0])); // sans dossiers de démarrage auto
                 return;
             }
         }
