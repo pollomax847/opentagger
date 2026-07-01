@@ -165,13 +165,6 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
                         // Retirer du pool de candidats
                         candidateIndex.values().remove(hit);
-                    } catch (org.jaudiotagger.audio.exceptions.CannotReadException ex) {
-                        // M4A/MP4 avec en-tête non standard (iTunes DRM ou espace insuffisant)
-                        // → skippé silencieusement, format non supporté par JAudioTagger
-                        hit.status  = FileEntry.Status.SKIPPED;
-                        hit.message = "format M4A non supporté";
-                        final FileEntry hitFinal2 = hit;
-                        SwingUtilities.invokeLater(() -> tableModel.update(hitFinal2));
                     } catch (Exception ex) {
                         publish("  ✗ " + hit.filename() + " : " + ex.getMessage());
                     }
