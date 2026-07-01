@@ -42,7 +42,7 @@ Identifie et complète les métadonnées de vos fichiers MP3, FLAC, M4A, OGG via
 - **Dossier racine bibliothèque** — tous les fichiers organisés vers un chemin configurable
 - **Compatibilité NAS / MergerFS** — copie+vérification de taille avant suppression de la source (pas d'`ATOMIC_MOVE` cross-device)
 
-### Podcasts *(nouveau en v0.9.0)*
+### Podcasts *(nouveau en v0.9.0, fix M4A en v0.9.1)*
 
 Taguage et organisation automatique des fichiers podcast via flux RSS.
 
