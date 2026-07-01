@@ -394,7 +394,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             log("▶ START  " + fichier.getName());
 
             log("  findTags...");
-            List<TagInfo> results = findTags(fichier, entry.current);
+            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify);
+            entry.forceReidentify = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
             log("  findTags → " + results.size() + " résultat(s)" +
                 (results.isEmpty() ? "" : " score=" + results.get(0).score));
@@ -671,7 +672,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
-    private List<TagInfo> findTags(File fichier, TagInfo existingTags) throws Exception {
+    private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
         if (TagWriter.repairM4aIfNeeded(fichier)) log("  M4A réparé OK");
 
@@ -694,7 +695,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         lastFindTagsSource = MetadataCache.SOURCE_TEXT;
         String knownMbid = cache.getFileTagging(fichier.getAbsolutePath());
         if (knownMbid != null) knownMbid = knownMbid.trim();
-        if (knownMbid != null && !knownMbid.isBlank()) {
+        if (!forceReidentify && knownMbid != null && !knownMbid.isBlank()) {
             String cachedSource = cache.getFileTaggingSource(fichier.getAbsolutePath());
             boolean trustedSource = MetadataCache.SOURCE_SONGREC.equals(cachedSource)
                                  || MetadataCache.SOURCE_ACOUSTID.equals(cachedSource)
@@ -720,7 +721,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Si le fichier a déjà releaseMbid + artist + title + album valides → confiance totale.
         // On ne ré-identifie pas ce que Picard a déjà fait : on garde l'album de compilation
         // tel quel, on évite deux allers-retours MB inutiles, et le taguage est instantané.
-        if (Config.get().trustExistingMbTags() && existingTags != null
+        if (!forceReidentify && Config.get().trustExistingMbTags() && existingTags != null
                 && !existingTags.releaseMbid.isBlank()
                 && !existingTags.artist.isBlank()
                 && !existingTags.title.isBlank()

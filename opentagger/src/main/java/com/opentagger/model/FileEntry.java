@@ -26,6 +26,9 @@ public class FileEntry {
     /** Suggestions d'amélioration générées après l'analyse (pochette absente, MBID manquant…). */
     public List<String> suggestions;
 
+    /** Forcer la ré-identification même si le cache ou les tags MB existants sont valides. */
+    public boolean forceReidentify = false;
+
     /**
      * Racine du dossier scanné — le renommage par masque est relatif à cette racine.
      * Ex : racine=/musique, masque={artist}/{album}/{track} - {title}

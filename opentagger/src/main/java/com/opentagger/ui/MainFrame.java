@@ -824,10 +824,18 @@ public class MainFrame extends JFrame {
         });
         miReveal.addActionListener(e -> {
             int row = table.getSelectedRow();
-            if (row >= 0) {
-                try { Desktop.getDesktop().open(
-                        tableModel.get(table.convertRowIndexToModel(row)).file.getParentFile()); }
-                catch (Exception ignored) {}
+            if (row < 0) return;
+            File dir = tableModel.get(table.convertRowIndexToModel(row)).file.getParentFile();
+            if (dir == null) return;
+            try {
+                String os = System.getProperty("os.name", "").toLowerCase();
+                ProcessBuilder pb;
+                if (os.contains("win"))        pb = new ProcessBuilder("explorer.exe", dir.getAbsolutePath());
+                else if (os.contains("mac"))   pb = new ProcessBuilder("open", dir.getAbsolutePath());
+                else                           pb = new ProcessBuilder("xdg-open", dir.getAbsolutePath());
+                pb.start();
+            } catch (Exception ex) {
+                showError("Impossible d'ouvrir le dossier : " + ex.getMessage());
             }
         });
         miRemove.addActionListener(e -> {
@@ -1699,16 +1707,39 @@ public class MainFrame extends JFrame {
                         af.commit();
                     }
                 } catch (Exception ignored) {}
-                // Réinitialiser le statut
-                e.status   = FileEntry.Status.PENDING;
-                e.message  = "";
-                e.result   = null;
-                e.candidates = null;
+                // Réinitialiser le statut et forcer la ré-identification (bypass cache + MB tags existants)
+                e.status           = FileEntry.Status.PENDING;
+                e.message          = "";
+                e.result           = null;
+                e.candidates       = null;
+                e.forceReidentify  = true;
                 tableModel.update(e);
             }
         } finally { cache.close(); }
         refreshStats();
-        setStatus(targets.size() + " fichier(s) remis en attente — relancez le taguage.");
+
+        // Lancer le taguage immédiatement sur les fichiers réinitialisés
+        int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
+        lastStatsRefreshMs = 0;
+        final List<FileEntry> forcedTargets = targets;
+        final int forcedTotal = forcedTargets.size();
+        worker = new TaggingWorker(forcedTargets, Config.get().useAcoustId(), autoMask,
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
+            entry -> { tableModel.update(entry); table.repaint(); });
+        worker.addPropertyChangeListener(evt -> {
+            if ("progress".equals(evt.getPropertyName())) {
+                int pct = (Integer) evt.getNewValue();
+                progress.setValue(pct);
+                progress.setString((int) Math.round(pct * forcedTotal / 100.0) + " / " + forcedTotal);
+                refreshStats();
+            }
+            if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
+                onTaggingDone(forcedTargets);
+        });
+        btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
+        btnCancel.setEnabled(true);
+        progress.setValue(0); progress.setVisible(true);
+        worker.execute();
     }
 
     private void onTaggingDone(List<FileEntry> done) {
