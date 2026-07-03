@@ -1,5 +1,7 @@
 package com.opentagger;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -20,10 +22,8 @@ public class ReplayGainAnalyzer {
             String ffmpeg = Config.get().str("audio.ffmpeg_path", "ffmpeg");
             ProcessBuilder pb = new ProcessBuilder(ffmpeg, "-filters");
             pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String out = new String(p.getInputStream().readAllBytes());
-            p.waitFor(5, TimeUnit.SECONDS);
-            return out.contains("replaygain");
+            String out = runCaptured(pb, 5);
+            return out != null && out.contains("replaygain");
         } catch (Exception e) { return false; }
     }
 
@@ -48,22 +48,10 @@ public class ReplayGainAnalyzer {
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String output = new String(p.getInputStream().readAllBytes());
-            p.waitFor(600, TimeUnit.SECONDS);
+            String output = runCaptured(pb, 600);
+            if (output == null) return null; // timeout — process tué, pas de résultat exploitable
 
-            String gain = "", peak = "";
-            for (String line : output.split("\\n")) {
-                if (line.contains("track_gain")) {
-                    Matcher m = PAT_GAIN.matcher(line);
-                    if (m.find()) gain = m.group(1) + " dB";
-                }
-                if (line.contains("track_peak")) {
-                    Matcher m = PAT_PEAK.matcher(line);
-                    if (m.find()) peak = m.group(1);
-                }
-            }
-            return (gain.isBlank() && peak.isBlank()) ? null : new RGResult(gain, peak);
+            return parseOutput(output);
         } catch (Exception e) { return null; }
     }
 
@@ -79,22 +67,46 @@ public class ReplayGainAnalyzer {
             ProcessBuilder pb = new ProcessBuilder(
                     ffmpeg, "-i", filePath, "-af", "replaygain", "-f", "null", "-");
             pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String output = new String(p.getInputStream().readAllBytes());
-            p.waitFor(120, TimeUnit.SECONDS);
+            String output = runCaptured(pb, 120);
+            if (output == null) return null;
 
-            String gain = "", peak = "";
-            for (String line : output.split("\\n")) {
-                if (line.contains("track_gain")) {
-                    Matcher m = PAT_GAIN.matcher(line);
-                    if (m.find()) gain = m.group(1) + " dB";
-                }
-                if (line.contains("track_peak")) {
-                    Matcher m = PAT_PEAK.matcher(line);
-                    if (m.find()) peak = m.group(1);
-                }
-            }
-            return (gain.isBlank() && peak.isBlank()) ? null : new RGResult(gain, peak);
+            return parseOutput(output);
         } catch (Exception e) { return null; }
+    }
+
+    private static RGResult parseOutput(String output) {
+        String gain = "", peak = "";
+        for (String line : output.split("\\n")) {
+            if (line.contains("track_gain")) {
+                Matcher m = PAT_GAIN.matcher(line);
+                if (m.find()) gain = m.group(1) + " dB";
+            }
+            if (line.contains("track_peak")) {
+                Matcher m = PAT_PEAK.matcher(line);
+                if (m.find()) peak = m.group(1);
+            }
+        }
+        return (gain.isBlank() && peak.isBlank()) ? null : new RGResult(gain, peak);
+    }
+
+    /**
+     * Démarre le process et draine sa sortie sur un thread séparé PENDANT que waitFor(timeout)
+     * attend — l'ancien code lisait toute la sortie (bloquant jusqu'à EOF) AVANT d'appeler
+     * waitFor(timeout), ce qui rendait ce timeout inopérant : un ffmpeg bloqué (fichier corrompu,
+     * montage NAS/MergerFS capricieux) gelait le thread appelant indéfiniment et geler tout le
+     * lot en cours côté TaggingWorker (celui-ci tourne en séquentiel, un seul fichier bloqué
+     * suffit à tout arrêter). Retourne null si le délai est dépassé (process tué).
+     */
+    private static String runCaptured(ProcessBuilder pb, long timeoutSeconds) throws Exception {
+        Process p = pb.start();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Thread drain = Thread.ofVirtual().start(() -> {
+            try { p.getInputStream().transferTo(out); }
+            catch (Exception ignored) {}
+        });
+        boolean done = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+        if (!done) { p.destroyForcibly(); return null; }
+        try { drain.join(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        return out.toString(StandardCharsets.UTF_8);
     }
 }

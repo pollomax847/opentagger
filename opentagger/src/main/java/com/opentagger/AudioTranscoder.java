@@ -83,16 +83,25 @@ public class AudioTranscoder {
         pb.redirectErrorStream(true);
         Process p = pb.start();
 
-        try (InputStream is = p.getInputStream()) {
-            is.transferTo(OutputStream.nullOutputStream());
-        }
+        // Drainer la sortie sur un thread séparé PENDANT que waitFor(timeout) attend : lire tout
+        // le flux (bloquant jusqu'à EOF) AVANT d'appeler waitFor rendait ce timeout inopérant —
+        // un ffmpeg bloqué (fichier corrompu, montage NAS/MergerFS capricieux) gelait ce thread
+        // indéfiniment sans jamais être tué.
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        Thread drain = Thread.ofVirtual().start(() -> {
+            try (InputStream is = p.getInputStream()) { is.transferTo(out); }
+            catch (Exception ignored) {}
+        });
 
         boolean finished = p.waitFor(5, TimeUnit.MINUTES);
         if (!finished) { p.destroyForcibly(); throw new IOException("Timeout ffmpeg"); }
+        try { drain.join(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
 
         if (p.exitValue() != 0 || !Files.exists(dest) || Files.size(dest) == 0) {
             Files.deleteIfExists(dest);
-            throw new IOException("Transcodage échoué (code " + p.exitValue() + ")");
+            String tail = out.toString(java.nio.charset.StandardCharsets.UTF_8).strip();
+            if (tail.length() > 400) tail = "…" + tail.substring(tail.length() - 400);
+            throw new IOException("Transcodage échoué (code " + p.exitValue() + ") — " + tail);
         }
 
         if (deleteSource) Files.deleteIfExists(source);

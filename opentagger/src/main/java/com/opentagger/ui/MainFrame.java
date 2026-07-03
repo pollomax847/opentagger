@@ -362,33 +362,44 @@ public class MainFrame extends JFrame {
             @Override protected Void doInBackground() throws Exception {
                 for (com.opentagger.model.FileEntry e : targets) {
                     com.opentagger.model.TagInfo current = e.activeTags();
+                    // Ne PAS muter `current`/`e` ici : c'est l'objet live affiché et trié par le
+                    // TableRowSorter sur l'EDT. Les valeurs fraîches sont calculées sur ce thread
+                    // (lectures réseau) puis appliquées d'un coup sur l'EDT plus bas — sinon même
+                    // défaut que le crash de tri déjà vu 697× en 3 jours (TaggingWorker).
+                    String releaseMbidForCaa = current.releaseMbid;
 
                     // 1. Tags frais depuis MB via recordingMbid
                     if (!current.recordingMbid.isBlank()) {
                         try {
                             com.opentagger.model.TagInfo fresh = mbClient.lookupRecording(current.recordingMbid);
                             if (fresh != null) {
-                                // Ne mettre à jour que les champs clés — ne pas écraser les données manuelles
-                                if (!fresh.title.isBlank())       current.title       = fresh.title;
-                                if (!fresh.artist.isBlank())      current.artist      = fresh.artist;
-                                if (!fresh.albumArtist.isBlank()) current.albumArtist = fresh.albumArtist;
-                                if (!fresh.album.isBlank())       current.album       = fresh.album;
-                                if (!fresh.year.isBlank())        current.year        = fresh.year;
-                                if (!fresh.track.isBlank())       current.track       = fresh.track;
-                                if (!fresh.trackTotal.isBlank())  current.trackTotal  = fresh.trackTotal;
-                                if (!fresh.releaseMbid.isBlank()) current.releaseMbid = fresh.releaseMbid;
-                                if (!fresh.releaseGroupMbid.isBlank()) current.releaseGroupMbid = fresh.releaseGroupMbid;
-                                e.result = current;
-                                e.status = com.opentagger.model.FileEntry.Status.TAGGED;
+                                if (!fresh.releaseMbid.isBlank()) releaseMbidForCaa = fresh.releaseMbid;
+                                SwingUtilities.invokeLater(() -> {
+                                    // Ne mettre à jour que les champs clés — ne pas écraser les données manuelles
+                                    if (!fresh.title.isBlank())       current.title       = fresh.title;
+                                    if (!fresh.artist.isBlank())      current.artist      = fresh.artist;
+                                    if (!fresh.albumArtist.isBlank()) current.albumArtist = fresh.albumArtist;
+                                    if (!fresh.album.isBlank())       current.album       = fresh.album;
+                                    if (!fresh.year.isBlank())        current.year        = fresh.year;
+                                    if (!fresh.track.isBlank())       current.track       = fresh.track;
+                                    if (!fresh.trackTotal.isBlank())  current.trackTotal  = fresh.trackTotal;
+                                    if (!fresh.releaseMbid.isBlank()) current.releaseMbid = fresh.releaseMbid;
+                                    if (!fresh.releaseGroupMbid.isBlank()) current.releaseGroupMbid = fresh.releaseGroupMbid;
+                                    e.result = current;
+                                    e.status = com.opentagger.model.FileEntry.Status.TAGGED;
+                                });
                             }
                         } catch (Exception ignored) {}
                         try { Thread.sleep(1100); } catch (InterruptedException ie) { break; } // MB rate-limit
                     }
 
-                    // 2. Pochette fraîche depuis CAA via releaseMbid
-                    if (!current.releaseMbid.isBlank()) {
+                    // 2. Pochette fraîche depuis CAA via releaseMbid (valeur locale : pas besoin
+                    // d'attendre que la mutation ci-dessus soit passée sur l'EDT)
+                    if (!releaseMbidForCaa.isBlank()) {
                         try {
-                            java.nio.file.Path img = caa.downloadFront(current);
+                            com.opentagger.model.TagInfo forCaa = new com.opentagger.model.TagInfo();
+                            forCaa.releaseMbid = releaseMbidForCaa;
+                            java.nio.file.Path img = caa.downloadFront(forCaa);
                             if (img != null) {
                                 writer.writeCoverOnly(e.file, img);
                                 java.nio.file.Files.deleteIfExists(img);
@@ -736,7 +747,7 @@ public class MainFrame extends JFrame {
         table.setShowHorizontalLines(false);
         table.setIntercellSpacing(new Dimension(0, 0));
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        rowSorter = new TableRowSorter<>(tableModel);
+        rowSorter = new SafeTableRowSorter<>(tableModel);
         table.setRowSorter(rowSorter);
         table.getTableHeader().setReorderingAllowed(false);
 
@@ -816,16 +827,41 @@ public class MainFrame extends JFrame {
             FileEntry entry = tableModel.get(table.convertRowIndexToModel(row));
             if (entry.status == FileEntry.Status.TAGGED) {
                 try {
-                    Path np = new FileRenamer().rename(
-                            entry.file.toPath(), entry.activeTags(), currentMask);
-                    if (np != null) setStatus("Renommé → " + np.getFileName());
+                    // entry.file est le chemin D'ORIGINE au chargement : si le fichier a déjà été
+                    // déplacé une première fois (auto-renommage pendant le taguage), entry.file
+                    // pointe vers un chemin qui n'existe plus, et cet appel échouait toujours.
+                    // Même résolution de racine que TaggingWorker (bibliothèque configurée en
+                    // priorité, sinon dossier scanné) pour un comportement cohérent partout.
+                    Path curPath   = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
+                    Path oldParent = curPath.getParent();
+                    String libRoot = Config.get().libraryRoot();
+                    Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                            ? java.nio.file.Paths.get(libRoot)
+                            : (entry.scanRoot != null ? entry.scanRoot : oldParent);
+                    Path np = new FileRenamer().rename(curPath, entry.activeTags(), currentMask, root);
+                    if (np != null) {
+                        entry.currentPath = np;
+                        if (Config.get().deleteEmptyDirsAfterRename()) {
+                            FileRenamer.deleteEmptyAncestors(oldParent, root);
+                        }
+                        tableModel.update(entry);
+                        setStatus("Renommé → " + np.getFileName());
+                    } else {
+                        setStatus("Déjà au bon emplacement — rien à renommer.");
+                    }
                 } catch (Exception ex) { showError(ex.getMessage()); }
             } else { setStatus("Ce fichier n'a pas encore été tagué."); }
         });
         miReveal.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) return;
-            File dir = tableModel.get(table.convertRowIndexToModel(row)).file.getParentFile();
+            FileEntry revealEntry = tableModel.get(table.convertRowIndexToModel(row));
+            // entry.file est le chemin D'ORIGINE au chargement (champ final, ne change jamais) ;
+            // entry.currentPath suit le fichier après un renommage/déplacement. Utiliser file ici
+            // ouvrait l'ANCIEN dossier — potentiellement vide et supprimé depuis — dès qu'un
+            // fichier avait déjà été renommé une fois (même défaut que "Renommer ce fichier").
+            File dir = (revealEntry.currentPath != null ? revealEntry.currentPath.toFile() : revealEntry.file)
+                    .getParentFile();
             if (dir == null) return;
             try {
                 String os = System.getProperty("os.name", "").toLowerCase();
@@ -1144,13 +1180,25 @@ public class MainFrame extends JFrame {
         // pas la prochaine action disponible dans la pile.
         String desc = undoManager.undoDescription();
         FileEntry e = undoManager.undo();
-        if (e != null) { tableModel.update(e); refreshDetail(); setStatus("Annulé : " + desc); }
+        if (e != null) {
+            tableModel.update(e); refreshDetail();
+            // undo() ne restaurait avant que l'objet TagInfo en mémoire : l'affichage montrait
+            // les anciennes valeurs mais le fichier sur disque gardait les tags "annulés", qui
+            // réapparaissaient silencieusement au prochain F5/redémarrage. On réécrit donc ici
+            // exactement comme applyDetail() le fait pour une édition normale.
+            writeTagsSafe(e, e.activeTags());
+            setStatus("Annulé : " + desc);
+        }
     }
 
     private void performRedo() {
         String desc = undoManager.redoDescription();
         FileEntry e = undoManager.redo();
-        if (e != null) { tableModel.update(e); refreshDetail(); setStatus("Rétabli : " + desc); }
+        if (e != null) {
+            tableModel.update(e); refreshDetail();
+            writeTagsSafe(e, e.activeTags());
+            setStatus("Rétabli : " + desc);
+        }
     }
 
     private void updateUndoButtons() {
@@ -1338,20 +1386,26 @@ public class MainFrame extends JFrame {
         tableModel.add(entry);
         btnRefresh.setEnabled(true);
 
-        // Lire les tags en arrière-plan
-        new SwingWorker<com.opentagger.model.TagInfo, Void>() {
-            @Override protected com.opentagger.model.TagInfo doInBackground() {
+        // Lire les tags en arrière-plan. entry est déjà affiché/trié par le tableau (ajouté
+        // ci-dessus) : on calcule ici mais on ne mute entry QUE dans done() (EDT), sinon même
+        // course avec le TableRowSorter que le crash déjà vu 697× en 3 jours (TaggingWorker).
+        record LoadResult(com.opentagger.model.TagInfo tags, boolean wasTagged) {}
+        new SwingWorker<LoadResult, Void>() {
+            @Override protected LoadResult doInBackground() {
                 try {
                     com.opentagger.model.TagInfo ti = readTags(f);
                     MetadataCache cache = new MetadataCache();
                     boolean wasTagged = cache.loadTaggedPaths().contains(f.getAbsolutePath());
                     cache.close();
-                    if (wasTagged) entry.status = FileEntry.Status.TAGGED;
-                    return ti;
-                } catch (Exception e) { return new com.opentagger.model.TagInfo(); }
+                    return new LoadResult(ti, wasTagged);
+                } catch (Exception e) { return new LoadResult(new com.opentagger.model.TagInfo(), false); }
             }
             @Override protected void done() {
-                try { entry.current = get(); } catch (Exception ignored) {}
+                try {
+                    LoadResult r = get();
+                    entry.current = r.tags();
+                    if (r.wasTagged()) entry.status = FileEntry.Status.TAGGED;
+                } catch (Exception ignored) {}
                 tableModel.update(entry);
                 refreshStats();
             }
@@ -1513,6 +1567,17 @@ public class MainFrame extends JFrame {
             setStatus("Taguage en cours — attendez la fin ou cliquez sur Annuler.");
             return;
         }
+        // Symétrique de la garde de completeAlbums()/completeAllInfo() : lancer un taguage
+        // pendant qu'un de ces deux workers tourne encore provoque la même course (connexions
+        // MetadataCache concurrentes + FileEntry/TagInfo mutés par deux threads en parallèle).
+        if (completionWorker != null && !completionWorker.isDone()) {
+            setStatus("Complétion des albums en cours — attendez la fin avant de taguer.");
+            return;
+        }
+        if (infoCompleter != null && !infoCompleter.isDone()) {
+            setStatus("Passe complète en cours — attendez la fin avant de taguer.");
+            return;
+        }
         List<FileEntry> toTag = new ArrayList<>();
         if (selOnly) {
             for (int r : table.getSelectedRows())
@@ -1602,6 +1667,10 @@ public class MainFrame extends JFrame {
             setStatus("Taguage en cours — attendez la fin avant de lancer la passe complète.");
             return;
         }
+        if (completionWorker != null && !completionWorker.isDone()) {
+            setStatus("Complétion des albums en cours — attendez la fin avant de lancer la passe complète.");
+            return;
+        }
 
         // Cible : sélection si ≥1, sinon tous les TAGGED avec champs manquants
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
@@ -1670,6 +1739,21 @@ public class MainFrame extends JFrame {
     }
 
     private void forceRetag() {
+        // Cette action lance elle aussi un TaggingWorker (via launchForcedTagging) — même garde
+        // que startTagging()/completeAllInfo()/completeAlbums(), sinon un worker déjà actif est
+        // silencieusement remplacé dans le champ `worker` alors qu'il continue de tourner.
+        if (worker != null && !worker.isDone()) {
+            setStatus("Taguage en cours — attendez la fin ou cliquez sur Annuler.");
+            return;
+        }
+        if (completionWorker != null && !completionWorker.isDone()) {
+            setStatus("Complétion des albums en cours — attendez la fin avant de forcer le re-taguage.");
+            return;
+        }
+        if (infoCompleter != null && !infoCompleter.isDone()) {
+            setStatus("Passe complète en cours — attendez la fin avant de forcer le re-taguage.");
+            return;
+        }
         // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
@@ -1689,40 +1773,63 @@ public class MainFrame extends JFrame {
             "Forcer le re-taguage", JOptionPane.OK_CANCEL_OPTION);
         if (confirm != JOptionPane.OK_OPTION) return;
 
-        MetadataCache cache = new MetadataCache();
-        try {
-            for (FileEntry e : targets) {
-                java.io.File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                // Effacer le cache pour ce fichier
-                cache.recordFileTagging(fichier.getAbsolutePath(), null);
-                // Effacer les MBIDs du fichier audio pour forcer une nouvelle identification
-                // (sinon MUSICBRAINZ_TRACK_ID est relu et peut donner un mauvais résultat en cache)
+        // Effacer cache + MBIDs disque = un AudioFileIO.read/commit PAR FICHIER. Fait en
+        // synchrone dans l'ActionListener (donc sur l'EDT), ça gelait toute l'interface le temps
+        // de retraiter toute une bibliothèque (rien n'était sélectionnable, même pas Annuler).
+        // On le pousse dans un SwingWorker ; les mutations de FileEntry/tableModel restent sur
+        // l'EDT (via publish/process) pour ne pas rouvrir la course avec le TableRowSorter.
+        setStatus("Réinitialisation de " + targets.size() + " fichier(s)…");
+        btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
+        final List<FileEntry> forcedTargets = targets;
+        new SwingWorker<Void, FileEntry>() {
+            @Override protected Void doInBackground() {
+                MetadataCache cache = new MetadataCache();
                 try {
-                    org.jaudiotagger.audio.AudioFile af = org.jaudiotagger.audio.AudioFileIO.read(fichier);
-                    org.jaudiotagger.tag.Tag tag = af.getTag();
-                    if (tag != null) {
-                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_TRACK_ID);
-                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_ARTISTID);
-                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASEID);
-                        tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
-                        af.commit();
+                    for (FileEntry e : forcedTargets) {
+                        java.io.File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                        // Effacer le cache pour ce fichier
+                        cache.recordFileTagging(fichier.getAbsolutePath(), null);
+                        // Effacer les MBIDs du fichier audio pour forcer une nouvelle identification
+                        // (sinon MUSICBRAINZ_TRACK_ID est relu et peut donner un mauvais résultat en cache)
+                        try {
+                            org.jaudiotagger.audio.AudioFile af = org.jaudiotagger.audio.AudioFileIO.read(fichier);
+                            org.jaudiotagger.tag.Tag tag = af.getTag();
+                            if (tag != null) {
+                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_TRACK_ID);
+                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_ARTISTID);
+                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASEID);
+                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
+                                af.commit();
+                            }
+                        } catch (Exception ignored) {}
+                        publish(e);
                     }
-                } catch (Exception ignored) {}
-                // Réinitialiser le statut et forcer la ré-identification (bypass cache + MB tags existants)
-                e.status           = FileEntry.Status.PENDING;
-                e.message          = "";
-                e.result           = null;
-                e.candidates       = null;
-                e.forceReidentify  = true;
-                tableModel.update(e);
+                } finally { cache.close(); }
+                return null;
             }
-        } finally { cache.close(); }
-        refreshStats();
+            @Override protected void process(List<FileEntry> chunk) {
+                // Sur l'EDT : réinitialiser le statut et forcer la ré-identification
+                // (bypass cache + MB tags existants).
+                for (FileEntry e : chunk) {
+                    e.status           = FileEntry.Status.PENDING;
+                    e.message          = "";
+                    e.result           = null;
+                    e.candidates       = null;
+                    e.forceReidentify  = true;
+                    tableModel.update(e);
+                }
+            }
+            @Override protected void done() {
+                refreshStats();
+                launchForcedTagging(forcedTargets);
+            }
+        }.execute();
+    }
 
-        // Lancer le taguage immédiatement sur les fichiers réinitialisés
+    /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag(). */
+    private void launchForcedTagging(List<FileEntry> forcedTargets) {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0;
-        final List<FileEntry> forcedTargets = targets;
         final int forcedTotal = forcedTargets.size();
         worker = new TaggingWorker(forcedTargets, Config.get().useAcoustId(), autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
@@ -1860,7 +1967,10 @@ public class MainFrame extends JFrame {
                             Path newPath = renamer.rename(e.currentPath, e.activeTags(), maskIndex, root);
                             if (newPath != null) {
                                 sourceDirs.add(oldPath.getParent());
-                                e.currentPath = newPath;
+                                // e.currentPath est lu par le TableRowSorter sur l'EDT ; on le mute
+                                // là-bas, pas ici (même défaut que le crash déjà vu 697× en 3 jours).
+                                final Path finalNewPath = newPath;
+                                SwingUtilities.invokeLater(() -> e.currentPath = finalNewPath);
                                 renamed++;
                                 String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
                                 if (mbid != null)
@@ -1870,7 +1980,8 @@ public class MainFrame extends JFrame {
                             }
                         } catch (Exception ex) {
                             errors++;
-                            e.message = "Renommage : " + (ex.getMessage() != null ? ex.getMessage() : "erreur");
+                            String msg = "Renommage : " + (ex.getMessage() != null ? ex.getMessage() : "erreur");
+                            SwingUtilities.invokeLater(() -> e.message = msg);
                         }
                         publish(e);
                     }
@@ -1888,15 +1999,18 @@ public class MainFrame extends JFrame {
                 @Override
                 protected void done() {
                     cache.close();
-                    // Nettoyer dossiers vides
-                    Set<Path> roots = new LinkedHashSet<>();
-                    for (int i = 0; i < tableModel.getRowCount(); i++) {
-                        FileEntry e = tableModel.get(i);
-                        if (e.scanRoot != null) roots.add(e.scanRoot);
+                    // Nettoyer dossiers vides — même réglage que le renommage auto pendant le
+                    // taguage (avant : toujours nettoyé ici, sans tenir compte du réglage).
+                    if (Config.get().deleteEmptyDirsAfterRename()) {
+                        Set<Path> roots = new LinkedHashSet<>();
+                        for (int i = 0; i < tableModel.getRowCount(); i++) {
+                            FileEntry e = tableModel.get(i);
+                            if (e.scanRoot != null) roots.add(e.scanRoot);
+                        }
+                        for (Path src : sourceDirs)
+                            for (Path r : roots)
+                                try { FileRenamer.deleteEmptyAncestors(src, r); } catch (Exception ignore) {}
                     }
-                    for (Path src : sourceDirs)
-                        for (Path r : roots)
-                            try { FileRenamer.deleteEmptyAncestors(src, r); } catch (Exception ignore) {}
                     try { setStatus(get()); } catch (Exception ignore) {}
                     onDone.run();
                 }
@@ -1972,6 +2086,17 @@ public class MainFrame extends JFrame {
         if (completionWorker != null && !completionWorker.isDone()) {
             completionWorker.cancel(true);
             setStatus("Complétion annulée.");
+            return;
+        }
+        // Même garde que completeAllInfo() : sans elle, ce worker et un TaggingWorker/
+        // InfoCompleterWorker en cours écrivent en même temps dans MetadataCache (connexions
+        // SQLite distinctes) et mutent les mêmes FileEntry/TagInfo affichés par le tableau.
+        if (worker != null && !worker.isDone()) {
+            setStatus("Taguage en cours — attendez la fin avant de compléter les albums.");
+            return;
+        }
+        if (infoCompleter != null && !infoCompleter.isDone()) {
+            setStatus("Passe complète en cours — attendez la fin avant de compléter les albums.");
             return;
         }
         setStatus("Complétion des albums en cours…");
@@ -2426,33 +2551,58 @@ public class MainFrame extends JFrame {
     }
 
     private void deleteErrorFiles() {
-        List<FileEntry> errors = new ArrayList<>();
+        // "Fichier introuvable" ne veut PAS dire fichier corrompu : c'était surtout, avant le
+        // correctif du scan des fichiers temporaires ot_m4a_*/ot_fix_*, l'entrée fantôme d'un
+        // fichier déjà reparti — il n'y a rien à "supprimer du disque", juste une ligne fantôme
+        // à retirer du tableau. On sépare donc ce cas des vraies erreurs de lecture/format, pour
+        // ne pas dire "ces fichiers sont corrompus" à propos de fichiers qui n'ont jamais existé
+        // sous ce statut, et pour ne pas proposer une suppression disque qui n'a pas de sens ici.
+        List<FileEntry> missing = new ArrayList<>();
+        List<FileEntry> corrupt = new ArrayList<>();
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
-            if (e.status == FileEntry.Status.ERROR) errors.add(e);
+            if (e.status != FileEntry.Status.ERROR) continue;
+            if ("Fichier introuvable".equals(e.message)) missing.add(e);
+            else corrupt.add(e);
         }
 
-        if (errors.isEmpty()) {
+        if (missing.isEmpty() && corrupt.isEmpty()) {
             JOptionPane.showMessageDialog(this,
                 "Aucun fichier illisible dans la liste.",
                 "Fichiers illisibles", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
-        // Construire le message de confirmation
+        if (!missing.isEmpty()) {
+            int ok = JOptionPane.showConfirmDialog(this,
+                missing.size() + " fichier(s) introuvable(s) sur le disque (déjà déplacés/supprimés) "
+                + "vont être retirés de la liste.\nAucun fichier ne sera supprimé — ce ne sont que des lignes fantômes.",
+                "Fichiers introuvables", JOptionPane.OK_CANCEL_OPTION);
+            if (ok == JOptionPane.OK_OPTION) {
+                for (FileEntry e : missing) {
+                    int idx = tableModel.indexOf(e);
+                    if (idx >= 0) tableModel.remove(idx);
+                }
+                setStatus(missing.size() + " ligne(s) fantôme(s) retirée(s) de la liste.");
+            }
+        }
+
+        if (corrupt.isEmpty()) return;
+
+        // Construire le message de confirmation (uniquement les vraies erreurs de lecture/format)
         StringBuilder sb = new StringBuilder("<html>Supprimer définitivement <b>");
-        sb.append(errors.size()).append(" fichier(s) illisible(s)</b> du disque ?<br><br>");
-        int shown = Math.min(errors.size(), 8);
+        sb.append(corrupt.size()).append(" fichier(s) illisible(s)</b> du disque ?<br><br>");
+        int shown = Math.min(corrupt.size(), 8);
         for (int i = 0; i < shown; i++) {
-            FileEntry e = errors.get(i);
+            FileEntry e = corrupt.get(i);
             File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
             sb.append("&nbsp;• <font color='#cc4444'>").append(f.getName()).append("</font>");
             if (e.message != null && !e.message.isBlank())
                 sb.append(" <i>(").append(e.message).append(")</i>");
             sb.append("<br>");
         }
-        if (errors.size() > shown)
-            sb.append("&nbsp;… et ").append(errors.size() - shown).append(" autre(s)<br>");
+        if (corrupt.size() > shown)
+            sb.append("&nbsp;… et ").append(corrupt.size() - shown).append(" autre(s)<br>");
         sb.append("<br><i>Ces fichiers sont corrompus ou dans un format non supporté.</i></html>");
 
         int ok = JOptionPane.showConfirmDialog(this, sb.toString(),
@@ -2460,7 +2610,7 @@ public class MainFrame extends JFrame {
         if (ok != JOptionPane.YES_OPTION) return;
 
         int deleted = 0, failDel = 0;
-        for (FileEntry e : errors) {
+        for (FileEntry e : corrupt) {
             File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
             int idx = tableModel.indexOf(e);
             if (f.delete()) {

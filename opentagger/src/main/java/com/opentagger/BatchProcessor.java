@@ -23,10 +23,15 @@ public class BatchProcessor {
     private static final AtomicLong LAST_MB_REQUEST_MS = new AtomicLong(0);
     private static final long       MB_MIN_INTERVAL_MS = 1050;
 
-    private final MusicBrainzClient mbClient  = new MusicBrainzClient();
-    private final AcoustIdClient    acoustId  = new AcoustIdClient();
+    // mbClient / acoustId / lastFm sont volontairement NON partagés entre les threads du pool
+    // (contrairement à discogs/fanArt/corrector/writer/renamer/cache, qui sont sans état
+    // inter-appel ou déjà synchronisés) : ces trois classes gardent le résultat du dernier
+    // appel dans un champ d'instance relu juste après (lastRawJson, lastFingerprint,
+    // cachedTagsKey/List...). Les partager entre threads concurrents faisait qu'un thread
+    // pouvait lire/mettre en cache le résultat du fichier d'un AUTRE thread — corruption
+    // silencieuse de tags. Une instance fraîche par tâche coûte rien de plus (le HttpClient
+    // sous-jacent, lui, reste statique/partagé dans chaque classe).
     private final DiscogsClient     discogs   = new DiscogsClient();
-    private final LastFmClient      lastFm    = new LastFmClient();
     private final FanArtClient      fanArt    = new FanArtClient();
     private final LocalCorrector    corrector = new LocalCorrector();
     private final TagWriter         writer    = new TagWriter();
@@ -34,6 +39,7 @@ public class BatchProcessor {
     private final MetadataCache     cache     = new MetadataCache();
     private final boolean           useAcoustId;
     private final int               maskIndex;
+    private final Path              scanRoot;
 
     // Compteurs thread-safe pour le résumé final
     private final AtomicInteger total      = new AtomicInteger(0);
@@ -43,8 +49,21 @@ public class BatchProcessor {
     private final AtomicInteger erreurs    = new AtomicInteger(0);
 
     public BatchProcessor(boolean useAcoustId, int maskIndex) {
+        this(useAcoustId, maskIndex, null);
+    }
+
+    /**
+     * @param scanRoot dossier scanné (mode {@code --dossier}) : sert de racine commune pour le
+     *                 renommage par masque, comme entry.scanRoot côté GUI. Sans lui (constructeur
+     *                 à 2 arguments), chaque fichier utilisait son PROPRE dossier parent comme
+     *                 racine — un masque à sous-dossiers ("AlbumArtist/Album/Track") imbriquait
+     *                 alors la nouvelle arborescence À L'INTÉRIEUR du dossier de chaque fichier au
+     *                 lieu de réorganiser à la racine du dossier scanné.
+     */
+    public BatchProcessor(boolean useAcoustId, int maskIndex, Path scanRoot) {
         this.useAcoustId = useAcoustId;
         this.maskIndex   = maskIndex;
+        this.scanRoot    = scanRoot;
     }
 
     public void process(List<File> fichiers) {
@@ -126,7 +145,7 @@ public class BatchProcessor {
                 }
                 if (best.genre.isBlank()) {
                     System.out.println("  → Genres via Last.fm...");
-                    try { lastFm.enrichGenres(best); } catch (Exception e) { /* ignore */ }
+                    try { new LastFmClient().enrichGenres(best); } catch (Exception e) { /* ignore */ }
                 }
 
                 Path cover = null;
@@ -144,8 +163,23 @@ public class BatchProcessor {
                 String renomme = "—";
                 if (maskIndex >= 0) {
                     try {
-                        Path nouveau = renamer.rename(fichier.toPath(), best, maskIndex);
-                        if (nouveau != null) { renommes.incrementAndGet(); renomme = nouveau.getFileName().toString(); }
+                        Path oldParent = fichier.toPath().getParent();
+                        // Même résolution de racine que le pipeline GUI (TaggingWorker) : la
+                        // bibliothèque configurée en priorité, sinon le dossier scanné — sans ça
+                        // (avant ce correctif) chaque fichier utilisait son propre dossier parent,
+                        // imbriquant la nouvelle arborescence au lieu de réorganiser à la racine.
+                        String libRoot = Config.get().libraryRoot();
+                        Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                                ? java.nio.file.Paths.get(libRoot)
+                                : (scanRoot != null ? scanRoot : oldParent);
+                        Path nouveau = renamer.rename(fichier.toPath(), best, maskIndex, root);
+                        if (nouveau != null) {
+                            renommes.incrementAndGet();
+                            renomme = nouveau.getFileName().toString();
+                            if (Config.get().deleteEmptyDirsAfterRename()) {
+                                FileRenamer.deleteEmptyAncestors(oldParent, root);
+                            }
+                        }
                     } catch (Exception e) { /* ignore */ }
                 }
 
@@ -167,11 +201,15 @@ public class BatchProcessor {
     }
 
     private List<TagInfo> findTags(File fichier) throws Exception {
+        // Instances fraîches par appel (voir commentaire sur les champs de la classe) : ce
+        // findTags() tourne en parallèle sur jusqu'à batch.threads threads différents.
+        MusicBrainzClient mbClient = new MusicBrainzClient();
+
         // Stratégie 1 : AcoustID (empreinte audio) si activé
         if (useAcoustId) {
             System.out.println("  → Analyse audio (AcoustID)...");
             // AcoustID fait un appel réseau MB interne — rate-limit appliqué à l'intérieur
-            List<TagInfo> resultats = acoustId.identify(fichier);
+            List<TagInfo> resultats = new AcoustIdClient().identify(fichier);
             if (!resultats.isEmpty()) return resultats;
             System.out.println("  → AcoustID sans résultat, essai par tags texte...");
         }

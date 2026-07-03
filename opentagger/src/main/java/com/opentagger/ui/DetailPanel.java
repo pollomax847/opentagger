@@ -388,8 +388,19 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfEnsemble)).isBlank())     t.ensemble     = v;
             if (!(v = g(tfChoir)).isBlank())        t.choir        = v;
             if (!(v = g(tfWork)).isBlank())         t.work         = v;
+            // Champs classiques manquants ici jusqu'à ce correctif : affichés et éditables en
+            // mode lot (populateMulti) mais jamais relus — une valeur tapée puis "Appliquer"
+            // en sélection multiple n'était silencieusement jamais écrite sur aucun fichier.
+            if (!(v = g(tfMovement)).isBlank())         t.movement         = v;
+            if (!(v = g(tfMovementNo)).isBlank())       t.movementNo       = v;
+            if (!(v = g(tfMovementTotal)).isBlank())    t.movementTotal    = v;
+            if (!(v = g(tfPart)).isBlank())              t.part             = v;
             if (!(v = g(tfPeriod)).isBlank())       t.period       = v;
             if (!(v = g(tfOpus)).isBlank())         t.opus         = v;
+            if (!(v = g(tfClassicalCatalog)).isBlank())  t.classicalCatalog  = v;
+            if (!(v = g(tfClassicalNickname)).isBlank()) t.classicalNickname = v;
+            if (!(v = g(tfSection)).isBlank())           t.section           = v;
+            if (!(v = g(tfOverallWork)).isBlank())       t.overallWork       = v;
             if (!(v = g(tfGrouping)).isBlank())     t.grouping     = v;
             if (!(v = g(tfLyricist)).isBlank())     t.lyricist     = v;
             if (!(v = g(tfProducer)).isBlank())     t.producer     = v;

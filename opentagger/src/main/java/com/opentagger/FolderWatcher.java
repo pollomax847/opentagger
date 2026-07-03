@@ -115,6 +115,11 @@ public class FolderWatcher implements Closeable {
 
     private static boolean isAudioFile(Path p) {
         String name = p.getFileName().toString().toLowerCase();
+        // Exclure les fichiers temporaires créés par TagWriter pendant la réparation/écriture M4A
+        // (ot_m4a_*, ot_fix_*) : ils vivent dans ce même dossier surveillé (nécessaire pour un
+        // renommage atomique sur NAS/MergerFS) et disparaissent avant que le watcher n'ait le temps
+        // de les traiter → sinon "SKIP (fichier introuvable)" en boucle (21 000+ fois en 3 jours).
+        if (name.startsWith("ot_m4a_") || name.startsWith("ot_fix_")) return false;
         int dot = name.lastIndexOf('.');
         return dot >= 0 && AUDIO_EXT.contains(name.substring(dot + 1));
     }

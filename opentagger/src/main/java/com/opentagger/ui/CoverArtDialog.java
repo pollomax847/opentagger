@@ -41,7 +41,10 @@ public class CoverArtDialog extends JDialog {
     private byte[]  pendingImageBytes = null;
     private boolean pendingDelete     = false;
 
-    private final HttpClient http = HttpClient.newBuilder()
+    // Statique et partagé : une instance par ouverture de dialogue (l'ancien code) reproduit
+    // exactement la fuite HttpClient déjà corrigée ailleurs (commit 71e27ef) — "Gérer la
+    // pochette…" est une action de routine, répétée souvent sur une session longue.
+    private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(20))
             .followRedirects(java.net.http.HttpClient.Redirect.ALWAYS)
             .build();

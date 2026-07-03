@@ -44,7 +44,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final MusicBrainzClient        mb               = new MusicBrainzClient();
     private final AcoustIdClient           acoustId         = new AcoustIdClient();
     private final SongRecClient            songRec          = new SongRecClient();
-    private final AudioRecognitionChain    recognitionChain = new AudioRecognitionChain();
+    // AudD (fallback reconnaissance audio après SongRec) — jusqu'à ce correctif, ce champ était
+    // un AudioRecognitionChain jamais appelé nulle part : le champ "Jeton API AudD" des Réglages
+    // n'avait donc aucun effet malgré son apparence de fonctionnalité active.
+    private final AudDClient               audd             = new AudDClient();
 
     // Source d'identification du dernier findTags() — utilisée pour enregistrer le niveau de confiance
     private String  lastFindTagsSource   = MetadataCache.SOURCE_TEXT;
@@ -251,11 +254,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 onProgress.accept(String.format(
                         "[album-first] \"%s\" trouvé — %d pistes, appariement…", tl.album(), tl.tracks().size()));
 
+                // Garde anti-doublon : une piste de la tracklist ne doit jamais être appliquée à
+                // deux fichiers différents (une erreur d'appariement a déjà causé, en production,
+                // l'application du même MBID/pochette à des dizaines de fichiers sans rapport).
+                java.util.Set<String> usedTracks = new java.util.HashSet<>();
                 for (FileEntry entry : files) {
                     if (isCancelled()) break;
                     MusicBrainzClient.ReleaseTrack track = matchFileToTrack(entry, tl.tracks());
                     if (track == null) {
                         log("[album-first] " + entry.filename() + " → pas d'appariement dans tracklist");
+                        continue;
+                    }
+                    String trackKey = !track.recordingMbid().isBlank()
+                            ? track.recordingMbid() : (track.disc() + "/" + track.trackNo());
+                    if (!usedTracks.add(trackKey)) {
+                        log("[album-first] " + entry.filename()
+                            + " → piste déjà assignée à un autre fichier de ce dossier, ignoré (garde anti-doublon)");
                         continue;
                     }
 
@@ -284,9 +298,43 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             recMbid.isBlank() ? MetadataCache.syntheticKey(ti.artist, ti.title) : recMbid,
                             MetadataCache.SOURCE_MBID);
 
-                    entry.result  = ti;
-                    entry.status  = FileEntry.Status.TAGGED;
-                    entry.message = "";
+                    // Renommage automatique — sans ce fallback, les fichiers tagués par
+                    // album-first étaient les seuls à ne jamais passer par FileRenamer même
+                    // quand "renommage auto" est activé (la boucle piste-par-piste plus bas,
+                    // qui gère le renommage, les saute puisqu'ils sont déjà dans `done`).
+                    if (maskIndex >= 0) {
+                        try {
+                            java.nio.file.Path curPath = entry.currentPath != null
+                                    ? entry.currentPath : entry.file.toPath();
+                            java.nio.file.Path oldParent = curPath.getParent();
+                            String libRoot = Config.get().libraryRoot();
+                            java.nio.file.Path root =
+                                (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                                    ? java.nio.file.Paths.get(libRoot)
+                                    : (entry.scanRoot != null ? entry.scanRoot : oldParent);
+                            java.nio.file.Path newPath = renamer.rename(curPath, ti, maskIndex, root);
+                            if (newPath != null) {
+                                final java.nio.file.Path finalNewPath = newPath;
+                                SwingUtilities.invokeLater(() -> entry.currentPath = finalNewPath);
+                                if (Config.get().deleteEmptyDirsAfterRename()) {
+                                    FileRenamer.deleteEmptyAncestors(oldParent, root);
+                                }
+                                log("[album-first]   renommé → " + newPath.getFileName());
+                            }
+                        } catch (Exception ex) {
+                            log("[album-first]   renommage échoué : " + ex.getMessage());
+                        }
+                    }
+
+                    // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le
+                    // TableRowSorter en direct depuis l'EDT (déjà vu 697× en 3 jours ailleurs
+                    // dans ce même worker — voir SafeTableRowSorter pour le filet de sécurité
+                    // sur la boucle piste-par-piste, plus délicate à refactorer sans risque ici).
+                    SwingUtilities.invokeLater(() -> {
+                        entry.result  = ti;
+                        entry.status  = FileEntry.Status.TAGGED;
+                        entry.message = "";
+                    });
                     publish(entry);
                     done.add(entry);
                     log("[album-first] ✓ " + entry.filename()
@@ -334,17 +382,27 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return null;
     }
 
-    /** Extrait le numéro de piste depuis le tag ou le nom de fichier ("01 - title.mp3"). */
+    /**
+     * Extrait le numéro de piste depuis le tag ou le nom de fichier.
+     * Gère "01 - title.mp3" mais aussi le préfixe "disque-piste" ("1-01 06 Title.m4a") :
+     * dans ce cas le premier nombre ("1") n'est PAS le numéro de piste (c'est le disque, ou
+     * un préfixe parasite) — on prend le DERNIER nombre de la série de préfixes numériques,
+     * qui est toujours le plus proche du titre et donc le plus fiable.
+     */
     private int extractTrackNumber(FileEntry entry) {
         if (entry.current != null && !entry.current.track.isBlank()) {
             try { return Integer.parseInt(entry.current.track.replaceAll("[^0-9]", "")); }
             catch (NumberFormatException ignored) {}
         }
-        java.util.regex.Matcher m =
-            java.util.regex.Pattern.compile("^(\\d{1,3})[\\s.\\-_]").matcher(entry.filename());
-        if (m.find()) {
-            try { return Integer.parseInt(m.group(1)); }
-            catch (NumberFormatException ignored) {}
+        java.util.regex.Matcher prefix =
+            java.util.regex.Pattern.compile("^(?:\\d{1,3}[\\s.\\-_]+)+").matcher(entry.filename());
+        if (prefix.find()) {
+            java.util.regex.Matcher nums = java.util.regex.Pattern.compile("\\d{1,3}").matcher(prefix.group());
+            int last = 0;
+            while (nums.find()) {
+                try { last = Integer.parseInt(nums.group()); } catch (NumberFormatException ignored) {}
+            }
+            if (last > 0) return last;
         }
         return 0;
     }
@@ -506,7 +564,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             log("  corrector...");
-            corrector.correct(best, entry.file.toPath());
+            // fichier (déjà résolu via entry.currentPath en tête de méthode, ligne ~384) et non
+            // entry.file : ce dernier est le chemin D'ORIGINE au chargement et ne change jamais,
+            // même après un renommage (même défaut que "Ouvrir le dossier parent"/"Renommer ce
+            // fichier" dans MainFrame — corrigé aussi).
+            corrector.correct(best, fichier.toPath());
             taggerScript.apply(best);
 
             step.accept("genres…");
@@ -1002,6 +1064,41 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             List<TagInfo> r = acoustId.identify(fichier);
             log("  AcoustID fallback → " + r.size() + " résultat(s)");
             if (!r.isEmpty()) return r;
+        }
+
+        // 5e. AudD — dernier recours après SongRec : algorithme de reconnaissance différent,
+        // utile quand SongRec ne reconnaît pas le morceau (cf. README : AcoustID → SongRec → AudD).
+        if (AudDClient.isAvailable()) {
+            log("  AudD fallback...");
+            try {
+                TagInfo ad = audd.recognize(fichier);
+                if (ad != null) {
+                    log("  AudD → " + ad.artist + " – " + ad.title);
+                    List<TagInfo> mbResults = mb.searchRecording(ad.artist, ad.title);
+                    if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
+                        TagInfo mbr = mbResults.get(0);
+                        // AudD comble ce que MB n'a pas (il fournit aussi l'ISRC Spotify)
+                        if (mbr.album.isBlank()   && !ad.album.isBlank())   mbr.album   = ad.album;
+                        if (mbr.year.isBlank()    && !ad.year.isBlank())    mbr.year    = ad.year;
+                        if (mbr.isrc.isBlank()    && !ad.isrc.isBlank())    mbr.isrc    = ad.isrc;
+                        mbr.score = 90;
+                        log("  AudD+MB → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
+                        return List.of(mbr);
+                    }
+                    if (ad.artistMbid.isBlank()) {
+                        try {
+                            String amid = mb.searchArtistMbid(ad.artist);
+                            if (!amid.isBlank()) { ad.artistMbid = amid; log("  artistMbid←MB: " + amid); }
+                        } catch (Exception ignored) {}
+                    }
+                    ad.score = 85;
+                    log("  AudD seul (MB non confirmé) → " + ad.artist + " – " + ad.title);
+                    return List.of(ad);
+                }
+                log("  AudD → rien trouvé");
+            } catch (Exception e) {
+                log("  AudD erreur: " + e.getMessage());
+            }
         }
         return results;
     }

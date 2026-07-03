@@ -153,11 +153,42 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                         cache.recordFileTagging(writePath.toString(), track.recordingMbid());
                         cache.saveTaggingHistory(ti);
 
-                        hit.result  = ti;
-                        hit.status  = FileEntry.Status.TAGGED;
-                        hit.message = "";
+                        // Renommage automatique — sans ça, les fichiers tagués par "Compléter les
+                        // albums" étaient les seuls à ne jamais passer par FileRenamer même quand
+                        // "renommage auto" est activé (même défaut que dans albumFirstPass).
+                        java.nio.file.Path finalWritePath = writePath;
+                        if (com.opentagger.Config.get().autoRenameEnabled()) {
+                            try {
+                                int maskIdx = com.opentagger.Config.get().defaultRenameMask();
+                                java.nio.file.Path oldParent = writePath.getParent();
+                                String libRoot = com.opentagger.Config.get().libraryRoot();
+                                java.nio.file.Path root =
+                                    (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                                        ? java.nio.file.Paths.get(libRoot)
+                                        : (hit.scanRoot != null ? hit.scanRoot : oldParent);
+                                java.nio.file.Path newPath = new com.opentagger.FileRenamer()
+                                        .rename(writePath, ti, maskIdx, root);
+                                if (newPath != null) {
+                                    finalWritePath = newPath;
+                                    if (com.opentagger.Config.get().deleteEmptyDirsAfterRename()) {
+                                        com.opentagger.FileRenamer.deleteEmptyAncestors(oldParent, root);
+                                    }
+                                }
+                            } catch (Exception ignored) {}
+                        }
+
+                        // Muter hit/tableModel SUR l'EDT : ce FileEntry est aussi comparé en
+                        // direct par le TableRowSorter depuis l'EDT, et une mutation concurrente
+                        // pendant un tri casse le contrat de Comparator (déjà vu 697× en 3 jours).
                         final FileEntry hitFinal = hit;
-                        SwingUtilities.invokeLater(() -> tableModel.update(hitFinal));
+                        final java.nio.file.Path finalPathForEdt = finalWritePath;
+                        SwingUtilities.invokeLater(() -> {
+                            hitFinal.result  = ti;
+                            hitFinal.status  = FileEntry.Status.TAGGED;
+                            hitFinal.message = "";
+                            hitFinal.currentPath = finalPathForEdt;
+                            tableModel.update(hitFinal);
+                        });
 
                         publish(String.format("  ✓ %s → piste %d \"%s\"",
                                 hit.filename(), track.trackNo(), track.title()));

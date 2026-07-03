@@ -121,6 +121,25 @@ public class AcoustIdClient {
         }
     }
 
+    // Limite le nombre d'invocations fpcalc CONCURRENTES (mode batch multi-thread) au réglage
+    // "Threads fpcalc" des Préférences — jusqu'à ce correctif, ce réglage était sauvegardé/rechargé
+    // sans jamais être lu, et le seul frein réel était le nombre de threads du pool (batch.threads).
+    private static volatile java.util.concurrent.Semaphore fpcalcGate;
+    private static volatile int fpcalcGatePermits = -1;
+
+    private static java.util.concurrent.Semaphore fpcalcGate() {
+        int wanted = Math.max(1, Config.get().fpcalcThreads());
+        if (fpcalcGate == null || fpcalcGatePermits != wanted) {
+            synchronized (AcoustIdClient.class) {
+                if (fpcalcGate == null || fpcalcGatePermits != wanted) {
+                    fpcalcGate = new java.util.concurrent.Semaphore(wanted);
+                    fpcalcGatePermits = wanted;
+                }
+            }
+        }
+        return fpcalcGate;
+    }
+
     private Fingerprint fingerprint(File fichier) throws Exception {
         String fpcalc = FpcalcInstaller.resolve();
         if (fpcalc == null) throw new Exception("fpcalc introuvable — installez-le via Préférences → Audio");
@@ -128,7 +147,14 @@ public class AcoustIdClient {
         // Comme Picard : -json pour parsing fiable, -length 120 pour analyser seulement 2 min (plus rapide)
         ProcessBuilder pb = new ProcessBuilder(fpcalc, "-json", "-length", "120", fichier.getAbsolutePath())
                 .redirectErrorStream(false);
-        String output = ProcessUtils.readStringWithTimeout(pb, 60);
+        String output;
+        java.util.concurrent.Semaphore gate = fpcalcGate();
+        gate.acquire();
+        try {
+            output = ProcessUtils.readStringWithTimeout(pb, 60);
+        } finally {
+            gate.release();
+        }
         if (output == null || output.isEmpty()) {
             System.out.println("  fpcalc timeout ou erreur sur " + fichier.getName());
             return null;
@@ -190,11 +216,24 @@ public class AcoustIdClient {
         for (int i = 0; i < tries; i++) {
             try {
                 // Utilise mbClient.lookupRecording qui inclut TOUS les inc= nécessaires
+                mbClient.resetNetworkFlag();
                 TagInfo info = mbClient.lookupRecording(mbids.get(i));
+                // Respecter la limite MusicBrainz (1 req/s) : ce client possède son propre
+                // MusicBrainzClient interne, distinct de celui de l'appelant (TaggingWorker/
+                // BatchProcessor) — sans cette pause, jusqu'à 3 lookups partent ici sans délai,
+                // et rien côté appelant ne peut le détecter puisque le flag réseau vérifié
+                // ensuite par l'appelant n'est pas celui de CE mbClient.
+                if (mbClient.wasNetworkCalled() && i < tries - 1) {
+                    mbClient.resetNetworkFlag();
+                    Thread.sleep(1100);
+                }
                 if (info != null && !info.title.isBlank()) {
                     best = List.of(info);
                     if (info.score >= 90) break; // bon résultat, on s'arrête
                 }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
             } catch (Exception e) {
                 System.out.println("  MB lookup " + mbids.get(i) + " : " + e.getMessage());
             }

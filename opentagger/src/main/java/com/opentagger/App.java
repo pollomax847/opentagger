@@ -25,6 +25,18 @@ public class App {
                     Logger.getLogger(n).setLevel(Level.OFF);
             });
 
+        // jaudiotagger encode par défaut en ISO-8859-1 (Latin-1) pour ID3v2.3 ET v2.4, y compris
+        // pour tout caractère accenté (é, à, ü…) qui "tient" en Latin-1. Plex (et tout lecteur
+        // qui suppose de l'UTF-8) interprète alors ces octets comme de l'UTF-8 invalide et plante
+        // (cf. docs/plex-utf8-corruption.md — incident déjà vécu, jamais corrigé côté code).
+        // On force ici l'unicode réellement standard pour chaque version ID3v2, et on force aussi
+        // la ré-encodage des frames déjà présentes (pas seulement les nouvelles) pour ne jamais
+        // laisser un fichier avec un mélange d'encodages.
+        org.jaudiotagger.tag.TagOptionSingleton opts = org.jaudiotagger.tag.TagOptionSingleton.getInstance();
+        opts.setId3v23DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_16);
+        opts.setId3v24DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_8);
+        opts.setResetTextEncodingForExistingFrames(true);
+
         if (args.length == 0) {
             MainFrame.launch(startupDirs(new File[0]));
             return;
@@ -83,7 +95,7 @@ public class App {
                 return;
             }
 
-            BatchProcessor processor = new BatchProcessor(useAcoustId, maskIndex);
+            BatchProcessor processor = new BatchProcessor(useAcoustId, maskIndex, dossier.toPath());
             processor.process(fichiers);
             return;
         }

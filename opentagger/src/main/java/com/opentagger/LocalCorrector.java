@@ -30,7 +30,9 @@ public class LocalCorrector {
     );
 
     // Patterns d'extraction depuis le nom de fichier
-    private static final Pattern FILE_TRACK_ARTIST_TITLE = Pattern.compile("^(\\d{1,3})\\s*[-–.]\\s*(.+?)\\s*[-–]\\s*(.+)$");
+    // Le préfixe disque-piste optionnel ("1-01 - ...") est absorbé AVANT le numéro de piste
+    // capturé : sans ça, "1-01 - Wale - Bad.mp3" donnait piste="1", artiste="01", titre="Wale - Bad".
+    private static final Pattern FILE_TRACK_ARTIST_TITLE = Pattern.compile("^(?:\\d{1,2}-)?(\\d{1,3})\\s*[-–.]\\s*(.+?)\\s*[-–]\\s*(.+)$");
     private static final Pattern FILE_ARTIST_TITLE       = Pattern.compile("^(.+?)\\s*[-–]\\s*(.+)$");
 
     private Set<String>  genreList       = new LinkedHashSet<>();

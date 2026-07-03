@@ -48,11 +48,45 @@ public class PodcastWorker extends SwingWorker<Void, String> {
                     new TagWriter().write(writePath.toFile(), ti);
                     cache.recordFileTagging(writePath.toString(), "podcast:" + ep.title());
 
-                    entry.result  = ti;
-                    entry.status  = FileEntry.Status.TAGGED;
-                    entry.message = "";
+                    // Organiser selon le masque [Podcast] Show/Season/Date - Titre (index 4) —
+                    // jusqu'à ce correctif, "Dossier racine podcasts" était sauvegardé/rechargé
+                    // dans les Réglages sans jamais être lu : les épisodes tagués n'étaient
+                    // jamais déplacés/organisés, quel que soit ce réglage.
+                    java.nio.file.Path finalWritePath = writePath;
+                    try {
+                        java.nio.file.Path oldParent = writePath.getParent();
+                        String podcastRoot = com.opentagger.Config.get().podcastLibraryRoot();
+                        String libRoot      = com.opentagger.Config.get().libraryRoot();
+                        java.nio.file.Path root =
+                            (!podcastRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(podcastRoot)))
+                                ? java.nio.file.Paths.get(podcastRoot)
+                            : (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                                ? java.nio.file.Paths.get(libRoot)
+                                : (entry.scanRoot != null ? entry.scanRoot : oldParent);
+                        java.nio.file.Path newPath = new com.opentagger.FileRenamer()
+                                .rename(writePath, ti, 4, root);
+                        if (newPath != null) {
+                            finalWritePath = newPath;
+                            if (com.opentagger.Config.get().deleteEmptyDirsAfterRename()) {
+                                com.opentagger.FileRenamer.deleteEmptyAncestors(oldParent, root);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+
+                    // Muter entry/tableModel SUR l'EDT, pas ici : ce FileEntry est aussi lu par
+                    // le TableRowSorter en direct depuis l'EDT, et une mutation concurrente
+                    // pendant qu'un tri est en cours produit "Comparison method violates its
+                    // general contract!" (déjà vu 697× en 3 jours, jusqu'ici imputé au seul
+                    // TaggingWorker qui a le même défaut).
                     final FileEntry ef = entry;
-                    SwingUtilities.invokeLater(() -> tableModel.update(ef));
+                    final java.nio.file.Path finalPathForEdt = finalWritePath;
+                    SwingUtilities.invokeLater(() -> {
+                        ef.result  = ti;
+                        ef.status  = FileEntry.Status.TAGGED;
+                        ef.message = "";
+                        ef.currentPath = finalPathForEdt;
+                        tableModel.update(ef);
+                    });
                     LOG.info("[Podcast] Tagué : " + entry.filename() + " → " + ep.title());
                     tagged++;
                 } catch (Exception ex) {

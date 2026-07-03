@@ -151,26 +151,92 @@ public class TagWriter {
         } catch (Exception e) {
             if (!fichier.getName().toLowerCase().endsWith(".m4a")) throw e;
         }
-        // Fallback 1 : repair structure ffmpeg + retry jaudiotagger
-        if (forcedRepairM4a(fichier)) {
-            try {
-                doWriteNative(fichier, i, coverImage, preserved, clearExisting);
-                return;
-            } catch (Exception ignored) {}
-        }
-        // Fallback 2 : AtomicParsley — full support (cover + MBIDs + ReplayGain)
+
+        // jaudiotagger réécrit l'arbre d'atomes M4A directement sur le fichier original ; si sa
+        // propre vérification post-écriture a échoué (ci-dessus), le fichier peut déjà avoir une
+        // structure cassée AVANT même que les fallbacks ci-dessous ne s'exécutent. On sauvegarde
+        // donc l'état actuel pour pouvoir restaurer l'original si toute la chaîne échoue — avant
+        // ce correctif, un échec complet ne laissait aucun filet et aucune trace de la cause réelle
+        // (stderr jeté à /dev/null à chaque étape).
+        Path backup = backupBeforeRepair(fichier);
+        StringBuilder diag = new StringBuilder();
         try {
-            writeM4aViaAtomicParsley(fichier, i, coverImage);
-            return;
-        } catch (Exception ignored) {}
-        // Fallback 3 : ffmpeg — tags standards seulement
-        writeM4aViaFfmpeg(fichier, i, coverImage);
+            // Fallback 1 : repair structure ffmpeg + retry jaudiotagger
+            if (runFfmpegRepair(fichier, diag)) {
+                try {
+                    doWriteNative(fichier, i, coverImage, preserved, clearExisting);
+                    deleteBackupQuietly(backup);
+                    return;
+                } catch (Exception e2) { diag.append(" | retry jaudiotagger: ").append(e2.getMessage()); }
+            }
+            // Fallback 2 : AtomicParsley — full support (cover + MBIDs + ReplayGain)
+            try {
+                writeM4aViaAtomicParsley(fichier, i, coverImage);
+                deleteBackupQuietly(backup);
+                return;
+            } catch (Exception e3) { diag.append(" | AtomicParsley: ").append(e3.getMessage()); }
+            // Fallback 3 : ffmpeg — tags standards seulement (dernier recours)
+            writeM4aViaFfmpeg(fichier, i, coverImage);
+            deleteBackupQuietly(backup);
+        } catch (Exception finalError) {
+            // Toute la chaîne a échoué : restaurer l'original plutôt que de laisser un fichier
+            // potentiellement corrompu par la tentative d'écriture jaudiotagger initiale.
+            boolean restored = restoreBackup(fichier, backup);
+            throw new Exception("Échec écriture M4A (jaudiotagger+repair+AtomicParsley+ffmpeg)"
+                + (restored ? " — original restauré" : " — AUCUNE sauvegarde disponible")
+                + " : " + finalError.getMessage() + diag, finalError);
+        }
+    }
+
+    /** Copie de sécurité avant toute tentative de réparation/écriture M4A risquée. */
+    private static Path backupBeforeRepair(File f) {
+        try {
+            Path backup = f.toPath().resolveSibling(f.getName() + ".ot-backup");
+            Files.copy(f.toPath(), backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            return backup;
+        } catch (Exception e) {
+            return null; // pas de filet possible (disque plein, permissions...) — on continue quand même
+        }
+    }
+
+    /** Restaure la sauvegarde à la place du fichier (potentiellement corrompu). Retourne true si fait. */
+    private static boolean restoreBackup(File f, Path backup) {
+        if (backup == null) return false;
+        try {
+            if (!Files.exists(backup)) return false;
+            Files.move(backup, f.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
+    private static void deleteBackupQuietly(Path backup) {
+        if (backup == null) return;
+        try { Files.deleteIfExists(backup); } catch (Exception ignored) {}
     }
 
     private void doWriteNative(File fichier, TagInfo i, Path coverImage,
                                 Map<String, String> preserved,
                                 boolean clearExisting) throws Exception {
+        // Réglages globaux jaudiotagger relus à chaque écriture (pas seulement au démarrage) pour
+        // réagir immédiatement à un changement dans les Préférences, sans redémarrage.
+        org.jaudiotagger.tag.TagOptionSingleton opts = org.jaudiotagger.tag.TagOptionSingleton.getInstance();
+        opts.setId3v1Save(!Config.get().removeId3v1());
+        String id3v2Pref = Config.get().id3v2Version();
+        if ("2.3".equals(id3v2Pref)) opts.setID3V2Version(org.jaudiotagger.tag.reference.ID3V2Version.ID3_V23);
+        else if ("2.4".equals(id3v2Pref)) opts.setID3V2Version(org.jaudiotagger.tag.reference.ID3V2Version.ID3_V24);
+
         AudioFile audio = AudioFileIO.read(fichier);
+
+        // "Conserver la pochette existante si aucune nouvelle" : createDefaultTag() (clearExisting)
+        // repart d'un tag entièrement vide, perdant la pochette embarquée si on ne la récupère pas
+        // AVANT de le remplacer. Sans ce correctif, ce réglage n'avait aucun effet.
+        Artwork preservedArt = null;
+        if (clearExisting && coverImage == null && Config.get().preserveImages()) {
+            try {
+                Tag existing = audio.getTag();
+                if (existing != null) preservedArt = existing.getFirstArtwork();
+            } catch (Exception ignored) {}
+        }
 
         Tag tag;
         if (clearExisting) {
@@ -178,6 +244,18 @@ public class TagWriter {
             audio.setTag(tag);
         } else {
             tag = audio.getTagOrCreateAndSetDefault();
+        }
+
+        // Forcer la version ID3v2 configurée (MP3 uniquement) — sans ça, une tag ID3v2.4
+        // existante restait v2.4 même si l'utilisateur demande explicitement "ID3v2.3".
+        if (tag instanceof AbstractID3v2Tag id3Existing) {
+            if ("2.3".equals(id3v2Pref) && !(id3Existing instanceof ID3v23Tag)) {
+                tag = new ID3v23Tag(id3Existing);
+                audio.setTag(tag);
+            } else if ("2.4".equals(id3v2Pref) && !(id3Existing instanceof ID3v24Tag)) {
+                tag = new ID3v24Tag(id3Existing);
+                audio.setTag(tag);
+            }
         }
 
         // ── Champs standard via FieldKey ─────────────────────────────────────
@@ -340,6 +418,8 @@ public class TagWriter {
                 tag.deleteArtworkField();
                 tag.setField(art);
             } catch (Exception ignored) {}
+        } else if (preservedArt != null) {
+            try { tag.setField(preservedArt); } catch (Exception ignored) {}
         }
 
         audio.commit();
@@ -421,19 +501,23 @@ public class TagWriter {
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
         Process p = pb.start();
-        Thread.ofVirtual().start(() -> {
-            try { p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream()); }
+        Thread drain = Thread.ofVirtual().start(() -> {
+            try { p.getInputStream().transferTo(out); }
             catch (Exception ignored) {}
         });
         boolean done = p.waitFor(120, TimeUnit.SECONDS);
         if (!done) { p.destroyForcibly(); throw new Exception("AtomicParsley timeout"); }
-        if (p.exitValue() != 0) throw new Exception("AtomicParsley exit=" + p.exitValue());
+        joinQuietly(drain);
+        if (p.exitValue() != 0)
+            throw new Exception("AtomicParsley exit=" + p.exitValue() + " — "
+                + tailOf(out.toString(java.nio.charset.StandardCharsets.UTF_8), 400));
     }
 
     private static void apField(List<String> cmd, String flag, String value) {
         if (value != null && !value.isBlank()) {
-            cmd.add(flag); cmd.add(value);
+            cmd.add(flag); cmd.add(sanitizeArg(value));
         }
     }
 
@@ -441,7 +525,7 @@ public class TagWriter {
         if (value == null || value.isBlank()) return;
         cmd.add("--freeForm"); cmd.add(name);
         cmd.add("--freeFormMeaning"); cmd.add("com.apple.iTunes");
-        cmd.add("--freeFormValue"); cmd.add(value);
+        cmd.add("--freeFormValue"); cmd.add(sanitizeArg(value));
     }
 
     // ── Fallback M4A via ffmpeg ───────────────────────────────────────────────
@@ -498,17 +582,20 @@ public class TagWriter {
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
         try {
             Process p = pb.start();
-            Thread.ofVirtual().start(() -> {
-                try { p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream()); }
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try { p.getInputStream().transferTo(out); }
                 catch (Exception ignored) {}
             });
             boolean done = p.waitFor(120, TimeUnit.SECONDS);
             if (!done) { p.destroyForcibly(); tmp.delete(); throw new Exception("timeout"); }
+            joinQuietly(drain);
             if (p.exitValue() != 0 || !tmp.exists() || tmp.length() == 0) {
                 tmp.delete();
-                throw new Exception("ffmpeg exit=" + p.exitValue());
+                throw new Exception("ffmpeg exit=" + p.exitValue() + " — "
+                    + tailOf(out.toString(java.nio.charset.StandardCharsets.UTF_8), 400));
             }
             Files.move(tmp.toPath(), fichier.toPath(),
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -520,7 +607,7 @@ public class TagWriter {
 
     private static void ffMeta(List<String> cmd, String key, String value) {
         if (value != null && !value.isBlank()) {
-            cmd.add("-metadata"); cmd.add(key + "=" + value);
+            cmd.add("-metadata"); cmd.add(key + "=" + sanitizeArg(value));
         }
     }
 
@@ -584,14 +671,6 @@ public class TagWriter {
     // ── Réparation M4A ────────────────────────────────────────────────────────
 
     /**
-     * Passe toujours par ffmpeg (même si jaudiotagger peut lire le fichier).
-     * Utilisé en fallback quand le writer jaudiotagger échoue (mdat<moov lisible mais non écrivable).
-     */
-    private static boolean forcedRepairM4a(File f) {
-        return runFfmpegRepair(f);
-    }
-
-    /**
      * Répare les M4A illisibles par jaudiotagger via ffmpeg -movflags +faststart.
      * Idempotent : si le fichier est déjà lisible ET écrivable, ne fait rien.
      */
@@ -603,33 +682,61 @@ public class TagWriter {
         } catch (Exception e) {
             // Lecture impossible → forcer la réparation
         }
-        return runFfmpegRepair(f);
+        return runFfmpegRepair(f, null);
     }
 
-    private static boolean runFfmpegRepair(File f) {
+    /** Réparation ffmpeg. Si {@code diag} est fourni, la sortie ffmpeg (stdout+stderr) y est
+     *  ajoutée en cas d'échec au lieu d'être jetée — sinon un échec complet de la chaîne de
+     *  secours ne laissait aucune trace exploitable dans les logs. */
+    private static boolean runFfmpegRepair(File f, StringBuilder diag) {
         try {
             File tmp = File.createTempFile("ot_fix_", ".m4a", f.getParentFile());
             ProcessBuilder pb = new ProcessBuilder(
                 "ffmpeg", "-y", "-i", f.getAbsolutePath(),
                 "-c", "copy", "-movflags", "+faststart", tmp.getAbsolutePath());
             pb.redirectErrorStream(true);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
             Process p = pb.start();
-            Thread.ofVirtual().start(() -> {
-                try { p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream()); }
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try { p.getInputStream().transferTo(out); }
                 catch (Exception ignored) {}
             });
             boolean exited = p.waitFor(120, TimeUnit.SECONDS);
-            if (!exited) { p.destroyForcibly(); tmp.delete(); return false; }
+            if (!exited) {
+                p.destroyForcibly(); tmp.delete();
+                if (diag != null) diag.append(" | ffmpeg repair: timeout");
+                return false;
+            }
+            joinQuietly(drain);
             if (p.exitValue() == 0 && tmp.length() > 0) {
                 Files.move(tmp.toPath(), f.toPath(),
                     java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 return true;
             }
             tmp.delete();
+            if (diag != null) diag.append(" | ffmpeg repair exit=").append(p.exitValue())
+                .append(" ").append(tailOf(out.toString(java.nio.charset.StandardCharsets.UTF_8), 400));
             return false;
         } catch (Exception ex) {
+            if (diag != null) diag.append(" | ffmpeg repair: ").append(ex.getMessage());
             return false;
         }
+    }
+
+    private static void joinQuietly(Thread t) {
+        try { t.join(2000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+    }
+
+    /** Tronque et aplatit une sortie de process pour un message d'erreur lisible. */
+    private static String tailOf(String s, int maxChars) {
+        s = s.strip().replaceAll("\\s+", " ");
+        return s.length() > maxChars ? "…" + s.substring(s.length() - maxChars) : s;
+    }
+
+    /** Retire les caractères de contrôle (dont NUL) qu'un tag scrappé peut contenir : un NUL dans
+     *  un argument fait planter ProcessBuilder ("invalid null character in command"). */
+    private static String sanitizeArg(String value) {
+        return value.replaceAll("[\\x00-\\x1F\\x7F]", "");
     }
 
     // ── Merge et preserved — lecture jaudiotagger ─────────────────────────────

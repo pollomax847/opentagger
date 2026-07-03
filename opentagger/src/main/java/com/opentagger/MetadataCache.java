@@ -450,9 +450,25 @@ public class MetadataCache {
 
     // ── Utilitaires ──────────────────────────────────────────────────────────
 
-    /** Génère une clé de cache stable pour une requête artist+title. */
+    /**
+     * Génère une clé de cache stable pour une requête artist+title.
+     * Le séparateur précédent était un octet NUL brut incrusté directement dans le
+     * fichier source (fragile, invisible, non standard) ; remplacé par un échappement Unicode
+     * propre qui ne peut pas non plus apparaître dans un tag réel. SHA-256 (au lieu d'un
+     * hashCode 32 bits) élimine aussi le risque réel de collision sur une grande bibliothèque
+     * (paradoxe des anniversaires ~54k requêtes distinctes).
+     */
     public static String queryHash(String artist, String title) {
-        return Integer.toHexString((artist + " " + title).toLowerCase().hashCode() & 0x7FFFFFFF);
+        try {
+            String key = artist.trim().toLowerCase() + '\u0001' + title.trim().toLowerCase();
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e); // SHA-256 est toujours disponible dans un JRE standard
+        }
     }
 
     public void purgeExpired() {

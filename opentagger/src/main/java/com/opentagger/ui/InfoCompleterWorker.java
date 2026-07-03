@@ -225,28 +225,44 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // ── 7. Écriture si changement ─────────────────────────────────────
         if (changed || cover != null) {
             writer.write(fichier, ti, cover);
-            entry.result = ti;
             String icKey = !ti.recordingMbid.isBlank()
                     ? ti.recordingMbid
                     : MetadataCache.syntheticKey(ti.artist, ti.title);
             cache.saveTaggingHistory(ti, icKey);
             // ── 8. Renommage automatique ──────────────────────────────────
+            java.nio.file.Path newPath = null;
             if (autoRename) {
                 try {
                     java.nio.file.Path curPath = entry.currentPath != null
                             ? entry.currentPath : fichier.toPath();
                     java.nio.file.Path oldParent = curPath.getParent();
-                    java.nio.file.Path root = entry.scanRoot != null ? entry.scanRoot : oldParent;
-                    java.nio.file.Path newPath = renamer.rename(curPath, ti, autoMaskIdx, root);
+                    // Même résolution de racine que TaggingWorker : "dossier racine bibliothèque"
+                    // prioritaire s'il est configuré, sinon le dossier scanné (avant : toujours
+                    // scanRoot, ignorant silencieusement ce réglage pour la passe complète).
+                    String libRoot = Config.get().libraryRoot();
+                    java.nio.file.Path root =
+                        (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                            ? java.nio.file.Paths.get(libRoot)
+                            : (entry.scanRoot != null ? entry.scanRoot : oldParent);
+                    newPath = renamer.rename(curPath, ti, autoMaskIdx, root);
                     if (newPath != null) {
-                        entry.currentPath = newPath;
-                        FileRenamer.deleteEmptyAncestors(oldParent, root);
+                        if (Config.get().deleteEmptyDirsAfterRename()) {
+                            FileRenamer.deleteEmptyAncestors(oldParent, root);
+                        }
                         log("  renommé → " + newPath.getFileName());
                     }
                 } catch (Exception ex) {
                     log("  renommage échoué: " + ex.getMessage());
                 }
             }
+            // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le TableRowSorter
+            // en direct depuis l'EDT, et une mutation concurrente pendant un tri casse le
+            // contrat de Comparator (déjà vu 697× en 3 jours dans TaggingWorker — même défaut).
+            final java.nio.file.Path finalNewPath = newPath;
+            SwingUtilities.invokeLater(() -> {
+                entry.result = ti;
+                if (finalNewPath != null) entry.currentPath = finalNewPath;
+            });
             log("  ✔ mis à jour");
             submitToMusicBrainz(ti);
         } else {

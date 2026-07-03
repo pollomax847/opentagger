@@ -37,6 +37,9 @@ public class AudioScanner {
         // Exclure les fichiers cachés et les resource forks macOS (._NomFichier)
         if (nom.startsWith(".")) return false;
         String lower = nom.toLowerCase();
+        // Exclure les fichiers temporaires de réparation/écriture M4A de TagWriter — un scan
+        // manuel lancé pendant un taguage en cours ne doit pas les mettre en file.
+        if (lower.startsWith("ot_m4a_") || lower.startsWith("ot_fix_")) return false;
         return EXTENSIONS.stream().anyMatch(lower::endsWith);
     }
 }
