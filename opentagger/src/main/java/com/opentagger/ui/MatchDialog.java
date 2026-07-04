@@ -1,7 +1,9 @@
 package com.opentagger.ui;
 
 import com.opentagger.LocalCorrector;
+import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
+import com.opentagger.TagEnrichment;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
@@ -198,6 +200,7 @@ public class MatchDialog extends JDialog {
 
         try {
             new TagWriter().write(path.toFile(), chosen);
+            TagEnrichment.recordSuccess(new MetadataCache(), path.toFile(), chosen);
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "Erreur d'écriture : " + ex.getMessage(),
                     "Erreur", JOptionPane.ERROR_MESSAGE);

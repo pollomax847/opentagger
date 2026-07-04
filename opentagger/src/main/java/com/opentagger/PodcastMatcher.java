@@ -23,7 +23,7 @@ public class PodcastMatcher {
         Map<FileEntry, Integer> fileDurations = new LinkedHashMap<>();
         for (FileEntry f : files) {
             String path = (f.currentPath != null ? f.currentPath : f.file.toPath()).toString();
-            fileDurations.put(f, probeDuration(path));
+            fileDurations.put(f, AudioDuration.probeSeconds(path));
         }
 
         Set<PodcastEpisode> used = new HashSet<>();
@@ -61,21 +61,6 @@ public class PodcastMatcher {
         }
 
         return results;
-    }
-
-    private static int probeDuration(String path) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "csv=p=0",
-                path);
-            pb.redirectErrorStream(true);
-            String out = ProcessUtils.readStringWithTimeout(pb, 10);
-            if (out != null && !out.isBlank())
-                return (int) Math.round(Double.parseDouble(out.trim()));
-        } catch (Exception ignored) {}
-        return -1;
     }
 
     static String normalize(String s) {

@@ -182,32 +182,35 @@ public class App {
 
         // 5. Corrections locales (capitalisation, feat., genre)
         new LocalCorrector().correct(choisi, fichier.toPath());
+        new TaggerScript().apply(choisi);
+        TagEnrichment.translateArtist(choisi, new MusicBrainzClient(), new java.util.HashMap<>());
+
+        // 6. Empreinte AcoustID même si l'identification vient du texte (pas seulement d'AcoustID)
+        if (Config.get().saveAcoustidFingerprints() && choisi.acoustidFingerprint.isBlank()
+                && FpcalcInstaller.isAvailable()) {
+            try { choisi.acoustidFingerprint = Fingerprinter.compute(fichier).fingerprint(); }
+            catch (Exception ignored) {}
+        }
 
         // 7. Enrichir le genre : Discogs → Last.fm (cascade)
-        if (choisi.genre.isBlank()) {
-            System.out.println("Recherche genres sur Discogs...");
-            try { new DiscogsClient().enrichGenres(choisi); } catch (Exception e) { /* ignore */ }
-        }
-        if (choisi.genre.isBlank()) {
-            System.out.println("Recherche genres sur Last.fm...");
-            try { new LastFmClient().enrichGenres(choisi); } catch (Exception e) { /* ignore */ }
-        }
+        System.out.println("Recherche du genre (Discogs → Last.fm)...");
+        TagEnrichment.enrichGenre(choisi, new DiscogsClient(), new LastFmClient());
         if (!choisi.genre.isBlank()) System.out.println("  Genre trouvé : " + choisi.genre);
 
-        // 8. Télécharger la pochette FanArt.tv
-        java.nio.file.Path cover = null;
-        if (!choisi.artistMbid.isBlank()) {
-            System.out.println("Téléchargement pochette (FanArt.tv)...");
-            try {
-                cover = new FanArtClient().downloadCover(choisi);
-                System.out.println(cover != null ? "  Pochette téléchargée." : "  Aucune pochette trouvée.");
-            } catch (Exception e) {
-                System.out.println("  FanArt.tv indisponible : " + e.getMessage());
-            }
-        }
+        // 8. Pochette : Cover Art Archive → dossier local → FanArt.tv
+        System.out.println("Recherche de la pochette (CAA → local → FanArt.tv)...");
+        java.nio.file.Path cover = TagEnrichment.resolveCover(choisi, fichier, new CaaClient(), new FanArtClient());
+        System.out.println(cover != null ? "  Pochette trouvée." : "  Aucune pochette trouvée.");
 
         // 9. Écrire les tags + pochette
-        new TagWriter().write(fichier, choisi, cover);
+        try {
+            new TagWriter().write(fichier, choisi, cover);
+            TagEnrichment.recordSuccess(new MetadataCache(), fichier, choisi);
+        } catch (Exception e) {
+            System.out.println();
+            System.out.println("✗ Erreur lors de l'écriture des tags : " + e.getMessage());
+            return;
+        }
 
         System.out.println();
         System.out.println("✓ Tags mis à jour !");

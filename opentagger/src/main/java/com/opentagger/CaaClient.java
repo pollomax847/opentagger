@@ -31,22 +31,24 @@ public class CaaClient {
      * Retourne un fichier temporaire ou null en cas d'échec.
      */
     public Path downloadFront(TagInfo info) {
-        // 1. Release level (image la plus précise — liée à l'édition exacte)
-        if (!info.releaseMbid.isBlank()) {
-            Path p = tryDownload("/release/" + info.releaseMbid + "/front-500");
-            if (p != null) return p;
-            // fallback taille complète si 500 n'existe pas
-            p = tryDownload("/release/" + info.releaseMbid + "/front");
-            if (p != null) return p;
-        }
-        // 2. Release group level (partagé entre toutes les éditions du même album)
-        if (!info.releaseGroupMbid.isBlank()) {
-            Path p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front-500");
-            if (p != null) return p;
-            p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front");
-            if (p != null) return p;
-        }
-        return null;
+        Path p = downloadFromRelease(info);
+        return p != null ? p : downloadFromReleaseGroup(info);
+    }
+
+    /** Pochette liée à l'édition exacte (la plus précise) — un des 2 niveaux CAA séparément activables. */
+    public Path downloadFromRelease(TagInfo info) {
+        if (info.releaseMbid.isBlank()) return null;
+        Path p = tryDownload("/release/" + info.releaseMbid + "/front-500");
+        if (p != null) return p;
+        return tryDownload("/release/" + info.releaseMbid + "/front"); // fallback taille complète
+    }
+
+    /** Pochette partagée entre toutes les éditions du même album — l'autre niveau CAA. */
+    public Path downloadFromReleaseGroup(TagInfo info) {
+        if (info.releaseGroupMbid.isBlank()) return null;
+        Path p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front-500");
+        if (p != null) return p;
+        return tryDownload("/release-group/" + info.releaseGroupMbid + "/front");
     }
 
     private Path tryDownload(String path) {

@@ -48,6 +48,9 @@ public class TagWriter {
     }
 
     public TagInfo write(File fichier, TagInfo info, Path coverImage) throws Exception {
+        // Réaffectation immédiate (pas seulement le throttle de Config.get()) : on veut le
+        // silencing effectif dès CETTE écriture, sans attendre la prochaine fenêtre de 2s.
+        Config.silenceJaudiotaggerLogging();
         long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
 
         // M4A : réparation si nécessaire avant lecture/écriture

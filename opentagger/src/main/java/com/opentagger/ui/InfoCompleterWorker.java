@@ -39,6 +39,9 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final DiscogsClient     discogs = new DiscogsClient();
     private final LastFmClient      lastFm  = new LastFmClient();
     private final FanArtClient      fanArt  = new FanArtClient();
+    private final CaaClient         caa     = new CaaClient();
+    private final TaggerScript      taggerScript = new TaggerScript();
+    private final java.util.Map<String, String> aliasCache = new java.util.HashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
     private final TagWriter         writer  = new TagWriter();
@@ -185,16 +188,21 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         }
 
         // ── 2. Genre ──────────────────────────────────────────────────────
-        if (ti.genre.isBlank()) {
-            try { discogs.enrichGenres(ti); if (!ti.genre.isBlank()) { log("  genre←discogs=" + ti.genre); changed = true; } } catch (Exception ignored) {}
-        }
-        if (ti.genre.isBlank()) {
-            try { lastFm.enrichGenres(ti);  if (!ti.genre.isBlank()) { log("  genre←lastfm="  + ti.genre); changed = true; } } catch (Exception ignored) {}
-        }
+        String genreBefore = ti.genre;
+        TagEnrichment.enrichGenre(ti, discogs, lastFm);
+        if (!ti.genre.equals(genreBefore)) { log("  genre=" + ti.genre); changed = true; }
 
         // ── 3. Mood ───────────────────────────────────────────────────────
         if (ti.mood.isBlank()) {
             try { lastFm.enrichMood(ti); if (!ti.mood.isBlank()) { log("  mood←lastfm=" + ti.mood); changed = true; } } catch (Exception ignored) {}
+        }
+
+        // ── 3b. Translittération artiste (si nom non-Latin et option activée) ───
+        String artistBeforeTranslit = ti.artist;
+        TagEnrichment.translateArtist(ti, mb, aliasCache);
+        if (!ti.artist.equals(artistBeforeTranslit)) {
+            log("  translit: " + artistBeforeTranslit + " → " + ti.artist);
+            changed = true;
         }
 
         // ── 4. BPM ────────────────────────────────────────────────────────
@@ -214,23 +222,27 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
         // ── 6. Pochette (vérifier si absente du fichier) ──────────────────
         Path cover = null;
-        if (!ti.artistMbid.isBlank() && !hasCoverInFile(fichier)) {
-            log("  pochette manquante → fanart...");
-            try { cover = fanArt.downloadCover(ti); }
-            catch (Exception ignored) {}
+        if (!hasCoverInFile(fichier)) {
+            log("  pochette manquante → recherche (CAA/local/fanart)...");
+            cover = TagEnrichment.resolveCover(ti, fichier, caa, fanArt);
             log("  cover=" + (cover != null ? cover.getFileName() : "null"));
             if (cover != null) changed = true;
         }
 
-        // ── 7. Écriture si changement ─────────────────────────────────────
+        // ── 7. Script tagger utilisateur (avant le test de changement : un script
+        // activé est une modification intentionnelle même si non détectable par diff) ──
+        if (taggerScript.apply(ti)) changed = true;
+
+        // ── 8. Écriture si changement ─────────────────────────────────────
         if (changed || cover != null) {
             writer.write(fichier, ti, cover);
             String icKey = !ti.recordingMbid.isBlank()
                     ? ti.recordingMbid
                     : MetadataCache.syntheticKey(ti.artist, ti.title);
             cache.saveTaggingHistory(ti, icKey);
-            // ── 8. Renommage automatique ──────────────────────────────────
+            // ── 9. Renommage automatique ──────────────────────────────────
             java.nio.file.Path newPath = null;
+            String renameError = null;
             if (autoRename) {
                 try {
                     java.nio.file.Path curPath = entry.currentPath != null
@@ -249,19 +261,24 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                         if (Config.get().deleteEmptyDirsAfterRename()) {
                             FileRenamer.deleteEmptyAncestors(oldParent, root);
                         }
-                        log("  renommé → " + newPath.getFileName());
+                        log("  renommé → " + newPath);
                     }
                 } catch (Exception ex) {
-                    log("  renommage échoué: " + ex.getMessage());
+                    // Ne plus se contenter d'un log console : sans indication dans l'UI, un
+                    // déplacement qui échoue (permissions, disque cible, etc.) est invisible.
+                    renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                    log("  renommage échoué: " + renameError);
                 }
             }
             // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le TableRowSorter
             // en direct depuis l'EDT, et une mutation concurrente pendant un tri casse le
             // contrat de Comparator (déjà vu 697× en 3 jours dans TaggingWorker — même défaut).
             final java.nio.file.Path finalNewPath = newPath;
+            final String finalRenameError = renameError;
             SwingUtilities.invokeLater(() -> {
                 entry.result = ti;
                 if (finalNewPath != null) entry.currentPath = finalNewPath;
+                if (finalRenameError != null) entry.message = "Renommage échoué : " + finalRenameError;
             });
             log("  ✔ mis à jour");
             submitToMusicBrainz(ti);

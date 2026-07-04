@@ -302,6 +302,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // album-first étaient les seuls à ne jamais passer par FileRenamer même
                     // quand "renommage auto" est activé (la boucle piste-par-piste plus bas,
                     // qui gère le renommage, les saute puisqu'ils sont déjà dans `done`).
+                    java.nio.file.Path renamedPath = null;
+                    String renameErr = null;
                     if (maskIndex >= 0) {
                         try {
                             java.nio.file.Path curPath = entry.currentPath != null
@@ -314,15 +316,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                                     : (entry.scanRoot != null ? entry.scanRoot : oldParent);
                             java.nio.file.Path newPath = renamer.rename(curPath, ti, maskIndex, root);
                             if (newPath != null) {
-                                final java.nio.file.Path finalNewPath = newPath;
-                                SwingUtilities.invokeLater(() -> entry.currentPath = finalNewPath);
+                                renamedPath = newPath;
                                 if (Config.get().deleteEmptyDirsAfterRename()) {
                                     FileRenamer.deleteEmptyAncestors(oldParent, root);
                                 }
-                                log("[album-first]   renommé → " + newPath.getFileName());
+                                log("[album-first]   renommé → " + newPath);
                             }
                         } catch (Exception ex) {
-                            log("[album-first]   renommage échoué : " + ex.getMessage());
+                            // Visible dans le log ET dans le statut UI — sans ça un déplacement
+                            // qui échoue (permissions, disque cible...) est invisible.
+                            renameErr = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                            log("[album-first]   renommage échoué : " + renameErr);
                         }
                     }
 
@@ -330,10 +334,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // TableRowSorter en direct depuis l'EDT (déjà vu 697× en 3 jours ailleurs
                     // dans ce même worker — voir SafeTableRowSorter pour le filet de sécurité
                     // sur la boucle piste-par-piste, plus délicate à refactorer sans risque ici).
+                    final java.nio.file.Path finalRenamedPath = renamedPath;
+                    final String finalRenameErr = renameErr;
                     SwingUtilities.invokeLater(() -> {
                         entry.result  = ti;
                         entry.status  = FileEntry.Status.TAGGED;
-                        entry.message = "";
+                        if (finalRenamedPath != null) entry.currentPath = finalRenamedPath;
+                        entry.message = finalRenameErr != null ? "Tagué, renommage échoué : " + finalRenameErr : "";
                     });
                     publish(entry);
                     done.add(entry);
@@ -573,12 +580,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             step.accept("genres…");
             log("  genres...");
-            if (best.genre.isBlank()) {
-                try { discogs.enrichGenres(best); log("  genre←discogs=" + best.genre); } catch (Exception ignored) {}
-            }
-            if (best.genre.isBlank()) {
-                try { lastFm.enrichGenres(best);  log("  genre←lastfm="  + best.genre); } catch (Exception ignored) {}
-            }
+            TagEnrichment.enrichGenre(best, discogs, lastFm);
             log("  genre=" + best.genre);
 
             if (best.mood.isBlank()) {
@@ -594,6 +596,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log("  bpm=" + best.bpm);
             }
 
+            // Empreinte AcoustID : calculée même quand l'identification vient de SongRec/AudD/texte
+            // (pas seulement du chemin AcoustID) — comme Picard, qui la calcule systématiquement peu
+            // importe la méthode d'identification. acoustidId (le match AcoustID confirmé) n'est PAS
+            // renseigné ici : il suppose une vraie correspondance trouvée via l'API, pas juste un
+            // calcul local.
+            if (Config.get().saveAcoustidFingerprints() && best.acoustidFingerprint.isBlank()
+                    && FpcalcInstaller.isAvailable()) {
+                step.accept("empreinte…");
+                log("  empreinte...");
+                try {
+                    best.acoustidFingerprint = Fingerprinter.compute(fichier).fingerprint();
+                    log("  empreinte calculée");
+                } catch (Exception ex) {
+                    log("  empreinte: " + ex.getMessage());
+                }
+            }
+
             if (essentiaEnabled) {
                 log("  essentia...");
                 essentia.analyze(fichier.getAbsolutePath(), best);
@@ -601,43 +620,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             // ── Translittération artiste (si nom non-Latin et option activée) ──────
-            if (Config.get().translateArtists() && !best.artistMbid.isBlank()
-                    && hasNonLatinChars(best.artist)) {
-                try {
-                    String alias = aliasCache.computeIfAbsent(best.artistMbid, mbid -> {
-                        try { return mb.lookupArtistAlias(mbid, Config.get().translateLocale()); }
-                        catch (Exception e) { return ""; }
-                    });
-                    if (!alias.isBlank()) {
-                        log("  translit: " + best.artist + " → " + alias);
-                        best.artist     = alias;
-                        best.artistSort = alias;
-                    }
-                } catch (Exception ignored) {}
-            }
+            String artistBeforeTranslit = best.artist;
+            TagEnrichment.translateArtist(best, mb, aliasCache);
+            if (!best.artist.equals(artistBeforeTranslit))
+                log("  translit: " + artistBeforeTranslit + " → " + best.artist);
 
             log("  lyrics...");
             try { lyrics.enrich(best); } catch (Exception ignored) {}
 
             step.accept("pochette…");
             log("  fanart/caa...");
-            Path cover = null;
-            // 1. Cover Art Archive en priorité (lié à la release exacte via MBID — plus fiable)
-            if (!best.releaseMbid.isBlank() || !best.releaseGroupMbid.isBlank()) {
-                try { cover = caa.downloadFront(best); } catch (Exception ignored) {}
-                if (cover != null) log("  cover←caa");
-            }
-            // 2. Pochette locale en fallback (folder.jpg, cover.jpg… dans le dossier du fichier)
-            if (cover == null && Config.get().coverSearchLocal()) {
-                try { cover = findLocalCover(fichier.getParentFile()); } catch (Exception ignored) {}
-                if (cover != null) log("  cover←local: " + cover.getFileName());
-            }
-            // 3. FanArt.tv en dernier recours
-            if (cover == null && Config.get().fanartEnabled() && !best.artistMbid.isBlank()) {
-                try { cover = fanArt.downloadCover(best); } catch (Exception ignored) {}
-                if (cover != null) log("  cover←fanart");
-            }
-            // 3. Sauvegarde pochette en fichier séparé si configuré
+            Path cover = TagEnrichment.resolveCover(best, fichier, caa, fanArt);
+            log("  cover=" + (cover != null ? cover.getFileName() : "null"));
+
+            // Sauvegarde pochette en fichier séparé si configuré
             if (cover != null && Config.get().bool("cover.save_to_file", false)) {
                 try {
                     String fname = Config.get().str("cover.filename", "cover");
@@ -647,7 +643,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 } catch (Exception ignored) {}
             }
-            log("  cover=" + (cover != null ? cover.getFileName() : "null"));
 
             // ── ReplayGain (avant écriture pour inclure dans le même commit) ────────
             if (rgEnabled) {
@@ -673,9 +668,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 try {
                     Path curPath = fichier.toPath();
                     String libRoot = Config.get().libraryRoot();
-                    Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                    boolean libRootValid = !libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot));
+                    Path root = libRootValid
                             ? java.nio.file.Paths.get(libRoot)
                             : (entry.scanRoot != null ? entry.scanRoot : curPath.getParent());
+                    log("  renommage → racine=" + root
+                        + (libRoot.isBlank() ? " (aucune bibliothèque configurée)"
+                           : libRootValid ? " (bibliothèque configurée)"
+                           : " (bibliothèque configurée introuvable/inaccessible : '" + libRoot + "' → repli sur le dossier scanné)"));
                     Path newPath = renamer.rename(curPath, best, maskIndex, root);
                     if (newPath != null) {
                         Path oldParent    = fichier.toPath().getParent();
@@ -684,8 +684,19 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             FileRenamer.deleteEmptyAncestors(oldParent, root);
                         }
                         entry.message = "→ " + newPath.getFileName();
+                        log("  renommé → " + newPath);
+                    } else {
+                        log("  renommage : déjà au bon endroit (chemin cible identique)");
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception ex) {
+                    // Ne plus avaler cette erreur en silence : sans ça, un fichier tagué mais dont
+                    // le déplacement échoue (permissions, disque externe non réinscriptible,
+                    // caractère non supporté par le système de fichiers cible...) restait dans son
+                    // dossier d'origine sans aucune indication de la cause.
+                    log("  ✗ renommage ÉCHOUÉ : " + ex.getClass().getSimpleName() + " — " + ex.getMessage());
+                    entry.message = "Tagué, renommage échoué : "
+                        + (ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName());
+                }
             }
 
             // ── Suggestions d'amélioration ────────────────────────────────────
@@ -717,7 +728,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
             cache.recordFileTagging(effectivePath, cacheKey, lastFindTagsSource);
 
-            if (!best.recordingMbid.isBlank()) acoustId.submit(best.recordingMbid);
+            // AcoustIdSubmitter recalcule sa propre empreinte pour CE fichier (pas d'état
+            // partagé entre fichiers, contrairement à l'ancien acoustId.submit() qui réutilisait
+            // les champs d'instance du dernier identify() — supprimé, il envoyait de toute façon
+            // un format de requête rejeté par l'API AcoustID, "missing required parameter
+            // fingerprint" observé en production, corrigé dans AcoustIdSubmitter). On limite la
+            // soumission automatique aux fichiers réellement identifiés via AcoustID pour ne pas
+            // multiplier les appels réseau à chaque taguage — la soumission manuelle en masse
+            // (bouton "Soumettre AcoustID") reste disponible pour les autres sources.
+            if (MetadataCache.SOURCE_ACOUSTID.equals(lastFindTagsSource) && !best.recordingMbid.isBlank()) {
+                try {
+                    new AcoustIdSubmitter().submit(fichier, best);
+                } catch (Exception ex) {
+                    log("  AcoustID submit skip: " + ex.getMessage());
+                }
+            }
             submitToMusicBrainz(best);
 
         } catch (Exception ex) {
@@ -741,8 +766,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Indice d'album : tag existant > nom du dossier parent.
         // Permet à pickBestRelease() de favoriser la release MB qui correspond au dossier iTunes.
         // Ex. : dossier "100 Club Hits Edition 2022" → MB préfère cette compilation si elle existe.
+        // En reidentification forcée, on ignore le tag album existant pour la même raison que
+        // l'artiste/titre plus bas : un album déjà faux biaiserait le choix de release MB vers ce
+        // même album erroné, même une fois l'artiste/titre correctement retrouvés via SongRec.
         {
-            String tagAlbum    = cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
+            String tagAlbum    = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
             String folderAlbum = fichier.getParentFile() != null
                 ? fichier.getParentFile().getName() : "";
             // Le tag existant prime ; le dossier parent sert de fallback si tag vide
@@ -880,14 +908,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
 
         // 3. Tags texte existants, avec fallback sur le nom de fichier
-        String artist = readTag(fichier, FieldKey.ARTIST);
-        String title  = readTag(fichier, FieldKey.TITLE);
+        // En reidentification forcée, on ne fait PAS confiance à l'artiste/titre déjà écrits sur
+        // le fichier : ce sont précisément les données que l'utilisateur demande de revérifier
+        // (typiquement après le bug de mass-mistagging album-first). Sans ce garde-fou, une
+        // recherche texte MusicBrainz basée sur le mauvais artiste/titre pouvait "réussir" avec
+        // un résultat tout aussi faux, retourné avant même d'atteindre le second essai SongRec —
+        // "Forcer le re-taguage" ne repartait alors jamais vraiment de zéro.
+        String artist = forceReidentify ? "" : readTag(fichier, FieldKey.ARTIST);
+        String title  = forceReidentify ? "" : readTag(fichier, FieldKey.TITLE);
         // Lire l'album maintenant (utilisé en fallback plus bas quand artiste manque)
         String existingAlbum = cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
 
         // Détection hors FR/EN : si les tags contiennent du japonais, coréen, arabe,
         // cyrillique, etc. → inutile de chercher dans MB avec ces termes, SongRec en priorité
-        boolean nonLatinInput = hasNonLatinChars(artist) || hasNonLatinChars(title);
+        boolean nonLatinInput = TagEnrichment.hasNonLatinChars(artist) || TagEnrichment.hasNonLatinChars(title);
         if (nonLatinInput) {
             log("  tags non-Latin → SongRec en priorité");
             artist = ""; title = "";
@@ -899,7 +933,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             log("  tags lus: artiste='" + artist + "' titre='" + title + "'");
             if (artist.isBlank() && title.isBlank()) {
                 String[] fn = parseFilename(fichier);
-                if (hasNonLatinChars(fn[0]) || hasNonLatinChars(fn[1])) {
+                if (TagEnrichment.hasNonLatinChars(fn[0]) || TagEnrichment.hasNonLatinChars(fn[1])) {
                     nonLatinInput = true;
                     log("  nom de fichier non-Latin → SongRec en priorité");
                 } else {
@@ -911,7 +945,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             } else if (artist.isBlank() && !title.isBlank()) {
                 // Artiste vide mais titre connu : essayer de récupérer l'artiste depuis le nom de fichier
                 String[] fn = parseFilename(fichier);
-                if (!fn[0].isBlank() && !isGenericTag(fn[0]) && !hasNonLatinChars(fn[0])) {
+                if (!fn[0].isBlank() && !isGenericTag(fn[0]) && !TagEnrichment.hasNonLatinChars(fn[0])) {
                     artist = fn[0];
                     log("  artiste←nom de fichier: '" + artist + "'");
                 }
@@ -929,7 +963,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         potTitle  = title.substring(idx + 1).trim();
                     }
                     if (!potArtist.isBlank() && !potTitle.isBlank()
-                            && !isGenericTag(potArtist) && !hasNonLatinChars(potArtist)
+                            && !isGenericTag(potArtist) && !TagEnrichment.hasNonLatinChars(potArtist)
                             && (potArtist.contains(" ") || potArtist.length() >= 5)) {
                         artist = potArtist;
                         title  = potTitle;
@@ -1132,7 +1166,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
                 for (FileEntry entry : albumFiles) {
                     TagInfo result = entry.result;
-                    MusicBrainzClient.ReleaseTrack matched = findBestTrack(tracklist, result);
+                    File entryFile = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+                    MusicBrainzClient.ReleaseTrack matched = findBestTrack(tracklist, result, entryFile);
                     if (matched == null) continue;
 
                     boolean changed = false;
@@ -1182,23 +1217,58 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
     }
 
-    private MusicBrainzClient.ReleaseTrack findBestTrack(MusicBrainzClient.ReleaseTracklist tracklist, TagInfo result) {
+    /** Tolérance de matching par durée entre le fichier et la piste MB (rips/encodages varient de 1-2 s). */
+    private static final int DURATION_TOLERANCE_SEC = 3;
+
+    private MusicBrainzClient.ReleaseTrack findBestTrack(MusicBrainzClient.ReleaseTracklist tracklist,
+                                                          TagInfo result, File audioFile) {
         // 1. Correspondance par recordingMbid (100% fiable)
         if (!result.recordingMbid.isBlank()) {
             for (var t : tracklist.tracks())
                 if (result.recordingMbid.equals(t.recordingMbid())) return t;
         }
-        // 2. Correspondance par numéro de piste + disc
+        String titleLow = result.title.toLowerCase().trim();
+
+        // 2. Correspondance par numéro de piste (+ disque si connu). Sur une release multi-disques,
+        // si le disque n'est pas connu et que plusieurs disques ont ce numéro de piste, NE PAS
+        // deviner (bug corrigé : renvoyait silencieusement le disque 1 par défaut) — laisser
+        // les étapes suivantes (durée, titre) trancher.
         if (!result.track.isBlank()) {
             try {
                 int n = Integer.parseInt(result.track.trim());
-                int d = result.discNo.isBlank() ? 1 : Integer.parseInt(result.discNo.trim());
-                for (var t : tracklist.tracks())
-                    if (t.trackNo() == n && (t.disc() == 0 || t.disc() == d)) return t;
+                Integer d = result.discNo.isBlank() ? null : Integer.parseInt(result.discNo.trim());
+                List<MusicBrainzClient.ReleaseTrack> sameNumber = new java.util.ArrayList<>();
+                for (var t : tracklist.tracks()) {
+                    if (t.trackNo() != n) continue;
+                    if (d != null && t.disc() != 0 && t.disc() != d) continue;
+                    sameNumber.add(t);
+                }
+                if (sameNumber.size() == 1) return sameNumber.get(0);
             } catch (NumberFormatException ignored) {}
         }
-        // 3. Correspondance par similarité de titre
-        String titleLow = result.title.toLowerCase().trim();
+
+        // 3. Correspondance par durée du fichier (utile quand ni le numéro de piste ni le titre
+        // ne permettent de trancher — fichier générique/mal renseigné, comme Picard le fait).
+        int fileDurSec = audioFile != null ? AudioDuration.probeSeconds(audioFile.getAbsolutePath()) : -1;
+        if (fileDurSec > 0) {
+            List<MusicBrainzClient.ReleaseTrack> withinTolerance = new java.util.ArrayList<>();
+            for (var t : tracklist.tracks()) {
+                if (t.lengthMs() <= 0) continue;
+                if (Math.abs(t.lengthMs() / 1000 - fileDurSec) <= DURATION_TOLERANCE_SEC) withinTolerance.add(t);
+            }
+            if (withinTolerance.size() == 1) return withinTolerance.get(0);
+            if (withinTolerance.size() > 1 && !titleLow.isBlank()) {
+                MusicBrainzClient.ReleaseTrack best = null;
+                int bestScore = 0;
+                for (var t : withinTolerance) {
+                    int sim = titleSimilarity(titleLow, t.title().toLowerCase().trim());
+                    if (sim > bestScore) { bestScore = sim; best = t; }
+                }
+                if (best != null) return best;
+            }
+        }
+
+        // 4. Correspondance par similarité de titre (dernier recours, toute la tracklist)
         if (titleLow.isBlank()) return null;
         MusicBrainzClient.ReleaseTrack best = null;
         int bestScore = 0;
@@ -1217,18 +1287,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         long common = ta.stream().filter(tb::contains).count();
         int total = ta.size() + tb.size();
         return total == 0 ? 0 : (int)(common * 2 * 100 / total);
-    }
-
-    /** Cherche une pochette dans le dossier : folder.jpg, cover.jpg, front.jpg… */
-    private static Path findLocalCover(File dir) {
-        if (dir == null || !dir.isDirectory()) return null;
-        for (String name : new String[]{
-                "folder.jpg","cover.jpg","front.jpg","albumart.jpg","album.jpg",
-                "folder.png","cover.png","front.png"}) {
-            File f = new File(dir, name);
-            if (f.exists() && f.length() > 512) return f.toPath();
-        }
-        return null;
     }
 
     private String readTag(File f, FieldKey key) {
@@ -1353,23 +1411,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (!real.isBlank() && !isGenericTag(real)) artist = real;
         }
         return new String[]{ artist, titlePart };
-    }
-
-    /**
-     * Retourne true si la chaîne contient des caractères de scripts non-Latin
-     * (japonais, coréen, chinois, arabe, cyrillique, hébreu, thaï…).
-     * Les caractères Latin de base + Latin étendu (accents FR, etc.) passent.
-     */
-    static boolean hasNonLatinChars(String s) {
-        if (s == null || s.isBlank()) return false;
-        return s.codePoints().anyMatch(cp -> {
-            if (!Character.isLetter(cp)) return false;
-            // Latin Basic (0000-007F), Latin-1 Supplement (0080-00FF),
-            // Latin Extended A/B (0100-024F), Latin Extended Additional (1E00-1EFF)
-            if (cp <= 0x024F) return false;
-            if (cp >= 0x1E00 && cp <= 0x1EFF) return false; // accents vietnamiens etc.
-            return true; // cyrillique, grec, arabe, CJK, hangul, kana…
-        });
     }
 
     /**

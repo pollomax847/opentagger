@@ -31,12 +31,16 @@ public class BatchProcessor {
     // pouvait lire/mettre en cache le résultat du fichier d'un AUTRE thread — corruption
     // silencieuse de tags. Une instance fraîche par tâche coûte rien de plus (le HttpClient
     // sous-jacent, lui, reste statique/partagé dans chaque classe).
-    private final DiscogsClient     discogs   = new DiscogsClient();
-    private final FanArtClient      fanArt    = new FanArtClient();
-    private final LocalCorrector    corrector = new LocalCorrector();
-    private final TagWriter         writer    = new TagWriter();
-    private final FileRenamer       renamer   = new FileRenamer();
-    private final MetadataCache     cache     = new MetadataCache();
+    // Partagé entre threads : ConcurrentHashMap (contrairement à LastFmClient/MusicBrainzClient,
+    // une simple Map<String,String> de cache n'a pas d'état interne dangereux à partager).
+    private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private final DiscogsClient     discogs      = new DiscogsClient();
+    private final FanArtClient      fanArt       = new FanArtClient();
+    private final LocalCorrector    corrector    = new LocalCorrector();
+    private final TaggerScript      taggerScript = new TaggerScript();
+    private final TagWriter         writer       = new TagWriter();
+    private final FileRenamer       renamer      = new FileRenamer();
+    private final MetadataCache     cache        = new MetadataCache();
     private final boolean           useAcoustId;
     private final int               maskIndex;
     private final Path              scanRoot;
@@ -138,27 +142,30 @@ public class BatchProcessor {
 
             if (best.score >= SEUIL_AUTO) {
                 corrector.correct(best, fichier.toPath());
+                taggerScript.apply(best);
 
-                if (best.genre.isBlank()) {
-                    System.out.println("  → Genres via Discogs...");
-                    try { discogs.enrichGenres(best); } catch (Exception e) { /* ignore */ }
-                }
-                if (best.genre.isBlank()) {
-                    System.out.println("  → Genres via Last.fm...");
-                    try { new LastFmClient().enrichGenres(best); } catch (Exception e) { /* ignore */ }
+                // Translittération artiste (si nom non-Latin et option activée) — instance
+                // MusicBrainzClient fraîche, comme findTags() (pas de partage inter-threads).
+                TagEnrichment.translateArtist(best, new MusicBrainzClient(), aliasCache);
+
+                // Empreinte AcoustID même si l'identification vient du texte (pas seulement
+                // d'AcoustID) — comme Picard. Fingerprinter est thread-safe (sémaphore statique).
+                if (Config.get().saveAcoustidFingerprints() && best.acoustidFingerprint.isBlank()
+                        && FpcalcInstaller.isAvailable()) {
+                    try { best.acoustidFingerprint = Fingerprinter.compute(fichier).fingerprint(); }
+                    catch (Exception ignored) {}
                 }
 
-                Path cover = null;
-                if (!best.artistMbid.isBlank()) {
-                    System.out.println("  → Pochette via FanArt.tv / CAA...");
-                    try { cover = fanArt.downloadCover(best); } catch (Exception e) { /* ignore */ }
-                }
+                // Instance LastFmClient fraîche : voir le commentaire de classe sur le
+                // partage inter-threads (cachedTagsKey/cachedTagsList d'instance).
+                TagEnrichment.enrichGenre(best, discogs, new LastFmClient());
+
+                Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt);
                 writer.write(fichier, best, cover);
                 appliques.incrementAndGet();
 
                 // Sauvegarder dans l'historique pour éviter les re-lookups
-                cache.saveTaggingHistory(best);
-                cache.recordFileTagging(fichier.getAbsolutePath(), best.recordingMbid);
+                TagEnrichment.recordSuccess(cache, fichier, best);
 
                 String renomme = "—";
                 if (maskIndex >= 0) {

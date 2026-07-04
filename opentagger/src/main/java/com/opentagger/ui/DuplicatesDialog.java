@@ -258,38 +258,56 @@ public class DuplicatesDialog extends JDialog {
             "Confirmer la suppression", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (ok != JOptionPane.YES_OPTION) return;
 
-        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+        // desktop.moveToTrash(...)/suppression + nettoyage des dossiers vides sont des opérations
+        // disque potentiellement lentes (beaucoup de fichiers, stockage réseau/NAS) — tout ça
+        // tournait directement sur l'EDT et gelait l'interface le temps du traitement complet.
+        // Poussé dans un SwingWorker ; seules les mises à jour de tableModel restent sur l'EDT
+        // (via publish/process) pour ne pas rouvrir la course avec le TableRowSorter.
+        setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR));
+        new SwingWorker<Void, FileEntry>() {
+            int deleted = 0, errors = 0, dirsRemoved = 0;
+            boolean trashSupported;
 
-        int deleted = 0, errors = 0;
-        List<File> deletedParents = new ArrayList<>();
-        for (FileEntry e : toDelete) {
-            File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-            int modelIdx = tableModel.indexOf(e);
-            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
-            if (moved) {
-                if (modelIdx >= 0) tableModel.remove(modelIdx);
-                if (chkCleanDirs.isSelected() && f.getParentFile() != null)
-                    deletedParents.add(f.getParentFile());
-                deleted++;
-            } else {
-                errors++;
+            @Override protected Void doInBackground() {
+                java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+                trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                List<File> deletedParents = new ArrayList<>();
+                for (FileEntry e : toDelete) {
+                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    if (moved) {
+                        publish(e);
+                        if (chkCleanDirs.isSelected() && f.getParentFile() != null)
+                            deletedParents.add(f.getParentFile());
+                        deleted++;
+                    } else {
+                        errors++;
+                    }
+                }
+                // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés
+                if (chkCleanDirs.isSelected())
+                    for (File dir : deletedParents) dirsRemoved += cleanEmptyAncestors(dir);
+                return null;
             }
-        }
 
-        // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés
-        int dirsRemoved = 0;
-        if (chkCleanDirs.isSelected()) {
-            for (File dir : deletedParents) dirsRemoved += cleanEmptyAncestors(dir);
-        }
+            @Override protected void process(List<FileEntry> chunks) {
+                for (FileEntry e : chunks) {
+                    int modelIdx = tableModel.indexOf(e);
+                    if (modelIdx >= 0) tableModel.remove(modelIdx);
+                }
+            }
 
-        String where = trashSupported ? "déplacé(s) dans la corbeille" : "supprimé(s)";
-        String msg = deleted + " fichier(s) " + where
-            + (dirsRemoved > 0 ? ", " + dirsRemoved + " dossier(s) vide(s) supprimé(s)" : "")
-            + (errors > 0 ? ", " + errors + " erreur(s)" : "") + ".";
-        LOG.info("[Doublons] " + msg);
-        JOptionPane.showMessageDialog(this, msg, "Résultat", JOptionPane.INFORMATION_MESSAGE);
-        dispose();
+            @Override protected void done() {
+                setCursor(java.awt.Cursor.getDefaultCursor());
+                String where = trashSupported ? "déplacé(s) dans la corbeille" : "supprimé(s)";
+                String msg = deleted + " fichier(s) " + where
+                    + (dirsRemoved > 0 ? ", " + dirsRemoved + " dossier(s) vide(s) supprimé(s)" : "")
+                    + (errors > 0 ? ", " + errors + " erreur(s)" : "") + ".";
+                LOG.info("[Doublons] " + msg);
+                JOptionPane.showMessageDialog(DuplicatesDialog.this, msg, "Résultat", JOptionPane.INFORMATION_MESSAGE);
+                dispose();
+            }
+        }.execute();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

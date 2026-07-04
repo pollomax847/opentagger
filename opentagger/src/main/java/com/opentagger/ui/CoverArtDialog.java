@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.Config;
+import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import org.jaudiotagger.audio.AudioFile;
 import org.jaudiotagger.audio.AudioFileIO;
@@ -255,6 +256,10 @@ public class CoverArtDialog extends JDialog {
     private void applyChanges() {
         File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
         try {
+            // Réparation M4A si nécessaire avant lecture/écriture, comme tous les autres
+            // chemins d'écriture (TagWriter.write/writeCoverOnly) — sans ça, un M4A cassé
+            // qui se répare normalement au tagging échoue silencieusement ici.
+            TagWriter.repairM4aIfNeeded(f);
             AudioFile af  = AudioFileIO.read(f);
             Tag       tag = af.getTagOrCreateDefault();
 

@@ -4,6 +4,7 @@ import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
 import com.opentagger.MusicBrainzClient.ReleaseTracklist;
 import com.opentagger.MusicBrainzClient.ReleaseTrack;
+import com.opentagger.TagEnrichment;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
@@ -35,6 +36,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
     private int matched  = 0;
     private int releases = 0;
+    private final java.util.Map<String, String> aliasCache = new java.util.HashMap<>();
 
     public AlbumCompletionWorker(FileTableModel tableModel, MusicBrainzClient mb,
                                  Consumer<String> statusCallback, Runnable doneCallback) {
@@ -143,8 +145,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                     ti.releaseMbid     = tl.releaseMbid();
                     ti.releaseGroupMbid= tl.releaseGroupMbid();
                     ti.recordingMbid   = track.recordingMbid();
+                    ti.artistMbid      = track.artistMbid();
                     ti.isCompilation   = tl.isCompilation() ? "1" : "";
                     ti.score           = 100;
+
+                    // Translittération artiste (si nom non-Latin et option activée) — même logique
+                    // partagée que TaggingWorker, absente ici jusqu'à présent.
+                    TagEnrichment.translateArtist(ti, mb, aliasCache);
 
                     // Écrire les tags
                     try {

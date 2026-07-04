@@ -478,7 +478,7 @@ public class MusicBrainzClient {
     // ── Lookup d'une release complète (tracklist) ─────────────────────────────
 
     public record ReleaseTrack(int disc, int trackNo, int trackTotal, String title,
-                               String artist, String recordingMbid) {}
+                               String artist, String recordingMbid, int lengthMs, String artistMbid) {}
 
     public record ReleaseTracklist(String releaseMbid, String album, String albumArtist,
                                    String albumArtistSort, String year, String releaseGroupMbid,
@@ -513,9 +513,14 @@ public class MusicBrainzClient {
                 if ("Compilation".equalsIgnoreCase(t.asText())) { isCompilation = true; break; }
         }
 
-        // Tracks
+        List<ReleaseTrack> tracks = parseTracks(root.path("media"), albumArtist);
+        return new ReleaseTracklist(releaseMbid, album, albumArtist, albumArtistSort,
+                                    year, rgMbid, isCompilation, tracks);
+    }
+
+    /** Parse le tableau "media" (disques + pistes) d'une réponse MB release, avec durée (lengthMs). */
+    private List<ReleaseTrack> parseTracks(JsonNode media, String albumArtist) {
         List<ReleaseTrack> tracks = new ArrayList<>();
-        JsonNode media = root.path("media");
         if (media.isArray()) {
             int discCount = media.size();
             for (JsonNode medium : media) {
@@ -525,17 +530,21 @@ public class MusicBrainzClient {
                     int    pos      = t.path("position").asInt(0);
                     String tTitle   = t.path("title").asText("").trim();
                     String recMbid  = t.path("recording").path("id").asText("").trim();
-                    String tArtist  = "";
+                    int    lengthMs = t.path("length").asInt(0);
+                    String tArtist     = "";
+                    String tArtistMbid = "";
                     JsonNode tac = t.path("recording").path("artist-credit");
-                    if (tac.isArray() && !tac.isEmpty())
-                        tArtist = tac.get(0).path("name").asText("").trim();
+                    if (tac.isArray() && !tac.isEmpty()) {
+                        tArtist     = tac.get(0).path("name").asText("").trim();
+                        tArtistMbid = tac.get(0).path("artist").path("id").asText("").trim();
+                    }
                     tracks.add(new ReleaseTrack(discCount > 1 ? disc : 0, pos, trackTotal,
-                                               tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid));
+                                               tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid, lengthMs,
+                                               tArtistMbid));
                 }
             }
         }
-        return new ReleaseTracklist(releaseMbid, album, albumArtist, albumArtistSort,
-                                    year, rgMbid, isCompilation, tracks);
+        return tracks;
     }
 
     /** Désérialise un ReleaseTracklist depuis un JSON mis en cache (même format que lookupRelease). */
@@ -559,26 +568,7 @@ public class MusicBrainzClient {
             if (secTypes.isArray())
                 for (JsonNode t : secTypes)
                     if ("Compilation".equalsIgnoreCase(t.asText())) { isCompilation = true; break; }
-            List<ReleaseTrack> tracks = new ArrayList<>();
-            JsonNode media = root.path("media");
-            if (media.isArray()) {
-                int discCount = media.size();
-                for (JsonNode medium : media) {
-                    int disc       = medium.path("position").asInt(1);
-                    int trackTotal = medium.path("track-count").asInt(0);
-                    for (JsonNode t : medium.path("tracks")) {
-                        int    pos     = t.path("position").asInt(0);
-                        String tTitle  = t.path("title").asText("").trim();
-                        String recMbid = t.path("recording").path("id").asText("").trim();
-                        String tArtist = "";
-                        JsonNode tac = t.path("recording").path("artist-credit");
-                        if (tac.isArray() && !tac.isEmpty())
-                            tArtist = tac.get(0).path("name").asText("").trim();
-                        tracks.add(new ReleaseTrack(discCount > 1 ? disc : 0, pos, trackTotal,
-                                                   tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid));
-                    }
-                }
-            }
+            List<ReleaseTrack> tracks = parseTracks(root.path("media"), albumArtist);
             if (relMbid.isBlank() || album.isBlank()) return null;
             return new ReleaseTracklist(relMbid, album, albumArtist, albumArtistSort,
                                         year, rgMbid, isCompilation, tracks);
@@ -663,26 +653,13 @@ public class MusicBrainzClient {
      */
     private String parseMbGenres(JsonNode genres) {
         if (!genres.isArray() || genres.isEmpty()) return "";
-        int minUsage  = Config.get().num("mb.min_genre_usage", 50);
-        int maxGenres = Config.get().mbMaxGenres();
-        String filterRaw = Config.get().str("mb.genres_filter", "-seen live\n-fixme\n-owned\n-favorites");
-        java.util.Set<String> blacklist = new java.util.HashSet<>();
-        for (String line : filterRaw.split("[\\r\\n]+")) {
-            String l = line.trim();
-            if (l.startsWith("-")) blacklist.add(l.substring(1).trim().toLowerCase());
-        }
-
-        java.util.List<String> result = new java.util.ArrayList<>();
+        java.util.List<GenreFilter.Candidate> candidates = new java.util.ArrayList<>();
         for (JsonNode g : genres) {
-            int count  = g.path("count").asInt(0);
-            if (count < minUsage) continue;
-            String name = g.path("name").asText("").trim();
-            if (name.isBlank() || blacklist.contains(name.toLowerCase())) continue;
-            // Capitaliser première lettre
-            result.add(Character.toUpperCase(name.charAt(0)) + name.substring(1));
-            if (result.size() >= maxGenres) break;
+            String name  = g.path("name").asText("").trim();
+            int    count = g.path("count").asInt(0);
+            candidates.add(new GenreFilter.Candidate(name, count));
         }
-        return String.join(", ", result);
+        return String.join(", ", GenreFilter.filter(candidates, Config.get().mbMaxGenres()));
     }
 
     /**

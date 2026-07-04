@@ -54,8 +54,10 @@ public class DiscogsClient {
                 genres = extraireTableau(hit.path("style"));
                 if (genres.isEmpty()) genres = extraireTableau(hit.path("genre"));
             }
-            if (max > 0 && genres.size() > max) genres = genres.subList(0, max);
-            if (!genres.isEmpty()) info.genre = String.join(", ", genres);
+            java.util.List<GenreFilter.Candidate> candidates = new ArrayList<>();
+            for (String g : genres) candidates.add(new GenreFilter.Candidate(g));
+            List<String> filtered = GenreFilter.filter(candidates, max > 0 ? max : Integer.MAX_VALUE);
+            if (!filtered.isEmpty()) info.genre = String.join(", ", filtered);
         }
 
         // Barcode (tableau dans les résultats Discogs)

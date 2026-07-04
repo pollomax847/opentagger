@@ -41,24 +41,21 @@ public class LastFmClient {
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private String         cachedTagsKey  = null;
-    private List<String>   cachedTagsList = null;
+    private String                       cachedTagsKey  = null;
+    private List<GenreFilter.Candidate>  cachedTagsList = null;
 
     /** Enrichit le genre d'un TagInfo depuis les tags Last.fm. Ne modifie genre que si vide. */
     public void enrichGenres(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
         if (!info.genre.isBlank()) return;
 
-        List<String> allTags = fetchAllTags(info);
+        List<GenreFilter.Candidate> allTags = fetchAllTags(info);
+        List<GenreFilter.Candidate> genreCandidates = new ArrayList<>();
+        for (GenreFilter.Candidate c : allTags)
+            if (!isMoodTag(c.name().toLowerCase())) genreCandidates.add(c);
 
-        List<String> genreTags = new ArrayList<>();
-        for (String name : allTags) {
-            if (!isBlacklisted(name) && !isMoodTag(name.toLowerCase())) {
-                genreTags.add(capitalize(name));
-                if (genreTags.size() >= Config.get().num("lastfm.max_genres", 3)) break;
-            }
-        }
-        if (!genreTags.isEmpty()) info.genre = joinGenres(genreTags);
+        List<String> genres = GenreFilter.filter(genreCandidates, Config.get().num("lastfm.max_genres", 3));
+        if (!genres.isEmpty()) info.genre = joinGenres(genres);
     }
 
     /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible). */
@@ -99,10 +96,10 @@ public class LastFmClient {
         if (!Config.get().lastfmEnabled()) return;
         if (!info.mood.isBlank()) return;
 
-        List<String> allTags = fetchAllTags(info);
+        List<GenreFilter.Candidate> allTags = fetchAllTags(info);
 
-        for (String raw : allTags) {
-            String t = raw.toLowerCase().trim();
+        for (GenreFilter.Candidate c : allTags) {
+            String t = c.name().toLowerCase().trim();
             if (t.equals("instrumental") || t.equals("no vocals")) {
                 info.isInstrumental = "1";
             }
@@ -117,13 +114,13 @@ public class LastFmClient {
         }
     }
 
-    /** Récupère tous les tags bruts Last.fm (morceau puis artiste en fallback). */
-    private List<String> fetchAllTags(TagInfo info) throws Exception {
+    /** Récupère tous les tags bruts Last.fm avec leur popularité (morceau puis artiste en fallback). */
+    private List<GenreFilter.Candidate> fetchAllTags(TagInfo info) throws Exception {
         // Cache : évite deux requêtes réseau quand enrichGenres() et enrichMood() sont appelés successivement
         String key = info.artist + "\0" + info.title;
         if (key.equals(cachedTagsKey)) return cachedTagsList;
 
-        List<String> tags = List.of();
+        List<GenreFilter.Candidate> tags = List.of();
         if (!info.artist.isBlank() && !info.title.isBlank()) {
             tags = getRawTags(BASE_URL
                 + "?method=track.getTopTags"
@@ -144,9 +141,10 @@ public class LastFmClient {
         return tags;
     }
 
-    private List<String> getRawTags(String url) throws Exception {
+    /** Last.fm renvoie un "count" de popularité relative (0-100) par tag — capturé pour GenreFilter. */
+    private List<GenreFilter.Candidate> getRawTags(String url) throws Exception {
         JsonNode root = fetch(url);
-        List<String> result = new ArrayList<>();
+        List<GenreFilter.Candidate> result = new ArrayList<>();
         if (root == null) return result;
 
         JsonNode tagArray = root.path("toptags").path("tag");
@@ -155,9 +153,10 @@ public class LastFmClient {
         if (!tagArray.isArray()) return result;
 
         for (JsonNode tag : tagArray) {
-            String name = tag.path("name").asText("").trim();
+            String name  = tag.path("name").asText("").trim();
+            int    count = tag.path("count").asInt(0);
             if (!name.isBlank() && name.length() > 2)
-                result.add(name);
+                result.add(new GenreFilter.Candidate(name, count));
         }
         return result;
     }
@@ -180,24 +179,6 @@ public class LastFmClient {
             for (String kw : group)
                 if (t.contains(kw)) return true;
         return false;
-    }
-
-    private boolean isBlacklisted(String tag) {
-        String t = tag.toLowerCase().trim();
-        return t.equals("seen live") || t.equals("favorites") || t.equals("favourite")
-                || t.equals("love") || t.equals("awesome") || t.equals("cool")
-                || t.equals("best") || t.equals("good") || t.startsWith("00s")
-                || t.startsWith("10s") || t.startsWith("20s") || t.startsWith("my ")
-                || t.contains("under") && t.contains("listeners")
-                || t.contains("over")  && t.contains("listeners")
-                || t.contains("listener") // "under 2000 listeners", "500 listeners" etc.
-                || t.equals("music") || t.equals("songs") || t.equals("playlist")
-                || t.equals("spotify") || t.equals("youtube") || t.equals("all");
-    }
-
-    private String capitalize(String s) {
-        if (s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
     private String joinGenres(List<String> tags) {

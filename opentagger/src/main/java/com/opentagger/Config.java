@@ -38,7 +38,31 @@ public class Config {
         loadUserConfig();
     }
 
+    // Silence les loggers jaudiotagger, y compris ceux créés tardivement (ex. ID3v22Tag,
+    // Mp4TagWriter — jaudiotagger crée/réaffecte parfois le niveau de ses propres loggers au
+    // premier vrai accès, souvent bien après le silencing fait une fois au démarrage dans
+    // App.java). Config.get() est appelé en permanence dans tout le code (lecture ET écriture de
+    // tags), donc réaffecter ici, à intervalle limité pour rester peu coûteux, couvre les cas que
+    // App.java au démarrage et TagWriter.write() (écriture seule) manquaient — ex. les
+    // avertissements "Invalid Frame"/"Found padding" pendant un simple scan/lecture de fichiers.
+    private static volatile long lastLogSilenceMs = 0;
+
+    static void silenceJaudiotaggerLoggingThrottled() {
+        long now = System.currentTimeMillis();
+        if (now - lastLogSilenceMs < 2000) return;
+        lastLogSilenceMs = now;
+        silenceJaudiotaggerLogging();
+    }
+
+    static void silenceJaudiotaggerLogging() {
+        java.util.logging.Logger.getLogger("org.jaudiotagger").setLevel(java.util.logging.Level.OFF);
+        java.util.logging.LogManager.getLogManager().getLoggerNames().asIterator().forEachRemaining(n -> {
+            if (n.startsWith("org.jaudiotagger")) java.util.logging.Logger.getLogger(n).setLevel(java.util.logging.Level.OFF);
+        });
+    }
+
     public static Config get() {
+        silenceJaudiotaggerLoggingThrottled();
         return Holder.INSTANCE;
     }
 
@@ -124,7 +148,7 @@ public class Config {
     // --- Genres MB (folksonomy) ---
     public boolean mbUseGenres()       { return bool("mb.use_genres",        false); }
     public int     mbMinGenreUsage()   { return num ("mb.min_genre_usage",   50); }
-    public String  mbGenresFilter()    { return str ("mb.genres_filter",     "-seen live\n-fixme\n-owned\n-favorites"); }
+    public String  mbGenresFilter()    { return str ("mb.genres_filter",     GenreFilter.DEFAULT_FILTER); }
 
     // --- Pochette fichier ---
     public boolean coverSaveToFile()   { return bool("cover.save_to_file",   false); }
@@ -140,6 +164,22 @@ public class Config {
 
     // --- Pochettes locales ---
     public boolean coverSearchLocal()  { return bool("cover.search_local",       true); }
+
+    // --- Barre d'outils secondaire personnalisable (façon Picard) ---
+    public static final String DEFAULT_TOOLBAR_ACTIONS = "transcode,submitAcoustId";
+    public String[] toolbarActions() {
+        String v = str("toolbar.actions", DEFAULT_TOOLBAR_ACTIONS);
+        return v.isBlank() ? new String[0] : v.split(",");
+    }
+
+    // --- Fournisseurs de pochette : activation individuelle + ordre (façon Picard) ---
+    public boolean caaReleaseEnabled()      { return bool("cover.caa_release_enabled",       true); }
+    public boolean caaReleaseGroupEnabled() { return bool("cover.caa_release_group_enabled", true); }
+    public static final String DEFAULT_COVER_PROVIDER_ORDER = "caa_release,caa_release_group,local,fanart";
+    public String[] coverProviderOrder() {
+        String v = str("cover.provider_order", DEFAULT_COVER_PROVIDER_ORDER);
+        return v.isBlank() ? DEFAULT_COVER_PROVIDER_ORDER.split(",") : v.split(",");
+    }
 
     // --- MB genres max ---
     public int     mbMaxGenres()       { return num ("mb.max_genres",            3); }

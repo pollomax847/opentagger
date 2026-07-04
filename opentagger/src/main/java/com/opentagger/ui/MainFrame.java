@@ -356,6 +356,7 @@ public class MainFrame extends JFrame {
         new SwingWorker<Void, com.opentagger.model.FileEntry>() {
             final com.opentagger.MusicBrainzClient mbClient = new com.opentagger.MusicBrainzClient();
             final com.opentagger.CaaClient         caa      = new com.opentagger.CaaClient();
+            final com.opentagger.FanArtClient      fanArt   = new com.opentagger.FanArtClient();
             final com.opentagger.TagWriter         writer   = new com.opentagger.TagWriter();
             int done = 0;
 
@@ -366,14 +367,16 @@ public class MainFrame extends JFrame {
                     // TableRowSorter sur l'EDT. Les valeurs fraîches sont calculées sur ce thread
                     // (lectures réseau) puis appliquées d'un coup sur l'EDT plus bas — sinon même
                     // défaut que le crash de tri déjà vu 697× en 3 jours (TaggingWorker).
-                    String releaseMbidForCaa = current.releaseMbid;
+                    String releaseMbidForCaa      = current.releaseMbid;
+                    String releaseGroupMbidForCaa = current.releaseGroupMbid;
 
                     // 1. Tags frais depuis MB via recordingMbid
                     if (!current.recordingMbid.isBlank()) {
                         try {
                             com.opentagger.model.TagInfo fresh = mbClient.lookupRecording(current.recordingMbid);
                             if (fresh != null) {
-                                if (!fresh.releaseMbid.isBlank()) releaseMbidForCaa = fresh.releaseMbid;
+                                if (!fresh.releaseMbid.isBlank())      releaseMbidForCaa      = fresh.releaseMbid;
+                                if (!fresh.releaseGroupMbid.isBlank()) releaseGroupMbidForCaa = fresh.releaseGroupMbid;
                                 SwingUtilities.invokeLater(() -> {
                                     // Ne mettre à jour que les champs clés — ne pas écraser les données manuelles
                                     if (!fresh.title.isBlank())       current.title       = fresh.title;
@@ -393,13 +396,19 @@ public class MainFrame extends JFrame {
                         try { Thread.sleep(1100); } catch (InterruptedException ie) { break; } // MB rate-limit
                     }
 
-                    // 2. Pochette fraîche depuis CAA via releaseMbid (valeur locale : pas besoin
-                    // d'attendre que la mutation ci-dessus soit passée sur l'EDT)
-                    if (!releaseMbidForCaa.isBlank()) {
+                    // 2. Pochette fraîche via la cascade de fournisseurs configurée (valeurs
+                    // locales : pas besoin d'attendre que la mutation ci-dessus soit passée sur
+                    // l'EDT). Passe par TagEnrichment.resolveCover comme les autres pipelines —
+                    // corrige un bypass complet de la config (CaaClient appelé en direct, aucun
+                    // fournisseur autre que CAA release n'avait jamais sa chance ici).
+                    if (!releaseMbidForCaa.isBlank() || !releaseGroupMbidForCaa.isBlank()) {
                         try {
-                            com.opentagger.model.TagInfo forCaa = new com.opentagger.model.TagInfo();
-                            forCaa.releaseMbid = releaseMbidForCaa;
-                            java.nio.file.Path img = caa.downloadFront(forCaa);
+                            com.opentagger.model.TagInfo forCover = new com.opentagger.model.TagInfo();
+                            forCover.releaseMbid      = releaseMbidForCaa;
+                            forCover.releaseGroupMbid = releaseGroupMbidForCaa;
+                            forCover.artistMbid       = current.artistMbid;
+                            java.nio.file.Path img = com.opentagger.TagEnrichment.resolveCover(
+                                    forCover, e.file, caa, fanArt);
                             if (img != null) {
                                 writer.writeCoverOnly(e.file, img);
                                 java.nio.file.Files.deleteIfExists(img);
@@ -491,6 +500,7 @@ public class MainFrame extends JFrame {
         m.add(mitem("Gérer la pochette…",      null,      e -> openCoverDialog()));
         m.addSeparator();
         m.add(mitem("Forcer le re-taguage…",    null,      e -> forceRetag()));
+        m.add(mitem("Rattraper les non identifiés (AcoustID forcé)…", null, e -> retryUnidentifiedForceAcoustId()));
         m.add(mitem("Passe complète…",          "Ctrl+P",  e -> completeAllInfo()));
         m.addSeparator();
         m.add(mitem("Tagger comme podcast…",    null,      e -> openPodcastDialog()));
@@ -556,12 +566,10 @@ public class MainFrame extends JFrame {
         btnTagAll    = headerBtn("Tout tagger", "Tagger tous les fichiers cochés (F6)");
         btnTagSel    = headerBtn("Tagger la sélection", "Tagger les lignes sélectionnées (F7)");
         btnCancel    = headerBtn("Arrêter", "Annuler le traitement en cours");
-        btnTranscode = headerBtn("Transcoder", "Transcoder les fichiers sélectionnés (Ctrl+T)");
         btnRefresh.addActionListener(e -> refreshFolders());
         btnTagAll.addActionListener(e -> startTagging(false));
         btnTagSel.addActionListener(e -> startTagging(true));
         btnCancel.addActionListener(e -> cancelTagging());
-        btnTranscode.addActionListener(e -> transcodeFiles(false));
         btnCancel.setEnabled(false);
         btnRefresh.setEnabled(false);
 
@@ -573,8 +581,21 @@ public class MainFrame extends JFrame {
         actionsPanel.add(btnTagAll);
         actionsPanel.add(btnTagSel);
         actionsPanel.add(btnCancel);
-        actionsPanel.add(vSep());
-        actionsPanel.add(btnTranscode);
+
+        // Actions secondaires personnalisables (façon Picard, onglet "Barre d'outils des
+        // actions") — voir toolbarActionRegistry() / Config.toolbarActions(). Les boutons d'état
+        // ci-dessus (Ouvrir/Rafraîchir/Tout tagger/Tagger la sélection/Annuler) restent fixes :
+        // trop couplés à resetBtns()/launchForcedTagging() pour être rendus optionnels sans risque.
+        String[] secondary = Config.get().toolbarActions();
+        if (secondary.length > 0) actionsPanel.add(vSep());
+        for (String id : secondary) {
+            ToolbarAction action = findToolbarAction(id.trim());
+            if (action == null) continue;
+            JButton btn = headerBtn(action.label(), action.tooltip());
+            btn.addActionListener(e -> action.handler().run());
+            if ("transcode".equals(action.id())) btnTranscode = btn; // conservé : lu par transcodeFiles()
+            actionsPanel.add(btn);
+        }
 
         // ── Droite : undo/redo (boutons conservés pour updateUndoButtons) ────
         btnUndo = iconBtn("↩", "Annuler (Ctrl+Z)");
@@ -600,6 +621,64 @@ public class MainFrame extends JFrame {
         sep.setPreferredSize(new Dimension(0, 2));
         wrapper.add(sep, BorderLayout.SOUTH);
         return wrapper;
+    }
+
+    /** Une action pouvant apparaître dans la barre d'outils secondaire (voir Config.toolbarActions). */
+    record ToolbarAction(String id, String label, String tooltip, Runnable handler) {}
+
+    /**
+     * id + libellé seuls (sans handler) — exposé en statique pour que SettingsDialog puisse
+     * lister les actions disponibles sans instancier MainFrame. Doit rester synchronisé avec
+     * {@link #toolbarActionRegistry()} (mêmes ids/libellés).
+     */
+    public static final java.util.List<String[]> TOOLBAR_ACTION_INFOS = java.util.List.of(
+        new String[]{"transcode",          "Transcoder"},
+        new String[]{"submitAcoustId",     "Soumettre AcoustID"},
+        new String[]{"matchDialog",        "Correspondance manuelle"},
+        new String[]{"coverDialog",        "Gérer la pochette"},
+        new String[]{"forceRetag",         "Forcer le re-taguage"},
+        new String[]{"retryUnidentified",  "Rattraper les non identifiés"},
+        new String[]{"completeAllInfo",    "Passe complète"},
+        new String[]{"podcastDialog",      "Tagger comme podcast"},
+        new String[]{"detectDuplicates",   "Détecter les doublons"},
+        new String[]{"historyDialog",      "Historique de taguage"}
+    );
+
+    /**
+     * Registre des actions disponibles pour la barre d'outils secondaire personnalisable —
+     * réutilise les méthodes déjà câblées ailleurs (menu Outils, clic-droit), aucune logique
+     * dupliquée. Défaut (`Config.DEFAULT_TOOLBAR_ACTIONS`) = comportement identique à avant
+     * l'ajout de cette fonctionnalité (transcode + submitAcoustId).
+     */
+    private java.util.List<ToolbarAction> toolbarActionRegistry() {
+        java.util.List<ToolbarAction> list = new java.util.ArrayList<>();
+        list.add(new ToolbarAction("transcode", "Transcoder",
+                "Transcoder les fichiers sélectionnés (Ctrl+T)", () -> transcodeFiles(false)));
+        list.add(new ToolbarAction("submitAcoustId", "Soumettre AcoustID",
+                "Envoyer les empreintes AcoustID de la sélection, ou de toute la bibliothèque si rien n'est sélectionné",
+                this::submitAcoustId));
+        list.add(new ToolbarAction("matchDialog", "Correspondance manuelle",
+                "Rechercher/choisir manuellement une correspondance MusicBrainz", this::openMatchDialog));
+        list.add(new ToolbarAction("coverDialog", "Gérer la pochette",
+                "Gérer la pochette du fichier sélectionné", this::openCoverDialog));
+        list.add(new ToolbarAction("forceRetag", "Forcer le re-taguage",
+                "Remettre en PENDING et re-taguer", this::forceRetag));
+        list.add(new ToolbarAction("retryUnidentified", "Rattraper les non identifiés",
+                "Retente les fichiers non identifiés avec AcoustID forcé", this::retryUnidentifiedForceAcoustId));
+        list.add(new ToolbarAction("completeAllInfo", "Passe complète",
+                "Compléter les infos manquantes (Ctrl+P)", this::completeAllInfo));
+        list.add(new ToolbarAction("podcastDialog", "Tagger comme podcast",
+                "Ouvrir le dialogue de taguage podcast", this::openPodcastDialog));
+        list.add(new ToolbarAction("detectDuplicates", "Détecter les doublons",
+                "Détecter les fichiers en double", this::detectDuplicates));
+        list.add(new ToolbarAction("historyDialog", "Historique de taguage",
+                "Ouvrir l'historique de taguage", () -> new HistoryDialog(this).setVisible(true)));
+        return list;
+    }
+
+    private ToolbarAction findToolbarAction(String id) {
+        for (ToolbarAction a : toolbarActionRegistry()) if (a.id().equals(id)) return a;
+        return null;
     }
 
     private JButton accentBtn(String text, String tip) {
@@ -1773,19 +1852,27 @@ public class MainFrame extends JFrame {
             "Forcer le re-taguage", JOptionPane.OK_CANCEL_OPTION);
         if (confirm != JOptionPane.OK_OPTION) return;
 
-        // Effacer cache + MBIDs disque = un AudioFileIO.read/commit PAR FICHIER. Fait en
-        // synchrone dans l'ActionListener (donc sur l'EDT), ça gelait toute l'interface le temps
-        // de retraiter toute une bibliothèque (rien n'était sélectionnable, même pas Annuler).
-        // On le pousse dans un SwingWorker ; les mutations de FileEntry/tableModel restent sur
-        // l'EDT (via publish/process) pour ne pas rouvrir la course avec le TableRowSorter.
+        resetForReidentification(targets, () -> launchForcedTagging(targets, Config.get().useAcoustId()));
+    }
+
+    /**
+     * Réinitialise une liste de fichiers pour forcer une nouvelle identification : vide leur
+     * entrée de cache, supprime les tags MBID sur le fichier disque, remet le statut à PENDING.
+     * Extrait de forceRetag() pour être réutilisé par retryUnidentifiedForceAcoustId().
+     *
+     * Effacer cache + MBIDs disque = un AudioFileIO.read/commit PAR FICHIER. Fait en arrière-plan
+     * (SwingWorker) — synchrone sur l'EDT, ça gelait toute l'interface le temps de retraiter toute
+     * une bibliothèque. Les mutations de FileEntry/tableModel restent sur l'EDT (via
+     * publish/process) pour ne pas rouvrir la course avec le TableRowSorter.
+     */
+    private void resetForReidentification(List<FileEntry> targets, Runnable onDone) {
         setStatus("Réinitialisation de " + targets.size() + " fichier(s)…");
         btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
-        final List<FileEntry> forcedTargets = targets;
         new SwingWorker<Void, FileEntry>() {
             @Override protected Void doInBackground() {
                 MetadataCache cache = new MetadataCache();
                 try {
-                    for (FileEntry e : forcedTargets) {
+                    for (FileEntry e : targets) {
                         java.io.File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
                         // Effacer le cache pour ce fichier
                         cache.recordFileTagging(fichier.getAbsolutePath(), null);
@@ -1821,17 +1908,65 @@ public class MainFrame extends JFrame {
             }
             @Override protected void done() {
                 refreshStats();
-                launchForcedTagging(forcedTargets);
+                onDone.run();
             }
         }.execute();
     }
 
-    /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag(). */
-    private void launchForcedTagging(List<FileEntry> forcedTargets) {
+    /**
+     * Sélectionne tous les fichiers SKIPPED (non identifiés) et retente leur identification en
+     * forçant AcoustID en priorité pour cette exécution seulement — sans toucher au réglage
+     * persisté dans Préférences. Utile après une session de "Soumettre AcoustID" (la base
+     * communautaire a pu s'enrichir) ou simplement pour donner sa chance à AcoustID en premier
+     * plutôt qu'en dernier recours. Ce n'est pas un algorithme différent : un fichier déjà passé
+     * par AcoustID (avec succès ou non) a de bonnes chances d'échouer à nouveau.
+     */
+    private void retryUnidentifiedForceAcoustId() {
+        if (worker != null && !worker.isDone()) {
+            setStatus("Taguage en cours — attendez la fin ou cliquez sur Annuler.");
+            return;
+        }
+        if (completionWorker != null && !completionWorker.isDone()) {
+            setStatus("Complétion des albums en cours — attendez la fin.");
+            return;
+        }
+        if (infoCompleter != null && !infoCompleter.isDone()) {
+            setStatus("Passe complète en cours — attendez la fin.");
+            return;
+        }
+        if (!com.opentagger.AcoustIdSubmitter.isAvailable()) {
+            showError("fpcalc introuvable — installez chromaprint pour utiliser AcoustID.");
+            return;
+        }
+        if (Config.get().acoustidKey().isBlank()) {
+            JOptionPane.showMessageDialog(this,
+                "Clé AcoustID non configurée (Préférences → APIs → AcoustID API Key).",
+                "Configuration requise", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        List<FileEntry> targets = new ArrayList<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+        }
+        if (targets.isEmpty()) { setStatus("Aucun fichier non identifié à rattraper."); return; }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            targets.size() + " fichier(s) non identifié(s) vont être retentés avec AcoustID forcé "
+            + "en priorité pour cette exécution (le réglage des Préférences n'est pas modifié).",
+            "Rattraper les non identifiés", JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        resetForReidentification(targets, () -> launchForcedTagging(targets, true));
+    }
+
+    /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag()/retryUnidentifiedForceAcoustId(). */
+    private void launchForcedTagging(List<FileEntry> forcedTargets, boolean useAcoustId) {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0;
         final int forcedTotal = forcedTargets.size();
-        worker = new TaggingWorker(forcedTargets, Config.get().useAcoustId(), autoMask,
+        worker = new TaggingWorker(forcedTargets, useAcoustId, autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> { tableModel.update(entry); table.repaint(); });
         worker.addPropertyChangeListener(evt -> {
@@ -2065,7 +2200,7 @@ public class MainFrame extends JFrame {
         if (r != JOptionPane.OK_OPTION) return;
 
         int[] done = {0};
-        btnTranscode.setEnabled(false);
+        if (btnTranscode != null) btnTranscode.setEnabled(false);
         setStatus("⏳ Transcodage… 0 / " + toTranscode.size());
 
         transcodeWorker = new TranscodeWorker(toTranscode, tableModel,
@@ -2074,7 +2209,7 @@ public class MainFrame extends JFrame {
                 String summary;
                 try { summary = transcodeWorker.get(); } catch (Exception ex) { summary = "Transcodage terminé"; }
                 setStatus(summary);
-                btnTranscode.setEnabled(true);
+                if (btnTranscode != null) btnTranscode.setEnabled(true);
             }
         );
         transcodeWorker.execute();
@@ -2680,25 +2815,23 @@ public class MainFrame extends JFrame {
         setStatus("Soumission AcoustID : " + info + "…");
 
         new SwingWorker<String, String>() {
-            private final java.util.List<String> errors = new java.util.ArrayList<>();
+            private List<com.opentagger.AcoustIdSubmitter.SubmissionResult> results;
 
-            @Override protected String doInBackground() {
+            @Override protected String doInBackground() throws Exception {
                 com.opentagger.AcoustIdSubmitter sub = new com.opentagger.AcoustIdSubmitter();
-                int ok = 0;
+                List<File> files = new ArrayList<>();
+                List<com.opentagger.model.TagInfo> tagsList = new ArrayList<>();
                 for (FileEntry e : toSubmit) {
-                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    try {
-                        sub.submit(f, e.activeTags());
-                        ok++;
-                        publish("✔ " + f.getName());
-                    } catch (Exception ex) {
-                        String errMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-                        errors.add(f.getName() + " : " + errMsg);
-                        publish("✗ " + f.getName() + " : " + errMsg);
-                    }
+                    files.add(e.currentPath != null ? e.currentPath.toFile() : e.file);
+                    tagsList.add(e.activeTags());
                 }
-                return "Soumission AcoustID — ✔ " + ok + " envoyé(s)" +
-                       (!errors.isEmpty() ? "  ✗ " + errors.size() + " erreur(s)" : "");
+                // Une seule requête HTTP pour tout le lot (format batch AcoustID), au lieu
+                // d'une requête par fichier — voir AcoustIdSubmitter.submitBatch.
+                results = sub.submitBatch(files, tagsList, this::publish);
+                long ok = results.stream().filter(com.opentagger.AcoustIdSubmitter.SubmissionResult::accepted).count();
+                long ko = results.size() - ok;
+                return "Soumission AcoustID — ✔ " + ok + " accepté(s)" +
+                       (ko > 0 ? "  ✗ " + ko + " erreur(s)" : "");
             }
             @Override protected void process(List<String> chunks) {
                 setStatus(chunks.get(chunks.size() - 1));
@@ -2706,6 +2839,11 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 try {
                     setStatus(get());
+                    List<String> errors = new ArrayList<>();
+                    if (results != null) {
+                        for (var r : results)
+                            if (!r.accepted()) errors.add(r.file().getName() + " : " + r.message());
+                    }
                     if (!errors.isEmpty()) {
                         StringBuilder sb = new StringBuilder("<html><b>Erreurs lors de la soumission :</b><br><br>");
                         for (String e : errors) sb.append("• ").append(e).append("<br>");
@@ -2714,7 +2852,7 @@ public class MainFrame extends JFrame {
                             sb.toString(), "Soumission AcoustID", JOptionPane.ERROR_MESSAGE);
                     }
                 } catch (Exception ex) {
-                    setStatus("Soumission AcoustID : erreur inattendue");
+                    setStatus("Soumission AcoustID : erreur inattendue — " + ex.getMessage());
                 }
             }
         }.execute();

@@ -62,7 +62,19 @@ public class PodcastRssClient {
         HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200)
             throw new Exception("HTTP " + resp.statusCode() + " pour " + url);
-        return resp.body();
+        String body = resp.body();
+
+        // Signe classique d'une page HTML reçue au lieu d'un flux XML (URL de la page du podcast
+        // au lieu du lien direct vers le flux, redirection vers une page de blocage/CAPTCHA...).
+        // Sans ce contrôle, l'utilisateur ne voit qu'une erreur SAX cryptique ("guillemets
+        // ouvrants attendus pour l'attribut...") sans comprendre que l'URL elle-même est en cause.
+        String start = body.stripLeading();
+        if (start.regionMatches(true, 0, "<!doctype html", 0, 14)
+                || start.regionMatches(true, 0, "<html", 0, 5)) {
+            throw new Exception("L'URL renvoie une page HTML, pas un flux RSS — utilisez le lien "
+                + "direct vers le fichier XML du flux (pas la page web du podcast) : " + url);
+        }
+        return body;
     }
 
     // ── Parsing ──────────────────────────────────────────────────────────────

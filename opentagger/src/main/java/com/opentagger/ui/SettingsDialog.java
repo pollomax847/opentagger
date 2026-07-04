@@ -4,6 +4,7 @@ import com.opentagger.Config;
 import com.opentagger.FileRenamer;
 import com.opentagger.FpcalcInstaller;
 import com.opentagger.MusicBrainzOAuth;
+import com.opentagger.TaggerScript;
 
 import javax.swing.*;
 import javax.swing.border.*;
@@ -28,7 +29,6 @@ public class SettingsDialog extends JDialog {
     private JTextField tfDiscogsKey, tfDiscogsSecret;
     private JTextField tfLastFmKey;
     private JTextField tfFanArtKey;
-    private JCheckBox  chkFanartEnabled;
     private JCheckBox  chkLastfmEnabled;
 
     // ── Onglet Matching ──────────────────────────────────────────────────────
@@ -85,11 +85,32 @@ public class SettingsDialog extends JDialog {
     private JTextArea  taGenresFilter;
     private JCheckBox  chkCoverSaveToFile;
     private JCheckBox  chkCoverOverwriteFile;
-    private JCheckBox  chkCoverSearchLocal;
     private JTextField tfCoverFilename;
 
-    // ── Onglet Script tagger ─────────────────────────────────────────────────
+    // ── Fournisseurs de pochette — activables/réordonnables (façon Picard) ──────────
+    private static final String[] COVER_PROVIDER_IDS = {"caa_release", "caa_release_group", "local", "fanart"};
+    private static final String[] COVER_PROVIDER_LABELS = {
+        "Cover Art Archive : parution", "Cover Art Archive : groupe de parution",
+        "Dossier local (folder.jpg / cover.jpg)", "FanArt.tv"
+    };
+    private DefaultListModel<String>     lstCoverProvidersModel = new DefaultListModel<>();
+    private JList<String>                lstCoverProviders;
+    private java.util.List<String>       coverProviderOrder     = new java.util.ArrayList<>();
+    private java.util.Map<String,Boolean> coverProviderEnabled  = new java.util.LinkedHashMap<>();
+
+    // ── Onglet Script tagger — liste de scripts nommés, activables individuellement ──
     private JTextArea  taTaggerScript;
+    private java.util.List<TaggerScript.ScriptDef> scriptDefs = new java.util.ArrayList<>();
+    private DefaultListModel<String> lstScriptsModel = new DefaultListModel<>();
+    private JList<String>            lstScripts;
+    private int                      currentScriptIndex = -1;
+
+    // ── Onglet Barre d'outils — actions secondaires personnalisables ────────────────
+    @SuppressWarnings("unchecked")
+    private JComboBox<String>        cmbToolbarActionPicker;
+    private DefaultListModel<String> lstToolbarActionsModel = new DefaultListModel<>();
+    private JList<String>            lstToolbarActions;
+    private java.util.List<String>   toolbarActionIds = new java.util.ArrayList<>();
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JCheckBox  chkReplayGainEnabled;
@@ -104,7 +125,16 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet Matching — releases préférées + méta ───────────────────────────
     private JCheckBox  chkTranslateArtists;
-    private JTextField tfTranslateLocale;
+    @SuppressWarnings("unchecked")
+    private JComboBox<String> cmbTranslateLocale;
+    // code MB (locale d'alias, ex. "en") — libellé affiché. codeFromLabel() (déjà utilisée pour
+    // les pays préférés) extrait le code avant " — " pour la sauvegarde.
+    private static final String[][] TRANSLATE_LOCALES = {
+        {"en", "Anglais"}, {"fr", "Français"}, {"de", "Allemand"}, {"es", "Espagnol"},
+        {"it", "Italien"}, {"pt", "Portugais"}, {"nl", "Néerlandais"}, {"sv", "Suédois"},
+        {"pl", "Polonais"}, {"ru", "Russe"}, {"ja", "Japonais"}, {"ko", "Coréen"},
+        {"zh", "Chinois"}, {"ar", "Arabe"}, {"tr", "Turc"},
+    };
     private JCheckBox  chkAlbumCluster;
     private JCheckBox  chkPrioritizeIncomplete;
     @SuppressWarnings("unchecked")
@@ -190,6 +220,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab("Audio",        scrollWrap(buildAudioPanel()));
         tabs.addTab("Transcodage",  scrollWrap(buildTranscodePanel()));
         tabs.addTab("Script",       scrollWrap(buildScriptPanel()));
+        tabs.addTab("Barre d'outils", scrollWrap(buildToolbarPanel()));
         tabs.addTab("MusicBrainz",  scrollWrap(buildMbOAuthPanel()));
 
         JButton btnOk     = new JButton("OK");
@@ -286,7 +317,8 @@ public class SettingsDialog extends JDialog {
         tfFanArtKey        = tf();
         tfRapidApiKey      = tf();
         tfAudDToken        = tf();
-        chkFanartEnabled   = new JCheckBox("Activer le téléchargement FanArt");
+        // FanArt.tv est activé/désactivé depuis la liste des fournisseurs de pochette
+        // (onglet Tags) — pas de case séparée ici pour éviter deux réglages contradictoires.
         chkLastfmEnabled   = new JCheckBox("Activer l'enrichissement Last.fm");
 
         JPanel inner = new JPanel(new GridBagLayout());
@@ -334,12 +366,11 @@ public class SettingsDialog extends JDialog {
         JPanel enrichInner = new JPanel(new GridBagLayout());
         enrichInner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), "Enrichissement automatique"));
-        for (int i = 0; i < 2; i++) {
-            JCheckBox chk = (i == 0) ? chkFanartEnabled : chkLastfmEnabled;
+        {
             GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = i; c.anchor = GridBagConstraints.WEST;
+            c.gridx = 0; c.gridy = 0; c.anchor = GridBagConstraints.WEST;
             c.insets = new Insets(3, 10, 3, 8); c.gridwidth = 3;
-            enrichInner.add(chk, c);
+            enrichInner.add(chkLastfmEnabled, c);
         }
 
         JPanel p = new JPanel(new BorderLayout(0, 4));
@@ -474,7 +505,7 @@ public class SettingsDialog extends JDialog {
             cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres
         }, "Sources de genres (Discogs / Last.fm)");
 
-        // MB genres
+        // MB genres + filtre partagé (s'applique aussi à Discogs/Last.fm, voir GenreFilter)
         chkMbUseGenres    = new JCheckBox("Utiliser les genres folksonomy MusicBrainz");
         spMbMinGenreUsage = new JSpinner(new SpinnerNumberModel(50, 1, 500, 10));
         spMbMaxGenres     = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
@@ -482,20 +513,23 @@ public class SettingsDialog extends JDialog {
         taGenresFilter.setLineWrap(true);
         taGenresFilter.setToolTipText("Un genre par ligne. Préfixe - pour exclure (ex: -seen live)");
         JPanel mbGenrePanel = form(new String[]{
-            "", "Nb votes minimum :", "Max genres MB :", "Filtre genres (- = exclure) :"
+            "Genres folksonomy MusicBrainz :", "Popularité minimale (MB) :",
+            "Max genres MB :", "Filtre de genres (- = exclure, s'applique à Discogs/Last.fm/MB) :"
         }, new JComponent[]{
             chkMbUseGenres, spMbMinGenreUsage, spMbMaxGenres, new JScrollPane(taGenresFilter)
-        }, "Genres MusicBrainz (folksonomy)");
+        }, "Filtre de genres");
 
         // ── Translittération artistes ──────────────────────────────────────────
         chkTranslateArtists = new JCheckBox("Translittérer les noms d'artiste non-Latin via alias MB");
-        tfTranslateLocale   = tf();
-        tfTranslateLocale.setToolTipText("Locale cible ex: en, fr, de — utilise les alias MusicBrainz");
+        String[] localeItems = new String[TRANSLATE_LOCALES.length];
+        for (int i = 0; i < TRANSLATE_LOCALES.length; i++)
+            localeItems[i] = TRANSLATE_LOCALES[i][0] + " — " + TRANSLATE_LOCALES[i][1];
+        cmbTranslateLocale = new JComboBox<>(localeItems);
         JLabel transHint = new JLabel("<html><i>Exemple : 宇多田ヒカル → Hikaru Utada (locale=en).<br>Nécessite un artistMbid valide.</i></html>");
         transHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         transHint.setBorder(new EmptyBorder(0, 10, 4, 0));
         JPanel transPanel = new JPanel(new BorderLayout()); transPanel.setBorder(new EmptyBorder(8,8,0,8));
-        JPanel transInner = form(new String[]{"", "Locale cible :"}, new JComponent[]{chkTranslateArtists, tfTranslateLocale}, "Translittération artistes");
+        JPanel transInner = form(new String[]{"", "Locale cible :"}, new JComponent[]{chkTranslateArtists, cmbTranslateLocale}, "Translittération artistes");
         transInner.add(transHint, BorderLayout.SOUTH);
         transPanel.add(transInner, BorderLayout.CENTER);
 
@@ -645,15 +679,70 @@ public class SettingsDialog extends JDialog {
                 new JComponent[]{tfPreservedTags}, "Tags préservés");
 
         // ── Pochette fichier ──────────────────────────────────────────────────────
+        // "Utiliser folder.jpg/cover.jpg local" a déménagé dans la liste des fournisseurs de
+        // pochette juste en dessous (case "Dossier local") — plus besoin de case séparée ici.
         chkCoverSaveToFile   = new JCheckBox("Sauvegarder la pochette dans un fichier séparé");
         chkCoverOverwriteFile= new JCheckBox("Écraser le fichier si déjà existant");
-        chkCoverSearchLocal  = new JCheckBox("Utiliser folder.jpg/cover.jpg local si présent (avant CAA)");
         tfCoverFilename      = tf();
         JPanel coverFileInner = form(new String[]{
-            "", "", "", "Nom du fichier (sans extension) :"
+            "", "", "Nom du fichier (sans extension) :"
         }, new JComponent[]{
-            chkCoverSearchLocal, chkCoverSaveToFile, chkCoverOverwriteFile, tfCoverFilename
+            chkCoverSaveToFile, chkCoverOverwriteFile, tfCoverFilename
         }, "Pochette en fichier (cover.jpg / folder.jpg)");
+
+        // ── Fournisseurs de pochette : ordre + activation (pas d'ajout/suppression,
+        // l'ensemble des 4 fournisseurs est fixe, contrairement aux pays ou aux scripts) ──
+        lstCoverProviders = new JList<>(lstCoverProvidersModel);
+        lstCoverProviders.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        lstCoverProviders.setVisibleRowCount(4);
+        JScrollPane coverProvidersScroll = new JScrollPane(lstCoverProviders);
+        coverProvidersScroll.setPreferredSize(new Dimension(320, 90));
+
+        JButton btnToggleCoverProvider = new JButton("Activer/Désactiver");
+        JButton btnUpCoverProvider     = new JButton("↑");
+        JButton btnDownCoverProvider   = new JButton("↓");
+        for (JButton b : new JButton[]{btnToggleCoverProvider, btnUpCoverProvider, btnDownCoverProvider})
+            b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnToggleCoverProvider.addActionListener(e -> {
+            int sel = lstCoverProviders.getSelectedIndex();
+            if (sel < 0) return;
+            String id = coverProviderOrder.get(sel);
+            coverProviderEnabled.put(id, !coverProviderEnabled.get(id));
+            refreshCoverProvidersList();
+            lstCoverProviders.setSelectedIndex(sel);
+        });
+        btnUpCoverProvider.addActionListener(e -> {
+            int sel = lstCoverProviders.getSelectedIndex();
+            if (sel > 0) {
+                String v = coverProviderOrder.remove(sel);
+                coverProviderOrder.add(sel - 1, v);
+                refreshCoverProvidersList();
+                lstCoverProviders.setSelectedIndex(sel - 1);
+            }
+        });
+        btnDownCoverProvider.addActionListener(e -> {
+            int sel = lstCoverProviders.getSelectedIndex();
+            if (sel >= 0 && sel < coverProviderOrder.size() - 1) {
+                String v = coverProviderOrder.remove(sel);
+                coverProviderOrder.add(sel + 1, v);
+                refreshCoverProvidersList();
+                lstCoverProviders.setSelectedIndex(sel + 1);
+            }
+        });
+
+        JPanel coverProviderBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
+        for (JButton b : new JButton[]{btnToggleCoverProvider, btnUpCoverProvider, btnDownCoverProvider})
+            coverProviderBtns.add(b);
+
+        JPanel coverProvidersInner = new JPanel(new BorderLayout(0, 4));
+        coverProvidersInner.add(coverProvidersScroll, BorderLayout.CENTER);
+        coverProvidersInner.add(coverProviderBtns,    BorderLayout.SOUTH);
+        JPanel coverProvidersBox = new JPanel(new BorderLayout());
+        coverProvidersBox.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Fournisseurs de pochette (ordre + activation)"));
+        coverProvidersBox.add(coverProvidersInner, BorderLayout.CENTER);
+        // ── fin fournisseurs de pochette ─────────────────────────────────────────────
 
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
@@ -661,12 +750,27 @@ public class SettingsDialog extends JDialog {
         JPanel pw  = new JPanel(new BorderLayout()); pw.setBorder(new EmptyBorder(8,8,0,8)); pw.add(tagInner,       BorderLayout.CENTER);
         JPanel fw  = new JPanel(new BorderLayout()); fw.setBorder(new EmptyBorder(8,8,0,8)); fw.add(fpInner,        BorderLayout.CENTER);
         JPanel prw = new JPanel(new BorderLayout()); prw.setBorder(new EmptyBorder(8,8,0,8));prw.add(preserveInner, BorderLayout.CENTER);
-        JPanel cfw = new JPanel(new BorderLayout()); cfw.setBorder(new EmptyBorder(8,8,8,8));cfw.add(coverFileInner,BorderLayout.CENTER);
-        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(cfw);
+        JPanel cfw = new JPanel(new BorderLayout()); cfw.setBorder(new EmptyBorder(8,8,0,8));cfw.add(coverFileInner,BorderLayout.CENTER);
+        JPanel cpw = new JPanel(new BorderLayout()); cpw.setBorder(new EmptyBorder(8,8,8,8));cpw.add(coverProvidersBox, BorderLayout.CENTER);
+        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(cfw); combined.add(cpw);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
         return wrap;
+    }
+
+    private static String labelForCoverProvider(String id) {
+        for (int i = 0; i < COVER_PROVIDER_IDS.length; i++)
+            if (COVER_PROVIDER_IDS[i].equals(id)) return COVER_PROVIDER_LABELS[i];
+        return id;
+    }
+
+    private void refreshCoverProvidersList() {
+        lstCoverProvidersModel.clear();
+        for (String id : coverProviderOrder) {
+            boolean enabled = coverProviderEnabled.getOrDefault(id, true);
+            lstCoverProvidersModel.addElement((enabled ? "☑ " : "☐ ") + labelForCoverProvider(id));
+        }
     }
 
     private JPanel buildRenamePanel() {
@@ -1027,14 +1131,196 @@ public class SettingsDialog extends JDialog {
 
         JPanel scriptBox = new JPanel(new BorderLayout(0, 6));
         scriptBox.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), "Script JavaScript (tagger.script)"));
+                BorderFactory.createEtchedBorder(), "Script sélectionné"));
         scriptBox.add(lblDesc, BorderLayout.NORTH);
         scriptBox.add(scriptScroll, BorderLayout.CENTER);
 
+        // ── Liste des scripts (plusieurs scripts nommés, activables individuellement,
+        // dans l'esprit des greffons Picard) ────────────────────────────────────────
+        lstScripts = new JList<>(lstScriptsModel);
+        lstScripts.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        JScrollPane scriptsListScroll = new JScrollPane(lstScripts);
+        scriptsListScroll.setPreferredSize(new Dimension(200, 0));
+
+        JButton btnNewScript    = new JButton("+ Nouveau");
+        JButton btnDeleteScript = new JButton("− Supprimer");
+        JButton btnToggleScript = new JButton("Activer/Désactiver");
+        JButton btnRenameScript = new JButton("Renommer…");
+        for (JButton b : new JButton[]{btnNewScript, btnDeleteScript, btnToggleScript, btnRenameScript})
+            b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnNewScript.addActionListener(e -> {
+            flushCurrentScriptEdits();
+            String name = JOptionPane.showInputDialog(this, "Nom du script :", "Nouveau script");
+            if (name == null || name.isBlank()) return;
+            scriptDefs.add(new TaggerScript.ScriptDef(name.trim(), true, ""));
+            refreshScriptsList();
+            lstScripts.setSelectedIndex(scriptDefs.size() - 1);
+        });
+        btnDeleteScript.addActionListener(e -> {
+            int sel = lstScripts.getSelectedIndex();
+            if (sel < 0) return;
+            scriptDefs.remove(sel);
+            currentScriptIndex = -1;
+            refreshScriptsList();
+            taTaggerScript.setText("");
+            taTaggerScript.setEnabled(false);
+        });
+        btnToggleScript.addActionListener(e -> {
+            int sel = lstScripts.getSelectedIndex();
+            if (sel < 0) return;
+            TaggerScript.ScriptDef d = scriptDefs.get(sel);
+            scriptDefs.set(sel, new TaggerScript.ScriptDef(d.name(), !d.enabled(), d.code()));
+            refreshScriptsList();
+            lstScripts.setSelectedIndex(sel);
+        });
+        btnRenameScript.addActionListener(e -> {
+            int sel = lstScripts.getSelectedIndex();
+            if (sel < 0) return;
+            TaggerScript.ScriptDef d = scriptDefs.get(sel);
+            String name = JOptionPane.showInputDialog(this, "Nouveau nom :", d.name());
+            if (name == null || name.isBlank()) return;
+            scriptDefs.set(sel, new TaggerScript.ScriptDef(name.trim(), d.enabled(), d.code()));
+            refreshScriptsList();
+            lstScripts.setSelectedIndex(sel);
+        });
+        lstScripts.addListSelectionListener(e -> {
+            if (e.getValueIsAdjusting()) return;
+            int sel = lstScripts.getSelectedIndex();
+            if (sel == currentScriptIndex) return;
+            flushCurrentScriptEdits();
+            currentScriptIndex = sel;
+            taTaggerScript.setText(sel >= 0 && sel < scriptDefs.size() ? scriptDefs.get(sel).code() : "");
+            taTaggerScript.setEnabled(sel >= 0);
+        });
+
+        JPanel scriptBtns = new JPanel(new java.awt.GridLayout(0, 1, 3, 3));
+        for (JButton b : new JButton[]{btnNewScript, btnDeleteScript, btnToggleScript, btnRenameScript})
+            scriptBtns.add(b);
+
+        JPanel scriptsListPanel = new JPanel(new BorderLayout(0, 4));
+        scriptsListPanel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Scripts"));
+        scriptsListPanel.add(scriptsListScroll, BorderLayout.CENTER);
+        scriptsListPanel.add(scriptBtns, BorderLayout.SOUTH);
+        scriptsListPanel.setPreferredSize(new Dimension(220, 0));
+        // ── fin liste des scripts ────────────────────────────────────────────────────
+
+        JPanel centerSplit = new JPanel(new BorderLayout(10, 0));
+        centerSplit.add(scriptsListPanel, BorderLayout.WEST);
+        centerSplit.add(scriptBox,        BorderLayout.CENTER);
+
         JPanel outer = new JPanel(new BorderLayout(0, 10));
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
-        outer.add(scriptBox, BorderLayout.CENTER);
+        outer.add(centerSplit, BorderLayout.CENTER);
         outer.add(exBox, BorderLayout.SOUTH);
+        return outer;
+    }
+
+    /** Reconstruit l'affichage de la liste des scripts depuis scriptDefs (nom + case activé). */
+    private void refreshScriptsList() {
+        lstScriptsModel.clear();
+        for (TaggerScript.ScriptDef d : scriptDefs)
+            lstScriptsModel.addElement((d.enabled() ? "☑ " : "☐ ") + d.name());
+    }
+
+    /** Sauve le texte actuellement affiché dans le ScriptDef en cours d'édition. */
+    private void flushCurrentScriptEdits() {
+        if (currentScriptIndex >= 0 && currentScriptIndex < scriptDefs.size()) {
+            TaggerScript.ScriptDef d = scriptDefs.get(currentScriptIndex);
+            scriptDefs.set(currentScriptIndex,
+                    new TaggerScript.ScriptDef(d.name(), d.enabled(), taTaggerScript.getText()));
+        }
+    }
+
+    private static String labelForToolbarAction(String id) {
+        for (String[] info : MainFrame.TOOLBAR_ACTION_INFOS)
+            if (info[0].equals(id)) return info[1];
+        return id;
+    }
+
+    private void refreshToolbarActionsList() {
+        lstToolbarActionsModel.clear();
+        for (String id : toolbarActionIds) lstToolbarActionsModel.addElement(labelForToolbarAction(id));
+    }
+
+    @SuppressWarnings("unchecked")
+    private JPanel buildToolbarPanel() {
+        JLabel lblDesc = new JLabel(
+            "<html>Boutons secondaires affichés dans la barre principale, en plus des boutons fixes<br>" +
+            "(Ouvrir dossier, Rafraîchir, Tout tagger, Tagger la sélection, Annuler).</html>");
+        lblDesc.setFont(lblDesc.getFont().deriveFont(11f));
+        lblDesc.putClientProperty("FlatLaf.style", "foreground: #888888");
+        lblDesc.setBorder(new EmptyBorder(0, 0, 8, 0));
+
+        String[] pickerItems = new String[MainFrame.TOOLBAR_ACTION_INFOS.size() + 1];
+        pickerItems[0] = "(Sélectionner une action…)";
+        for (int i = 0; i < MainFrame.TOOLBAR_ACTION_INFOS.size(); i++)
+            pickerItems[i + 1] = MainFrame.TOOLBAR_ACTION_INFOS.get(i)[1];
+        cmbToolbarActionPicker = new JComboBox<>(pickerItems);
+
+        lstToolbarActions = new JList<>(lstToolbarActionsModel);
+        lstToolbarActions.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        lstToolbarActions.setVisibleRowCount(8);
+        JScrollPane toolbarActionsScroll = new JScrollPane(lstToolbarActions);
+        toolbarActionsScroll.setPreferredSize(new Dimension(280, 160));
+
+        JButton btnAddAction    = new JButton("+");
+        JButton btnRemoveAction = new JButton("−");
+        JButton btnUpAction     = new JButton("↑");
+        JButton btnDownAction   = new JButton("↓");
+        for (JButton b : new JButton[]{btnAddAction, btnRemoveAction, btnUpAction, btnDownAction})
+            b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnAddAction.addActionListener(e -> {
+            int idx = cmbToolbarActionPicker.getSelectedIndex();
+            if (idx <= 0) return;
+            String id = MainFrame.TOOLBAR_ACTION_INFOS.get(idx - 1)[0];
+            if (toolbarActionIds.contains(id)) return; // éviter les doublons
+            toolbarActionIds.add(id);
+            refreshToolbarActionsList();
+        });
+        btnRemoveAction.addActionListener(e -> {
+            int sel = lstToolbarActions.getSelectedIndex();
+            if (sel >= 0) { toolbarActionIds.remove(sel); refreshToolbarActionsList(); }
+        });
+        btnUpAction.addActionListener(e -> {
+            int sel = lstToolbarActions.getSelectedIndex();
+            if (sel > 0) {
+                String v = toolbarActionIds.remove(sel);
+                toolbarActionIds.add(sel - 1, v);
+                refreshToolbarActionsList();
+                lstToolbarActions.setSelectedIndex(sel - 1);
+            }
+        });
+        btnDownAction.addActionListener(e -> {
+            int sel = lstToolbarActions.getSelectedIndex();
+            if (sel >= 0 && sel < toolbarActionIds.size() - 1) {
+                String v = toolbarActionIds.remove(sel);
+                toolbarActionIds.add(sel + 1, v);
+                refreshToolbarActionsList();
+                lstToolbarActions.setSelectedIndex(sel + 1);
+            }
+        });
+
+        JPanel actionBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
+        for (JButton b : new JButton[]{btnAddAction, btnRemoveAction, btnUpAction, btnDownAction})
+            actionBtns.add(b);
+
+        JPanel picker = new JPanel(new BorderLayout(0, 4));
+        picker.add(cmbToolbarActionPicker, BorderLayout.NORTH);
+        picker.add(toolbarActionsScroll,   BorderLayout.CENTER);
+        picker.add(actionBtns,             BorderLayout.SOUTH);
+
+        JPanel box = new JPanel(new BorderLayout());
+        box.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Actions affichées (dans l'ordre)"));
+        box.add(picker, BorderLayout.CENTER);
+
+        JPanel outer = new JPanel(new BorderLayout(0, 8));
+        outer.setBorder(new EmptyBorder(10, 10, 10, 10));
+        outer.add(lblDesc, BorderLayout.NORTH);
+        outer.add(box,     BorderLayout.CENTER);
         return outer;
     }
 
@@ -1216,7 +1502,6 @@ public class SettingsDialog extends JDialog {
         tfRapidApiKey.setText(cfg.str("rapidapi.key",    ""));
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
 
-        chkFanartEnabled    .setSelected(cfg.bool("fanart.download_cover", true));
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkReplayGainEnabled.setSelected(cfg.replayGainEnabled());
 
@@ -1250,7 +1535,13 @@ public class SettingsDialog extends JDialog {
             for (String t : excludedSecStr.split(",")) excludedSecSet.add(t.trim());
         for (int i = 0; i < SECONDARY_TYPES.length; i++)
             chkExcludedSecondary[i].setSelected(excludedSecSet.contains(SECONDARY_TYPES[i]));
-        tfTranslateLocale    .setText(cfg.translateLocale());
+        {
+            String savedLocale = cfg.translateLocale();
+            int idx = 0; // repli sur "en" (premier de la liste) si la valeur sauvée est inconnue
+            for (int i = 0; i < TRANSLATE_LOCALES.length; i++)
+                if (TRANSLATE_LOCALES[i][0].equalsIgnoreCase(savedLocale)) { idx = i; break; }
+            cmbTranslateLocale.setSelectedIndex(idx);
+        }
         chkAlbumCluster           .setSelected(cfg.albumClusterEnabled());
         chkPrioritizeIncomplete   .setSelected(cfg.prioritizeIncomplete());
 
@@ -1274,10 +1565,23 @@ public class SettingsDialog extends JDialog {
 
         // ─ Tags (onglet Tags) ─
         tfPreservedTags      .setText(cfg.preservedTags());
-        chkCoverSearchLocal  .setSelected(cfg.coverSearchLocal());
         chkCoverSaveToFile   .setSelected(cfg.coverSaveToFile());
         chkCoverOverwriteFile.setSelected(cfg.coverOverwriteFile());
         tfCoverFilename      .setText(cfg.coverFilename());
+
+        // ─ Fournisseurs de pochette : ordre + activation ─
+        coverProviderOrder.clear();
+        for (String id : cfg.coverProviderOrder())
+            if (!id.isBlank() && !coverProviderOrder.contains(id)) coverProviderOrder.add(id);
+        for (String id : COVER_PROVIDER_IDS) // rattrape tout id connu absent d'une config existante
+            if (!coverProviderOrder.contains(id)) coverProviderOrder.add(id);
+        coverProviderEnabled.clear();
+        coverProviderEnabled.put("caa_release",       cfg.caaReleaseEnabled());
+        coverProviderEnabled.put("caa_release_group", cfg.caaReleaseGroupEnabled());
+        coverProviderEnabled.put("local",  cfg.coverSearchLocal());
+        coverProviderEnabled.put("fanart", cfg.fanartEnabled());
+        refreshCoverProvidersList();
+
         chkCorrectPunctuation.setSelected(cfg.correctPunctuation());
         chkRemoveId3v1       .setSelected(cfg.removeId3v1());
         String id3v = cfg.id3v2Version();
@@ -1297,7 +1601,25 @@ public class SettingsDialog extends JDialog {
         cmbMbOAuthMode.setSelectedIndex(
             "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
 
-        taTaggerScript.setText(cfg.str("tagger.script", ""));
+        scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
+        currentScriptIndex = -1;
+        refreshScriptsList();
+        if (!scriptDefs.isEmpty()) {
+            lstScripts.setSelectedIndex(0);
+        } else {
+            taTaggerScript.setText("");
+            taTaggerScript.setEnabled(false);
+        }
+
+        // ─ Barre d'outils : actions secondaires affichées ─
+        toolbarActionIds.clear();
+        for (String id : cfg.toolbarActions()) {
+            String trimmed = id.trim();
+            boolean known = false;
+            for (String[] info : MainFrame.TOOLBAR_ACTION_INFOS) if (info[0].equals(trimmed)) { known = true; break; }
+            if (known && !toolbarActionIds.contains(trimmed)) toolbarActionIds.add(trimmed);
+        }
+        refreshToolbarActionsList();
     }
 
     private void save() {
@@ -1345,7 +1667,6 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rapidapi.key",   tfRapidApiKey.getText().trim());
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
 
-        p.setProperty("fanart.download_cover",  String.valueOf(chkFanartEnabled.isSelected()));
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("replaygain.enabled",     String.valueOf(chkReplayGainEnabled.isSelected()));
 
@@ -1378,7 +1699,7 @@ public class SettingsDialog extends JDialog {
                                                       ? "Various Artists" : tfVaName.getText().trim());
         p.setProperty("metadata.standardize_artists",  String.valueOf(chkStandardizeArtists.isSelected()));
         p.setProperty("metadata.translate_artists",    String.valueOf(chkTranslateArtists.isSelected()));
-        p.setProperty("metadata.translate_locale",     tfTranslateLocale.getText().trim().isEmpty() ? "en" : tfTranslateLocale.getText().trim());
+        p.setProperty("metadata.translate_locale",     codeFromLabel((String) cmbTranslateLocale.getSelectedItem()));
         p.setProperty("albums.cluster",                String.valueOf(chkAlbumCluster.isSelected()));
         p.setProperty("batch.prioritize_incomplete",   String.valueOf(chkPrioritizeIncomplete.isSelected()));
 
@@ -1390,7 +1711,14 @@ public class SettingsDialog extends JDialog {
 
         // ─ Onglet Tags ─
         p.setProperty("tags.preserved_tags",       tfPreservedTags.getText().trim());
-        p.setProperty("cover.search_local",        String.valueOf(chkCoverSearchLocal.isSelected()));
+
+        // ─ Fournisseurs de pochette : ordre + activation ─
+        p.setProperty("cover.provider_order",             String.join(",", coverProviderOrder));
+        p.setProperty("cover.caa_release_enabled",        String.valueOf(coverProviderEnabled.getOrDefault("caa_release", true)));
+        p.setProperty("cover.caa_release_group_enabled",  String.valueOf(coverProviderEnabled.getOrDefault("caa_release_group", true)));
+        p.setProperty("cover.search_local",               String.valueOf(coverProviderEnabled.getOrDefault("local", true)));
+        p.setProperty("fanart.download_cover",            String.valueOf(coverProviderEnabled.getOrDefault("fanart", true)));
+
         p.setProperty("cover.save_to_file",        String.valueOf(chkCoverSaveToFile.isSelected()));
         p.setProperty("cover.overwrite_file",      String.valueOf(chkCoverOverwriteFile.isSelected()));
         p.setProperty("cover.filename",            tfCoverFilename.getText().trim().isEmpty() ? "cover" : tfCoverFilename.getText().trim());
@@ -1407,7 +1735,10 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.ignore_existing",      String.valueOf(chkIgnoreExistingFingerprints.isSelected()));
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
 
-        p.setProperty("tagger.script",                 taTaggerScript.getText());
+        flushCurrentScriptEdits();
+        TaggerScript.saveScripts(scriptDefs);
+
+        p.setProperty("toolbar.actions", String.join(",", toolbarActionIds));
 
         // ─ Transcodage ─
         String[] fmtIds2 = {"mp3", "flac", "aac", "ogg", "opus"};
