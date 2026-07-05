@@ -274,6 +274,27 @@ public class SettingsDialog extends JDialog {
         JList<String> list = new JList<>(startupFolderModel);
         list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         list.setFont(list.getFont().deriveFont(12f));
+        // Affiche nom du dossier en gras + chemin parent en gris, et signale en rouge un dossier
+        // introuvable (ex. disque externe débranché/non monté au démarrage) — jusqu'ici un chemin
+        // brut sans indication, aucun moyen de repérer d'un coup d'œil un dossier qui ne sera
+        // silencieusement pas chargé au prochain lancement.
+        list.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> l, Object value, int index,
+                    boolean isSelected, boolean cellHasFocus) {
+                JLabel c = (JLabel) super.getListCellRendererComponent(l, value, index, isSelected, cellHasFocus);
+                String path = (String) value;
+                java.io.File f = new java.io.File(path);
+                boolean missing = !f.isDirectory();
+                String name   = f.getName().isBlank() ? path : f.getName();
+                String parent = f.getParent() != null ? f.getParent() : "";
+                c.setText("<html>" + (missing ? "⚠ " : "") + "<b>" + name + "</b>"
+                        + "<font color='" + (isSelected ? "#cccccc" : "#888888") + "'> — " + parent + "</font></html>");
+                c.setToolTipText(missing ? path + "  (introuvable — disque externe débranché ?)" : path);
+                if (!isSelected) c.setForeground(missing ? new Color(220, 90, 90) : l.getForeground());
+                return c;
+            }
+        });
         JScrollPane scroll = new JScrollPane(list);
         scroll.setPreferredSize(new Dimension(400, 200));
 
@@ -302,7 +323,8 @@ public class SettingsDialog extends JDialog {
         buttons.add(btnAdd);
         buttons.add(btnRemove);
 
-        JLabel hint = new JLabel("<html><i>Ces dossiers seront chargés automatiquement à chaque démarrage d'OpenTagger.</i></html>");
+        JLabel hint = new JLabel("<html><i>Ces dossiers seront chargés automatiquement à chaque démarrage d'OpenTagger. "
+                + "⚠ en rouge = dossier introuvable actuellement (disque externe débranché ?).</i></html>");
         hint.setBorder(new EmptyBorder(8, 0, 4, 0));
         hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
 

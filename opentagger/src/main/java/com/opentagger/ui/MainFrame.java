@@ -823,6 +823,7 @@ public class MainFrame extends JFrame {
         table.setTransferHandler(getTransferHandler());
         JScrollPane scroll = new JScrollPane(table);
         scroll.setBorder(null);
+        scroll.setMinimumSize(new Dimension(200, 0)); // filet de sécurité : jamais écrasée à ~0px
 
         // ── Panneau détail (droite) ───────────────────────────────────────────
         JPanel detail = buildDetailPanel();
@@ -833,6 +834,12 @@ public class MainFrame extends JFrame {
         sp.setResizeWeight(0.68);
         sp.setDividerSize(4);
         sp.setBorder(null);
+        // Position initiale explicite : resizeWeight ne gouverne que la redistribution lors des
+        // redimensionnements SUIVANTS, pas le tout premier calcul de position du diviseur — sans
+        // ça, imbriquer ce split à l'intérieur du split vertical du journal (ajouté récemment)
+        // pouvait occasionnellement placer le diviseur tout à gauche au premier affichage
+        // (table quasi invisible, panneau de détail prenant presque toute la largeur).
+        sp.setDividerLocation(0.68);
         return sp;
     }
 

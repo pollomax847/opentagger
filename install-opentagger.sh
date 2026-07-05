@@ -6,13 +6,18 @@
 
 set -e
 
-JAR_SRC="$(dirname "$(realpath "$0")")/opentagger/target/opentagger-0.9.0.jar"
+# opentagger.jar (sans suffixe de version) est le jar "fat" avec toutes les dépendances
+# embarquées — celui qui se lance réellement. opentagger-X.Y.Z.jar (le jar "nu" généré par
+# Maven) n'a ni Main-Class ni dépendances et ne s'exécute pas ; référencer un nom versionné ici
+# se périmait de toute façon à chaque release (encore "0.9.0" alors que le pom.xml était déjà
+# passé à 0.9.1, puis 0.9.3).
+JAR_SRC="$(dirname "$(realpath "$0")")/opentagger/target/opentagger.jar"
 INSTALL_DIR="$HOME/.local/share/opentagger"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor/128x128/apps"
 
-echo "=== Installation OpenTagger 0.9.0 ==="
+echo "=== Installation OpenTagger ==="
 
 # 1. Copier le JAR
 mkdir -p "$INSTALL_DIR"

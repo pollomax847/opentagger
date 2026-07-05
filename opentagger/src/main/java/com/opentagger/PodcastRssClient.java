@@ -38,7 +38,9 @@ public class PodcastRssClient {
         String episodeType,    // "full" / "trailer" / "bonus"
         String description,
         String episodeUrl,
-        String author
+        String author,
+        String keywords,       // itunes:keywords, séparés par virgules — "" si absent
+        String guid            // identifiant unique RSS — plus fiable que le titre pour dédupliquer
     ) {}
 
     private static final int TIMEOUT_SEC = 30;
@@ -116,7 +118,10 @@ public class PodcastRssClient {
         String desc        = firstOf(item, "itunes:summary", "description");
         String epUrl       = text(item, "link");
         String epAuthor    = firstOf(item, "itunes:author", "author");
-        return new PodcastEpisode(title, pubDate, duration, episodeNum, season, type, desc, epUrl, epAuthor);
+        String keywords    = text(item, "itunes:keywords");
+        String guid        = text(item, "guid");
+        return new PodcastEpisode(title, pubDate, duration, episodeNum, season, type, desc, epUrl, epAuthor,
+                keywords, guid);
     }
 
     // ── Helpers XML ──────────────────────────────────────────────────────────

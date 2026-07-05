@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opentagger.model.TagInfo;
 
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -86,21 +85,6 @@ public class FanArtClient {
     }
 
     private Path download(String imageUrl) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(imageUrl))
-                .header("User-Agent", Config.get().userAgent())
-                .GET()
-                .build();
-
-        HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        if (response.statusCode() != 200) return null;
-
-        // Détecter le type depuis le Content-Type (l'URL peut ne pas finir par .png/.jpg)
-        String ct  = response.headers().firstValue("Content-Type").orElse("");
-        String ext = ct.contains("png") ? ".png" : ".jpg";
-        Path tmp   = Files.createTempFile("opentagger-cover-", ext);
-        Files.copy(response.body(), tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-        if (Files.size(tmp) < 1000) { Files.deleteIfExists(tmp); return null; }
-        return tmp;
+        return ImageDownloader.downloadToTempFile(imageUrl);
     }
 }

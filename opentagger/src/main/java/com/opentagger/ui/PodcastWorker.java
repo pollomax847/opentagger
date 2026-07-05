@@ -32,6 +32,18 @@ public class PodcastWorker extends SwingWorker<Void, String> {
 
     @Override
     protected Void doInBackground() throws Exception {
+        // Pochette du show téléchargée UNE SEULE FOIS pour tout le feed (même artwork pour tous
+        // les épisodes) — le flux expose déjà cette URL (PodcastFeed.artworkUrl, parsée depuis
+        // <itunes:image>) mais elle n'était jusqu'ici jamais utilisée : les épisodes de podcast
+        // se retrouvaient tagués sans aucune pochette alors que la donnée était disponible.
+        java.nio.file.Path showCover = null;
+        if (!feed.artworkUrl().isBlank()) {
+            try {
+                showCover = ImageDownloader.downloadToTempFile(feed.artworkUrl());
+            } catch (Exception ex) {
+                LOG.warning("[Podcast] Pochette du show non téléchargée : " + ex.getMessage());
+            }
+        }
         try {
             for (MatchResult mr : matches) {
                 if (isCancelled()) break;
@@ -52,8 +64,11 @@ public class PodcastWorker extends SwingWorker<Void, String> {
                 // celui-ci.
                 new TaggerScript().apply(ti);
                 try {
-                    new TagWriter().write(writePath.toFile(), ti);
-                    cache.recordFileTagging(writePath.toString(), "podcast:" + ep.title());
+                    new TagWriter().write(writePath.toFile(), ti, showCover);
+                    // guid RSS si disponible (plus fiable que le titre, qui peut se répéter
+                    // d'un épisode à l'autre — ex. un épisode "Q&A" mensuel récurrent).
+                    String key = !ep.guid().isBlank() ? ep.guid() : ep.title();
+                    cache.recordFileTagging(writePath.toString(), "podcast:" + key);
 
                     // Organiser selon le masque [Podcast] Show/Season/Date - Titre (index 4) —
                     // jusqu'à ce correctif, "Dossier racine podcasts" était sauvegardé/rechargé
@@ -131,7 +146,7 @@ public class PodcastWorker extends SwingWorker<Void, String> {
         ti.podcastEpisode     = ep.episodeNumber() > 0 ? String.valueOf(ep.episodeNumber()) : "";
         ti.podcastSeason      = ep.season()        > 0 ? String.valueOf(ep.season())        : "";
         ti.podcastEpisodeType = ep.episodeType();
-        ti.podcastKeywords    = "";
+        ti.podcastKeywords    = ep.keywords();
 
         ti.score = 100;
         return ti;
