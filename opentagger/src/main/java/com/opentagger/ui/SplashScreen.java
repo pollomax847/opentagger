@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.Config;
+import com.opentagger.I18n;
 
 import javax.swing.*;
 import java.awt.*;
@@ -72,7 +73,7 @@ public class SplashScreen extends JWindow {
             // ── Sous-titre ────────────────────────────────────────────────
             g.setColor(new Color(144, 202, 249));
             g.setFont(new Font("SansSerif", Font.PLAIN, 14));
-            g.drawString("Tagueur audio open-source", 150, H / 2 + 16);
+            g.drawString(I18n.t("Tagueur audio open-source"), 150, H / 2 + 16);
 
             // ── Version ───────────────────────────────────────────────────
             g.setColor(new Color(120, 144, 156));

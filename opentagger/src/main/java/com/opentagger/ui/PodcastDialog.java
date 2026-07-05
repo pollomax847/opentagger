@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.*;
+import com.opentagger.I18n;
 import com.opentagger.PodcastMatcher.MatchResult;
 import com.opentagger.PodcastRssClient.*;
 import com.opentagger.PodcastSearchClient.PodcastResult;
@@ -35,7 +36,7 @@ public class PodcastDialog extends JDialog {
 
     // ── Widgets ───────────────────────────────────────────────────────────────
     private final JTextField      tfSearch   = new JTextField(35);
-    private final JButton         btnSearch  = new JButton("Rechercher");
+    private final JButton         btnSearch  = new JButton(I18n.t("Rechercher"));
     private final JList<PodcastResult> lstResults = new JList<>();
     private final JScrollPane     scrollResults;
     private final JLabel          lblFeedStatus = new JLabel(" ");
@@ -44,8 +45,8 @@ public class PodcastDialog extends JDialog {
     private final JTable            matchTable;
     private final JScrollPane       scrollMatch;
     private final JLabel            lblMatchStatus = new JLabel(" ");
-    private final JButton           btnTag  = new JButton("Tagger 0 fichiers");
-    private final JButton           btnClose= new JButton("Fermer");
+    private final JButton           btnTag  = new JButton(I18n.t("Tagger 0 fichiers"));
+    private final JButton           btnClose= new JButton(I18n.t("Fermer"));
     private final JProgressBar      progress= new JProgressBar();
 
     // ── État ─────────────────────────────────────────────────────────────────
@@ -53,10 +54,11 @@ public class PodcastDialog extends JDialog {
     private List<MatchResult> currentMatches = new ArrayList<>();
 
     // ── Colonnes du tableau de matching ──────────────────────────────────────
-    private static final String[] COLS = {"Fichier", "Épisode associé", "Durée", "Saison·Ep"};
+    private static final String[] COLS = {
+        I18n.t("Fichier"), I18n.t("Épisode associé"), I18n.t("Durée"), I18n.t("Saison·Ep")};
 
     public PodcastDialog(Frame owner, List<FileEntry> files, FileTableModel tableModel) {
-        super(owner, "Tagger comme podcast", true);
+        super(owner, I18n.t("Tagger comme podcast"), true);
         this.files      = files;
         this.tableModel = tableModel;
 
@@ -104,7 +106,7 @@ public class PodcastDialog extends JDialog {
     }
 
     private JPanel buildSearchPanel() {
-        JLabel lbl = new JLabel("Nom du podcast ou URL RSS : ");
+        JLabel lbl = new JLabel(I18n.t("Nom du podcast ou URL RSS : "));
         lbl.putClientProperty("FlatLaf.style", "font: bold 12 $defaultFont");
 
         JPanel searchRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
@@ -116,7 +118,7 @@ public class PodcastDialog extends JDialog {
         p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
         p.add(searchRow);
 
-        JLabel hint = new JLabel("  Tapez un nom pour chercher dans iTunes, ou collez directement l'URL RSS.");
+        JLabel hint = new JLabel(I18n.t("  Tapez un nom pour chercher dans iTunes, ou collez directement l'URL RSS."));
         hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         p.add(hint);
         p.add(Box.createVerticalStrut(8));
@@ -141,7 +143,7 @@ public class PodcastDialog extends JDialog {
         p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
         p.setBorder(new EmptyBorder(8, 0, 0, 0));
 
-        JLabel lblTitle = new JLabel("Correspondances fichiers ↔ épisodes");
+        JLabel lblTitle = new JLabel(I18n.t("Correspondances fichiers ↔ épisodes"));
         lblTitle.putClientProperty("FlatLaf.style", "font: bold 12 $defaultFont");
         p.add(lblTitle);
         p.add(Box.createVerticalStrut(4));
@@ -208,7 +210,7 @@ public class PodcastDialog extends JDialog {
     }
 
     private void doItunesSearch(String query) {
-        setBusy(true, "Recherche en cours…");
+        setBusy(true, I18n.t("Recherche en cours…"));
         new SwingWorker<List<PodcastResult>, Void>() {
             @Override protected List<PodcastResult> doInBackground() throws Exception {
                 return PodcastSearchClient.search(query);
@@ -218,18 +220,18 @@ public class PodcastDialog extends JDialog {
                 try {
                     List<PodcastResult> results = get();
                     if (results.isEmpty()) {
-                        lblFeedStatus.setText("Aucun résultat pour \"" + query + "\".");
+                        lblFeedStatus.setText(I18n.t("Aucun résultat pour \"%s\".", query));
                         scrollResults.setVisible(false);
                     } else {
                         DefaultListModel<PodcastResult> model = new DefaultListModel<>();
                         results.forEach(model::addElement);
                         lstResults.setModel(model);
                         scrollResults.setVisible(true);
-                        lblFeedStatus.setText(results.size() + " résultat(s) — double-cliquez pour sélectionner.");
+                        lblFeedStatus.setText(I18n.t("%d résultat(s) — double-cliquez pour sélectionner.", results.size()));
                     }
                     pack();
                 } catch (Exception ex) {
-                    lblFeedStatus.setText("Erreur : " + ex.getMessage());
+                    lblFeedStatus.setText(I18n.t("Erreur : %s", ex.getMessage()));
                     LOG.warning("[Podcast] Recherche iTunes : " + ex.getMessage());
                 }
             }
@@ -245,7 +247,7 @@ public class PodcastDialog extends JDialog {
     }
 
     private void fetchFeed(String url) {
-        setBusy(true, "Récupération du flux RSS…");
+        setBusy(true, I18n.t("Récupération du flux RSS…"));
         new SwingWorker<PodcastFeed, Void>() {
             @Override protected PodcastFeed doInBackground() throws Exception {
                 return PodcastRssClient.fetch(url);
@@ -254,11 +256,11 @@ public class PodcastDialog extends JDialog {
                 setBusy(false, "");
                 try {
                     currentFeed = get();
-                    lblFeedStatus.setText("\"" + currentFeed.showTitle() + "\" — "
-                        + currentFeed.episodes().size() + " épisode(s) dans le flux.");
+                    lblFeedStatus.setText(I18n.t("\"%s\" — %d épisode(s) dans le flux.",
+                        currentFeed.showTitle(), currentFeed.episodes().size()));
                     runMatching();
                 } catch (Exception ex) {
-                    lblFeedStatus.setText("Erreur flux : " + ex.getMessage());
+                    lblFeedStatus.setText(I18n.t("Erreur flux : %s", ex.getMessage()));
                     LOG.warning("[Podcast] Fetch RSS : " + ex.getMessage());
                 }
             }
@@ -266,7 +268,7 @@ public class PodcastDialog extends JDialog {
     }
 
     private void runMatching() {
-        setBusy(true, "Matching en cours…");
+        setBusy(true, I18n.t("Matching en cours…"));
         new SwingWorker<List<MatchResult>, Void>() {
             @Override protected List<MatchResult> doInBackground() {
                 return PodcastMatcher.match(files, currentFeed.episodes());
@@ -277,7 +279,7 @@ public class PodcastDialog extends JDialog {
                     currentMatches = get();
                     populateMatchTable(currentMatches);
                 } catch (Exception ex) {
-                    lblMatchStatus.setText("Erreur matching : " + ex.getMessage());
+                    lblMatchStatus.setText(I18n.t("Erreur matching : %s", ex.getMessage()));
                 }
             }
         }.execute();
@@ -289,7 +291,7 @@ public class PodcastDialog extends JDialog {
         for (MatchResult mr : matches) {
             String episodeName = mr.matched()
                 ? formatEpisodeLabel(mr.episode())
-                : "(non matché — gérer manuellement)";
+                : I18n.t("(non matché — gérer manuellement)");
             String duration = mr.matched() && mr.episode().durationSec() > 0
                 ? formatDuration(mr.episode().durationSec())
                 : "—";
@@ -301,11 +303,11 @@ public class PodcastDialog extends JDialog {
         }
 
         int unmatched = matches.size() - matched;
-        String status = matched + " matché(s) automatiquement";
-        if (unmatched > 0) status += ", " + unmatched + " non-matché(s) — à gérer manuellement";
+        String status = I18n.t("%d matché(s) automatiquement", matched);
+        if (unmatched > 0) status += I18n.t(", %d non-matché(s) — à gérer manuellement", unmatched);
         lblMatchStatus.setText(status);
 
-        btnTag.setText("Tagger " + matched + " fichier(s)");
+        btnTag.setText(I18n.t("Tagger %d fichier(s)", matched));
         btnTag.setEnabled(matched > 0);
         scrollMatch.setVisible(true);
         pack();
@@ -316,23 +318,25 @@ public class PodcastDialog extends JDialog {
 
         long toTag = currentMatches.stream().filter(MatchResult::matched).count();
         int ok = JOptionPane.showConfirmDialog(this,
-            "Écrire les tags podcast sur " + toTag + " fichier(s) ?\n"
-            + "Show : " + currentFeed.showTitle(),
-            "Confirmer le taguage", JOptionPane.YES_NO_OPTION);
+            I18n.t("Écrire les tags podcast sur %d fichier(s) ?\nShow : %s",
+                toTag, currentFeed.showTitle()),
+            I18n.t("Confirmer le taguage"), JOptionPane.YES_NO_OPTION);
         if (ok != JOptionPane.YES_OPTION) return;
 
         btnTag.setEnabled(false);
-        setBusy(true, "Taguage en cours…");
+        setBusy(true, I18n.t("Taguage en cours…"));
 
         PodcastWorker worker = new PodcastWorker(currentMatches, currentFeed, tableModel);
         worker.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 setBusy(false, "");
-                String msg = worker.getTagged() + " fichier(s) tagué(s)"
-                    + (worker.getErrors() > 0 ? ", " + worker.getErrors() + " erreur(s)" : "") + ".";
+                String errSuffix = worker.getErrors() > 0
+                    ? I18n.t(", %d erreur(s)", worker.getErrors())
+                    : "";
+                String msg = I18n.t("%d fichier(s) tagué(s)%s.", worker.getTagged(), errSuffix);
                 LOG.info("[Podcast] " + msg);
-                JOptionPane.showMessageDialog(this, msg, "Taguage terminé",
+                JOptionPane.showMessageDialog(this, msg, I18n.t("Taguage terminé"),
                         JOptionPane.INFORMATION_MESSAGE);
                 dispose();
             }

@@ -5,6 +5,7 @@ import com.opentagger.Config;
 import com.opentagger.DiscogsClient;
 import com.opentagger.FanArtClient;
 import com.opentagger.FileRenamer;
+import com.opentagger.I18n;
 import com.opentagger.LastFmClient;
 import com.opentagger.LocalCorrector;
 import com.opentagger.MetadataCache;
@@ -31,7 +32,7 @@ import java.util.List;
 public class MatchDialog extends JDialog {
 
     private static final String[] COLS =
-        {"Score", "Artiste", "Artiste Album", "Titre", "Album", "Année", "MBID"};
+        {"Score", I18n.t("Artiste"), I18n.t("Artiste Album"), I18n.t("Titre"), I18n.t("Album"), I18n.t("Année"), "MBID"};
 
     private final FileEntry       entry;
     private final FileTableModel  tableModel;
@@ -56,7 +57,7 @@ public class MatchDialog extends JDialog {
     private JButton              btnApply, btnCancel;
 
     public MatchDialog(Frame owner, FileEntry entry, FileTableModel tableModel, Runnable onApplied) {
-        super(owner, "Correspondance manuelle — " + entry.filename(), true);
+        super(owner, I18n.t("Correspondance manuelle — %s", entry.filename()), true);
         this.entry      = entry;
         this.tableModel = tableModel;
         this.onApplied  = onApplied;
@@ -105,7 +106,7 @@ public class MatchDialog extends JDialog {
         // Pré-charger les candidats du batch ou lancer une recherche
         if (entry.candidates != null && !entry.candidates.isEmpty()) {
             fill(entry.candidates);
-            lblStatus.setText(entry.candidates.size() + " candidat(s) du batch — affinez la recherche si besoin");
+            lblStatus.setText(I18n.t("%d candidat(s) du batch — affinez la recherche si besoin", entry.candidates.size()));
         } else {
             search();
         }
@@ -114,15 +115,15 @@ public class MatchDialog extends JDialog {
     // ── Barre de recherche ────────────────────────────────────────────────────
 
     private JPanel buildSearchBar() {
-        JButton btnSearch = new JButton("🔍  Chercher");
+        JButton btnSearch = new JButton("🔍  " + I18n.t("Chercher"));
         btnSearch.addActionListener(e -> search());
         tfArtist.addActionListener(e -> search());
         tfTitle .addActionListener(e -> search());
 
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
         p.setBorder(new MatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
-        p.add(new JLabel("Artiste :")); p.add(tfArtist);
-        p.add(new JLabel("  Titre :")); p.add(tfTitle);
+        p.add(new JLabel(I18n.t("Artiste :"))); p.add(tfArtist);
+        p.add(new JLabel(I18n.t("  Titre :"))); p.add(tfTitle);
         p.add(btnSearch);
         p.add(Box.createHorizontalStrut(10));
         p.add(lblStatus);
@@ -130,15 +131,15 @@ public class MatchDialog extends JDialog {
     }
 
     private JPanel buildFooter() {
-        btnApply  = new JButton("✓  Appliquer la sélection");
-        btnCancel = new JButton("Annuler");
+        btnApply  = new JButton("✓  " + I18n.t("Appliquer la sélection"));
+        btnCancel = new JButton(I18n.t("Annuler"));
         btnApply .addActionListener(e -> applySelected());
         btnCancel.addActionListener(e -> dispose());
         btnApply.putClientProperty("FlatLaf.style", "background: #1a6030");
 
         JPanel p = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
         p.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
-        p.add(new JLabel("<html><i>Double-clic ou Appliquer pour valider le résultat sélectionné</i></html>"));
+        p.add(new JLabel(I18n.t("<html><i>Double-clic ou Appliquer pour valider le résultat sélectionné</i></html>")));
         p.add(Box.createHorizontalStrut(16));
         p.add(btnCancel);
         p.add(btnApply);
@@ -159,7 +160,7 @@ public class MatchDialog extends JDialog {
         String artist = tfArtist.getText().trim();
         String title  = tfTitle .getText().trim();
         if (artist.isBlank() && title.isBlank()) return;
-        lblStatus.setText("Recherche en cours…");
+        lblStatus.setText(I18n.t("Recherche en cours…"));
         resultsModel.setRowCount(0);
         searchResults.clear();
 
@@ -171,10 +172,10 @@ public class MatchDialog extends JDialog {
                 try {
                     List<TagInfo> res = get();
                     fill(res);
-                    lblStatus.setText(res.isEmpty() ? "Aucun résultat." : res.size() + " résultat(s)");
+                    lblStatus.setText(res.isEmpty() ? I18n.t("Aucun résultat.") : I18n.t("%d résultat(s)", res.size()));
                     if (!res.isEmpty()) resultsTable.setRowSelectionInterval(0, 0);
                 } catch (Exception ex) {
-                    lblStatus.setText("Erreur : " + ex.getMessage());
+                    lblStatus.setText(I18n.t("Erreur : %s", ex.getMessage()));
                 }
             }
         }.execute();
@@ -199,8 +200,8 @@ public class MatchDialog extends JDialog {
     private void applySelected() {
         int row = resultsTable.getSelectedRow();
         if (row < 0) {
-            JOptionPane.showMessageDialog(this, "Sélectionnez un résultat dans la liste.",
-                    "Info", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, I18n.t("Sélectionnez un résultat dans la liste."),
+                    I18n.t("Info"), JOptionPane.INFORMATION_MESSAGE);
             return;
         }
         int modelRow = resultsTable.convertRowIndexToModel(row);
@@ -211,7 +212,7 @@ public class MatchDialog extends JDialog {
         btnApply.setEnabled(false);
         btnCancel.setEnabled(false);
         resultsTable.setEnabled(false);
-        lblStatus.setText("Enrichissement (genre, pochette) en cours…");
+        lblStatus.setText(I18n.t("Enrichissement (genre, pochette) en cours…"));
 
         // Genre (Discogs/Last.fm), pochette (CAA/local/FanArt) et renommage disque — tout dans un
         // SwingWorker, pas directement dans ce listener, sinon ça fige l'EDT le temps des requêtes
@@ -269,8 +270,8 @@ public class MatchDialog extends JDialog {
                 try {
                     finalPath = get();
                 } catch (Exception ex) {
-                    JOptionPane.showMessageDialog(MatchDialog.this, "Erreur d'écriture : " + ex.getMessage(),
-                            "Erreur", JOptionPane.ERROR_MESSAGE);
+                    JOptionPane.showMessageDialog(MatchDialog.this, I18n.t("Erreur d'écriture : %s", ex.getMessage()),
+                            I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
                     btnApply.setEnabled(true);
                     btnCancel.setEnabled(true);
                     resultsTable.setEnabled(true);
@@ -280,7 +281,7 @@ public class MatchDialog extends JDialog {
 
                 entry.result      = chosen;
                 entry.status      = FileEntry.Status.TAGGED;
-                entry.message     = "Sélectionné manuellement";
+                entry.message     = I18n.t("Sélectionné manuellement");
                 entry.candidates  = null;
                 entry.currentPath = finalPath;
 

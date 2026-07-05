@@ -4,6 +4,8 @@ Tagger audio automatique open-source — alternative libre à Jaikoz.
 
 Identifie et complète les métadonnées de vos fichiers MP3, FLAC, M4A, OGG via une chaîne de reconnaissance audio : **AcoustID → SongRec (Shazam) → AudD**, enrichie par **MusicBrainz**, **Discogs** et **Last.fm**.
 
+Disponible en français et en anglais (Préférences → Démarrage → Langue).
+
 ![Vue principale avec fichiers chargés](docs/screenshots/main_loaded.png)
 
 ---
@@ -164,6 +166,17 @@ cd opentagger
 mvn package -DskipTests
 # JAR produit : target/opentagger.jar
 ```
+
+---
+
+## Mises à jour
+
+OpenTagger vérifie automatiquement (une fois par jour) s'il existe une version plus récente, et
+propose de la télécharger et de l'installer directement depuis l'application — pas besoin de
+recloner ou recompiler. Vérification manuelle possible à tout moment via **Outils → Vérifier les
+mises à jour…**, et désactivable dans **Préférences → Démarrage**.
+
+Les binaires publiés sont hébergés sur un dépôt séparé, [opentagger-releases](https://github.com/pollomax847/opentagger-releases) — ce dépôt-ci contient uniquement le code source.
 
 ---
 

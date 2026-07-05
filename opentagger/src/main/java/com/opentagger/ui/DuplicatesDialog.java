@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.ui.DuplicateDetector.DuplicateGroup;
 
@@ -36,7 +37,7 @@ public class DuplicatesDialog extends JDialog {
     private JCheckBox chkCleanDirs;
 
     public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups, FileTableModel tableModel) {
-        super(owner, "Doublons détectés — " + groups.size() + " groupe(s)", true);
+        super(owner, I18n.t("Doublons détectés — %d groupe(s)", groups.size()), true);
         this.groups     = groups;
         this.tableModel = tableModel;
         setSize(900, 600);
@@ -65,8 +66,8 @@ public class DuplicatesDialog extends JDialog {
         outer.setLayout(new BoxLayout(outer, BoxLayout.Y_AXIS));
         outer.setBorder(new EmptyBorder(10, 14, 10, 14));
 
-        JLabel intro = new JLabel("<html><b>Cochez les fichiers à SUPPRIMER.</b> "
-            + "Le meilleur fichier de chaque groupe est mis en évidence — ne le cochez pas.</html>");
+        JLabel intro = new JLabel(I18n.t("<html><b>Cochez les fichiers à SUPPRIMER.</b> "
+            + "Le meilleur fichier de chaque groupe est mis en évidence — ne le cochez pas.</html>"));
         intro.putClientProperty("FlatLaf.style", "foreground: #cc7744; font: 11 $defaultFont");
         intro.setBorder(new EmptyBorder(0, 0, 10, 0));
         outer.add(intro);
@@ -123,8 +124,8 @@ public class DuplicatesDialog extends JDialog {
             long   sizeKb = f.exists() ? f.length() / 1024 : -1;
             String ext    = ext(f.getName()).toUpperCase();
             String sz     = sizeKb >= 1024
-                ? SZ.format(sizeKb / 1024.0) + " Mo"
-                : (sizeKb >= 0 ? sizeKb + " Ko" : "?");
+                ? I18n.t("%s Mo", SZ.format(sizeKb / 1024.0))
+                : (sizeKb >= 0 ? I18n.t("%d Ko", sizeKb) : "?");
 
             String path = f.getAbsolutePath();
 
@@ -138,7 +139,7 @@ public class DuplicatesDialog extends JDialog {
             lblMeta.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
 
             JLabel lblKeep = isBest
-                ? new JLabel("★ Recommandé")
+                ? new JLabel("★ " + I18n.t("Recommandé"))
                 : new JLabel("");
             if (isBest) {
                 lblKeep.putClientProperty("FlatLaf.style", "foreground: #a5d6a7; font: bold 10 $defaultFont");
@@ -163,17 +164,17 @@ public class DuplicatesDialog extends JDialog {
     // ── Footer ─────────────────────────────────────────────────────────────────
 
     private JPanel buildFooter() {
-        JButton btnSmart  = new JButton("Sélection intelligente");
-        JButton btnNone   = new JButton("Tout décocher");
-        JButton btnDelete = new JButton("Déplacer dans la corbeille…");
-        JButton btnClose  = new JButton("Fermer");
+        JButton btnSmart  = new JButton(I18n.t("Sélection intelligente"));
+        JButton btnNone   = new JButton(I18n.t("Tout décocher"));
+        JButton btnDelete = new JButton(I18n.t("Déplacer dans la corbeille…"));
+        JButton btnClose  = new JButton(I18n.t("Fermer"));
         btnDelete.putClientProperty("FlatLaf.style", "background: #8b1a1a");
 
-        chkCleanDirs = new JCheckBox("Supprimer les dossiers vides après");
+        chkCleanDirs = new JCheckBox(I18n.t("Supprimer les dossiers vides après"));
         chkCleanDirs.setSelected(true);
         chkCleanDirs.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
 
-        btnSmart.setToolTipText("Coche automatiquement les fichiers de moindre qualité dans chaque groupe");
+        btnSmart.setToolTipText(I18n.t("Coche automatiquement les fichiers de moindre qualité dans chaque groupe"));
         btnSmart .addActionListener(e -> smartSelect());
         btnNone  .addActionListener(e -> allBoxes.forEach(cb -> cb.setSelected(false)));
         btnDelete.addActionListener(e -> deleteSelected());
@@ -185,7 +186,7 @@ public class DuplicatesDialog extends JDialog {
             new EmptyBorder(8, 12, 8, 12)));
 
         int totalFiles = groups.stream().mapToInt(g -> g.files().size()).sum();
-        JLabel info = new JLabel("  " + groups.size() + " groupe(s), " + totalFiles + " fichier(s)");
+        JLabel info = new JLabel("  " + I18n.t("%d groupe(s), %d fichier(s)", groups.size(), totalFiles));
         info.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
 
         JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
@@ -223,8 +224,8 @@ public class DuplicatesDialog extends JDialog {
         long cocheCount = allBoxes.stream().filter(JCheckBox::isSelected).count();
         if (cocheCount == 0) {
             JOptionPane.showMessageDialog(this,
-                "Tous les fichiers ont le même score de qualité.\nCochez manuellement les fichiers à supprimer.",
-                "Sélection intelligente", JOptionPane.INFORMATION_MESSAGE);
+                I18n.t("Tous les fichiers ont le même score de qualité.\nCochez manuellement les fichiers à supprimer."),
+                I18n.t("Sélection intelligente"), JOptionPane.INFORMATION_MESSAGE);
         }
     }
 
@@ -238,25 +239,26 @@ public class DuplicatesDialog extends JDialog {
 
         if (toDelete.isEmpty()) {
             JOptionPane.showMessageDialog(this,
-                "Aucun fichier coché.\nUtilisez \"Sélection intelligente\" ou cochez manuellement.",
-                "Info", JOptionPane.INFORMATION_MESSAGE);
+                I18n.t("Aucun fichier coché.\nUtilisez \"Sélection intelligente\" ou cochez manuellement."),
+                I18n.t("Info"), JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
         // Construire un résumé lisible
-        StringBuilder sb = new StringBuilder("<html>Supprimer définitivement <b>");
-        sb.append(toDelete.size()).append(" fichier(s)</b> du disque ?<br><br>");
+        StringBuilder sb = new StringBuilder(
+            I18n.t("<html>Supprimer définitivement <b>%d fichier(s)</b> du disque ?<br><br>", toDelete.size()));
         int shown = Math.min(toDelete.size(), 6);
         for (int i = 0; i < shown; i++) {
             File f = toDelete.get(i).currentPath != null
                 ? toDelete.get(i).currentPath.toFile() : toDelete.get(i).file;
             sb.append("&nbsp;• ").append(f.getName()).append("<br>");
         }
-        if (toDelete.size() > shown) sb.append("&nbsp;… et ").append(toDelete.size() - shown).append(" autre(s)");
+        if (toDelete.size() > shown)
+            sb.append("&nbsp;").append(I18n.t("… et %d autre(s)", toDelete.size() - shown));
         sb.append("</html>");
 
         int ok = JOptionPane.showConfirmDialog(this, sb.toString(),
-            "Confirmer la suppression", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            I18n.t("Confirmer la suppression"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (ok != JOptionPane.YES_OPTION) return;
 
         // desktop.moveToTrash(...)/suppression + nettoyage des dossiers vides sont des opérations
@@ -300,12 +302,12 @@ public class DuplicatesDialog extends JDialog {
 
             @Override protected void done() {
                 setCursor(java.awt.Cursor.getDefaultCursor());
-                String where = trashSupported ? "déplacé(s) dans la corbeille" : "supprimé(s)";
-                String msg = deleted + " fichier(s) " + where
-                    + (dirsRemoved > 0 ? ", " + dirsRemoved + " dossier(s) vide(s) supprimé(s)" : "")
-                    + (errors > 0 ? ", " + errors + " erreur(s)" : "") + ".";
+                String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
+                String msg = I18n.t("%d fichier(s) %s", deleted, where)
+                    + (dirsRemoved > 0 ? I18n.t(", %d dossier(s) vide(s) supprimé(s)", dirsRemoved) : "")
+                    + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "") + ".";
                 LOG.info("[Doublons] " + msg);
-                JOptionPane.showMessageDialog(DuplicatesDialog.this, msg, "Résultat", JOptionPane.INFORMATION_MESSAGE);
+                JOptionPane.showMessageDialog(DuplicatesDialog.this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
                 dispose();
             }
         }.execute();

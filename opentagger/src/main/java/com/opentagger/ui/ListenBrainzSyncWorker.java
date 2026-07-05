@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.Config;
+import com.opentagger.I18n;
 import com.opentagger.ListenBrainzClient;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
@@ -44,13 +45,13 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
     protected Void doInBackground() throws Exception {
         String username = Config.get().listenbrainzUsername();
         if (username.isBlank()) {
-            onProgress.accept("Aucun nom d'utilisateur ListenBrainz configuré (Préférences → APIs).");
+            onProgress.accept(I18n.t("Aucun nom d'utilisateur ListenBrainz configuré (Préférences → APIs)."));
             return null;
         }
 
-        onProgress.accept("Récupération des statistiques ListenBrainz pour \"" + username + "\"…");
+        onProgress.accept(I18n.t("Récupération des statistiques ListenBrainz pour \"%s\"…", username));
         Map<String, Integer> counts = client.fetchTopRecordingCounts(username, Config.get().listenbrainzMaxTracks());
-        onProgress.accept(counts.size() + " piste(s) dans le classement ListenBrainz récupéré.");
+        onProgress.accept(I18n.t("%d piste(s) dans le classement ListenBrainz récupéré.", counts.size()));
 
         int total = entries.size();
         int done  = 0;
@@ -80,7 +81,7 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        onProgress.accept(String.format("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
+        onProgress.accept(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
                 updated, skipped, errors));
         return null;
     }

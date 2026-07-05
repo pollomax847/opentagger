@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.*;
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 import org.jaudiotagger.audio.AudioFileIO;
@@ -102,7 +103,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             queue.sort((a, b) -> incompletenessScore(b.current) - incompletenessScore(a.current));
             long incomplete = queue.stream().filter(e -> incompletenessScore(e.current) >= 4).count();
             if (incomplete > 0)
-                onProgress.accept("Priorité : " + incomplete + " fichier(s) très incomplet(s) traité(s) en premier");
+                onProgress.accept(I18n.t("Priorité : %s fichier(s) très incomplet(s) traité(s) en premier", incomplete));
         } else {
             queue = entries;
         }
@@ -146,7 +147,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 final String fname = entry.filename();
                 Consumer<String> step = s -> onProgress.accept(
                     String.format("[%d/%d] %s — %s", fileIdx, total, fname, s));
-                step.accept("identification…");
+                step.accept(I18n.t("identification…"));
 
                 // Instances fraîches par tâche (voir le commentaire sur processEntry()) :
                 // jamais les champs partagés mb/acoustId/lastFm quand plusieurs fichiers
@@ -174,7 +175,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             if (moved != null) entry.currentPath = moved;
                         }
                     } catch (Exception ex) {
-                        log("  déplacement (non tagué) échoué: " + ex.getMessage());
+                        log(I18n.t("  déplacement (non tagué) échoué: %s", ex.getMessage()));
                     }
                 }
 
@@ -218,7 +219,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 .orElse(null);
             java.nio.file.Path logPath = correctionLog.flush(folder);
             if (logPath != null)
-                onProgress.accept("Journal écrit → " + logPath.getFileName());
+                onProgress.accept(I18n.t("Journal écrit → %s", logPath.getFileName()));
         } catch (Exception ignored) {}
     }
 
@@ -269,13 +270,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (albumName.isBlank()) albumName = folderName;
             if (albumName.isBlank()) continue;
 
-            onProgress.accept(String.format("[album-first] \"%s\" (%d fichiers) — recherche MB…",
+            onProgress.accept(I18n.t("[album-first] \"%s\" (%d fichiers) — recherche MB…",
                     albumName, files.size()));
 
             try {
                 String relMbid = mb.searchBestRelease(albumName, artistHint);
                 if (relMbid == null || relMbid.isBlank()) {
-                    onProgress.accept(String.format(
+                    onProgress.accept(I18n.t(
                             "[album-first] \"%s\" — non trouvé dans MB (score < 70) → fallback piste/piste",
                             albumName));
                     continue;
@@ -284,7 +285,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 MusicBrainzClient.ReleaseTracklist tl = mb.lookupRelease(relMbid);
                 if (tl == null || tl.tracks().isEmpty()) continue;
 
-                onProgress.accept(String.format(
+                onProgress.accept(I18n.t(
                         "[album-first] \"%s\" trouvé — %d pistes, appariement…", tl.album(), tl.tracks().size()));
 
                 // Garde anti-doublon : une piste de la tracklist ne doit jamais être appliquée à
@@ -295,14 +296,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     if (isCancelled()) break;
                     MusicBrainzClient.ReleaseTrack track = matchFileToTrack(entry, tl.tracks());
                     if (track == null) {
-                        log("[album-first] " + entry.filename() + " → pas d'appariement dans tracklist");
+                        log(I18n.t("[album-first] %s → pas d'appariement dans tracklist", entry.filename()));
                         continue;
                     }
                     String trackKey = !track.recordingMbid().isBlank()
                             ? track.recordingMbid() : (track.disc() + "/" + track.trackNo());
                     if (!usedTracks.add(trackKey)) {
-                        log("[album-first] " + entry.filename()
-                            + " → piste déjà assignée à un autre fichier de ce dossier, ignoré (garde anti-doublon)");
+                        log(I18n.t("[album-first] %s → piste déjà assignée à un autre fichier de ce dossier, ignoré (garde anti-doublon)",
+                            entry.filename()));
                         continue;
                     }
 
@@ -382,13 +383,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                                 if (Config.get().deleteEmptyDirsAfterRename()) {
                                     FileRenamer.deleteEmptyAncestors(oldParent, root);
                                 }
-                                log("[album-first]   renommé → " + newPath);
+                                log(I18n.t("[album-first]   renommé → %s", newPath));
                             }
                         } catch (Exception ex) {
                             // Visible dans le log ET dans le statut UI — sans ça un déplacement
                             // qui échoue (permissions, disque cible...) est invisible.
                             renameErr = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-                            log("[album-first]   renommage échoué : " + renameErr);
+                            log(I18n.t("[album-first]   renommage échoué : %s", renameErr));
                         }
                     }
 
@@ -402,22 +403,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         entry.result  = ti;
                         entry.status  = FileEntry.Status.TAGGED;
                         if (finalRenamedPath != null) entry.currentPath = finalRenamedPath;
-                        entry.message = finalRenameErr != null ? "Tagué, renommage échoué : " + finalRenameErr : "";
+                        entry.message = finalRenameErr != null ? I18n.t("Tagué, renommage échoué : %s", finalRenameErr) : "";
                     });
                     publish(entry);
                     done.add(entry);
-                    log("[album-first] ✓ " + entry.filename()
-                        + " → piste " + track.trackNo() + " \"" + track.title() + "\"");
+                    log(I18n.t("[album-first] ✓ %s → piste %s \"%s\"",
+                        entry.filename(), track.trackNo(), track.title()));
                 }
 
             } catch (Exception ex) {
-                onProgress.accept(String.format("[album-first] Erreur \"%s\" : %s", albumName, ex.getMessage()));
-                log("[album-first] exception : " + ex.getMessage());
+                onProgress.accept(I18n.t("[album-first] Erreur \"%s\" : %s", albumName, ex.getMessage()));
+                log(I18n.t("[album-first] exception : %s", ex.getMessage()));
             }
         }
 
         if (!done.isEmpty())
-            onProgress.accept(String.format("[album-first] %d fichier(s) tagué(s) par album — %d restant(s) en pipeline normal",
+            onProgress.accept(I18n.t("[album-first] %d fichier(s) tagué(s) par album — %d restant(s) en pipeline normal",
                     done.size(), queue.size() - done.size()));
         return done;
     }
@@ -544,8 +545,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // Vérifier que le fichier existe avant tout traitement
             if (!fichier.exists()) {
                 entry.status  = FileEntry.Status.ERROR;
-                entry.message = "Fichier introuvable";
-                log("▶ SKIP   " + fichier.getName() + " (fichier introuvable)");
+                entry.message = I18n.t("Fichier introuvable");
+                log(I18n.t("▶ SKIP   %s (fichier introuvable)", fichier.getName()));
                 return;
             }
 
@@ -554,7 +555,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 try {
                     com.opentagger.AudioTranscoder.Format fmt =
                         com.opentagger.AudioTranscoder.Format.fromId(Config.get().transcodeFormat());
-                    step.accept("transcodage → " + fmt.id.toUpperCase() + "…");
+                    step.accept(I18n.t("transcodage → %s…", fmt.id.toUpperCase()));
                     java.nio.file.Path transcoded = new com.opentagger.AudioTranscoder()
                         .transcode(entry.currentPath != null ? entry.currentPath
                                    : entry.file.toPath(),
@@ -566,25 +567,25 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         log("  transcoded → " + transcoded.getFileName());
                     }
                 } catch (Exception txEx) {
-                    log("  transcode WARN: " + txEx.getMessage() + " — poursuite sans transcodage");
+                    log(I18n.t("  transcode WARN: %s — poursuite sans transcodage", txEx.getMessage()));
                 }
             }
 
-            log("▶ START  " + fichier.getName());
+            log(I18n.t("▶ START  %s", fichier.getName()));
 
-            log("  findTags...");
+            log(I18n.t("  findTags..."));
             List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm);
             entry.forceReidentify = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
-            log("  findTags → " + results.size() + " résultat(s)" +
-                (results.isEmpty() ? "" : " score=" + results.get(0).score));
+            log(I18n.t("  findTags → %s résultat(s)%s", results.size(),
+                results.isEmpty() ? "" : " score=" + results.get(0).score));
 
             int seuil = Config.get().minScoreAuto();
 
             if (results.isEmpty()) {
                 entry.status  = FileEntry.Status.SKIPPED;
-                entry.message = "Non identifié";
-                log("  SKIPPED (non identifié)");
+                entry.message = I18n.t("Non identifié");
+                log(I18n.t("  SKIPPED (non identifié)"));
                 return;
             }
 
@@ -593,17 +594,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (best.score < seuil) {
                 entry.candidates = results;
                 entry.status  = FileEntry.Status.SKIPPED;
-                entry.message = "Score " + best.score + "% < " + seuil + "% — " + results.size() + " candidat(s)";
-                log("  SKIPPED score trop bas");
+                entry.message = I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size());
+                log(I18n.t("  SKIPPED score trop bas"));
                 return;
             }
 
-            log("  ✓ identifié : " + best.artist + " – " + best.title + " (score=" + best.score + ")");
+            log(I18n.t("  ✓ identifié : %s – %s (score=%s)", best.artist, best.title, best.score));
 
             // Enrichir avec lookup si album ou année manquants (la recherche ne retourne pas
             // toujours les releases — ex. remixes, singles sans release dédiée dans MB)
             if ((best.album.isBlank() || best.year.isBlank()) && !best.recordingMbid.isBlank()) {
-                step.accept("enrichissement MusicBrainz…");
+                step.accept(I18n.t("enrichissement MusicBrainz…"));
                 try {
                     String lookupCached = cache.getLookup(best.recordingMbid);
                     TagInfo full = (lookupCached != null)
@@ -624,7 +625,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (!full.artistSort.isBlank())       best.artistSort       = full.artistSort;
                         if (!full.isrc.isBlank())             best.isrc             = full.isrc;
                         if (!full.language.isBlank())         best.language         = full.language;
-                        log("  enrichi←lookup: album='" + best.album + "' année='" + best.year + "' artistMbid='" + best.artistMbid + "'");
+                        log(I18n.t("  enrichi←lookup: album='%s' année='%s' artistMbid='%s'",
+                            best.album, best.year, best.artistMbid));
                     }
                 } catch (Exception ignored) {}
             }
@@ -649,7 +651,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (best.releaseGroupMbid.isBlank() && !full.releaseGroupMbid.isBlank()) best.releaseGroupMbid = full.releaseGroupMbid;
                         if (best.recordingMbid.isBlank()    && !full.recordingMbid.isBlank())    best.recordingMbid    = full.recordingMbid;
                         if (best.isrc.isBlank()             && !full.isrc.isBlank())             best.isrc             = full.isrc;
-                        log("  enrichi←MB search: album='" + best.album + "' année='" + best.year + "' artistMbid='" + best.artistMbid + "'");
+                        log(I18n.t("  enrichi←MB search: album='%s' année='%s' artistMbid='%s'",
+                            best.album, best.year, best.artistMbid));
                     }
                 } catch (Exception ignored) {}
             }
@@ -668,8 +671,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     || "Various Artists".equalsIgnoreCase(origAlbumArtist);
                 // MB n'a pas retourné de release compilation → restaurer contexte original
                 if (origWasCompilation && !origAlbum.isBlank() && !"1".equals(best.isCompilation)) {
-                    log("  compilation restaurée : album='" + origAlbum
-                        + "' albumArtist='" + origAlbumArtist + "'");
+                    log(I18n.t("  compilation restaurée : album='%s' albumArtist='%s'",
+                        origAlbum, origAlbumArtist));
                     best.album         = origAlbum;
                     best.albumArtist   = origAlbumArtist.isBlank()
                         ? Config.get().vaName() : origAlbumArtist;
@@ -678,7 +681,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 }
             }
 
-            log("  corrector...");
+            log(I18n.t("  corrector..."));
             // fichier (déjà résolu via entry.currentPath en tête de méthode, ligne ~384) et non
             // entry.file : ce dernier est le chemin D'ORIGINE au chargement et ne change jamais,
             // même après un renommage (même défaut que "Ouvrir le dossier parent"/"Renommer ce
@@ -686,22 +689,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             corrector.correct(best, fichier.toPath());
             taggerScript.apply(best);
 
-            step.accept("genres…");
-            log("  genres...");
+            step.accept(I18n.t("genres…"));
+            log(I18n.t("  genres..."));
             TagEnrichment.enrichGenre(best, discogs, lastFm);
-            log("  genre=" + best.genre);
+            log(I18n.t("  genre=%s", best.genre));
 
             if (best.mood.isBlank()) {
-                try { lastFm.enrichMood(best); log("  mood←lastfm=" + best.mood); } catch (Exception ignored) {}
+                try { lastFm.enrichMood(best); log(I18n.t("  mood←lastfm=%s", best.mood)); } catch (Exception ignored) {}
             }
             try { lastFm.enrichArtistUrls(best); } catch (Exception ignored) {}
 
             if (bpmEnabled && best.bpm.isBlank()) {
-                step.accept("BPM…");
-                log("  BPM...");
+                step.accept(I18n.t("BPM…"));
+                log(I18n.t("  BPM..."));
                 int bpm = bpmDet.detect(fichier.getAbsolutePath());
                 if (bpm > 0) best.bpm = String.valueOf(bpm);
-                log("  bpm=" + best.bpm);
+                log(I18n.t("  bpm=%s", best.bpm));
             }
 
             // Empreinte AcoustID : calculée même quand l'identification vient de SongRec/AudD/texte
@@ -711,35 +714,35 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // calcul local.
             if (Config.get().saveAcoustidFingerprints() && best.acoustidFingerprint.isBlank()
                     && FpcalcInstaller.isAvailable()) {
-                step.accept("empreinte…");
-                log("  empreinte...");
+                step.accept(I18n.t("empreinte…"));
+                log(I18n.t("  empreinte..."));
                 try {
                     best.acoustidFingerprint = Fingerprinter.compute(fichier).fingerprint();
-                    log("  empreinte calculée");
+                    log(I18n.t("  empreinte calculée"));
                 } catch (Exception ex) {
-                    log("  empreinte: " + ex.getMessage());
+                    log(I18n.t("  empreinte: %s", ex.getMessage()));
                 }
             }
 
             if (essentiaEnabled) {
-                log("  essentia...");
+                log(I18n.t("  essentia..."));
                 essentia.analyze(fichier.getAbsolutePath(), best);
-                log("  mood←essentia=" + best.mood);
+                log(I18n.t("  mood←essentia=%s", best.mood));
             }
 
             // ── Translittération artiste (si nom non-Latin et option activée) ──────
             String artistBeforeTranslit = best.artist;
             TagEnrichment.translateArtist(best, mb, aliasCache);
             if (!best.artist.equals(artistBeforeTranslit))
-                log("  translit: " + artistBeforeTranslit + " → " + best.artist);
+                log(I18n.t("  translit: %s → %s", artistBeforeTranslit, best.artist));
 
-            log("  lyrics...");
+            log(I18n.t("  lyrics..."));
             try { lyrics.enrich(best); } catch (Exception ignored) {}
 
-            step.accept("pochette…");
-            log("  fanart/caa...");
+            step.accept(I18n.t("pochette…"));
+            log(I18n.t("  fanart/caa..."));
             Path cover = TagEnrichment.resolveCover(best, fichier, caa, fanArt);
-            log("  cover=" + (cover != null ? cover.getFileName() : "null"));
+            log(I18n.t("  cover=%s", cover != null ? cover.getFileName() : "null"));
 
             // Sauvegarde pochette en fichier séparé si configuré
             if (cover != null && Config.get().bool("cover.save_to_file", false)) {
@@ -754,25 +757,25 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             // ── ReplayGain (avant écriture pour inclure dans le même commit) ────────
             if (rgEnabled) {
-                log("  replaygain...");
+                log(I18n.t("  replaygain..."));
                 try {
                     ReplayGainAnalyzer.RGResult rg = replayGain.analyze(fichier.getAbsolutePath());
                     if (rg != null) {
                         best.replayGainTrackGain = rg.trackGain();
                         best.replayGainTrackPeak = rg.trackPeak();
-                        log("  rg: gain=" + rg.trackGain() + " peak=" + rg.trackPeak());
+                        log(I18n.t("  rg: gain=%s peak=%s", rg.trackGain(), rg.trackPeak()));
                     }
                 } catch (Exception ignored) {}
             }
 
-            step.accept("écriture tags…");
-            log("  write tags...");
+            step.accept(I18n.t("écriture tags…"));
+            log(I18n.t("  write tags..."));
             best = writer.write(fichier, best, cover);
 
             // ── Renommage optionnel ───────────────────────────────────────
             String oldFilePath = fichier.getAbsolutePath();
             if (maskIndex >= 0) {
-                step.accept("renommage…");
+                step.accept(I18n.t("renommage…"));
                 try {
                     Path curPath = fichier.toPath();
                     String libRoot = Config.get().libraryRoot();
@@ -780,10 +783,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     Path root = libRootValid
                             ? java.nio.file.Paths.get(libRoot)
                             : (entry.scanRoot != null ? entry.scanRoot : curPath.getParent());
-                    log("  renommage → racine=" + root
-                        + (libRoot.isBlank() ? " (aucune bibliothèque configurée)"
-                           : libRootValid ? " (bibliothèque configurée)"
-                           : " (bibliothèque configurée introuvable/inaccessible : '" + libRoot + "' → repli sur le dossier scanné)"));
+                    String rootNote = libRoot.isBlank() ? I18n.t(" (aucune bibliothèque configurée)")
+                           : libRootValid ? I18n.t(" (bibliothèque configurée)")
+                           : I18n.t(" (bibliothèque configurée introuvable/inaccessible : '%s' → repli sur le dossier scanné)", libRoot);
+                    log(I18n.t("  renommage → racine=%s%s", root, rootNote));
                     Path newPath = renamer.rename(curPath, best, maskIndex, root);
                     if (newPath != null) {
                         Path oldParent    = fichier.toPath().getParent();
@@ -791,19 +794,19 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (Config.get().deleteEmptyDirsAfterRename()) {
                             FileRenamer.deleteEmptyAncestors(oldParent, root);
                         }
-                        entry.message = "→ " + newPath.getFileName();
-                        log("  renommé → " + newPath);
+                        entry.message = I18n.t("→ %s", newPath.getFileName());
+                        log(I18n.t("  renommé → %s", newPath));
                     } else {
-                        log("  renommage : déjà au bon endroit (chemin cible identique)");
+                        log(I18n.t("  renommage : déjà au bon endroit (chemin cible identique)"));
                     }
                 } catch (Exception ex) {
                     // Ne plus avaler cette erreur en silence : sans ça, un fichier tagué mais dont
                     // le déplacement échoue (permissions, disque externe non réinscriptible,
                     // caractère non supporté par le système de fichiers cible...) restait dans son
                     // dossier d'origine sans aucune indication de la cause.
-                    log("  ✗ renommage ÉCHOUÉ : " + ex.getClass().getSimpleName() + " — " + ex.getMessage());
-                    entry.message = "Tagué, renommage échoué : "
-                        + (ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName());
+                    log(I18n.t("  ✗ renommage ÉCHOUÉ : %s — %s", ex.getClass().getSimpleName(), ex.getMessage()));
+                    entry.message = I18n.t("Tagué, renommage échoué : %s",
+                        ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName());
                 }
             }
 
@@ -817,7 +820,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             entry.result = best;
             entry.status = FileEntry.Status.TAGGED;
-            log("  ✔ TAGGED " + fichier.getName() + (sugg.isEmpty() ? "" : " (" + sugg.size() + " suggestion(s))"));
+            log(I18n.t("  ✔ TAGGED %s%s", fichier.getName(),
+                sugg.isEmpty() ? "" : I18n.t(" (%s suggestion(s))", sugg.size())));
 
             // Clé cache : MBID réel si disponible, sinon clé synthétique artist+title
             // Garantit que même les résultats SongRec-only sont mémorisés et ne repassent pas en PENDING
@@ -848,7 +852,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 try {
                     new AcoustIdSubmitter().submit(fichier, best);
                 } catch (Exception ex) {
-                    log("  AcoustID submit skip: " + ex.getMessage());
+                    log(I18n.t("  AcoustID submit skip: %s", ex.getMessage()));
                 }
             }
             submitToMusicBrainz(best);
@@ -856,7 +860,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         } catch (Exception ex) {
             entry.status  = FileEntry.Status.ERROR;
             entry.message = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-            log("  ✗ ERROR " + entry.filename() + " : " + entry.message);
+            log(I18n.t("  ✗ ERROR %s : %s", entry.filename(), entry.message));
         }
     }
 
@@ -870,7 +874,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify,
                                     MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
-        if (TagWriter.repairM4aIfNeeded(fichier)) log("  M4A réparé OK");
+        if (TagWriter.repairM4aIfNeeded(fichier)) log(I18n.t("  M4A réparé OK"));
 
         // Indice d'album : tag existant > nom du dossier parent.
         // Permet à pickBestRelease() de favoriser la release MB qui correspond au dossier iTunes.
@@ -885,7 +889,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // Le tag existant prime ; le dossier parent sert de fallback si tag vide
             String albumHint = tagAlbum.isBlank() ? folderAlbum : tagAlbum;
             mb.setPreferredAlbum(albumHint);
-            if (!albumHint.isBlank()) log("  indice album : '" + albumHint + "'");
+            if (!albumHint.isBlank()) log(I18n.t("  indice album : '%s'", albumHint));
         }
 
         // 0. Historique personnel — ce fichier a-t-il déjà été tagué par OpenTagger ?
@@ -905,14 +909,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // Empreinte audio → confiance totale, retour instantané
                     hist.score = 100;
                     lastFindTagsSource.set(cachedSource);
-                    log("  cache hit [" + cachedSource + "] ✓ : " + hist.artist + " – " + hist.title);
+                    log(I18n.t("  cache hit [%s] ✓ : %s – %s", cachedSource, hist.artist, hist.title));
                     return List.of(hist);
                 } else {
                     // Identification textuelle → on continue vers SongRec pour vérifier
-                    log("  cache hit [text] → SongRec va vérifier : " + hist.artist + " – " + hist.title);
+                    log(I18n.t("  cache hit [text] → SongRec va vérifier : %s – %s", hist.artist, hist.title));
                 }
             } else if (hist != null) {
-                log("  cache hit IGNORÉ (artiste+titre vides) pour mbid=" + knownMbid);
+                log(I18n.t("  cache hit IGNORÉ (artiste+titre vides) pour mbid=%s", knownMbid));
             }
         }
 
@@ -930,10 +934,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             TagInfo t = existingTags.copy();
             t.score = 100;
             lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
-            log("  tags MB existants ✓ [releaseMbid=" + existingTags.releaseMbid.substring(0,
-                    Math.min(8, existingTags.releaseMbid.length())) + "…] "
-                + existingTags.artist + " – " + existingTags.title
-                + " [" + existingTags.album + "] → skip identification");
+            log(I18n.t("  tags MB existants ✓ [releaseMbid=%s…] %s – %s [%s] → skip identification",
+                existingTags.releaseMbid.substring(0, Math.min(8, existingTags.releaseMbid.length())),
+                existingTags.artist, existingTags.title, existingTags.album));
             return List.of(t);
         }
 
@@ -941,10 +944,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         //    de faux tags existants. Placé AVANT AcoustID pour être la source principale.
         if (SongRecClient.isAvailable()) {
             try {
-                log("  SongRec...");
+                log(I18n.t("  SongRec..."));
                 TagInfo sr = songRec.recognize(fichier);
                 if (sr != null && !sr.artist.isBlank() && !sr.title.isBlank()) {
-                    log("  SongRec → " + sr.artist + " – " + sr.title);
+                    log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
                     // Enrichir avec MusicBrainz (ajoute MBIDs, piste, disque, etc.)
                     String srHash = MetadataCache.queryHash(sr.artist, sr.title);
                     String srCached = cache.getRecordingSearch(srHash);
@@ -963,7 +966,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
                         if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
                         best.score = 90;
-                        log("  SongRec→MB: " + best.artist + " – " + best.title + " [" + best.album + "] score=" + best.score);
+                        log(I18n.t("  SongRec→MB: %s – %s [%s] score=%s", best.artist, best.title, best.album, best.score));
                         lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                         return srMb;
                     }
@@ -983,15 +986,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
                             if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
                             best.score = 90;
-                            log("  SongRec→MB (titre nettoyé '" + cleanTitle + "'): " + best.artist
-                                    + " – " + best.title + " [" + best.album + "] score=" + best.score);
+                            log(I18n.t("  SongRec→MB (titre nettoyé '%s'): %s – %s [%s] score=%s",
+                                    cleanTitle, best.artist, best.title, best.album, best.score));
                             lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                             return srMbClean;
                         }
                     }
                     // MB n'a rien enrichi : garder le résultat SongRec seul
                     sr.score = 85;
-                    log("  SongRec seul (MB sans match): " + sr.artist + " – " + sr.title);
+                    log(I18n.t("  SongRec seul (MB sans match): %s – %s", sr.artist, sr.title));
                     // Cascade centralisée (au lieu d'une copie inline qui divergerait silencieusement
                     // si TagEnrichment.enrichGenre change) — de toute façon re-noopée sans risque à
                     // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
@@ -999,10 +1002,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                     return List.of(sr);
                 } else {
-                    log("  SongRec → rien trouvé");
+                    log(I18n.t("  SongRec → rien trouvé"));
                 }
             } catch (Exception e) {
-                log("  SongRec WARN: " + e.getMessage());
+                log(I18n.t("  SongRec WARN: %s", e.getMessage()));
             }
         }
 
@@ -1018,12 +1021,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
             // Valider : ignorer si artiste ET titre vides (lookup MB incomplet)
             if (t != null && (!t.artist.isBlank() || !t.title.isBlank())) {
-                log("  MBID lookup: " + t.artist + " – " + t.title);
+                log(I18n.t("  MBID lookup: %s – %s", t.artist, t.title));
                 t.score = 100;
                 lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
                 return List.of(t);
             } else if (t != null) {
-                log("  MBID lookup IGNORÉ (artiste+titre vides) mbid=" + existingMbid);
+                log(I18n.t("  MBID lookup IGNORÉ (artiste+titre vides) mbid=%s", existingMbid));
             }
         }
 
@@ -1056,31 +1059,31 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // cyrillique, etc. → inutile de chercher dans MB avec ces termes, SongRec en priorité
         boolean nonLatinInput = TagEnrichment.hasNonLatinChars(artist) || TagEnrichment.hasNonLatinChars(title);
         if (nonLatinInput) {
-            log("  tags non-Latin → SongRec en priorité");
+            log(I18n.t("  tags non-Latin → SongRec en priorité"));
             artist = ""; title = "";
         } else {
             artist = cleanSearchTerm(artist);
             title  = cleanSearchTerm(title);
             if (isGenericTag(artist)) artist = "";
             if (isGenericTag(title))  title  = "";
-            log("  tags lus: artiste='" + artist + "' titre='" + title + "'");
+            log(I18n.t("  tags lus: artiste='%s' titre='%s'", artist, title));
             if (artist.isBlank() && title.isBlank()) {
                 String[] fn = parseFilename(fichier);
                 if (TagEnrichment.hasNonLatinChars(fn[0]) || TagEnrichment.hasNonLatinChars(fn[1])) {
                     nonLatinInput = true;
-                    log("  nom de fichier non-Latin → SongRec en priorité");
+                    log(I18n.t("  nom de fichier non-Latin → SongRec en priorité"));
                 } else {
                     artist = fn[0]; title = fn[1];
                     // Appliquer isGenericTag sur l'artiste du nom de fichier aussi ("0", "01", etc.)
                     if (isGenericTag(artist)) artist = "";
-                    log("  → infos du nom de fichier: artiste='" + artist + "' titre='" + title + "'");
+                    log(I18n.t("  → infos du nom de fichier: artiste='%s' titre='%s'", artist, title));
                 }
             } else if (artist.isBlank() && !title.isBlank()) {
                 // Artiste vide mais titre connu : essayer de récupérer l'artiste depuis le nom de fichier
                 String[] fn = parseFilename(fichier);
                 if (!fn[0].isBlank() && !isGenericTag(fn[0]) && !TagEnrichment.hasNonLatinChars(fn[0])) {
                     artist = fn[0];
-                    log("  artiste←nom de fichier: '" + artist + "'");
+                    log(I18n.t("  artiste←nom de fichier: '%s'", artist));
                 }
                 // Dernier recours : titre contient "Artiste-Titre" ou "Artiste - Titre" → splitter
                 // Ex: titre="Bob Sinclar-Give A Lil Love" → artiste="Bob Sinclar", titre="Give A Lil Love"
@@ -1100,19 +1103,19 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             && (potArtist.contains(" ") || potArtist.length() >= 5)) {
                         artist = potArtist;
                         title  = potTitle;
-                        log("  artiste+titre←split titre: '" + artist + "' / '" + title + "'");
+                        log(I18n.t("  artiste+titre←split titre: '%s' / '%s'", artist, title));
                     }
                 }
                 // Titres trop génériques sans artiste → MB donnera trop de faux positifs → SongRec
                 if (artist.isBlank() && GENERIC_TITLES_WITHOUT_ARTIST.contains(title.toLowerCase())) {
-                    log("  titre générique sans artiste ('" + title + "') → SongRec");
+                    log(I18n.t("  titre générique sans artiste ('%s') → SongRec", title));
                     title = "";
                 }
             }
         }
 
         if (artist.isBlank() && title.isBlank() && !nonLatinInput) {
-            log("  → rien à chercher");
+            log(I18n.t("  → rien à chercher"));
             return List.of();
         }
 
@@ -1124,15 +1127,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             String cached = cache.getRecordingSearch(hash);
             if (cached != null) {
                 List<TagInfo> r = mb.parseFromCache(cached);
-                log("  MB cache: " + r.size() + " résultat(s)");
+                log(I18n.t("  MB cache: %s résultat(s)", r.size()));
                 if (!r.isEmpty()) return r;
             }
 
             // 5. MusicBrainz — réseau (avec fallbacks progressifs)
-            log("  MB search: '" + artist + "' / '" + title + "'");
+            log(I18n.t("  MB search: '%s' / '%s'", artist, title));
             results = mb.searchRecording(artist, title);
-            log("  MB search → " + results.size() + " résultat(s)" +
-                (results.isEmpty() ? "" : " meilleur score=" + results.get(0).score));
+            log(I18n.t("  MB search → %s résultat(s)%s", results.size(),
+                results.isEmpty() ? "" : I18n.t(" meilleur score=%s", results.get(0).score)));
             if (!results.isEmpty()) {
                 cache.putRecordingSearch(hash, mb.lastRawJson());
                 return results;
@@ -1141,9 +1144,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // 5b. Fallback: artiste simplifié
             String artistSimple = simplifyArtist(artist);
             if (!artistSimple.equals(artist) && !artistSimple.isBlank() && !isGenericTag(artistSimple)) {
-                log("  MB fallback artiste simplifié: '" + artistSimple + "'");
+                log(I18n.t("  MB fallback artiste simplifié: '%s'", artistSimple));
                 results = mb.searchRecording(artistSimple, title);
-                log("  MB fallback → " + results.size() + " résultat(s)");
+                log(I18n.t("  MB fallback → %s résultat(s)", results.size()));
                 if (!results.isEmpty()) {
                     cache.putRecordingSearch(hash, mb.lastRawJson());
                     return results;
@@ -1157,9 +1160,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Typique : fichier avec artist="0"/vide mais title+album corrects (ex: M4A mal encodé)
         if (!nonLatinInput && results.isEmpty() && artist.isBlank()
                 && !title.isBlank() && !existingAlbum.isBlank()) {
-            log("  MB fallback titre+album: '" + title + "' / '" + existingAlbum + "'");
+            log(I18n.t("  MB fallback titre+album: '%s' / '%s'", title, existingAlbum));
             results = mb.searchRecording("", title, existingAlbum);
-            log("  MB titre+album → " + results.size() + " résultat(s)");
+            log(I18n.t("  MB titre+album → %s résultat(s)", results.size()));
             if (!results.isEmpty()) {
                 cache.putRecordingSearch(MetadataCache.queryHash(title, existingAlbum), mb.lastRawJson());
                 return results;
@@ -1169,11 +1172,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // 5c. SongRec — étape 1 : reconnaissance audio (empreinte Shazam gratuite)
         //              étape 2 : MB complète ce que SongRec a trouvé
         if (SongRecClient.isAvailable()) {
-            log(nonLatinInput ? "  SongRec (non-Latin)..." : "  SongRec fallback...");
+            log(nonLatinInput ? I18n.t("  SongRec (non-Latin)...") : I18n.t("  SongRec fallback..."));
             try {
                 TagInfo sr = songRec.recognize(fichier);
                 if (sr != null) {
-                    log("  SongRec → " + sr.artist + " – " + sr.title);
+                    log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
                     // MB complète : MBID, album complet, track#, disc#, albumArtist, année…
                     List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
                     if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
@@ -1186,14 +1189,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (mbr.track.isBlank()    && !sr.track.isBlank())   mbr.track   = sr.track;
                         if (mbr.comment.isBlank()  && !sr.comment.isBlank()) mbr.comment = sr.comment;
                         mbr.score = 90;
-                        log("  SongRec+MB → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
+                        log(I18n.t("  SongRec+MB → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
                         return List.of(mbr);
                     }
                     // MB échoue avec titre complet → réessayer sans qualificatif entre parenthèses
                     // ex: "Song Name (Home Demos)" → "Song Name"
                     String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
                     if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
-                        log("  SongRec+MB (titre nettoyé): '" + cleanTitle + "'");
+                        log(I18n.t("  SongRec+MB (titre nettoyé): '%s'", cleanTitle));
                         List<TagInfo> mbClean = mb.searchRecording(sr.artist, cleanTitle);
                         if (!mbClean.isEmpty() && mbClean.get(0).score >= 50) {
                             TagInfo mbr = mbClean.get(0);
@@ -1205,7 +1208,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             if (mbr.comment.isBlank()  && !sr.comment.isBlank()) mbr.comment = sr.comment;
                             if (!sr.title.equals(cleanTitle)) mbr.title = sr.title;
                             mbr.score = 85;
-                            log("  SongRec+MB(nettoyé) → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
+                            log(I18n.t("  SongRec+MB(nettoyé) → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
                             return List.of(mbr);
                         }
                     }
@@ -1213,34 +1216,34 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     if (sr.artistMbid.isBlank()) {
                         try {
                             String amid = mb.searchArtistMbid(sr.artist);
-                            if (!amid.isBlank()) { sr.artistMbid = amid; log("  artistMbid←MB: " + amid); }
+                            if (!amid.isBlank()) { sr.artistMbid = amid; log(I18n.t("  artistMbid←MB: %s", amid)); }
                         } catch (Exception ignored) {}
                     }
                     sr.score = 85;
-                    log("  SongRec seul (MB non confirmé) → " + sr.artist + " – " + sr.title);
+                    log(I18n.t("  SongRec seul (MB non confirmé) → %s – %s", sr.artist, sr.title));
                     return List.of(sr);
                 }
             } catch (Exception e) {
-                log("  SongRec erreur: " + e.getMessage());
+                log(I18n.t("  SongRec erreur: %s", e.getMessage()));
             }
         }
 
         // 5d. AcoustID en dernier recours (lent mais très précis par empreinte audio)
         if (!useAcoustId && !Config.get().acoustidKey().isBlank()) {
-            log("  AcoustID fallback...");
+            log(I18n.t("  AcoustID fallback..."));
             List<TagInfo> r = acoustId.identify(fichier);
-            log("  AcoustID fallback → " + r.size() + " résultat(s)");
+            log(I18n.t("  AcoustID fallback → %s résultat(s)", r.size()));
             if (!r.isEmpty()) return r;
         }
 
         // 5e. AudD — dernier recours après SongRec : algorithme de reconnaissance différent,
         // utile quand SongRec ne reconnaît pas le morceau (cf. README : AcoustID → SongRec → AudD).
         if (AudDClient.isAvailable()) {
-            log("  AudD fallback...");
+            log(I18n.t("  AudD fallback..."));
             try {
                 TagInfo ad = audd.recognize(fichier);
                 if (ad != null) {
-                    log("  AudD → " + ad.artist + " – " + ad.title);
+                    log(I18n.t("  AudD → %s – %s", ad.artist, ad.title));
                     List<TagInfo> mbResults = mb.searchRecording(ad.artist, ad.title);
                     if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
                         TagInfo mbr = mbResults.get(0);
@@ -1249,22 +1252,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (mbr.year.isBlank()    && !ad.year.isBlank())    mbr.year    = ad.year;
                         if (mbr.isrc.isBlank()    && !ad.isrc.isBlank())    mbr.isrc    = ad.isrc;
                         mbr.score = 90;
-                        log("  AudD+MB → " + mbr.artist + " – " + mbr.title + " [" + mbr.album + "]");
+                        log(I18n.t("  AudD+MB → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
                         return List.of(mbr);
                     }
                     if (ad.artistMbid.isBlank()) {
                         try {
                             String amid = mb.searchArtistMbid(ad.artist);
-                            if (!amid.isBlank()) { ad.artistMbid = amid; log("  artistMbid←MB: " + amid); }
+                            if (!amid.isBlank()) { ad.artistMbid = amid; log(I18n.t("  artistMbid←MB: %s", amid)); }
                         } catch (Exception ignored) {}
                     }
                     ad.score = 85;
-                    log("  AudD seul (MB non confirmé) → " + ad.artist + " – " + ad.title);
+                    log(I18n.t("  AudD seul (MB non confirmé) → %s – %s", ad.artist, ad.title));
                     return List.of(ad);
                 }
-                log("  AudD → rien trouvé");
+                log(I18n.t("  AudD → rien trouvé"));
             } catch (Exception e) {
-                log("  AudD erreur: " + e.getMessage());
+                log(I18n.t("  AudD erreur: %s", e.getMessage()));
             }
         }
         return results;
@@ -1290,7 +1293,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (albumFiles.size() < 2) continue;
 
             String releaseMbid = group.getKey();
-            log("  cluster: " + albumFiles.size() + " fichiers pour release " + releaseMbid);
+            log(I18n.t("  cluster: %s fichiers pour release %s", albumFiles.size(), releaseMbid));
             try {
                 MusicBrainzClient.ReleaseTracklist tracklist = mb.lookupRelease(releaseMbid);
                 if (tracklist == null || tracklist.tracks().isEmpty()) continue;
@@ -1322,7 +1325,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     if (changed) {
                         File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
                         result = writer.write(fichier, result);
-                        log("  cluster ok: " + fichier.getName() + " → piste " + result.track + "/" + result.trackTotal);
+                        log(I18n.t("  cluster ok: %s → piste %s/%s", fichier.getName(), result.track, result.trackTotal));
                         entry.result = result;
                         publish(entry);
                     }
@@ -1332,10 +1335,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     java.util.List<String> paths = albumFiles.stream()
                         .map(e -> e.currentPath != null ? e.currentPath.toString() : e.file.getAbsolutePath())
                         .collect(java.util.stream.Collectors.toList());
-                    log("  album RG: analyse " + paths.size() + " pistes...");
+                    log(I18n.t("  album RG: analyse %s pistes...", paths.size()));
                     ReplayGainAnalyzer.RGResult albumRg = ReplayGainAnalyzer.analyzeAlbum(paths);
                     if (albumRg != null) {
-                        log("  album RG: gain=" + albumRg.trackGain() + " peak=" + albumRg.trackPeak());
+                        log(I18n.t("  album RG: gain=%s peak=%s", albumRg.trackGain(), albumRg.trackPeak()));
                         for (FileEntry entry : albumFiles) {
                             File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
                             writer.writeAlbumReplayGain(f, albumRg.trackGain(), albumRg.trackPeak());
@@ -1344,7 +1347,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 }
 
             } catch (Exception e) {
-                log("  cluster erreur: " + e.getMessage());
+                log(I18n.t("  cluster erreur: %s", e.getMessage()));
             }
         }
     }
@@ -1476,17 +1479,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private static List<String> buildSuggestions(TagInfo best, Path cover, int seuil) {
         List<String> s = new java.util.ArrayList<>();
         if (best.score > 0 && best.score < seuil + 20)
-            s.add("Score modéré (" + best.score + "%) — vérifier l'identification");
+            s.add(I18n.t("Score modéré (%s%%) — vérifier l'identification", best.score));
         if (cover == null)
-            s.add("Pochette non trouvée");
+            s.add(I18n.t("Pochette non trouvée"));
         if (best.recordingMbid.isBlank())
-            s.add("MBID d'enregistrement manquant");
+            s.add(I18n.t("MBID d'enregistrement manquant"));
         if (best.album.isBlank())
-            s.add("Album inconnu");
+            s.add(I18n.t("Album inconnu"));
         if (best.year.isBlank())
-            s.add("Année manquante");
+            s.add(I18n.t("Année manquante"));
         if (best.genre.isBlank())
-            s.add("Genre manquant");
+            s.add(I18n.t("Genre manquant"));
         return s;
     }
 

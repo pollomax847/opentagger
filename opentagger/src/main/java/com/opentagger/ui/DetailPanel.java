@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.I18n;
 import com.opentagger.model.TagInfo;
 
 import javax.swing.*;
@@ -57,7 +58,7 @@ public class DetailPanel extends JPanel {
     private final JTextField tfSection           = tf(24);
     private final JTextField tfOverallWork       = tf(24);
     private final JTextField tfGrouping          = tf(24);
-    private final JCheckBox  chkClassical        = new JCheckBox("Musique classique");
+    private final JCheckBox  chkClassical        = new JCheckBox(I18n.t("Musique classique"));
 
     // ── Onglet 3 — Contributeurs ─────────────────────────────────────────────
     private final JTextField tfLyricist    = tf(24);
@@ -81,12 +82,12 @@ public class DetailPanel extends JPanel {
     private final JTextField tfIsrc       = tf(16);
     private final JTextField tfAmazonId   = tf(16);
     private final JTextField tfTags       = tf(24);
-    private final JCheckBox  chkHD             = new JCheckBox("HD (Hi-Res)");
-    private final JCheckBox  chkLive           = new JCheckBox("Live");
-    private final JCheckBox  chkCompilation    = new JCheckBox("Compilation");
-    private final JCheckBox  chkGreatestHits   = new JCheckBox("Greatest Hits");
-    private final JCheckBox  chkSoundtrack     = new JCheckBox("Bande originale");
-    private final JCheckBox  chkInstrumental   = new JCheckBox("Instrumental");
+    private final JCheckBox  chkHD             = new JCheckBox(I18n.t("HD (Hi-Res)"));
+    private final JCheckBox  chkLive           = new JCheckBox(I18n.t("Live"));
+    private final JCheckBox  chkCompilation    = new JCheckBox(I18n.t("Compilation"));
+    private final JCheckBox  chkGreatestHits   = new JCheckBox(I18n.t("Greatest Hits"));
+    private final JCheckBox  chkSoundtrack     = new JCheckBox(I18n.t("Bande originale"));
+    private final JCheckBox  chkInstrumental   = new JCheckBox(I18n.t("Instrumental"));
 
     // Mood (lecture seule — remplis par Essentia, non éditables manuellement)
     private final JTextField tfMood            = tf(16);
@@ -100,7 +101,7 @@ public class DetailPanel extends JPanel {
     private final JTextField tfMoodParty       = tf(12);
 
     // ── Onglet Pochette ──────────────────────────────────────────────────────
-    private final JLabel     lblCoverTab  = new JLabel("Aucune pochette", SwingConstants.CENTER);
+    private final JLabel     lblCoverTab  = new JLabel(I18n.t("Aucune pochette"), SwingConstants.CENTER);
     private final JLabel     lblCoverInfo = new JLabel(" ", SwingConstants.CENTER);
     private Runnable         onCoverClick;
 
@@ -137,13 +138,13 @@ public class DetailPanel extends JPanel {
     public DetailPanel() {
         super(new BorderLayout());
         JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
-        tabs.addTab("Général",       buildGeneralTab());
-        tabs.addTab("Pochette",      buildPochetteTab());
-        tabs.addTab("Classique",     buildClassicalTab());
-        tabs.addTab("Contributeurs", buildContribTab());
-        tabs.addTab("Audio / Mood",  buildAudioTab());
-        tabs.addTab("Paroles",       buildLyricsTab());
-        tabs.addTab("URLs & IDs",    buildIdsTab());
+        tabs.addTab(I18n.t("Général"),       buildGeneralTab());
+        tabs.addTab(I18n.t("Pochette"),      buildPochetteTab());
+        tabs.addTab(I18n.t("Classique"),     buildClassicalTab());
+        tabs.addTab(I18n.t("Contributeurs"), buildContribTab());
+        tabs.addTab(I18n.t("Audio / Mood"),  buildAudioTab());
+        tabs.addTab(I18n.t("Paroles"),       buildLyricsTab());
+        tabs.addTab(I18n.t("URLs & IDs"),    buildIdsTab());
         add(tabs, BorderLayout.CENTER);
 
         // Champs mood en lecture seule
@@ -352,7 +353,7 @@ public class DetailPanel extends JPanel {
             tf.setText(vals.iterator().next());
         } else {
             tf.setText("");
-            tf.putClientProperty("JTextField.placeholderText", "— valeurs multiples —");
+            tf.putClientProperty("JTextField.placeholderText", I18n.t("— valeurs multiples —"));
         }
     }
 
@@ -529,88 +530,88 @@ public class DetailPanel extends JPanel {
 
     private JScrollPane buildGeneralTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
-        fields.put("Titre :",          tfTitle);
-        fields.put("Artiste :",        tfArtist);
-        fields.put("Artiste album :",  tfAlbumArtist);
-        fields.put("Album :",          tfAlbum);
-        fields.put("Année :",          tfYear);
-        fields.put("Genre :",          tfGenre);
-        fields.put("Piste :",          tfTrack);
-        fields.put("Total pistes :",   tfTrackTotal);
-        fields.put("Disque :",         tfDiscNo);
-        fields.put("Total disques :",  tfDiscTotal);
+        fields.put(I18n.t("Titre :"),          tfTitle);
+        fields.put(I18n.t("Artiste :"),        tfArtist);
+        fields.put(I18n.t("Artiste album :"),  tfAlbumArtist);
+        fields.put(I18n.t("Album :"),          tfAlbum);
+        fields.put(I18n.t("Année :"),          tfYear);
+        fields.put(I18n.t("Genre :"),          tfGenre);
+        fields.put(I18n.t("Piste :"),          tfTrack);
+        fields.put(I18n.t("Total pistes :"),   tfTrackTotal);
+        fields.put(I18n.t("Disque :"),         tfDiscNo);
+        fields.put(I18n.t("Total disques :"),  tfDiscTotal);
         return scroll(formPanel(fields));
     }
 
     private JScrollPane buildClassicalTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
-        fields.put("Est classique :",     chkClassical);
-        fields.put("Compositeur :",       tfComposer);
-        fields.put("Tri compositeur :",   tfComposerSort);
-        fields.put("Chef d'orchestre :",  tfConductor);
-        fields.put("Orchestre :",         tfOrchestra);
-        fields.put("Ensemble :",          tfEnsemble);
-        fields.put("Chœur :",             tfChoir);
-        fields.put("Œuvre (Work) :",      tfWork);
-        fields.put("MB Work ID :",        tfWorkMbid);
-        fields.put("Mouvement :",         tfMovement);
-        fields.put("Nº mouvement :",      tfMovementNo);
-        fields.put("Total mouvements :",  tfMovementTotal);
-        fields.put("Partie :",            tfPart);
-        fields.put("Période :",           tfPeriod);
-        fields.put("Opus :",              tfOpus);
-        fields.put("Catalogue :",         tfClassicalCatalog);
-        fields.put("Surnom :",            tfClassicalNickname);
-        fields.put("Section (opéra) :",   tfSection);
-        fields.put("Œuvre globale :",     tfOverallWork);
-        fields.put("Grouping (iTunes) :", tfGrouping);
+        fields.put(I18n.t("Est classique :"),     chkClassical);
+        fields.put(I18n.t("Compositeur :"),       tfComposer);
+        fields.put(I18n.t("Tri compositeur :"),   tfComposerSort);
+        fields.put(I18n.t("Chef d'orchestre :"),  tfConductor);
+        fields.put(I18n.t("Orchestre :"),         tfOrchestra);
+        fields.put(I18n.t("Ensemble :"),          tfEnsemble);
+        fields.put(I18n.t("Chœur :"),             tfChoir);
+        fields.put(I18n.t("Œuvre (Work) :"),      tfWork);
+        fields.put(I18n.t("MB Work ID :"),        tfWorkMbid);
+        fields.put(I18n.t("Mouvement :"),         tfMovement);
+        fields.put(I18n.t("Nº mouvement :"),      tfMovementNo);
+        fields.put(I18n.t("Total mouvements :"),  tfMovementTotal);
+        fields.put(I18n.t("Partie :"),            tfPart);
+        fields.put(I18n.t("Période :"),           tfPeriod);
+        fields.put(I18n.t("Opus :"),              tfOpus);
+        fields.put(I18n.t("Catalogue :"),         tfClassicalCatalog);
+        fields.put(I18n.t("Surnom :"),            tfClassicalNickname);
+        fields.put(I18n.t("Section (opéra) :"),   tfSection);
+        fields.put(I18n.t("Œuvre globale :"),     tfOverallWork);
+        fields.put(I18n.t("Grouping (iTunes) :"), tfGrouping);
         return scroll(formPanel(fields));
     }
 
     private JScrollPane buildContribTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
-        fields.put("Parolier :",           tfLyricist);
-        fields.put("Producteur :",         tfProducer);
-        fields.put("Arrangeur :",          tfArranger);
-        fields.put("Ingénieur son :",      tfEngineer);
-        fields.put("Mixage :",             tfMixer);
-        fields.put("DJ Mixer :",           tfDjMixer);
-        fields.put("─── Tris ───",         sep());
-        fields.put("Tri titre :",          tfTitleSort);
-        fields.put("Tri artiste :",        tfArtistSort);
-        fields.put("Tri album :",          tfAlbumSort);
-        fields.put("Tri artiste album :",  tfAlbumArtistSort);
-        fields.put("Tri chef :",           tfConductorSort);
-        fields.put("Tri orchestre :",      tfOrchestraSort);
+        fields.put(I18n.t("Parolier :"),           tfLyricist);
+        fields.put(I18n.t("Producteur :"),         tfProducer);
+        fields.put(I18n.t("Arrangeur :"),          tfArranger);
+        fields.put(I18n.t("Ingénieur son :"),      tfEngineer);
+        fields.put(I18n.t("Mixage :"),             tfMixer);
+        fields.put(I18n.t("DJ Mixer :"),           tfDjMixer);
+        fields.put(I18n.t("─── Tris ───"),         sep());
+        fields.put(I18n.t("Tri titre :"),          tfTitleSort);
+        fields.put(I18n.t("Tri artiste :"),        tfArtistSort);
+        fields.put(I18n.t("Tri album :"),          tfAlbumSort);
+        fields.put(I18n.t("Tri artiste album :"),  tfAlbumArtistSort);
+        fields.put(I18n.t("Tri chef :"),           tfConductorSort);
+        fields.put(I18n.t("Tri orchestre :"),      tfOrchestraSort);
         return scroll(formPanel(fields));
     }
 
     private JScrollPane buildAudioTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
-        fields.put("BPM :",               tfBpm);
-        fields.put("Tonalité :",           tfKey);
-        fields.put("Langue :",             tfLanguage);
-        fields.put("Note (Rating) :",      tfRating);
-        fields.put("ISRC :",               tfIsrc);
-        fields.put("Amazon ID :",          tfAmazonId);
-        fields.put("Mots-clés :",          tfTags);
-        fields.put("─── Caractéristiques ───", sep());
+        fields.put(I18n.t("BPM :"),               tfBpm);
+        fields.put(I18n.t("Tonalité :"),           tfKey);
+        fields.put(I18n.t("Langue :"),             tfLanguage);
+        fields.put(I18n.t("Note (Rating) :"),      tfRating);
+        fields.put(I18n.t("ISRC :"),               tfIsrc);
+        fields.put(I18n.t("Amazon ID :"),          tfAmazonId);
+        fields.put(I18n.t("Mots-clés :"),          tfTags);
+        fields.put(I18n.t("─── Caractéristiques ───"), sep());
         fields.put("",                     chkHD);
         fields.put(" ",                    chkLive);
         fields.put("  ",                   chkCompilation);
         fields.put("   ",                  chkGreatestHits);
         fields.put("    ",                 chkSoundtrack);
         fields.put("     ",                chkInstrumental);
-        fields.put("─── Mood (Essentia) ───", sep());
-        fields.put("Mood général :",       tfMood);
-        fields.put("Agressif :",           tfMoodAggressive);
-        fields.put("Acoustique :",         tfMoodAcoustic);
-        fields.put("Électronique :",       tfMoodElectronic);
-        fields.put("Joyeux :",             tfMoodHappy);
-        fields.put("Triste :",             tfMoodSad);
-        fields.put("Relaxant :",           tfMoodRelaxed);
-        fields.put("Dansant :",            tfMoodDance);
-        fields.put("Festif :",             tfMoodParty);
+        fields.put(I18n.t("─── Mood (Essentia) ───"), sep());
+        fields.put(I18n.t("Mood général :"),       tfMood);
+        fields.put(I18n.t("Agressif :"),           tfMoodAggressive);
+        fields.put(I18n.t("Acoustique :"),         tfMoodAcoustic);
+        fields.put(I18n.t("Électronique :"),       tfMoodElectronic);
+        fields.put(I18n.t("Joyeux :"),             tfMoodHappy);
+        fields.put(I18n.t("Triste :"),             tfMoodSad);
+        fields.put(I18n.t("Relaxant :"),           tfMoodRelaxed);
+        fields.put(I18n.t("Dansant :"),            tfMoodDance);
+        fields.put(I18n.t("Festif :"),             tfMoodParty);
         return scroll(formPanel(fields));
     }
 
@@ -627,12 +628,12 @@ public class DetailPanel extends JPanel {
         java.awt.Image scaled = img.getScaledInstance(sw, sh, java.awt.Image.SCALE_SMOOTH);
         lblCoverTab.setIcon(new ImageIcon(scaled));
         lblCoverTab.setText("");
-        lblCoverInfo.setText(w + " × " + h + " px");
+        lblCoverInfo.setText(I18n.t("%d × %d px", w, h));
     }
 
     public void clearCover() {
         lblCoverTab.setIcon(null);
-        lblCoverTab.setText("Aucune pochette");
+        lblCoverTab.setText(I18n.t("Aucune pochette"));
         lblCoverInfo.setText(" ");
     }
 
@@ -640,7 +641,7 @@ public class DetailPanel extends JPanel {
         lblCoverTab.putClientProperty("FlatLaf.style", "foreground: #546E7A");
         lblCoverInfo.putClientProperty("FlatLaf.style", "foreground: #546E7A; font: 10 $defaultFont");
         lblCoverTab.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
-        lblCoverTab.setToolTipText("Double-clic pour gérer la pochette");
+        lblCoverTab.setToolTipText(I18n.t("Double-clic pour gérer la pochette"));
         lblCoverTab.addMouseListener(new java.awt.event.MouseAdapter() {
             @Override public void mouseClicked(java.awt.event.MouseEvent e) {
                 if (e.getClickCount() == 2 && onCoverClick != null) onCoverClick.run();
@@ -658,7 +659,7 @@ public class DetailPanel extends JPanel {
         center.add(lblCoverInfo);
         center.add(Box.createVerticalGlue());
 
-        JButton btnChange = new JButton("Changer la pochette…");
+        JButton btnChange = new JButton(I18n.t("Changer la pochette…"));
         btnChange.addActionListener(e -> { if (onCoverClick != null) onCoverClick.run(); });
         JPanel btnRow = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.CENTER));
         btnRow.add(btnChange);
@@ -674,7 +675,7 @@ public class DetailPanel extends JPanel {
         p.setBorder(new EmptyBorder(10, 14, 10, 14));
 
         JPanel urlRow = new JPanel(new BorderLayout(8, 0));
-        urlRow.add(new JLabel("URL paroles :"), BorderLayout.WEST);
+        urlRow.add(new JLabel(I18n.t("URL paroles :")), BorderLayout.WEST);
         urlRow.add(tfLyricsUrl, BorderLayout.CENTER);
 
         taLyrics.setLineWrap(true);
@@ -691,31 +692,31 @@ public class DetailPanel extends JPanel {
 
     private JScrollPane buildIdsTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
-        fields.put("─── URLs artiste ───",    sep());
-        fields.put("Site officiel :",          tfArtistOfficialUrl);
-        fields.put("Wikipedia artiste :",      tfArtistWikipediaUrl);
-        fields.put("Discogs artiste :",        tfArtistDiscogsUrl);
-        fields.put("─── URLs release ───",     sep());
-        fields.put("Site officiel release :",  tfReleaseOfficialUrl);
-        fields.put("Wikipedia release :",      tfReleaseWikipediaUrl);
-        fields.put("Discogs release :",        tfReleaseDiscogsUrl);
-        fields.put("─── IDs MusicBrainz ───",  sep());
-        fields.put("Recording MBID :",         tfRecordingMbid);
-        fields.put("Release MBID :",           tfReleaseMbid);
-        fields.put("Release Group MBID :",     tfReleaseGroupMbid);
-        fields.put("Artist MBID :",            tfArtistMbid);
-        fields.put("─── Autres IDs ───",       sep());
-        fields.put("AcoustID :",               tfAcoustidId);
-        fields.put("Discogs ID :",             tfDiscogsId);
-        fields.put("Roon Album Tag :",         tfRoonAlbumTag);
-        fields.put("Roon Track Tag :",         tfRoonTrackTag);
+        fields.put(I18n.t("─── URLs artiste ───"),    sep());
+        fields.put(I18n.t("Site officiel :"),          tfArtistOfficialUrl);
+        fields.put(I18n.t("Wikipedia artiste :"),      tfArtistWikipediaUrl);
+        fields.put(I18n.t("Discogs artiste :"),        tfArtistDiscogsUrl);
+        fields.put(I18n.t("─── URLs release ───"),     sep());
+        fields.put(I18n.t("Site officiel release :"),  tfReleaseOfficialUrl);
+        fields.put(I18n.t("Wikipedia release :"),      tfReleaseWikipediaUrl);
+        fields.put(I18n.t("Discogs release :"),        tfReleaseDiscogsUrl);
+        fields.put(I18n.t("─── IDs MusicBrainz ───"),  sep());
+        fields.put(I18n.t("Recording MBID :"),         tfRecordingMbid);
+        fields.put(I18n.t("Release MBID :"),           tfReleaseMbid);
+        fields.put(I18n.t("Release Group MBID :"),     tfReleaseGroupMbid);
+        fields.put(I18n.t("Artist MBID :"),            tfArtistMbid);
+        fields.put(I18n.t("─── Autres IDs ───"),       sep());
+        fields.put(I18n.t("AcoustID :"),               tfAcoustidId);
+        fields.put(I18n.t("Discogs ID :"),             tfDiscogsId);
+        fields.put(I18n.t("Roon Album Tag :"),         tfRoonAlbumTag);
+        fields.put(I18n.t("Roon Track Tag :"),         tfRoonTrackTag);
         return scroll(formPanel(fields));
     }
 
     // ── Footer avec bouton Appliquer ─────────────────────────────────────────
 
     public JPanel buildFooter() {
-        JButton btnApply = new JButton("Appliquer les modifications");
+        JButton btnApply = new JButton(I18n.t("Appliquer les modifications"));
         btnApply.addActionListener(e -> { if (onApply != null) onApply.run(); });
         JPanel p = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
         p.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));

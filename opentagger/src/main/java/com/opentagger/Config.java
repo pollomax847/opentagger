@@ -97,6 +97,10 @@ public class Config {
 
     // --- Raccourcis pour les cles les plus utilisees ---
 
+    public String  uiLanguage()        { return str("ui.language", "fr"); }
+    public boolean updateCheckEnabled() { return bool("update.check_enabled", true); }
+    public long    lastUpdateCheckMs()  { try { return Long.parseLong(str("update.last_check_ms", "0")); } catch (Exception e) { return 0; } }
+    public void    setLastUpdateCheckMs(long ms) { set("update.last_check_ms", String.valueOf(ms)); }
     public boolean useAcoustId()       { return bool("acoustid.use_acoustid", true); }
     public String acoustidKey()        { return str("acoustid.api_key"); }
     public String discogsKey()         { return str("discogs.consumer_key"); }

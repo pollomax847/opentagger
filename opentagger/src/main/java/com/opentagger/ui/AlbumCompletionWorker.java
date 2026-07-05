@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.I18n;
 import com.opentagger.CaaClient;
 import com.opentagger.DiscogsClient;
 import com.opentagger.FanArtClient;
@@ -116,15 +117,15 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         }
 
         if (releaseGroups.isEmpty()) {
-            publish("Aucun album identifié parmi les fichiers tagués.");
+            publish(I18n.t("Aucun album identifié parmi les fichiers tagués."));
             return null;
         }
         if (candidates.isEmpty()) {
-            publish("Aucun fichier SKIPPED/PENDING à compléter.");
+            publish(I18n.t("Aucun fichier SKIPPED/PENDING à compléter."));
             return null;
         }
 
-        publish(String.format("Analyse de %d album(s) — %d fichier(s) à récupérer possible(s)…",
+        publish(I18n.t("Analyse de %d album(s) — %d fichier(s) à récupérer possible(s)…",
                 releaseGroups.size(), candidates.size()));
 
         // Index titre normalisé → FileEntry pour les candidats (on lit le titre intégré dans le
@@ -177,7 +178,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         if (tl == null) return;
         releases.incrementAndGet();
 
-        publish(String.format("Album : %s (%d piste(s) trouvée(s) / %d au total)",
+        publish(I18n.t("Album : %s (%d piste(s) trouvée(s) / %d au total)",
                 tl.album(), found.size(), tl.tracks().size()));
 
         for (ReleaseTrack track : tl.tracks()) {
@@ -284,11 +285,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                     tableModel.update(hitFinal);
                 });
 
-                publish(String.format("  ✓ %s → piste %d \"%s\"",
+                publish(I18n.t("  ✓ %s → piste %d \"%s\"",
                         hit.filename(), track.trackNo(), track.title()));
                 matched.incrementAndGet();
             } catch (Exception ex) {
-                publish("  ✗ " + hit.filename() + " : " + ex.getMessage());
+                publish(I18n.t("  ✗ %s : %s", hit.filename(), ex.getMessage()));
             }
         }
     }
@@ -301,7 +302,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     @Override
     protected void done() {
         if (!isCancelled()) {
-            statusCallback.accept(String.format(
+            statusCallback.accept(I18n.t(
                 "Complétion albums — %d album(s) analysé(s), %d piste(s) récupérée(s)",
                 releases.get(), matched.get()));
         }
@@ -325,7 +326,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             }
             return tl;
         } catch (Exception e) {
-            publish("  ⚠ Impossible de récupérer la tracklist : " + e.getMessage());
+            publish(I18n.t("  ⚠ Impossible de récupérer la tracklist : %s", e.getMessage()));
             return null;
         }
     }

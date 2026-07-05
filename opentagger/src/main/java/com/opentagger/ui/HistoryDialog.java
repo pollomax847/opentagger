@@ -2,6 +2,7 @@ package com.opentagger.ui;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.opentagger.I18n;
 import com.opentagger.MetadataCache;
 import com.opentagger.MetadataCache.ExportEntry;
 import com.opentagger.MetadataCache.HistoryEntry;
@@ -34,7 +35,7 @@ public class HistoryDialog extends JDialog {
             DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm").withZone(ZoneId.systemDefault());
 
     private static final String[] COLS =
-            {"Artiste", "Titre", "Album", "Année", "MBID", "Date taguage"};
+            {I18n.t("Artiste"), I18n.t("Titre"), I18n.t("Album"), I18n.t("Année"), "MBID", I18n.t("Date taguage")};
 
     private final MetadataCache cache;
     private final JTextField    tfArtist = new JTextField(18);
@@ -44,7 +45,7 @@ public class HistoryDialog extends JDialog {
     private final DefaultTableModel model;
 
     public HistoryDialog(Frame owner) {
-        super(owner, "Historique de taguage — OpenTagger", false);
+        super(owner, I18n.t("Historique de taguage — OpenTagger"), false);
         setSize(960, 620);
         setMinimumSize(new Dimension(720, 440));
         setLocationRelativeTo(owner);
@@ -93,15 +94,15 @@ public class HistoryDialog extends JDialog {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
         p.setBorder(new MatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
 
-        JButton btnSearch = new JButton("Filtrer");
-        JButton btnReset  = new JButton("Tout afficher");
+        JButton btnSearch = new JButton(I18n.t("Filtrer"));
+        JButton btnReset  = new JButton(I18n.t("Tout afficher"));
         btnSearch.addActionListener(e -> search());
         btnReset .addActionListener(e -> loadAll());
         tfArtist.addActionListener(e -> search());
         tfTitle .addActionListener(e -> search());
 
-        p.add(new JLabel("Artiste :"));    p.add(tfArtist);
-        p.add(new JLabel("  Titre :"));   p.add(tfTitle);
+        p.add(new JLabel(I18n.t("Artiste :")));    p.add(tfArtist);
+        p.add(new JLabel(I18n.t("  Titre :")));   p.add(tfTitle);
         p.add(btnSearch);
         p.add(btnReset);
         p.add(Box.createHorizontalStrut(20));
@@ -112,16 +113,16 @@ public class HistoryDialog extends JDialog {
     // ── Pied de page ─────────────────────────────────────────────────────────
 
     private JPanel buildFooter() {
-        JButton btnClose   = new JButton("Fermer");
-        JButton btnPurge   = new JButton("Purger l'historique…");
-        JButton btnExport  = new JButton("📤  Exporter JSON");
-        JButton btnImport  = new JButton("📥  Importer JSON");
+        JButton btnClose   = new JButton(I18n.t("Fermer"));
+        JButton btnPurge   = new JButton(I18n.t("Purger l'historique…"));
+        JButton btnExport  = new JButton("📤  " + I18n.t("Exporter JSON"));
+        JButton btnImport  = new JButton("📥  " + I18n.t("Importer JSON"));
         btnClose .addActionListener(e -> dispose());
         btnPurge .addActionListener(e -> confirmPurge());
         btnExport.addActionListener(e -> exportJson());
         btnImport.addActionListener(e -> importJson());
-        btnExport.setToolTipText("Sauvegarder l'historique dans un fichier JSON (partage/sauvegarde)");
-        btnImport.setToolTipText("Fusionner un fichier JSON d'historique (les entrées existantes ne sont pas écrasées)");
+        btnExport.setToolTipText(I18n.t("Sauvegarder l'historique dans un fichier JSON (partage/sauvegarde)"));
+        btnImport.setToolTipText(I18n.t("Fusionner un fichier JSON d'historique (les entrées existantes ne sont pas écrasées)"));
 
         JPanel p = new JPanel(new BorderLayout(0, 0));
         p.setBorder(new CompoundBorder(
@@ -141,7 +142,7 @@ public class HistoryDialog extends JDialog {
     private JLabel buildStats() {
         JLabel lbl = new JLabel();
         int total = cache.historyCount();
-        lbl.setText("  Total dans la base : " + total + " morceau(x)");
+        lbl.setText("  " + I18n.t("Total dans la base : %d morceau(x)", total));
         lbl.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         return lbl;
     }
@@ -163,14 +164,14 @@ public class HistoryDialog extends JDialog {
             String date = DF.format(Instant.ofEpochMilli(e.ts()));
             model.addRow(new Object[]{e.artist(), e.title(), e.album(), e.year(), e.mbid(), date});
         }
-        lblCount.setText(entries.size() + " résultat(s)");
+        lblCount.setText(I18n.t("%d résultat(s)", entries.size()));
     }
 
     // ── Export JSON ───────────────────────────────────────────────────────────
 
     private void exportJson() {
         JFileChooser fc = new JFileChooser();
-        fc.setDialogTitle("Exporter l'historique de taguage");
+        fc.setDialogTitle(I18n.t("Exporter l'historique de taguage"));
         fc.setFileFilter(new FileNameExtensionFilter("JSON (*.json)", "json"));
         fc.setSelectedFile(new File("opentagger-history.json"));
         if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
@@ -196,11 +197,11 @@ public class HistoryDialog extends JDialog {
                 try {
                     int n = get();
                     JOptionPane.showMessageDialog(HistoryDialog.this,
-                        n + " entrée(s) exportée(s) vers\n" + finalDest.getAbsolutePath(),
-                        "Export réussi", JOptionPane.INFORMATION_MESSAGE);
+                        I18n.t("%d entrée(s) exportée(s) vers\n%s", n, finalDest.getAbsolutePath()),
+                        I18n.t("Export réussi"), JOptionPane.INFORMATION_MESSAGE);
                 } catch (Exception ex) {
                     JOptionPane.showMessageDialog(HistoryDialog.this,
-                        "Erreur export : " + ex.getMessage(), "Erreur", JOptionPane.ERROR_MESSAGE);
+                        I18n.t("Erreur export : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
                 }
             }
         }.execute();
@@ -210,7 +211,7 @@ public class HistoryDialog extends JDialog {
 
     private void importJson() {
         JFileChooser fc = new JFileChooser();
-        fc.setDialogTitle("Importer un historique JSON");
+        fc.setDialogTitle(I18n.t("Importer un historique JSON"));
         fc.setFileFilter(new FileNameExtensionFilter("JSON (*.json)", "json"));
         if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
 
@@ -222,7 +223,7 @@ public class HistoryDialog extends JDialog {
                 com.fasterxml.jackson.databind.JsonNode root = om.readTree(json);
                 com.fasterxml.jackson.databind.JsonNode arr  = root.isArray() ? root : root.get("entries");
                 if (arr == null || !arr.isArray())
-                    throw new Exception("Format invalide — clé \"entries\" introuvable.");
+                    throw new Exception(I18n.t("Format invalide — clé \"entries\" introuvable."));
                 List<ExportEntry> entries = Arrays.asList(
                     om.treeToValue(arr, ExportEntry[].class));
                 return cache.importHistory(entries);
@@ -232,11 +233,11 @@ public class HistoryDialog extends JDialog {
                     int n = get();
                     loadAll();
                     JOptionPane.showMessageDialog(HistoryDialog.this,
-                        n + " nouvelle(s) entrée(s) importée(s)\n(les entrées déjà présentes sont conservées).",
-                        "Import réussi", JOptionPane.INFORMATION_MESSAGE);
+                        I18n.t("%d nouvelle(s) entrée(s) importée(s)\n(les entrées déjà présentes sont conservées).", n),
+                        I18n.t("Import réussi"), JOptionPane.INFORMATION_MESSAGE);
                 } catch (Exception ex) {
                     JOptionPane.showMessageDialog(HistoryDialog.this,
-                        "Erreur import : " + ex.getMessage(), "Erreur", JOptionPane.ERROR_MESSAGE);
+                        I18n.t("Erreur import : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
                 }
             }
         }.execute();
@@ -247,13 +248,12 @@ public class HistoryDialog extends JDialog {
     private void confirmPurge() {
         int total = cache.historyCount();
         int choice = JOptionPane.showConfirmDialog(this,
-            "Supprimer les " + total + " entrée(s) de l'historique ?\n"
-            + "Cette action est irréversible.",
-            "Purger l'historique", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            I18n.t("Supprimer les %d entrée(s) de l'historique ?\nCette action est irréversible.", total),
+            I18n.t("Purger l'historique"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (choice == JOptionPane.YES_OPTION) {
             cache.purgeHistory();
             loadAll();
-            setTitle("Historique de taguage — OpenTagger (purgé)");
+            setTitle(I18n.t("Historique de taguage — OpenTagger (purgé)"));
         }
     }
 

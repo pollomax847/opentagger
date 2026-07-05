@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
@@ -10,7 +11,8 @@ import java.util.List;
 public class FileTableModel extends AbstractTableModel {
 
     private static final String[] COLS = {
-        "☑", "Fichier", "Artiste", "Artiste Album", "Titre", "Album", "Année", "Genre", "Piste", "Statut"
+        "☑", I18n.t("Fichier"), I18n.t("Artiste"), I18n.t("Artiste Album"), I18n.t("Titre"),
+        I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste"), I18n.t("Statut")
     };
     public static final int COL_SEL          = 0;
     public static final int COL_FILE         = 1;
@@ -130,10 +132,10 @@ public class FileTableModel extends AbstractTableModel {
         String warn = hasSugg ? " ⚠" + sugg.size() : "";
         return switch (s) {
             case PENDING    -> "—";
-            case PROCESSING -> "⏳ En cours...";
-            case TAGGED     -> (msg.isBlank() ? "✓ Tagué" : "✓ " + msg) + warn;
-            case SKIPPED    -> "⚠ " + (msg.isBlank() ? "Ignoré" : msg);
-            case ERROR      -> "✗ " + (msg.isBlank() ? "Erreur" : msg);
+            case PROCESSING -> I18n.t("⏳ En cours...");
+            case TAGGED     -> (msg.isBlank() ? I18n.t("✓ Tagué") : "✓ " + msg) + warn;
+            case SKIPPED    -> "⚠ " + (msg.isBlank() ? I18n.t("Ignoré") : msg);
+            case ERROR      -> "✗ " + (msg.isBlank() ? I18n.t("Erreur") : msg);
         };
     }
 
@@ -141,7 +143,7 @@ public class FileTableModel extends AbstractTableModel {
     public String getTooltip(int row) {
         FileEntry e = entries.get(row);
         if (e.suggestions == null || e.suggestions.isEmpty()) return null;
-        StringBuilder sb = new StringBuilder("<html><b>Suggestions d'amélioration :</b><br>");
+        StringBuilder sb = new StringBuilder("<html><b>" + I18n.t("Suggestions d'amélioration :") + "</b><br>");
         for (String s : e.suggestions) sb.append("&nbsp;⚠&nbsp;").append(s).append("<br>");
         sb.append("</html>");
         return sb.toString();

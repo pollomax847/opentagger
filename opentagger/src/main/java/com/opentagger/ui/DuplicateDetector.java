@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
@@ -30,10 +31,10 @@ import java.util.*;
 public class DuplicateDetector {
 
     public enum Confidence {
-        MBID_EXACT("MBID", "Identifié par Recording MBID — quasi-certain"),
-        ACOUSTID_EXACT("AcoustID", "Identifié par empreinte acoustique (base AcoustID) — très fiable"),
-        FINGERPRINT_EXACT("Empreinte", "Même empreinte audio brute — fiable (copies/même encodage)"),
-        TITLE_HEURISTIC("Titre", "Correspondance artiste+titre — à vérifier");
+        MBID_EXACT("MBID", I18n.t("Identifié par Recording MBID — quasi-certain")),
+        ACOUSTID_EXACT("AcoustID", I18n.t("Identifié par empreinte acoustique (base AcoustID) — très fiable")),
+        FINGERPRINT_EXACT(I18n.t("Empreinte"), I18n.t("Même empreinte audio brute — fiable (copies/même encodage)")),
+        TITLE_HEURISTIC(I18n.t("Titre"), I18n.t("Correspondance artiste+titre — à vérifier"));
 
         public final String badge;
         public final String tooltip;
@@ -110,7 +111,7 @@ public class DuplicateDetector {
         StringBuilder sb = new StringBuilder();
         if (!ti.artist.isBlank()) sb.append(ti.artist).append(" — ");
         if (!ti.title.isBlank())  sb.append(ti.title);
-        if (sb.isEmpty()) sb.append("(titre inconnu)");
+        if (sb.isEmpty()) sb.append(I18n.t("(titre inconnu)"));
         sb.append("  [").append(group.confidence().badge).append("]");
         return sb.toString();
     }

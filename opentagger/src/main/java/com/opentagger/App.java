@@ -16,6 +16,10 @@ import java.util.logging.Logger;
 public class App {
 
     public static void main(String[] args) throws Exception {
+        // Doit s'exécuter avant la construction du moindre composant Swing — un composant déjà
+        // instancié ne change pas de texte si la langue change après coup (voir I18n.java).
+        I18n.setLanguage(Config.get().uiLanguage());
+
         // Supprimer tous les logs JAudioTagger (scan warnings + write GRAVE errors sur M4A)
         Logger.getLogger("org.jaudiotagger").setLevel(Level.OFF);
         // Les loggers enfants sont souvent créés avant cette ligne → les silencer explicitement

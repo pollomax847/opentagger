@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.Config;
+import com.opentagger.I18n;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import org.jaudiotagger.audio.AudioFile;
@@ -51,21 +52,21 @@ public class CoverArtDialog extends JDialog {
             .build();
 
     public CoverArtDialog(Frame owner, FileEntry entry, Runnable onApplied) {
-        super(owner, "Pochette — " + entry.filename(), true);
+        super(owner, I18n.t("Pochette — %s", entry.filename()), true);
         this.entry     = entry;
         this.onApplied = onApplied;
         setSize(540, 580);
         setMinimumSize(new Dimension(420, 460));
         setLocationRelativeTo(owner);
 
-        lblPreview = new JLabel("Chargement…", SwingConstants.CENTER);
+        lblPreview = new JLabel(I18n.t("Chargement…"), SwingConstants.CENTER);
         lblPreview.setPreferredSize(new Dimension(PREVIEW_SIZE, PREVIEW_SIZE));
         lblPreview.setBorder(new MatteBorder(1, 1, 1, 1, UIManager.getColor("Separator.foreground")));
 
         lblInfo = new JLabel(" ", SwingConstants.CENTER);
         lblInfo.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
 
-        btnApply = new JButton("✓  Appliquer");
+        btnApply = new JButton("✓  " + I18n.t("Appliquer"));
         btnApply.setEnabled(false);
         btnApply.putClientProperty("FlatLaf.style", "background: #1a6030");
 
@@ -93,10 +94,10 @@ public class CoverArtDialog extends JDialog {
     // ── Boutons d'action ──────────────────────────────────────────────────────
 
     private JPanel buildActions() {
-        JButton btnLocal  = new JButton("📂  Choisir image locale…");
+        JButton btnLocal  = new JButton("📂  " + I18n.t("Choisir image locale…"));
         JButton btnCaa    = new JButton("🌐  Cover Art Archive (MB)");
-        JButton btnDelete = new JButton("🗑  Supprimer la pochette");
-        JButton btnFolder = new JButton("💾  Sauver en folder.jpg");
+        JButton btnDelete = new JButton("🗑  " + I18n.t("Supprimer la pochette"));
+        JButton btnFolder = new JButton("💾  " + I18n.t("Sauver en folder.jpg"));
 
         btnLocal .addActionListener(e -> chooseLocal());
         btnCaa   .addActionListener(e -> downloadCaa());
@@ -117,7 +118,7 @@ public class CoverArtDialog extends JDialog {
     }
 
     private JPanel buildFooter() {
-        JButton btnClose = new JButton("Fermer");
+        JButton btnClose = new JButton(I18n.t("Fermer"));
         btnClose.addActionListener(e -> dispose());
         btnApply.addActionListener(e -> applyChanges());
 
@@ -148,8 +149,8 @@ public class CoverArtDialog extends JDialog {
                 try {
                     ImageIcon icon = get();
                     if (icon != null) { lblPreview.setIcon(icon); lblPreview.setText(""); }
-                    else              { lblPreview.setIcon(null);  lblPreview.setText("Pas de pochette"); }
-                } catch (Exception ignored) { lblPreview.setText("Erreur de lecture"); }
+                    else              { lblPreview.setIcon(null);  lblPreview.setText(I18n.t("Pas de pochette")); }
+                } catch (Exception ignored) { lblPreview.setText(I18n.t("Erreur de lecture")); }
             }
         }.execute();
     }
@@ -164,10 +165,10 @@ public class CoverArtDialog extends JDialog {
         File img = fc.getSelectedFile();
         try {
             showPreview(Files.readAllBytes(img.toPath()),
-                    img.getName() + " — " + img.length() / 1024 + " Ko");
+                    img.getName() + " — " + I18n.t("%d Ko", img.length() / 1024));
         } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "Impossible de lire l'image : " + ex.getMessage(),
-                    "Erreur", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, I18n.t("Impossible de lire l'image : %s", ex.getMessage()),
+                    I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -177,11 +178,11 @@ public class CoverArtDialog extends JDialog {
         String mbid = entry.activeTags().releaseMbid;
         if (mbid == null || mbid.isBlank()) {
             JOptionPane.showMessageDialog(this,
-                    "Aucun Release MBID disponible.\nTaguez d'abord ce fichier pour obtenir un MBID.",
+                    I18n.t("Aucun Release MBID disponible.\nTaguez d'abord ce fichier pour obtenir un MBID."),
                     "Cover Art Archive", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        lblInfo.setText("Téléchargement depuis Cover Art Archive…");
+        lblInfo.setText(I18n.t("Téléchargement depuis Cover Art Archive…"));
         new SwingWorker<byte[], Void>() {
             @Override protected byte[] doInBackground() throws Exception {
                 String url = "https://coverartarchive.org/release/" + mbid + "/front-500";
@@ -197,9 +198,9 @@ public class CoverArtDialog extends JDialog {
             @Override protected void done() {
                 try {
                     byte[] data = get();
-                    showPreview(data, "Cover Art Archive — " + data.length / 1024 + " Ko");
+                    showPreview(data, "Cover Art Archive — " + I18n.t("%d Ko", data.length / 1024));
                 } catch (Exception ex) {
-                    lblInfo.setText("Erreur : " + ex.getMessage());
+                    lblInfo.setText(I18n.t("Erreur : %s", ex.getMessage()));
                 }
             }
         }.execute();
@@ -211,8 +212,8 @@ public class CoverArtDialog extends JDialog {
         pendingDelete     = true;
         pendingImageBytes = null;
         lblPreview.setIcon(null);
-        lblPreview.setText("Pochette supprimée à l'application");
-        lblInfo.setText("La pochette sera supprimée du fichier.");
+        lblPreview.setText(I18n.t("Pochette supprimée à l'application"));
+        lblInfo.setText(I18n.t("La pochette sera supprimée du fichier."));
         btnApply.setEnabled(true);
     }
 
@@ -227,13 +228,13 @@ public class CoverArtDialog extends JDialog {
                 AudioFile af  = AudioFileIO.read(f);
                 Tag       tag = af.getTag();
                 if (tag == null || tag.getFirstArtwork() == null) {
-                    lblInfo.setText("Pas de pochette à sauvegarder.");
+                    lblInfo.setText(I18n.t("Pas de pochette à sauvegarder."));
                     return;
                 }
                 data = tag.getFirstArtwork().getBinaryData();
             } catch (Exception ex) {
-                JOptionPane.showMessageDialog(this, "Erreur lecture : " + ex.getMessage(),
-                        "Erreur", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this, I18n.t("Erreur lecture : %s", ex.getMessage()),
+                        I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
                 return;
             }
         }
@@ -244,10 +245,10 @@ public class CoverArtDialog extends JDialog {
                     ? "folder.png" : "folder.jpg";
             Path dest = f.toPath().getParent().resolve(fname);
             Files.write(dest, data);
-            lblInfo.setText("Sauvegardé → " + dest.getFileName());
+            lblInfo.setText(I18n.t("Sauvegardé → %s", dest.getFileName()));
         } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "Erreur sauvegarde : " + ex.getMessage(),
-                    "Erreur", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, I18n.t("Erreur sauvegarde : %s", ex.getMessage()),
+                    I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -277,8 +278,8 @@ public class CoverArtDialog extends JDialog {
             if (onApplied != null) onApplied.run();
             dispose();
         } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "Erreur d'écriture : " + ex.getMessage(),
-                    "Erreur", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, I18n.t("Erreur d'écriture : %s", ex.getMessage()),
+                    I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -292,8 +293,8 @@ public class CoverArtDialog extends JDialog {
         try {
             BufferedImage img = ImageIO.read(new java.io.ByteArrayInputStream(bytes));
             if (img != null) { lblPreview.setIcon(scaledIcon(img)); lblPreview.setText(""); }
-            else             { lblPreview.setText("Format image non reconnu"); }
-        } catch (Exception ignored) { lblPreview.setText("Erreur aperçu"); }
+            else             { lblPreview.setText(I18n.t("Format image non reconnu")); }
+        } catch (Exception ignored) { lblPreview.setText(I18n.t("Erreur aperçu")); }
     }
 
     private ImageIcon scaledIcon(BufferedImage img) {

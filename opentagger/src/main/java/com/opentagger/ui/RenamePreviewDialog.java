@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.FileRenamer;
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 
 import javax.swing.*;
@@ -47,7 +48,7 @@ public class RenamePreviewDialog extends JDialog {
     private JPanel       progressPanel;
 
     public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, RenameJob job) {
-        this(owner, rows, "Aperçu du renommage", job);
+        this(owner, rows, I18n.t("Aperçu du renommage"), job);
     }
 
     public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, String title, RenameJob job) {
@@ -80,8 +81,8 @@ public class RenamePreviewDialog extends JDialog {
     // ── Footer avec barre de progression ──────────────────────────────────────
 
     private JPanel buildFooter(RenameJob job) {
-        btnApply = new JButton("Appliquer (" + willRenameCount + " renommage(s))");
-        btnClose = new JButton("Fermer");
+        btnApply = new JButton(I18n.t("Appliquer (%d renommage(s))", willRenameCount));
+        btnClose = new JButton(I18n.t("Fermer"));
         btnApply.setEnabled(willRenameCount > 0);
         if (willRenameCount > 0)
             btnApply.putClientProperty("FlatLaf.style", "background: #1a6030");
@@ -119,7 +120,7 @@ public class RenamePreviewDialog extends JDialog {
 
     private void startRename(RenameJob job) {
         btnApply.setEnabled(false);
-        btnApply.setText("En cours…");
+        btnApply.setText(I18n.t("En cours…"));
         progressBar.setValue(0);
         progressPanel.setVisible(true);
 
@@ -128,15 +129,15 @@ public class RenamePreviewDialog extends JDialog {
             done -> {
                 progressBar.setValue(done);
                 progressBar.setString(done + " / " + willRenameCount);
-                lblProgress.setText("✓ " + done + " renommé(s)");
+                lblProgress.setText(I18n.t("✓ %d renommé(s)", done));
             },
             // onDone — appelé sur EDT à la fin
             () -> {
                 progressBar.setValue((int) willRenameCount);
-                progressBar.setString("Terminé");
-                lblProgress.setText("✓ Terminé");
+                progressBar.setString(I18n.t("Terminé"));
+                lblProgress.setText(I18n.t("✓ Terminé"));
                 btnApply.setVisible(false);
-                btnClose.setText("Fermer");
+                btnClose.setText(I18n.t("Fermer"));
                 btnClose.putClientProperty("FlatLaf.style", "background: #1a6030");
                 getRootPane().setDefaultButton(btnClose);
             }
@@ -169,7 +170,7 @@ public class RenamePreviewDialog extends JDialog {
                 Path newPath   = root.resolve(newName).normalize();
                 if (newName.isBlank()) {
                     result.add(new PreviewRow(e, current.toString(), "—", "—",
-                        RowState.ERROR, "Masque vide — tags incomplets ?"));
+                        RowState.ERROR, I18n.t("Masque vide — tags incomplets ?")));
                 } else if (newPath.equals(current)) {
                     result.add(new PreviewRow(e, current.toString(), curName,
                         current.toString(), RowState.ALREADY_OK, ""));
@@ -188,16 +189,16 @@ public class RenamePreviewDialog extends JDialog {
     // ── Tableau prévisualisation ───────────────────────────────────────────────
 
     private JTable buildTable() {
-        String[] cols = {"Statut", "Fichier actuel", "Nouveau nom"};
+        String[] cols = {I18n.t("Statut"), I18n.t("Fichier actuel"), I18n.t("Nouveau nom")};
         DefaultTableModel model = new DefaultTableModel(cols, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
         };
 
         for (PreviewRow r : rows) {
             String badge = switch (r.state()) {
-                case WILL_RENAME -> "✎ Renommer";
-                case ALREADY_OK  -> "✓ Inchangé";
-                case ERROR       -> "✗ Erreur";
+                case WILL_RENAME -> I18n.t("✎ Renommer");
+                case ALREADY_OK  -> I18n.t("✓ Inchangé");
+                case ERROR       -> I18n.t("✗ Erreur");
             };
             String newName = r.state() == RowState.ERROR ? r.errorMsg() : r.newName();
             model.addRow(new Object[]{badge, r.oldName(), newName});
@@ -243,9 +244,9 @@ public class RenamePreviewDialog extends JDialog {
     }
 
     private String buildSummaryText(long willRename, long errors, int total) {
-        String txt = "<html><b>" + willRename + " fichier(s) seront renommés</b>";
-        txt += " sur " + total + " tagués.";
-        if (errors > 0) txt += "  <font color='#ef9a9a'>✗ " + errors + " erreur(s)</font>";
+        String txt = "<html><b>" + I18n.t("%d fichier(s) seront renommés", willRename) + "</b>";
+        txt += " " + I18n.t("sur %d tagués.", total);
+        if (errors > 0) txt += "  <font color='#ef9a9a'>" + I18n.t("✗ %d erreur(s)", errors) + "</font>";
         txt += "</html>";
         return txt;
     }

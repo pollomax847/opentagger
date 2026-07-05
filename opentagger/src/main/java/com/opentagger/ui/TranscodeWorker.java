@@ -3,6 +3,7 @@ package com.opentagger.ui;
 import com.opentagger.AudioTranscoder;
 import com.opentagger.AudioTranscoder.Format;
 import com.opentagger.Config;
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 
 import javax.swing.*;
@@ -74,7 +75,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
                     }
                 } catch (Exception ex) {
                     errors.incrementAndGet();
-                    String msg = ex.getMessage() != null ? ex.getMessage() : "erreur";
+                    String msg = ex.getMessage() != null ? ex.getMessage() : I18n.t("erreur");
                     publish(new Progress(e, null, msg, done.get() + skipped.get() + errors.get(), total));
                 }
             }));
@@ -85,7 +86,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
             try { f.get(); } catch (Exception ignored) {}
         }
 
-        return String.format("Transcodage — ✓ %d converti(s)  déjà OK %d  ✗ %d erreur(s)",
+        return I18n.t("Transcodage — ✓ %d converti(s)  déjà OK %d  ✗ %d erreur(s)",
                 done.get(), skipped.get(), errors.get());
     }
 
@@ -95,7 +96,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
             if (pr.newPath() != null)
                 pr.entry().currentPath = pr.newPath();
             if (pr.error() != null)
-                pr.entry().message = "Transcode : " + pr.error();
+                pr.entry().message = I18n.t("Transcode : %s", pr.error());
             tableModel.update(pr.entry());
             if (onProgress != null) onProgress.accept(pr);
         }

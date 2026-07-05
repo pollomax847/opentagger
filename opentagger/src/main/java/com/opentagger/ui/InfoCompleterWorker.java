@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.opentagger.*;
+import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 import org.jaudiotagger.audio.AudioFile;
@@ -114,21 +115,21 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 ? entry.currentPath.toFile()
                 : entry.file;
 
-        onProgress.accept("[" + fileIdx + "/" + total + "] " + fichier.getName());
+        onProgress.accept(I18n.t("[%s/%s] %s", fileIdx, total, fichier.getName()));
 
         if (!fichier.exists()) {
-            log("▶ SKIP " + fichier.getName() + " (fichier introuvable)");
+            log(I18n.t("▶ SKIP %s (fichier introuvable)", fichier.getName()));
             onCount.accept(doneCount.incrementAndGet(), total);
             publish(entry);
             return;
         }
 
-        log("▶ COMPLÉTER " + fichier.getName());
+        log(I18n.t("▶ COMPLÉTER %s", fichier.getName()));
 
         try {
             completeEntry(entry, fichier, mb, lastFm);
         } catch (Exception ex) {
-            log("  ✗ erreur: " + ex.getMessage());
+            log(I18n.t("  ✗ erreur: %s", ex.getMessage()));
         }
 
         onCount.accept(doneCount.incrementAndGet(), total);
@@ -139,7 +140,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // Lire le TagInfo actuel depuis e.result ou depuis le fichier
         TagInfo ti = entry.result != null ? entry.result : readTagsFromFile(fichier);
         if (ti == null || (ti.artist.isBlank() && ti.title.isBlank())) {
-            log("  ignoré (artiste+titre vides)");
+            log(I18n.t("  ignoré (artiste+titre vides)"));
             return;
         }
 
@@ -153,21 +154,21 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
             // Lookup direct si recordingMbid connu → plus rapide et précis que text search
             if (!ti.recordingMbid.isBlank()) {
-                log("  MB lookup: " + ti.recordingMbid);
+                log(I18n.t("  MB lookup: %s", ti.recordingMbid));
                 TagInfo full = mb.lookupRecording(ti.recordingMbid);
                 if (full != null && !full.title.isBlank()) {
                     mbr = full;
-                    log("  MB lookup→ " + full.artist + " – " + full.title + " [" + full.album + " " + full.year + "]");
+                    log(I18n.t("  MB lookup→ %s – %s [%s %s]", full.artist, full.title, full.album, full.year));
                 }
             }
 
             // Fallback : recherche texte si lookup échoue ou MBID absent
             if (mbr == null) {
-                log("  MB search: '" + ti.artist + "' / '" + ti.title + "'");
+                log(I18n.t("  MB search: '%s' / '%s'", ti.artist, ti.title));
                 mbr = mbLookup(mb, ti.artist, ti.title);
                 if (mbr == null && ti.title.contains("(")) {
                     String clean = ti.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
-                    log("  MB search (nettoyé): '" + clean + "'");
+                    log(I18n.t("  MB search (nettoyé): '%s'", clean));
                     mbr = mbLookup(mb, ti.artist, clean);
                 }
                 if (mbr == null && !ti.title.isBlank()) {
@@ -179,14 +180,14 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                         TagInfo candidate = mbLookupStrict(mb, ti.artist, short1, 90);
                         if (candidate != null && titlesSimilar(ti.title, candidate.title)) {
                             mbr = candidate;
-                            log("  MB search (titre court): '" + short1 + "'");
+                            log(I18n.t("  MB search (titre court): '%s'", short1));
                         }
                     }
                 }
             }
 
             if (mbr != null) {
-                log("  MB trouvé: " + mbr.artist + " – " + mbr.title + " [" + mbr.album + " " + mbr.year + "]");
+                log(I18n.t("  MB trouvé: %s – %s [%s %s]", mbr.artist, mbr.title, mbr.album, mbr.year));
                 changed |= fillBlank(ti, "album",             mbr.album);
                 changed |= fillBlank(ti, "year",              mbr.year);
                 changed |= fillBlank(ti, "track",             mbr.track);
@@ -209,11 +210,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 changed |= fillBlank(ti, "artistsSort",       mbr.artistsSort);
             } else if (ti.artistMbid.isBlank()) {
                 // Fallback minimal : artistMbid pour la pochette
-                log("  MB artist search: '" + ti.artist + "'");
+                log(I18n.t("  MB artist search: '%s'", ti.artist));
                 String amid = mb.searchArtistMbid(ti.artist);
                 if (!amid.isBlank()) {
                     ti.artistMbid = amid;
-                    log("  artistMbid←MB: " + amid);
+                    log(I18n.t("  artistMbid←MB: %s", amid));
                     changed = true;
                 }
             }
@@ -222,25 +223,25 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // ── 2. Genre ──────────────────────────────────────────────────────
         String genreBefore = ti.genre;
         TagEnrichment.enrichGenre(ti, discogs, lastFm);
-        if (!ti.genre.equals(genreBefore)) { log("  genre=" + ti.genre); changed = true; }
+        if (!ti.genre.equals(genreBefore)) { log(I18n.t("  genre=%s", ti.genre)); changed = true; }
 
         // ── 3. Mood ───────────────────────────────────────────────────────
         if (ti.mood.isBlank()) {
-            try { lastFm.enrichMood(ti); if (!ti.mood.isBlank()) { log("  mood←lastfm=" + ti.mood); changed = true; } } catch (Exception ignored) {}
+            try { lastFm.enrichMood(ti); if (!ti.mood.isBlank()) { log(I18n.t("  mood←lastfm=%s", ti.mood)); changed = true; } } catch (Exception ignored) {}
         }
 
         // ── 3b. Translittération artiste (si nom non-Latin et option activée) ───
         String artistBeforeTranslit = ti.artist;
         TagEnrichment.translateArtist(ti, mb, aliasCache);
         if (!ti.artist.equals(artistBeforeTranslit)) {
-            log("  translit: " + artistBeforeTranslit + " → " + ti.artist);
+            log(I18n.t("  translit: %s → %s", artistBeforeTranslit, ti.artist));
             changed = true;
         }
 
         // ── 4. BPM ────────────────────────────────────────────────────────
         if (ti.bpm.isBlank() && bpmEnabled) {
             int bpm = bpmDet.detect(fichier.getAbsolutePath());
-            if (bpm > 0) { ti.bpm = String.valueOf(bpm); log("  bpm=" + bpm); changed = true; }
+            if (bpm > 0) { ti.bpm = String.valueOf(bpm); log(I18n.t("  bpm=%s", bpm)); changed = true; }
         }
 
         // ── 5. Paroles ─────────────────────────────────────────────────────
@@ -248,16 +249,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             try {
                 String before = ti.lyrics;
                 lyrics.enrich(ti);
-                if (!ti.lyrics.equals(before)) { log("  lyrics trouvées"); changed = true; }
+                if (!ti.lyrics.equals(before)) { log(I18n.t("  lyrics trouvées")); changed = true; }
             } catch (Exception ignored) {}
         }
 
         // ── 6. Pochette (vérifier si absente du fichier) ──────────────────
         Path cover = null;
         if (!hasCoverInFile(fichier)) {
-            log("  pochette manquante → recherche (CAA/local/fanart)...");
+            log(I18n.t("  pochette manquante → recherche (CAA/local/fanart)..."));
             cover = TagEnrichment.resolveCover(ti, fichier, caa, fanArt);
-            log("  cover=" + (cover != null ? cover.getFileName() : "null"));
+            log(I18n.t("  cover=%s", cover != null ? cover.getFileName() : "null"));
             if (cover != null) changed = true;
         }
 
@@ -299,13 +300,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                         if (Config.get().deleteEmptyDirsAfterRename()) {
                             FileRenamer.deleteEmptyAncestors(oldParent, root);
                         }
-                        log("  renommé → " + newPath);
+                        log(I18n.t("  renommé → %s", newPath));
                     }
                 } catch (Exception ex) {
                     // Ne plus se contenter d'un log console : sans indication dans l'UI, un
                     // déplacement qui échoue (permissions, disque cible, etc.) est invisible.
                     renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-                    log("  renommage échoué: " + renameError);
+                    log(I18n.t("  renommage échoué: %s", renameError));
                 }
             }
             // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le TableRowSorter
@@ -316,12 +317,12 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             SwingUtilities.invokeLater(() -> {
                 entry.result = ti;
                 if (finalNewPath != null) entry.currentPath = finalNewPath;
-                if (finalRenameError != null) entry.message = "Renommage échoué : " + finalRenameError;
+                if (finalRenameError != null) entry.message = I18n.t("Renommage échoué : %s", finalRenameError);
             });
-            log("  ✔ mis à jour");
+            log(I18n.t("  ✔ mis à jour"));
             submitToMusicBrainz(ti);
         } else {
-            log("  — déjà complet, rien à faire");
+            log(I18n.t("  — déjà complet, rien à faire"));
         }
     }
 
