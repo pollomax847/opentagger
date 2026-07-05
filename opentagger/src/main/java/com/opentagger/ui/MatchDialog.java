@@ -1,9 +1,17 @@
 package com.opentagger.ui;
 
+import com.opentagger.CaaClient;
+import com.opentagger.Config;
+import com.opentagger.DiscogsClient;
+import com.opentagger.FanArtClient;
+import com.opentagger.FileRenamer;
+import com.opentagger.LastFmClient;
 import com.opentagger.LocalCorrector;
 import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
+import com.opentagger.MusicBrainzOAuth;
 import com.opentagger.TagEnrichment;
+import com.opentagger.TaggerScript;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
@@ -28,7 +36,16 @@ public class MatchDialog extends JDialog {
     private final FileEntry       entry;
     private final FileTableModel  tableModel;
     private final Runnable        onApplied;
-    private final MusicBrainzClient mb = new MusicBrainzClient();
+    private final MusicBrainzClient mb       = new MusicBrainzClient();
+    // Mêmes enrichissements (genre Discogs/Last.fm, pochette CAA/local/FanArt) que les autres
+    // pipelines de taguage — sans ça, une correspondance choisie manuellement ici n'avait NI genre
+    // Discogs/Last.fm NI pochette du tout, contrairement au taguage automatique.
+    private final DiscogsClient  discogs  = new DiscogsClient();
+    private final LastFmClient   lastFm   = new LastFmClient();
+    private final CaaClient      caa      = new CaaClient();
+    private final FanArtClient   fanArt   = new FanArtClient();
+    private final TaggerScript   taggerScript = new TaggerScript();
+    private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
 
     private final JTextField     tfArtist;
     private final JTextField     tfTitle;
@@ -36,6 +53,7 @@ public class MatchDialog extends JDialog {
     private final JTable         resultsTable;
     private final DefaultTableModel resultsModel;
     private final List<TagInfo>  searchResults = new ArrayList<>();
+    private JButton              btnApply, btnCancel;
 
     public MatchDialog(Frame owner, FileEntry entry, FileTableModel tableModel, Runnable onApplied) {
         super(owner, "Correspondance manuelle — " + entry.filename(), true);
@@ -112,8 +130,8 @@ public class MatchDialog extends JDialog {
     }
 
     private JPanel buildFooter() {
-        JButton btnApply  = new JButton("✓  Appliquer la sélection");
-        JButton btnCancel = new JButton("Annuler");
+        btnApply  = new JButton("✓  Appliquer la sélection");
+        btnCancel = new JButton("Annuler");
         btnApply .addActionListener(e -> applySelected());
         btnCancel.addActionListener(e -> dispose());
         btnApply.putClientProperty("FlatLaf.style", "background: #1a6030");
@@ -188,28 +206,89 @@ public class MatchDialog extends JDialog {
         int modelRow = resultsTable.convertRowIndexToModel(row);
         if (modelRow >= searchResults.size()) return;
         TagInfo chosen = searchResults.get(modelRow);
-
-        // Corrections locales
         java.nio.file.Path path = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
-        new LocalCorrector().correct(chosen, path);
 
-        entry.result     = chosen;
-        entry.status     = FileEntry.Status.TAGGED;
-        entry.message    = "Sélectionné manuellement";
-        entry.candidates = null;
+        btnApply.setEnabled(false);
+        btnCancel.setEnabled(false);
+        resultsTable.setEnabled(false);
+        lblStatus.setText("Enrichissement (genre, pochette) en cours…");
 
-        try {
-            new TagWriter().write(path.toFile(), chosen);
-            TagEnrichment.recordSuccess(new MetadataCache(), path.toFile(), chosen);
-        } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "Erreur d'écriture : " + ex.getMessage(),
-                    "Erreur", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
+        // Genre (Discogs/Last.fm), pochette (CAA/local/FanArt) et renommage disque — tout dans un
+        // SwingWorker, pas directement dans ce listener, sinon ça fige l'EDT le temps des requêtes
+        // réseau et du déplacement de fichier.
+        new SwingWorker<java.nio.file.Path, Void>() {
+            @Override protected java.nio.file.Path doInBackground() throws Exception {
+                new LocalCorrector().correct(chosen, path);
+                taggerScript.apply(chosen);
+                TagEnrichment.enrichGenre(chosen, discogs, lastFm);
+                java.nio.file.Path cover = TagEnrichment.resolveCover(chosen, path.toFile(), caa, fanArt);
 
-        tableModel.update(entry);
-        if (onApplied != null) onApplied.run();
-        dispose();
+                // Empreinte AcoustID : calculée systématiquement après toute identification réussie
+                // (TaggingWorker/BatchProcessor/App le font déjà, comme Picard) — une correspondance
+                // confirmée manuellement est une identification tout aussi réussie.
+                if (Config.get().saveAcoustidFingerprints() && chosen.acoustidFingerprint.isBlank()
+                        && com.opentagger.FpcalcInstaller.isAvailable()) {
+                    try {
+                        chosen.acoustidFingerprint = com.opentagger.Fingerprinter.compute(path.toFile()).fingerprint();
+                    } catch (Exception ignored) {}
+                }
+
+                new TagWriter().write(path.toFile(), chosen, cover);
+                TagEnrichment.recordSuccess(new MetadataCache(), path.toFile(), chosen);
+                // Soumission MB (tags genre/mood + rating, si OAuth configuré) — même logique
+                // partagée que TaggingWorker/InfoCompleterWorker/AlbumCompletionWorker, absente
+                // ici jusqu'à présent.
+                TagEnrichment.submitToMusicBrainz(mbOauth, chosen,
+                        msg -> System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg));
+
+                // Renommage automatique — même pattern que TaggingWorker/BatchProcessor/App/
+                // InfoCompleterWorker/AlbumCompletionWorker/PodcastWorker : sans ça, une
+                // correspondance appliquée manuellement était la seule à ne jamais être renommée
+                // même quand "renommage auto" est activé.
+                java.nio.file.Path finalPath = path;
+                if (Config.get().autoRenameEnabled()) {
+                    java.nio.file.Path oldParent = path.getParent();
+                    String libRoot = Config.get().libraryRoot();
+                    java.nio.file.Path root =
+                        (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                            ? java.nio.file.Paths.get(libRoot)
+                            : (entry.scanRoot != null ? entry.scanRoot : oldParent);
+                    java.nio.file.Path newPath = new FileRenamer()
+                            .rename(path, chosen, Config.get().defaultRenameMask(), root);
+                    if (newPath != null) {
+                        finalPath = newPath;
+                        if (Config.get().deleteEmptyDirsAfterRename())
+                            FileRenamer.deleteEmptyAncestors(oldParent, root);
+                    }
+                }
+                return finalPath;
+            }
+
+            @Override protected void done() {
+                java.nio.file.Path finalPath;
+                try {
+                    finalPath = get();
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(MatchDialog.this, "Erreur d'écriture : " + ex.getMessage(),
+                            "Erreur", JOptionPane.ERROR_MESSAGE);
+                    btnApply.setEnabled(true);
+                    btnCancel.setEnabled(true);
+                    resultsTable.setEnabled(true);
+                    lblStatus.setText(" ");
+                    return;
+                }
+
+                entry.result      = chosen;
+                entry.status      = FileEntry.Status.TAGGED;
+                entry.message     = "Sélectionné manuellement";
+                entry.candidates  = null;
+                entry.currentPath = finalPath;
+
+                tableModel.update(entry);
+                if (onApplied != null) onApplied.run();
+                dispose();
+            }
+        }.execute();
     }
 
     // ── Renderer coloré pour le score ─────────────────────────────────────────

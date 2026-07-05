@@ -34,6 +34,9 @@ public class FanArtClient {
      */
     public Path downloadCover(TagInfo info) throws Exception {
         if (info.artistMbid.isBlank()) return null;
+        // Sans clé API configurée, la requête échouerait de toute façon — éviter l'appel réseau
+        // inutile sur chaque fichier, même pattern que DiscogsClient/lastfmEnabled().
+        if (Config.get().fanartKey().isBlank()) return null;
         JsonNode data = fetchArtistData(info.artistMbid);
         if (data == null) return null;
 

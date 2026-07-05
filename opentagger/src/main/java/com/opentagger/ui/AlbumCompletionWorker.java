@@ -1,10 +1,16 @@
 package com.opentagger.ui;
 
+import com.opentagger.CaaClient;
+import com.opentagger.DiscogsClient;
+import com.opentagger.FanArtClient;
+import com.opentagger.LastFmClient;
 import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
 import com.opentagger.MusicBrainzClient.ReleaseTracklist;
 import com.opentagger.MusicBrainzClient.ReleaseTrack;
+import com.opentagger.MusicBrainzOAuth;
 import com.opentagger.TagEnrichment;
+import com.opentagger.TaggerScript;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
@@ -33,6 +39,17 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private final MusicBrainzClient mb;
     private final Consumer<String>  statusCallback;
     private final Runnable          doneCallback;
+
+    // Genre (Discogs/Last.fm) et pochette (CAA/local/FanArt) — la tracklist MB ne fournit ni
+    // l'un ni l'autre, donc "ancre MB fiable" ne dispensait pas de ces enrichissements ; jusqu'ici
+    // absents, les fichiers complétés par ce worker sortaient sans genre ni pochette du tout,
+    // contrairement aux fichiers tagués par TaggingWorker/InfoCompleterWorker/MatchDialog.
+    private final DiscogsClient  discogs = new DiscogsClient();
+    private final LastFmClient   lastFm  = new LastFmClient();
+    private final CaaClient      caa     = new CaaClient();
+    private final FanArtClient   fanArt  = new FanArtClient();
+    private final TaggerScript   taggerScript = new TaggerScript();
+    private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
 
     private int matched  = 0;
     private int releases = 0;
@@ -153,12 +170,37 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                     // partagée que TaggingWorker, absente ici jusqu'à présent.
                     TagEnrichment.translateArtist(ti, mb, aliasCache);
 
+                    java.nio.file.Path writePath = hit.currentPath != null ? hit.currentPath : hit.file.toPath();
+
+                    // Script tagger utilisateur — même logique partagée que TaggingWorker/
+                    // BatchProcessor/App/InfoCompleterWorker, absente ici jusqu'à présent.
+                    taggerScript.apply(ti);
+
+                    // Genre (Discogs/Last.fm) et pochette (CAA/local/FanArt) — la tracklist MB
+                    // n'en fournit ni l'un ni l'autre, il faut les chercher comme les autres pipelines.
+                    TagEnrichment.enrichGenre(ti, discogs, lastFm);
+                    java.nio.file.Path cover = TagEnrichment.resolveCover(ti, writePath.toFile(), caa, fanArt);
+
+                    // Empreinte AcoustID : calculée systématiquement après toute identification
+                    // réussie (TaggingWorker/BatchProcessor/App/MatchDialog le font déjà, comme
+                    // Picard) — un fichier retrouvé via la tracklist d'album est identifié tout
+                    // aussi sûrement (score 100 ci-dessus).
+                    if (com.opentagger.Config.get().saveAcoustidFingerprints() && ti.acoustidFingerprint.isBlank()
+                            && com.opentagger.FpcalcInstaller.isAvailable()) {
+                        try {
+                            ti.acoustidFingerprint = com.opentagger.Fingerprinter.compute(writePath.toFile()).fingerprint();
+                        } catch (Exception ignored) {}
+                    }
+
                     // Écrire les tags
                     try {
-                        java.nio.file.Path writePath = hit.currentPath != null ? hit.currentPath : hit.file.toPath();
-                        new TagWriter().write(writePath.toFile(), ti);
+                        new TagWriter().write(writePath.toFile(), ti, cover);
                         cache.recordFileTagging(writePath.toString(), track.recordingMbid());
                         cache.saveTaggingHistory(ti);
+                        // Soumission MB (tags genre/mood + rating, si OAuth configuré) — même
+                        // logique partagée que TaggingWorker/InfoCompleterWorker, absente ici
+                        // jusqu'à présent.
+                        TagEnrichment.submitToMusicBrainz(mbOauth, ti, this::publish);
 
                         // Renommage automatique — sans ça, les fichiers tagués par "Compléter les
                         // albums" étaient les seuls à ne jamais passer par FileRenamer même quand

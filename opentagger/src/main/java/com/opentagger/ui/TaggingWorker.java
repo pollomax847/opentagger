@@ -14,6 +14,10 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.BiConsumer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * SwingWorker qui traite les fichiers sélectionnés en arrière-plan
@@ -50,7 +54,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final AudDClient               audd             = new AudDClient();
 
     // Source d'identification du dernier findTags() — utilisée pour enregistrer le niveau de confiance
-    private String  lastFindTagsSource   = MetadataCache.SOURCE_TEXT;
+    // ThreadLocal : scratch par fichier en cours de traitement (pas un état de client partagé) —
+    // avec plusieurs fichiers traités en parallèle sur la même instance de TaggingWorker, un champ
+    // simple ferait fuiter la source d'un fichier vers un autre traité au même moment.
+    private final ThreadLocal<String> lastFindTagsSource =
+            ThreadLocal.withInitial(() -> MetadataCache.SOURCE_TEXT);
     private final DiscogsClient      discogs   = new DiscogsClient();
     private final LastFmClient       lastFm    = new LastFmClient();
     private final FanArtClient       fanArt    = new FanArtClient();
@@ -105,50 +113,79 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 ? albumFirstPass(queue) : new java.util.HashSet<>();
 
         int total = queue.size();
-        int done  = 0;
+        AtomicInteger done = new AtomicInteger(0);
 
+        // Fichiers déjà tagués par l'album-first pass : juste compter la progression.
+        // Le reste part en parallèle (batch.threads, même réglage que BatchProcessor/CLI) —
+        // le rate-limit MB reste correct quel que soit le nombre de threads puisqu'il est
+        // désormais centralisé dans MusicBrainzClient.getWithRetry(), pas ici.
+        List<FileEntry> toProcess = new java.util.ArrayList<>();
         for (FileEntry entry : queue) {
             if (taggedByAlbum.contains(entry)) {
-                setProgress((++done * 100) / total);
+                setProgress((done.incrementAndGet() * 100) / total);
                 correctionLog.addEntry(entry);
-                continue;
+            } else {
+                toProcess.add(entry);
             }
+        }
+
+        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Future<?>> futures = new java.util.ArrayList<>();
+        int startIdx = done.get();
+
+        for (int i = 0; i < toProcess.size(); i++) {
             if (isCancelled()) break;
+            final FileEntry entry  = toProcess.get(i);
+            final int       fileIdx = startIdx + i + 1;
+            futures.add(pool.submit(() -> {
+                if (isCancelled()) return;
 
-            entry.status = FileEntry.Status.PROCESSING;
-            publish(entry);
-            final int fileIdx   = done + 1;
-            final int fileTotal = total;
-            final String fname  = entry.filename();
-            Consumer<String> step = s -> onProgress.accept(
-                String.format("[%d/%d] %s — %s", fileIdx, fileTotal, fname, s));
-            step.accept("identification…");
+                entry.status = FileEntry.Status.PROCESSING;
+                publish(entry);
+                final String fname = entry.filename();
+                Consumer<String> step = s -> onProgress.accept(
+                    String.format("[%d/%d] %s — %s", fileIdx, total, fname, s));
+                step.accept("identification…");
 
-            // Reset avant chaque fichier : on mesure tous les appels MB de processEntry entier
-            mb.resetNetworkFlag();
+                // Instances fraîches par tâche (voir le commentaire sur processEntry()) :
+                // jamais les champs partagés mb/acoustId/lastFm quand plusieurs fichiers
+                // tournent en même temps.
+                processEntry(entry, step, new MusicBrainzClient(), new AcoustIdClient(), new LastFmClient());
 
-            processEntry(entry, step);
+                // Si annulé pendant processEntry, remettre l'entrée en attente
+                if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
+                    entry.status  = FileEntry.Status.PENDING;
+                    entry.message = "";
+                }
 
-            // Si annulé pendant processEntry, remettre l'entrée en attente
-            if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
-                entry.status  = FileEntry.Status.PENDING;
-                entry.message = "";
-            }
+                correctionLog.addEntry(entry);
 
-            correctionLog.addEntry(entry);
+                // Déplacer les fichiers non tagués (SKIPPED/ERROR) vers un dossier dédié si
+                // configuré — évite qu'ils restent mélangés dans la bibliothèque organisée par
+                // le renommage auto.
+                if (Config.get().skippedMoveEnabled()
+                        && (entry.status == FileEntry.Status.SKIPPED || entry.status == FileEntry.Status.ERROR)) {
+                    try {
+                        String folder = Config.get().skippedMoveFolder();
+                        if (!folder.isBlank()) {
+                            java.nio.file.Path curPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
+                            java.nio.file.Path moved = FileRenamer.moveToFolder(curPath, java.nio.file.Paths.get(folder));
+                            if (moved != null) entry.currentPath = moved;
+                        }
+                    } catch (Exception ex) {
+                        log("  déplacement (non tagué) échoué: " + ex.getMessage());
+                    }
+                }
 
-            setProgress((++done * 100) / total);
-            publish(entry);
+                setProgress((done.incrementAndGet() * 100) / total);
+                publish(entry);
+            }));
+        }
 
-            // Rate-limit MusicBrainz : sleep SEULEMENT si un vrai appel HTTP a eu lieu
-            // Cache hits (source fiable) = 0 ms d'attente
-            boolean usedNet = mb.wasNetworkCalled();
-            if (!isCancelled() && done < total && usedNet) {
-                log("  [rate-limit] appel réseau MB → pause 1.1s");
-                sleep(1100);
-            } else if (!isCancelled() && done < total) {
-                log("  [rate-limit] cache hit → pas de pause");
-            }
+        pool.shutdown();
+        for (Future<?> f : futures) {
+            try { f.get(); } catch (Exception ignored) {}
         }
 
         // Remettre en attente toute entrée restée bloquée en PROCESSING
@@ -236,9 +273,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     albumName, files.size()));
 
             try {
-                mb.resetNetworkFlag();
                 String relMbid = mb.searchBestRelease(albumName, artistHint);
-                if (mb.wasNetworkCalled()) { mb.resetNetworkFlag(); sleep(1100); }
                 if (relMbid == null || relMbid.isBlank()) {
                     onProgress.accept(String.format(
                             "[album-first] \"%s\" — non trouvé dans MB (score < 70) → fallback piste/piste",
@@ -246,9 +281,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     continue;
                 }
 
-                mb.resetNetworkFlag();
                 MusicBrainzClient.ReleaseTracklist tl = mb.lookupRelease(relMbid);
-                if (mb.wasNetworkCalled()) { mb.resetNetworkFlag(); sleep(1100); }
                 if (tl == null || tl.tracks().isEmpty()) continue;
 
                 onProgress.accept(String.format(
@@ -286,11 +319,40 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     ti.releaseMbid      = tl.releaseMbid();
                     ti.releaseGroupMbid = tl.releaseGroupMbid();
                     ti.recordingMbid    = track.recordingMbid();
+                    ti.artistMbid       = track.artistMbid();
                     ti.isCompilation    = tl.isCompilation() ? "1" : "";
                     ti.score            = 100;
 
                     File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-                    writer.write(fichier, ti);
+
+                    // Toutes les étapes d'enrichissement ci-dessous existaient déjà dans la boucle
+                    // piste-par-piste plus bas, mais l'album-first pass (chemin emprunté par la
+                    // majorité d'une grosse bibliothèque bien organisée en albums) les sautait
+                    // TOUTES : ni genre Discogs/Last.fm, ni pochette, ni translittération d'artiste,
+                    // ni script tagger, ni empreinte AcoustID, ni soumission MusicBrainz. Trouvé en
+                    // observant un run réel où "encore des audios non traduits" concernait presque
+                    // exclusivement des fichiers passés par ce chemin (artistMbid restait vide, donc
+                    // TagEnrichment.translateArtist() se désactivait silencieusement pour tous).
+                    taggerScript.apply(ti);
+                    TagEnrichment.enrichGenre(ti, discogs, lastFm);
+                    if (ti.mood.isBlank()) { try { lastFm.enrichMood(ti); } catch (Exception ignored) {} }
+                    try { lastFm.enrichArtistUrls(ti); } catch (Exception ignored) {}
+                    if (bpmEnabled && ti.bpm.isBlank()) {
+                        int bpm = bpmDet.detect(fichier.getAbsolutePath());
+                        if (bpm > 0) ti.bpm = String.valueOf(bpm);
+                    }
+                    if (Config.get().saveAcoustidFingerprints() && ti.acoustidFingerprint.isBlank()
+                            && FpcalcInstaller.isAvailable()) {
+                        try { ti.acoustidFingerprint = Fingerprinter.compute(fichier).fingerprint(); }
+                        catch (Exception ignored) {}
+                    }
+                    if (essentiaEnabled) essentia.analyze(fichier.getAbsolutePath(), ti);
+                    TagEnrichment.translateArtist(ti, mb, aliasCache);
+                    try { lyrics.enrich(ti); } catch (Exception ignored) {}
+                    Path cover = TagEnrichment.resolveCover(ti, fichier, caa, fanArt);
+
+                    writer.write(fichier, ti, cover);
+                    TagEnrichment.submitToMusicBrainz(mbOauth, ti, msg -> log("[album-first]   " + msg));
                     String recMbid = track.recordingMbid();
                     cache.saveTaggingHistory(ti, recMbid.isBlank()
                             ? MetadataCache.syntheticKey(ti.artist, ti.title) : recMbid);
@@ -361,20 +423,52 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     }
 
     /** Apparie un fichier à une piste de la tracklist : d'abord par numéro, puis par titre. */
+    // Mots sans aucun pouvoir discriminant dans un titre (dictaphone/téléphone : "Recording 001",
+    // "Titre_Inconnu", "Musique_29007"...) — un fichier ainsi nommé n'est presque jamais un vrai
+    // titre catalogué sur MusicBrainz. Le laisser "ressembler" à une piste MB tout aussi générique
+    // (ex. un bootleg catalogué "Recording 001" par coïncidence) revient à faire confiance à du
+    // bruit textuel. Trouvé en observant un run réel : un fichier déjà nommé "Recording 001" par
+    // un dictaphone a matché une piste MB tout aussi vaguement nommée "Recording 001".
+    private static final java.util.Set<String> GENERIC_TITLE_WORDS = java.util.Set.of(
+            "recording", "rec", "track", "piste", "titre", "title", "inconnu", "unknown",
+            "untitled", "download", "audio", "voice", "memo", "musique", "daily", "sound", "clip");
+
+    private boolean isGenericTitle(String normTitle) {
+        if (normTitle.isBlank()) return false; // le cas "aucun titre" est géré séparément
+        for (String w : normTitle.split("\\s+")) {
+            if (w.isEmpty()) continue;
+            if (w.chars().allMatch(Character::isDigit)) continue; // un numéro seul est ignoré
+            if (!GENERIC_TITLE_WORDS.contains(w)) return false; // mot informatif → pas générique
+        }
+        return true;
+    }
+
     private MusicBrainzClient.ReleaseTrack matchFileToTrack(
             FileEntry entry, List<MusicBrainzClient.ReleaseTrack> tracks) {
-        // 1. Par numéro de piste (tag existant ou préfixe dans le nom de fichier)
+        String title = (entry.current != null && !entry.current.title.isBlank())
+                ? entry.current.title : filenameToTitle(entry.filename());
+        String normTitle = title.isBlank() ? "" : AlbumCompletionWorker.normalize(title);
+        if (isGenericTitle(normTitle)) return null;
+
+        // 1. Par numéro de piste (tag existant ou préfixe dans le nom de fichier) — accepté
+        // seulement si aucun titre n'est exploitable pour vérifier (fichier sans tag, nom
+        // générique type "Track01"), ou si le titre disponible ressemble au moins un minimum à
+        // celui de la piste ciblée. Un simple numéro qui coïncide est un signal bien trop faible
+        // pour un dossier qui n'est pas un vrai album : trouvé en observant un run réel où un
+        // dossier "vrac" (morceaux totalement sans rapport partageant juste un préfixe numérique
+        // coïncidant, ex. "1-01 10 Casseurs Flowters - ...") se faisait réassigner en masse aux
+        // pistes d'un album MusicBrainz sans aucun rapport, sur le seul numéro extrait du nom.
         int num = extractTrackNumber(entry);
         if (num > 0) {
-            for (MusicBrainzClient.ReleaseTrack t : tracks)
-                if (t.trackNo() == num) return t;
+            for (MusicBrainzClient.ReleaseTrack t : tracks) {
+                if (t.trackNo() != num) continue;
+                if (normTitle.isBlank() || titlesResemble(normTitle, AlbumCompletionWorker.normalize(t.title())))
+                    return t;
+            }
         }
 
         // 2. Par titre normalisé
-        String title = (entry.current != null && !entry.current.title.isBlank())
-                ? entry.current.title : filenameToTitle(entry.filename());
-        if (title.isBlank()) return null;
-        String normTitle = AlbumCompletionWorker.normalize(title);
+        if (normTitle.isBlank()) return null;
 
         // Correspondance exacte
         for (MusicBrainzClient.ReleaseTrack t : tracks)
@@ -387,6 +481,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 return t;
         }
         return null;
+    }
+
+    /** Ressemblance minimale entre deux titres déjà normalisés : égalité, inclusion, ou mot significatif partagé. */
+    private boolean titlesResemble(String a, String b) {
+        if (a.isBlank() || b.isBlank()) return false;
+        if (a.equals(b)) return true;
+        if (a.length() >= 8 && (a.contains(b) || b.contains(a))) return true;
+        java.util.Set<String> wordsA = new java.util.HashSet<>();
+        for (String w : a.split("\\s+")) if (w.length() >= 4) wordsA.add(w);
+        for (String w : b.split("\\s+")) if (w.length() >= 4 && wordsA.contains(w)) return true;
+        return false;
     }
 
     /**
@@ -423,7 +528,16 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return name.trim();
     }
 
-    private void processEntry(FileEntry entry, Consumer<String> step) {
+    // mb/acoustId/lastFm passés en paramètres (et non les champs partagés du même nom) : chaque
+    // fichier traité en parallèle doit avoir ses propres instances, ces 3 classes gardant un état
+    // mutable entre appels (lastRawJson/networkCallMade, lastFingerprint/lastAcoustId,
+    // cachedTagsKey/List) — les partager entre threads corromprait les résultats d'un fichier avec
+    // ceux d'un autre traité au même moment (même risque déjà documenté dans BatchProcessor). Les
+    // paramètres portent volontairement les mêmes noms que les champs de classe : ça masque les
+    // champs dans toute cette méthode sans avoir à réécrire le moindre appel mb.xxx()/lastFm.xxx()
+    // du corps existant.
+    private void processEntry(FileEntry entry, Consumer<String> step,
+                               MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm) {
         try {
             File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
 
@@ -459,7 +573,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             log("▶ START  " + fichier.getName());
 
             log("  findTags...");
-            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify);
+            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm);
             entry.forceReidentify = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
             log("  findTags → " + results.size() + " résultat(s)" +
@@ -516,12 +630,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             // Fallback MB search : si album ou artistMbid toujours vides après lookup.
-            // Ne pause que si un vrai appel MB a eu lieu (évite d'attendre pour un cache hit).
-            if ((best.album.isBlank() || best.year.isBlank()) && !best.recordingMbid.isBlank()
-                    && mb.wasNetworkCalled()) {
-                mb.resetNetworkFlag(); // flag réinitialisé : le prochain appel en bénéficiera aussi
-                sleep(1100);
-            }
             if (!best.artist.isBlank()
                     && (best.album.isBlank() || best.artistMbid.isBlank())) {
                 try {
@@ -726,7 +834,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 // Supprimer l'entrée de l'ancien chemin pour ne pas laisser d'orphelin
                 cache.deleteFileHistory(oldFilePath);
             }
-            cache.recordFileTagging(effectivePath, cacheKey, lastFindTagsSource);
+            cache.recordFileTagging(effectivePath, cacheKey, lastFindTagsSource.get());
 
             // AcoustIdSubmitter recalcule sa propre empreinte pour CE fichier (pas d'état
             // partagé entre fichiers, contrairement à l'ancien acoustId.submit() qui réutilisait
@@ -736,7 +844,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // soumission automatique aux fichiers réellement identifiés via AcoustID pour ne pas
             // multiplier les appels réseau à chaque taguage — la soumission manuelle en masse
             // (bouton "Soumettre AcoustID") reste disponible pour les autres sources.
-            if (MetadataCache.SOURCE_ACOUSTID.equals(lastFindTagsSource) && !best.recordingMbid.isBlank()) {
+            if (MetadataCache.SOURCE_ACOUSTID.equals(lastFindTagsSource.get()) && !best.recordingMbid.isBlank()) {
                 try {
                     new AcoustIdSubmitter().submit(fichier, best);
                 } catch (Exception ex) {
@@ -759,7 +867,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
-    private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify) throws Exception {
+    private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify,
+                                    MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
         if (TagWriter.repairM4aIfNeeded(fichier)) log("  M4A réparé OK");
 
@@ -782,7 +891,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // 0. Historique personnel — ce fichier a-t-il déjà été tagué par OpenTagger ?
         //    Confiance totale SEULEMENT si identifié par empreinte audio (songrec/acoustid/mbid).
         //    Si identifié par texte ("text"), SongRec doit vérifier car les tags peuvent être faux.
-        lastFindTagsSource = MetadataCache.SOURCE_TEXT;
+        lastFindTagsSource.set(MetadataCache.SOURCE_TEXT);
         String knownMbid = cache.getFileTagging(fichier.getAbsolutePath());
         if (knownMbid != null) knownMbid = knownMbid.trim();
         if (!forceReidentify && knownMbid != null && !knownMbid.isBlank()) {
@@ -795,7 +904,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 if (trustedSource) {
                     // Empreinte audio → confiance totale, retour instantané
                     hist.score = 100;
-                    lastFindTagsSource = cachedSource;
+                    lastFindTagsSource.set(cachedSource);
                     log("  cache hit [" + cachedSource + "] ✓ : " + hist.artist + " – " + hist.title);
                     return List.of(hist);
                 } else {
@@ -820,7 +929,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 && !isGenericTag(existingTags.title)) {
             TagInfo t = existingTags.copy();
             t.score = 100;
-            lastFindTagsSource = MetadataCache.SOURCE_MBID;
+            lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
             log("  tags MB existants ✓ [releaseMbid=" + existingTags.releaseMbid.substring(0,
                     Math.min(8, existingTags.releaseMbid.length())) + "…] "
                 + existingTags.artist + " – " + existingTags.title
@@ -855,15 +964,39 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
                         best.score = 90;
                         log("  SongRec→MB: " + best.artist + " – " + best.title + " [" + best.album + "] score=" + best.score);
-                        lastFindTagsSource = MetadataCache.SOURCE_SONGREC;
+                        lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                         return srMb;
+                    }
+                    // MB échoue avec le titre complet → réessayer sans qualificatif entre
+                    // parenthèses (ex. "Le coach (feat. Vincenzo)" → "Le coach") : SongRec/Shazam
+                    // renvoie souvent le featuring collé dans le titre, ce qui fait chuter le score
+                    // MB sous le seuil alors qu'une recherche sur le titre seul matche parfaitement
+                    // — même correctif déjà présent dans le fallback SongRec plus loin dans la
+                    // cascade (voir plus bas "titre nettoyé"), qui manquait ici jusqu'à présent.
+                    String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
+                    if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
+                        List<TagInfo> srMbClean = mb.searchRecording(sr.artist, cleanTitle);
+                        if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50) {
+                            TagInfo best = srMbClean.get(0);
+                            if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
+                            if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
+                            if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
+                            if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
+                            best.score = 90;
+                            log("  SongRec→MB (titre nettoyé '" + cleanTitle + "'): " + best.artist
+                                    + " – " + best.title + " [" + best.album + "] score=" + best.score);
+                            lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
+                            return srMbClean;
+                        }
                     }
                     // MB n'a rien enrichi : garder le résultat SongRec seul
                     sr.score = 85;
                     log("  SongRec seul (MB sans match): " + sr.artist + " – " + sr.title);
-                    if (sr.genre.isBlank()) { try { discogs.enrichGenres(sr); } catch (Exception ignored) {} }
-                    if (sr.genre.isBlank()) { try { lastFm.enrichGenres(sr);  } catch (Exception ignored) {} }
-                    lastFindTagsSource = MetadataCache.SOURCE_SONGREC;
+                    // Cascade centralisée (au lieu d'une copie inline qui divergerait silencieusement
+                    // si TagEnrichment.enrichGenre change) — de toute façon re-noopée sans risque à
+                    // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
+                    TagEnrichment.enrichGenre(sr, discogs, lastFm);
+                    lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                     return List.of(sr);
                 } else {
                     log("  SongRec → rien trouvé");
@@ -887,7 +1020,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (t != null && (!t.artist.isBlank() || !t.title.isBlank())) {
                 log("  MBID lookup: " + t.artist + " – " + t.title);
                 t.score = 100;
-                lastFindTagsSource = MetadataCache.SOURCE_MBID;
+                lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
                 return List.of(t);
             } else if (t != null) {
                 log("  MBID lookup IGNORÉ (artiste+titre vides) mbid=" + existingMbid);
@@ -901,7 +1034,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
                 List<TagInfo> r = acoustId.identify(fichier);
                 if (!r.isEmpty()) {
-                    lastFindTagsSource = MetadataCache.SOURCE_ACOUSTID;
+                    lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
                     return r;
                 }
             }
@@ -1210,7 +1343,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     }
                 }
 
-                if (mb.wasNetworkCalled()) { mb.resetNetworkFlag(); sleep(1100); }
             } catch (Exception e) {
                 log("  cluster erreur: " + e.getMessage());
             }
@@ -1418,46 +1550,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * Silencieux : une erreur n'interrompt pas le tagging local.
      */
     private void submitToMusicBrainz(TagInfo info) {
-        String token = Config.get().str("mb.oauth.token", "");
-        if (token.isBlank() || info.recordingMbid.isBlank()) return;
-
-        // Tags : genres + mood
-        java.util.List<String> tags = new java.util.ArrayList<>();
-        if (!info.genre.isBlank())
-            java.util.Arrays.stream(info.genre.split(",")).map(String::trim)
-                    .filter(s -> !s.isBlank()).forEach(tags::add);
-        if (!info.mood.isBlank()) tags.add(info.mood);
-
-        try {
-            if (!tags.isEmpty()) {
-                mbOauth.submitUserTags(info.recordingMbid, tags, token);
-                log("  MB tags soumis: " + tags);
-            }
-        } catch (Exception e) {
-            log("  MB tags skip: " + e.getMessage());
-        }
-
-        // Rating (valeur 1–5 uniquement)
-        try {
-            int rating = parseStars(info.rating);
-            if (rating > 0) {
-                mbOauth.submitRating(info.recordingMbid, rating, token);
-                log("  MB rating soumis: " + rating + " étoile(s)");
-            }
-        } catch (Exception e) {
-            log("  MB rating skip: " + e.getMessage());
-        }
-    }
-
-    /** Convertit une valeur de rating en étoiles 1–5. Retourne 0 si non applicable. */
-    private static int parseStars(String raw) {
-        if (raw == null || raw.isBlank()) return 0;
-        try {
-            int v = Integer.parseInt(raw.trim());
-            if (v >= 1 && v <= 5) return v;
-            if (v >= 6 && v <= 255) return Math.max(1, Math.min(5, (int) Math.round(v * 5.0 / 255)));
-        } catch (NumberFormatException ignored) {}
-        return 0;
+        TagEnrichment.submitToMusicBrainz(mbOauth, info, msg -> log("  " + msg));
     }
 
     private void sleep(long ms) {

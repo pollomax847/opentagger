@@ -273,6 +273,35 @@ public class FileRenamer {
 
     private String safe(String s) { return s == null ? "" : s; }
 
+    /**
+     * Déplace un fichier "brut" (sans masque, nom d'origine conservé) vers un dossier — utilisé
+     * pour isoler les fichiers non tagués (SKIPPED/ERROR) hors de la bibliothèque organisée.
+     * Mêmes garanties de collision ((2), (3)…) et de déplacement cross-device que {@link #rename}.
+     */
+    public static Path moveToFolder(Path fichier, Path targetFolder) throws IOException {
+        Files.createDirectories(targetFolder);
+        String nom  = fichier.getFileName().toString();
+        int dot      = nom.lastIndexOf('.');
+        String ext   = dot > 0 ? nom.substring(dot) : "";
+        String stem  = dot > 0 ? nom.substring(0, dot) : nom;
+
+        Path cible = targetFolder.resolve(nom).normalize();
+        if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
+
+        if (Files.exists(cible)) {
+            int n = 2;
+            do {
+                cible = targetFolder.resolve(stem + " (" + n++ + ")" + ext).normalize();
+            } while (Files.exists(cible) && n < 100);
+            if (Files.exists(cible))
+                throw new IOException("Impossible de déplacer '" + nom
+                        + "' : 98 fichiers en collision existent déjà.");
+        }
+
+        moveFile(fichier, cible);
+        return cible;
+    }
+
     // ── Déplacement de fichier ────────────────────────────────────────────────
 
     private static void moveFile(Path src, Path dst) throws IOException {

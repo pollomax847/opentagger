@@ -33,6 +33,9 @@ public class DiscogsClient {
      */
     public void enrichGenres(TagInfo info) throws Exception {
         if (info.artist.isBlank()) return;
+        // Sans clé/secret configurés, la requête échouerait de toute façon (401) — éviter l'appel
+        // réseau inutile sur chaque fichier, même pattern que lastfmEnabled()/AcoustID pré-vérifié.
+        if (Config.get().discogsKey().isBlank() || Config.get().discogsSecret().isBlank()) return;
 
         JsonNode hit = null;
         if (!info.album.isBlank())  hit = searchBest(info.artist, info.album);

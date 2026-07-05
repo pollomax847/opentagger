@@ -93,6 +93,44 @@ public final class TagEnrichment {
     }
 
     /**
+     * Soumet à MusicBrainz (si OAuth configuré) les tags utilisateur (genre + mood) et le rating
+     * du TagInfo pour son recordingMbid — no-op silencieux si OAuth non configuré ou pas de MBID.
+     * Anciennement dupliqué à l'identique dans TaggingWorker et InfoCompleterWorker (même risque
+     * de divergence que le reste des cascades genre/pochette centralisées ici).
+     */
+    public static void submitToMusicBrainz(MusicBrainzOAuth mbOauth, TagInfo info,
+                                            java.util.function.Consumer<String> log) {
+        String token = Config.get().str("mb.oauth.token", "");
+        if (token.isBlank() || info.recordingMbid.isBlank()) return;
+
+        java.util.List<String> tags = new java.util.ArrayList<>();
+        if (!info.genre.isBlank())
+            java.util.Arrays.stream(info.genre.split(",")).map(String::trim)
+                    .filter(s -> !s.isBlank()).forEach(tags::add);
+        if (!info.mood.isBlank()) tags.add(info.mood);
+
+        try {
+            if (!tags.isEmpty()) { mbOauth.submitUserTags(info.recordingMbid, tags, token); log.accept("MB tags soumis: " + tags); }
+        } catch (Exception e) { log.accept("MB tags skip: " + e.getMessage()); }
+
+        try {
+            int rating = parseStars(info.rating);
+            if (rating > 0) { mbOauth.submitRating(info.recordingMbid, rating, token); log.accept("MB rating soumis: " + rating); }
+        } catch (Exception e) { log.accept("MB rating skip: " + e.getMessage()); }
+    }
+
+    /** Convertit une valeur de rating brute (1-5 ou 1-255) en étoiles 1-5. Retourne 0 si non applicable. */
+    private static int parseStars(String raw) {
+        if (raw == null || raw.isBlank()) return 0;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v >= 1 && v <= 5) return v;
+            if (v >= 6 && v <= 255) return Math.max(1, Math.min(5, (int) Math.round(v * 5.0 / 255)));
+        } catch (NumberFormatException ignored) {}
+        return 0;
+    }
+
+    /**
      * Translittère l'artiste vers l'alias MusicBrainz dans la locale préférée si son nom n'est
      * pas en écriture latine (ex. cyrillique, japonais, coréen, chinois, arabe…) et que l'option
      * est activée. {@code aliasCache} évite de refaire le lookup réseau pour le même artiste sur

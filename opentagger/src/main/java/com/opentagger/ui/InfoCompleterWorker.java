@@ -240,6 +240,12 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                     ? ti.recordingMbid
                     : MetadataCache.syntheticKey(ti.artist, ti.title);
             cache.saveTaggingHistory(ti, icKey);
+            // Toutes les autres pipelines (TaggingWorker/BatchProcessor/App/MatchDialog/
+            // AlbumCompletionWorker/PodcastWorker) appellent aussi recordFileTagging — absent
+            // ici jusqu'à présent. Cas concret : recordingMbid était vide et vient d'être rempli
+            // (étape 1 ci-dessus, MB release lookup) sans jamais mettre à jour cette association
+            // fichier→MBID dans le cache.
+            cache.recordFileTagging(fichier.getAbsolutePath(), ti.recordingMbid);
             // ── 9. Renommage automatique ──────────────────────────────────
             java.nio.file.Path newPath = null;
             String renameError = null;
@@ -288,33 +294,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     }
 
     private void submitToMusicBrainz(TagInfo info) {
-        String token = Config.get().str("mb.oauth.token", "");
-        if (token.isBlank() || info.recordingMbid.isBlank()) return;
-
-        java.util.List<String> tags = new java.util.ArrayList<>();
-        if (!info.genre.isBlank())
-            java.util.Arrays.stream(info.genre.split(",")).map(String::trim)
-                    .filter(s -> !s.isBlank()).forEach(tags::add);
-        if (!info.mood.isBlank()) tags.add(info.mood);
-
-        try {
-            if (!tags.isEmpty()) { mbOauth.submitUserTags(info.recordingMbid, tags, token); log("  MB tags soumis"); }
-        } catch (Exception e) { log("  MB tags skip: " + e.getMessage()); }
-
-        try {
-            int rating = parseStars(info.rating);
-            if (rating > 0) { mbOauth.submitRating(info.recordingMbid, rating, token); log("  MB rating soumis: " + rating); }
-        } catch (Exception e) { log("  MB rating skip: " + e.getMessage()); }
-    }
-
-    private static int parseStars(String raw) {
-        if (raw == null || raw.isBlank()) return 0;
-        try {
-            int v = Integer.parseInt(raw.trim());
-            if (v >= 1 && v <= 5) return v;
-            if (v >= 6 && v <= 255) return Math.max(1, Math.min(5, (int) Math.round(v * 5.0 / 255)));
-        } catch (NumberFormatException ignored) {}
-        return 0;
+        TagEnrichment.submitToMusicBrainz(mbOauth, info, msg -> log("  " + msg));
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

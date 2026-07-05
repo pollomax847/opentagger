@@ -8,6 +8,7 @@ import com.opentagger.TaggerScript;
 
 import javax.swing.*;
 import javax.swing.border.*;
+import javax.swing.event.*;
 import java.awt.*;
 import java.io.*;
 import java.nio.file.*;
@@ -51,6 +52,8 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkFollowLog;
     private JTextField tfLibraryRoot;
     private JTextField tfPodcastLibraryRoot;
+    private JCheckBox  chkMoveSkipped;
+    private JTextField tfSkippedFolder;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JTextField tfFfmpegPath;
@@ -78,6 +81,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkSaveAcoustidFingerprints;
     private JCheckBox  chkIgnoreExistingFingerprints;
     private JSpinner   spFpcalcThreads;
+    private JSpinner   spBatchThreads;
     private JTextField tfPreservedTags;
     private JCheckBox  chkMbUseGenres;
     private JSpinner   spMbMinGenreUsage;
@@ -203,13 +207,20 @@ public class SettingsDialog extends JDialog {
 
     private final java.util.function.Consumer<java.io.File[]> onLoadFolders;
 
+    // ── Recherche de réglages (10 onglets / ~75 réglages — pas de refonte, juste
+    //    un accès direct à un champ sans devoir deviner son onglet) ────────────
+    private JTabbedPane tabs;
+    private JTextField  tfSettingsSearch;
+    private final java.util.List<SearchTarget> searchIndex = new java.util.ArrayList<>();
+    private record SearchTarget(int tabIndex, String text, JComponent component) {}
+
     public SettingsDialog(Frame owner, java.util.function.Consumer<java.io.File[]> onLoadFolders) {
         super(owner, "Préférences — OpenTagger", true);
         this.onLoadFolders = onLoadFolders;
         setMinimumSize(new Dimension(560, 500));
         setResizable(true);
 
-        JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
+        tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
         // Chaque onglet est enveloppé dans un JScrollPane pour que le contenu soit
         // toujours accessible quelle que soit la taille de la fenêtre
         tabs.addTab("Démarrage",    scrollWrap(buildStartupPanel()));
@@ -222,6 +233,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab("Script",       scrollWrap(buildScriptPanel()));
         tabs.addTab("Barre d'outils", scrollWrap(buildToolbarPanel()));
         tabs.addTab("MusicBrainz",  scrollWrap(buildMbOAuthPanel()));
+        buildSearchIndex();
 
         JButton btnOk     = new JButton("OK");
         JButton btnCancel = new JButton("Annuler");
@@ -235,6 +247,7 @@ public class SettingsDialog extends JDialog {
         buttons.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
 
         getContentPane().setLayout(new BorderLayout());
+        getContentPane().add(buildSearchBar(), BorderLayout.NORTH);
         getContentPane().add(tabs,    BorderLayout.CENTER);
         getContentPane().add(buttons, BorderLayout.SOUTH);
 
@@ -621,6 +634,10 @@ public class SettingsDialog extends JDialog {
         chkSaveAcoustidFingerprints   = new JCheckBox("Sauvegarder l'empreinte AcoustID dans les tags");
         chkIgnoreExistingFingerprints = new JCheckBox("Forcer le re-fingerprint (même si AcoustID déjà présent)");
         spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
+        spBatchThreads             = new JSpinner(new SpinnerNumberModel(3, 1, 16, 1));
+        spBatchThreads.setToolTipText("Fichiers traités en parallèle pendant le taguage (GUI et CLI/--dossier). "
+                + "Le rate-limit MusicBrainz (1 requête/s) reste respecté quel que soit ce réglage — "
+                + "augmenter aide surtout les étapes non-MB (BPM, paroles, écriture disque).");
 
         JLabel id3Hint = new JLabel(
             "<html><i>ID3v2.3 : recommandé pour voitures, NAS anciens, Windows Explorer.<br>" +
@@ -661,6 +678,7 @@ public class SettingsDialog extends JDialog {
             { new JLabel(""), chkSaveAcoustidFingerprints },
             { new JLabel(""), chkIgnoreExistingFingerprints },
             { new JLabel("Threads fpcalc :"), spFpcalcThreads },
+            { new JLabel("Threads de taguage :"), spBatchThreads },
         };
         for (int i = 0; i < fpRows.length; i++) {
             GridBagConstraints lc = new GridBagConstraints();
@@ -865,9 +883,27 @@ public class SettingsDialog extends JDialog {
         podcastRootPanel.add(tfPodcastLibraryRoot, BorderLayout.CENTER);
         podcastRootPanel.add(btnBrowsePodcast,     BorderLayout.EAST);
 
+        // ── Dossier des fichiers non tagués (SKIPPED/ERROR) ────────────────────
+        chkMoveSkipped = new JCheckBox("Déplacer les fichiers non tagués (ignorés/erreurs) vers ce dossier");
+        tfSkippedFolder = tf();
+        tfSkippedFolder.setToolTipText("Dossier où isoler les fichiers non identifiés ou en erreur, hors de la bibliothèque organisée.");
+        JButton btnBrowseSkipped = new JButton("…");
+        btnBrowseSkipped.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser(tfSkippedFolder.getText().isBlank()
+                    ? System.getProperty("user.home") : tfSkippedFolder.getText());
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfSkippedFolder.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel skippedFolderPanel = new JPanel(new BorderLayout(4, 0));
+        skippedFolderPanel.add(tfSkippedFolder,   BorderLayout.CENTER);
+        skippedFolderPanel.add(btnBrowseSkipped,  BorderLayout.EAST);
+
         JPanel p = form(
-            new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :", "", "", ""},
-            new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkFollowLog},
+            new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
+                    "", "", "", "", "Dossier fichiers non tagués :"},
+            new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
+                    chkFollowLog, chkMoveSkipped, skippedFolderPanel},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -1490,6 +1526,8 @@ public class SettingsDialog extends JDialog {
         chkDeleteEmptyDirs.setSelected(cfg.bool("rename.delete_empty_dirs",  true));
         chkFollowLog      .setSelected(cfg.bool("rename.follow_log",         true));
         cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
+        chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
+        tfSkippedFolder   .setText(cfg.str("skipped.move_folder",           ""));
 
         startupFolderModel.clear();
         for (String f : cfg.startupFolders())
@@ -1594,6 +1632,7 @@ public class SettingsDialog extends JDialog {
         chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
         chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
+        spBatchThreads            .setValue(cfg.num("batch.threads", 3));
 
         tfMbClientId    .setText(cfg.mbClientId());
         tfMbClientSecret.setText(cfg.mbClientSecret());
@@ -1652,6 +1691,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
         p.setProperty("rename.delete_empty_dirs",      String.valueOf(chkDeleteEmptyDirs.isSelected()));
         p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
+        p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
+        p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < startupFolderModel.size(); i++) {
@@ -1734,6 +1775,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.save_fingerprints",    String.valueOf(chkSaveAcoustidFingerprints.isSelected()));
         p.setProperty("acoustid.ignore_existing",      String.valueOf(chkIgnoreExistingFingerprints.isSelected()));
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
+        p.setProperty("batch.threads",                 String.valueOf(spBatchThreads.getValue()));
 
         flushCurrentScriptEdits();
         TaggerScript.saveScripts(scriptDefs);
@@ -1749,8 +1791,9 @@ public class SettingsDialog extends JDialog {
 
         p.setProperty("mb.oauth.client_id",            tfMbClientId.getText().trim());
         p.setProperty("mb.oauth.client_secret",        tfMbClientSecret.getText().trim());
-        // Conserver le token et username existants
+        // Conserver le token, refresh_token et username existants
         p.setProperty("mb.oauth.token",               Config.get().mbToken());
+        p.setProperty("mb.oauth.refresh_token",       Config.get().str("mb.oauth.refresh_token", ""));
         p.setProperty("mb.oauth.username",            Config.get().mbUsername());
         String[] oauthModes = {"scheme", "localhost", "oob"};
         p.setProperty("mb.oauth.mode", oauthModes[cmbMbOAuthMode.getSelectedIndex()]);
@@ -1789,6 +1832,75 @@ public class SettingsDialog extends JDialog {
     private JTextField tf() { return new JTextField(28); }
 
     /** Enveloppe un panneau dans un JScrollPane sans bordure — les onglets défilent si besoin. */
+    // ── Recherche de réglages ─────────────────────────────────────────────────
+
+    private JPanel buildSearchBar() {
+        tfSettingsSearch = new JTextField();
+        tfSettingsSearch.putClientProperty("JTextField.placeholderText", "Rechercher un réglage…");
+        tfSettingsSearch.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e) { onSettingsSearch(); }
+            @Override public void removeUpdate(DocumentEvent e) { onSettingsSearch(); }
+            @Override public void changedUpdate(DocumentEvent e) { onSettingsSearch(); }
+        });
+        JPanel bar = new JPanel(new BorderLayout(6, 0));
+        bar.setBorder(new EmptyBorder(6, 8, 4, 8));
+        bar.add(new JLabel("🔎"), BorderLayout.WEST);
+        bar.add(tfSettingsSearch, BorderLayout.CENTER);
+        return bar;
+    }
+
+    /** Indexe une fois (labels, cases à cocher, boutons, titres de section) sur les 10 onglets. */
+    private void buildSearchIndex() {
+        searchIndex.clear();
+        for (int i = 0; i < tabs.getTabCount(); i++)
+            indexComponent(tabs.getComponentAt(i), i);
+    }
+
+    private void indexComponent(Component c, int tabIndex) {
+        if (c instanceof JLabel lbl && lbl.getText() != null && !lbl.getText().isBlank())
+            searchIndex.add(new SearchTarget(tabIndex, lbl.getText(), lbl));
+        if (c instanceof AbstractButton b && b.getText() != null && !b.getText().isBlank())
+            searchIndex.add(new SearchTarget(tabIndex, b.getText(), b));
+        if (c instanceof JComponent jc && jc.getBorder() instanceof TitledBorder tb
+                && tb.getTitle() != null && !tb.getTitle().isBlank())
+            searchIndex.add(new SearchTarget(tabIndex, tb.getTitle(), jc));
+        if (c instanceof Container cont)
+            for (Component child : cont.getComponents())
+                indexComponent(child, tabIndex);
+    }
+
+    private void onSettingsSearch() {
+        String q = tfSettingsSearch.getText().trim().toLowerCase();
+        Color defaultBg = UIManager.getColor("TextField.background");
+        if (q.isEmpty()) { tfSettingsSearch.setBackground(defaultBg); return; }
+
+        SearchTarget match = searchIndex.stream()
+                .filter(t -> t.text().toLowerCase().contains(q))
+                .findFirst().orElse(null);
+        if (match == null) {
+            tfSettingsSearch.setBackground(new Color(90, 40, 40));
+            return;
+        }
+        tfSettingsSearch.setBackground(defaultBg);
+        tabs.setSelectedIndex(match.tabIndex());
+        SwingUtilities.invokeLater(() -> {
+            JComponent c = match.component();
+            c.scrollRectToVisible(new Rectangle(0, 0, c.getWidth(), c.getHeight()));
+            flashComponent(c);
+        });
+    }
+
+    /** Flash temporaire du fond du composant trouvé, pour le repérer visuellement dans l'onglet. */
+    private void flashComponent(JComponent c) {
+        Color original = c.getBackground();
+        boolean wasOpaque = c.isOpaque();
+        c.setOpaque(true);
+        c.setBackground(new Color(255, 213, 79));
+        Timer t = new Timer(1200, e -> { c.setBackground(original); c.setOpaque(wasOpaque); c.repaint(); });
+        t.setRepeats(false);
+        t.start();
+    }
+
     private JScrollPane scrollWrap(JPanel panel) {
         JScrollPane sp = new JScrollPane(panel,
                 JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,

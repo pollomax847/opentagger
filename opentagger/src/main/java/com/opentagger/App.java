@@ -146,6 +146,7 @@ public class App {
 
         if (resultats.isEmpty()) {
             System.out.println("Aucun résultat trouvé.");
+            moveIfConfiguredSkipped(fichier);
             return;
         }
 
@@ -192,10 +193,24 @@ public class App {
             catch (Exception ignored) {}
         }
 
+        // 6b. BPM (ffmpeg) — présent dans le pipeline GUI (TaggingWorker/InfoCompleterWorker)
+        // mais absent ici jusqu'à présent.
+        if (choisi.bpm.isBlank() && BpmDetector.isAvailable()) {
+            int bpm = new BpmDetector().detect(fichier.getAbsolutePath());
+            if (bpm > 0) choisi.bpm = String.valueOf(bpm);
+        }
+
         // 7. Enrichir le genre : Discogs → Last.fm (cascade)
         System.out.println("Recherche du genre (Discogs → Last.fm)...");
-        TagEnrichment.enrichGenre(choisi, new DiscogsClient(), new LastFmClient());
+        LastFmClient lastFm = new LastFmClient();
+        TagEnrichment.enrichGenre(choisi, new DiscogsClient(), lastFm);
         if (!choisi.genre.isBlank()) System.out.println("  Genre trouvé : " + choisi.genre);
+        // Mood + URLs artiste Last.fm — même gap : absents du CLI jusqu'à présent.
+        if (choisi.mood.isBlank()) { try { lastFm.enrichMood(choisi); } catch (Exception ignored) {} }
+        try { lastFm.enrichArtistUrls(choisi); } catch (Exception ignored) {}
+
+        // Paroles — même gap : absentes du CLI jusqu'à présent.
+        try { new LyricsClient().enrich(choisi); } catch (Exception ignored) {}
 
         // 8. Pochette : Cover Art Archive → dossier local → FanArt.tv
         System.out.println("Recherche de la pochette (CAA → local → FanArt.tv)...");
@@ -209,6 +224,7 @@ public class App {
         } catch (Exception e) {
             System.out.println();
             System.out.println("✗ Erreur lors de l'écriture des tags : " + e.getMessage());
+            moveIfConfiguredSkipped(fichier);
             return;
         }
 
@@ -245,6 +261,17 @@ public class App {
                 System.out.println("Masque invalide, renommage ignoré.");
             }
         }
+    }
+
+    /** Déplace un fichier non tagué (aucun résultat / erreur d'écriture) vers le dossier dédié
+     *  si configuré — mêmes règles que le pipeline GUI (TaggingWorker) et BatchProcessor. */
+    private static void moveIfConfiguredSkipped(File fichier) {
+        if (!Config.get().skippedMoveEnabled()) return;
+        String folder = Config.get().skippedMoveFolder();
+        if (folder.isBlank()) return;
+        try {
+            FileRenamer.moveToFolder(fichier.toPath(), java.nio.file.Paths.get(folder));
+        } catch (Exception ignored) {}
     }
 
     /** Fusionne les dossiers CLI avec les dossiers de démarrage configurés dans les préférences. */

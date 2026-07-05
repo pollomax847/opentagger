@@ -44,6 +44,13 @@ public class PodcastWorker extends SwingWorker<Void, String> {
                 publish("Taguage : " + entry.filename());
 
                 TagInfo ti = buildTagInfo(ep);
+                // Script tagger utilisateur : mécanisme générique (s'applique à n'importe quel
+                // TagInfo, pas seulement aux résultats d'identification musicale) — même logique
+                // partagée que TaggingWorker/BatchProcessor/App/InfoCompleterWorker/
+                // AlbumCompletionWorker, absente ici jusqu'à présent. Contrairement au genre/à la
+                // pochette (hors-sujet pour un épisode de podcast), rien ne justifie d'exclure
+                // celui-ci.
+                new TaggerScript().apply(ti);
                 try {
                     new TagWriter().write(writePath.toFile(), ti);
                     cache.recordFileTagging(writePath.toString(), "podcast:" + ep.title());

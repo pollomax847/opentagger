@@ -121,17 +121,9 @@ public class AcoustIdClient {
         for (int i = 0; i < tries; i++) {
             try {
                 // Utilise mbClient.lookupRecording qui inclut TOUS les inc= nécessaires
-                mbClient.resetNetworkFlag();
+                // Rate-limit MB : centralisé dans MusicBrainzClient.getWithRetry(), plus besoin
+                // de pause manuelle ici même si ce client a son propre MusicBrainzClient interne.
                 TagInfo info = mbClient.lookupRecording(mbids.get(i));
-                // Respecter la limite MusicBrainz (1 req/s) : ce client possède son propre
-                // MusicBrainzClient interne, distinct de celui de l'appelant (TaggingWorker/
-                // BatchProcessor) — sans cette pause, jusqu'à 3 lookups partent ici sans délai,
-                // et rien côté appelant ne peut le détecter puisque le flag réseau vérifié
-                // ensuite par l'appelant n'est pas celui de CE mbClient.
-                if (mbClient.wasNetworkCalled() && i < tries - 1) {
-                    mbClient.resetNetworkFlag();
-                    Thread.sleep(1100);
-                }
                 if (info != null && !info.title.isBlank()) {
                     best = List.of(info);
                     if (info.score >= 90) break; // bon résultat, on s'arrête

@@ -12,16 +12,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class BatchProcessor {
 
     private final int SEUIL_AUTO = Config.get().minScoreAuto();
-
-    // Rate limiter partagé pour respecter MB 1 req/s (comme Picard ratecontrol.py)
-    // Toutes les requêtes MB passent par ce token bucket, pas seulement 1 par fichier.
-    private static final AtomicLong LAST_MB_REQUEST_MS = new AtomicLong(0);
-    private static final long       MB_MIN_INTERVAL_MS = 1050;
 
     // mbClient / acoustId / lastFm sont volontairement NON partagés entre les threads du pool
     // (contrairement à discogs/fanArt/corrector/writer/renamer/cache, qui sont sans état
@@ -75,8 +69,10 @@ public class BatchProcessor {
         System.out.println("Fichiers trouvés : " + total);
         System.out.println();
 
-        // Traitement parallèle : 3 threads max (limité par le rate-limit MB 1 req/s)
-        // Au-delà de 3, les threads se bloquent mutuellement dans mbRateLimit()
+        // Traitement parallèle : le rate-limit MB (1 req/s, centralisé dans
+        // MusicBrainzClient.getWithRetry()) borne de toute façon le débit réel des requêtes MB
+        // quel que soit le nombre de threads ; au-delà de 3, le gain vient surtout des étapes non-MB
+        // (BPM, paroles, empreinte, écriture disque) qui peuvent, elles, tourner en parallèle.
         int threads = Config.get().num("batch.threads", 3);
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
@@ -101,21 +97,6 @@ public class BatchProcessor {
         printSummary();
     }
 
-    /**
-     * Respecte le rate-limit MB : attend le temps nécessaire pour garantir
-     * au moins MB_MIN_INTERVAL_MS entre deux requêtes sur l'ensemble des threads.
-     * Analogue à Picard's ratecontrol.get_delay_to_next_request().
-     */
-    public static synchronized void mbRateLimit() {
-        long now  = System.currentTimeMillis();
-        long last = LAST_MB_REQUEST_MS.get();
-        long wait = MB_MIN_INTERVAL_MS - (now - last);
-        if (wait > 0) {
-            try { Thread.sleep(wait); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }
-        LAST_MB_REQUEST_MS.set(System.currentTimeMillis());
-    }
-
     private void processOne(File fichier) {
         try {
             // Vérifier l'historique : si ce fichier a déjà été tagué, réutiliser le résultat
@@ -135,6 +116,7 @@ public class BatchProcessor {
             if (resultats.isEmpty()) {
                 System.out.println("  ✗ Aucun résultat trouvé.");
                 incertains.incrementAndGet();
+                moveIfConfiguredSkipped(fichier);
                 return;
             }
 
@@ -156,9 +138,24 @@ public class BatchProcessor {
                     catch (Exception ignored) {}
                 }
 
+                // BPM (ffmpeg) — présent dans le pipeline GUI (TaggingWorker/InfoCompleterWorker)
+                // mais absent ici jusqu'à présent : le CLI/batch ne calculait jamais le BPM, même
+                // avec les mêmes réglages activés.
+                if (best.bpm.isBlank() && BpmDetector.isAvailable()) {
+                    int bpm = new BpmDetector().detect(fichier.getAbsolutePath());
+                    if (bpm > 0) best.bpm = String.valueOf(bpm);
+                }
+
                 // Instance LastFmClient fraîche : voir le commentaire de classe sur le
                 // partage inter-threads (cachedTagsKey/cachedTagsList d'instance).
-                TagEnrichment.enrichGenre(best, discogs, new LastFmClient());
+                LastFmClient lastFm = new LastFmClient();
+                TagEnrichment.enrichGenre(best, discogs, lastFm);
+                // Mood + URLs artiste Last.fm — même gap : absents du CLI/batch jusqu'à présent.
+                if (best.mood.isBlank()) { try { lastFm.enrichMood(best); } catch (Exception ignored) {} }
+                try { lastFm.enrichArtistUrls(best); } catch (Exception ignored) {}
+
+                // Paroles — même gap : absentes du CLI/batch jusqu'à présent.
+                try { new LyricsClient().enrich(best); } catch (Exception ignored) {}
 
                 Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt);
                 writer.write(fichier, best, cover);
@@ -199,12 +196,25 @@ public class BatchProcessor {
                 System.out.printf("  ? Incertain (%d%%) : %s - %s — ignoré%n",
                         best.score, best.artist, best.title);
                 incertains.incrementAndGet();
+                moveIfConfiguredSkipped(fichier);
             }
 
         } catch (Exception e) {
             System.out.println("  ✗ Erreur : " + e.getMessage());
             erreurs.incrementAndGet();
+            moveIfConfiguredSkipped(fichier);
         }
+    }
+
+    /** Déplace un fichier non tagué (aucun résultat / score < seuil / erreur) vers le dossier
+     *  dédié si configuré — mêmes règles que le pipeline GUI (TaggingWorker). */
+    private void moveIfConfiguredSkipped(File fichier) {
+        if (!Config.get().skippedMoveEnabled()) return;
+        String folder = Config.get().skippedMoveFolder();
+        if (folder.isBlank()) return;
+        try {
+            FileRenamer.moveToFolder(fichier.toPath(), java.nio.file.Paths.get(folder));
+        } catch (Exception ignored) {}
     }
 
     private List<TagInfo> findTags(File fichier) throws Exception {
@@ -239,7 +249,6 @@ public class BatchProcessor {
         }
 
         System.out.printf("  → Recherche MusicBrainz : \"%s - %s\"%n", artiste, titre);
-        mbRateLimit(); // respecter 1 req/s MB
         List<TagInfo> results = mbClient.searchRecording(artiste, titre);
 
         // Mettre en cache la réponse

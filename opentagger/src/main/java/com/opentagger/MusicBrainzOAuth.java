@@ -252,17 +252,59 @@ public class MusicBrainzOAuth {
 
     private String finalizeToken(String code, String redirectUri, String clientId, String clientSecret)
             throws Exception {
-        String token = exchangeCode(code, redirectUri, clientId, clientSecret);
-        String username = fetchUsername(token);
-        Config.get().set("mb.oauth.token",    token);
-        Config.get().set("mb.oauth.username", username);
-        return token;
+        TokenPair tokens = exchangeCode(code, redirectUri, clientId, clientSecret);
+        String username = fetchUsername(tokens.accessToken());
+        Config.get().set("mb.oauth.token",         tokens.accessToken());
+        Config.get().set("mb.oauth.refresh_token", tokens.refreshToken());
+        Config.get().set("mb.oauth.username",      username);
+        return tokens.accessToken();
     }
 
     /** Révoque le token local (supprime de la config — pas d'appel réseau, MB ne supporte pas la révocation). */
     public static void logout() {
-        Config.get().set("mb.oauth.token",    "");
-        Config.get().set("mb.oauth.username", "");
+        Config.get().set("mb.oauth.token",         "");
+        Config.get().set("mb.oauth.refresh_token", "");
+        Config.get().set("mb.oauth.username",      "");
+    }
+
+    /**
+     * Rafraîchit l'access_token expiré via le refresh_token stocké (grant_type=refresh_token).
+     * Les access_token MusicBrainz expirent au bout d'1h (expires_in=3600) — sans ce
+     * rafraîchissement, chaque soumission de tag/rating échouait en 401 dès que le token
+     * expirait, pour toujours, jusqu'à ce que l'utilisateur refasse toute l'autorisation OAuth
+     * manuellement. Retourne le nouvel access_token, ou null si le rafraîchissement est
+     * impossible (pas de refresh_token stocké, ou identifiants manquants).
+     */
+    private String refreshAccessToken() {
+        String clientId     = Config.get().mbClientId();
+        String clientSecret = Config.get().mbClientSecret();
+        String refreshToken = Config.get().str("mb.oauth.refresh_token", "");
+        if (clientId.isBlank() || clientSecret.isBlank() || refreshToken.isBlank()) return null;
+
+        try {
+            String body = "grant_type=refresh_token"
+                + "&refresh_token=" + encode(refreshToken)
+                + "&client_id="     + encode(clientId)
+                + "&client_secret=" + encode(clientSecret);
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(TOKEN_URL))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("User-Agent", Config.get().userAgent())
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            JsonNode json = mapper.readTree(resp.body());
+            if (json.has("error") || !json.has("access_token")) return null;
+
+            String newAccessToken = json.get("access_token").asText();
+            Config.get().set("mb.oauth.token", newAccessToken);
+            // MusicBrainz renvoie un nouveau refresh_token à chaque rafraîchissement — le garder.
+            if (json.has("refresh_token"))
+                Config.get().set("mb.oauth.refresh_token", json.get("refresh_token").asText());
+            return newAccessToken;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // ── Informations utilisateur ──────────────────────────────────────────────
@@ -317,6 +359,19 @@ public class MusicBrainzOAuth {
     // ── Helpers HTTP ──────────────────────────────────────────────────────────
 
     private void post(String url, String xmlBody, String token, String desc) throws Exception {
+        HttpResponse<String> resp = doPost(url, xmlBody, token);
+        if (resp.statusCode() == 401) {
+            // Access token expiré (durée de vie 1h côté MB) : tenter un rafraîchissement
+            // silencieux via le refresh_token stocké, puis rejouer la requête une seule fois.
+            String refreshed = refreshAccessToken();
+            if (refreshed != null)
+                resp = doPost(url, xmlBody, refreshed);
+        }
+        if (resp.statusCode() >= 400)
+            throw new Exception(desc + " — HTTP " + resp.statusCode() + " : " + resp.body());
+    }
+
+    private HttpResponse<String> doPost(String url, String xmlBody, String token) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("Authorization", "Bearer " + token)
@@ -324,15 +379,15 @@ public class MusicBrainzOAuth {
                 .header("User-Agent", Config.get().userAgent())
                 .POST(HttpRequest.BodyPublishers.ofString(xmlBody, StandardCharsets.UTF_8))
                 .build();
-        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() >= 400)
-            throw new Exception(desc + " — HTTP " + resp.statusCode() + " : " + resp.body());
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     // ── Helpers OAuth ─────────────────────────────────────────────────────────
 
+    /** Paire access_token/refresh_token renvoyée par MB à l'échange initial et au rafraîchissement. */
+    private record TokenPair(String accessToken, String refreshToken) {}
 
-    private String exchangeCode(String code, String redirectUri, String clientId, String clientSecret)
+    private TokenPair exchangeCode(String code, String redirectUri, String clientId, String clientSecret)
             throws Exception {
         String body = "grant_type=authorization_code"
             + "&code="          + encode(code)
@@ -352,7 +407,8 @@ public class MusicBrainzOAuth {
             throw new Exception("OAuth : " + json.path("error_description").asText(json.path("error").asText()));
         if (!json.has("access_token"))
             throw new Exception("Réponse OAuth inattendue : " + resp.body());
-        return json.get("access_token").asText();
+        String refreshToken = json.has("refresh_token") ? json.get("refresh_token").asText() : "";
+        return new TokenPair(json.get("access_token").asText(), refreshToken);
     }
 
     private static String encode(String s) {

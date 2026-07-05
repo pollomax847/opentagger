@@ -34,7 +34,9 @@ public class CorrectionLog {
 
     // ── Ajout d'une entrée par fichier traité ──────────────────────────────────
 
-    public void addEntry(FileEntry entry) {
+    // synchronized : plusieurs fichiers peuvent être traités en parallèle (TaggingWorker,
+    // Executors.newFixedThreadPool) et partagent tous la même instance de CorrectionLog.
+    public synchronized void addEntry(FileEntry entry) {
         switch (entry.status) {
             case TAGGED  -> cntTagged++;
             case SKIPPED -> cntSkipped++;

@@ -59,8 +59,13 @@ EOF
 echo "✓ Fichier .desktop → $DESKTOP_DIR/opentagger.desktop"
 
 # 5. Mettre à jour la base de données MIME + applications
+# NOTE : ne PAS faire "xdg-mime default ... inode/directory" ici — ça remplacerait le
+# gestionnaire de fichiers par défaut de TOUT le système par OpenTagger (plus moyen
+# d'ouvrir un dossier normalement, y compris depuis OpenTagger lui-même via "Ouvrir le
+# dossier parent", qui se relance alors en boucle). Le MimeType déclaré dans le .desktop
+# suffit à faire apparaître OpenTagger dans le menu "Ouvrir avec" pour un dossier — sans
+# jamais forcer ce choix par défaut.
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null && echo "✓ Base applications mise à jour" || true
-xdg-mime default opentagger.desktop inode/directory 2>/dev/null || true
 
 echo ""
 echo "=== Installation terminée ==="

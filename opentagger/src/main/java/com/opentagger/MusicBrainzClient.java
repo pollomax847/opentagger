@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class MusicBrainzClient {
 
@@ -24,19 +25,31 @@ public class MusicBrainzClient {
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
+    // Rate-limit MB centralisé ici — seul point de passage réel (getWithRetry, juste en dessous)
+    // de TOUS les appels réseau MB de l'appli, y compris via des instances distinctes (le
+    // MusicBrainzClient interne d'AcoustIdClient, une instance par tâche dans un pool de threads
+    // type BatchProcessor/TaggingWorker...). Centraliser ici évite qu'un appelant oublie de
+    // cadencer ses requêtes — remplace les rate-limits dispersés qui existaient avant côté
+    // appelant (un sleep approximatif par fichier dans TaggingWorker, un appel manuel unique dans
+    // BatchProcessor.findTags()), et cadence désormais chaque requête réseau réelle individuellement.
+    private static final AtomicLong LAST_MB_REQUEST_MS = new AtomicLong(0);
+    private static final long       MB_MIN_INTERVAL_MS = 1100;
+
+    private static synchronized void mbRateLimit() {
+        long now  = System.currentTimeMillis();
+        long wait = MB_MIN_INTERVAL_MS - (now - LAST_MB_REQUEST_MS.get());
+        if (wait > 0) {
+            try { Thread.sleep(wait); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+        LAST_MB_REQUEST_MS.set(System.currentTimeMillis());
+    }
+
     private String  lastRawJson      = "";
-    private boolean networkCallMade  = false;
     /** Album préféré fourni par TaggingWorker pour orienter pickBestRelease(). */
     private String  preferredAlbum   = "";
 
     /** Dernier JSON brut reçu — utilisé par TaggingWorker pour la mise en cache. */
     public String lastRawJson() { return lastRawJson; }
-
-    /** Retourne true si au moins un appel HTTP réel a eu lieu depuis le dernier reset. */
-    public boolean wasNetworkCalled() { return networkCallMade; }
-
-    /** Remet à zéro le compteur d'appels réseau (à appeler avant chaque fichier). */
-    public void resetNetworkFlag() { networkCallMade = false; }
 
     /**
      * Définit l'album préféré avant les appels de recherche — utilisé pour favoriser
@@ -175,7 +188,7 @@ public class MusicBrainzClient {
                     .header("User-Agent", Config.get().userAgent())
                     .GET()
                     .build();
-            networkCallMade = true; // au moins un vrai appel HTTP MB
+            mbRateLimit();
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             int status = response.statusCode();
             if (status == 200) return response;

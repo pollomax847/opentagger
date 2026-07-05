@@ -81,6 +81,15 @@ public class MainFrame extends JFrame {
     // ── Barre de statut ───────────────────────────────────────────────────────
     private JLabel       lblStatus;
     private JProgressBar progress;
+    private long          runStartMillis;
+
+    // ── Journal (persiste les résultats par fichier pendant/après un run) ────
+    private final java.util.List<LogEntry>   logHistory = new java.util.ArrayList<>();
+    private DefaultListModel<LogEntry>       logModel;
+    private JList<LogEntry>                  logList;
+    private JCheckBox                        chkLogErrorsOnly;
+
+    private record LogEntry(String time, String text, FileEntry.Status status) {}
 
     // ── Throttle stats (évite O(n²) sur 100k+ fichiers) ──────────────────────
     private volatile long lastStatsRefreshMs = 0;
@@ -131,6 +140,7 @@ public class MainFrame extends JFrame {
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent e) {
                 saveWindowGeometry();
+                saveColumnWidths();
                 if (folderWatcher != null) try { folderWatcher.close(); } catch (Exception ignored) {}
             }
         });
@@ -179,7 +189,14 @@ public class MainFrame extends JFrame {
         add(topArea, BorderLayout.NORTH);
 
         // ── Split horizontal : table gauche | détail droit ──────────────────
-        add(buildMainSplit(), BorderLayout.CENTER);
+        // ── Split vertical : (table|détail) en haut, journal en bas ─────────
+        JPanel logPanel = buildLogPanel();
+        logPanel.setPreferredSize(new Dimension(10, 140)); // hauteur initiale du journal
+        JSplitPane withLog = new JSplitPane(JSplitPane.VERTICAL_SPLIT, buildMainSplit(), logPanel);
+        withLog.setResizeWeight(1.0);   // le journal garde sa hauteur, le reste absorbe le redimensionnement
+        withLog.setDividerSize(4);
+        withLog.setBorder(null);
+        add(withLog, BorderLayout.CENTER);
         add(buildStatusBar(), BorderLayout.SOUTH);
 
         table.getSelectionModel().addListSelectionListener(e -> {
@@ -886,7 +903,16 @@ public class MainFrame extends JFrame {
 
     private void colWidth(TableColumnModel cm, int i, int p, int mn, int mx) {
         TableColumn c = cm.getColumn(i);
-        c.setPreferredWidth(p); c.setMinWidth(mn); c.setMaxWidth(mx);
+        int saved = PREFS.getInt("col." + i + ".w", p);
+        c.setMinWidth(mn); c.setMaxWidth(mx);
+        c.setPreferredWidth(Math.max(mn, Math.min(mx, saved)));
+    }
+
+    /** Mémorise la largeur courante de chaque colonne (appelé à la fermeture, comme la géométrie fenêtre). */
+    private void saveColumnWidths() {
+        TableColumnModel cm = table.getColumnModel();
+        for (int i = 0; i < cm.getColumnCount(); i++)
+            PREFS.putInt("col." + i + ".w", cm.getColumn(i).getWidth());
     }
 
     // ── Menu contextuel ───────────────────────────────────────────────────────
@@ -1076,6 +1102,26 @@ public class MainFrame extends JFrame {
         panel.add(scroll, BorderLayout.CENTER);
         panel.add(detailPanel.buildFooter(), BorderLayout.SOUTH);
         return panel;
+    }
+
+    /**
+     * Fait suivre visuellement la table (scroll + sélection) au fichier en cours de traitement
+     * pendant un run — sans ça, l'UI restait statique pendant tout un taguage, notamment pour les
+     * fichiers tagués via l'album-first pass qui ne passent jamais par le statut PROCESSING (donc
+     * ne déclenchaient jamais l'ancien scroll, qui n'était de toute façon jamais couplé à une
+     * sélection : le panneau de détail ne suivait donc jamais rien, même sur le chemin normal).
+     * setRowSelectionInterval déclenche le ListSelectionListener existant → refreshDetail()
+     * automatiquement, mais un appel explicite ici documente l'intention et reste sans risque
+     * (idempotent).
+     */
+    private void followProcessing(FileEntry entry) {
+        int modelRow = tableModel.indexOf(entry);
+        if (modelRow < 0) return;
+        int viewRow = table.convertRowIndexToView(modelRow);
+        if (viewRow < 0) return;
+        table.scrollRectToVisible(table.getCellRect(viewRow, 0, true));
+        table.setRowSelectionInterval(viewRow, viewRow);
+        refreshDetail();
     }
 
     private void refreshDetail() {
@@ -1306,6 +1352,105 @@ public class MainFrame extends JFrame {
         bar.add(lblStatus, BorderLayout.WEST);
         bar.add(progress,  BorderLayout.EAST);
         return bar;
+    }
+
+    // ── Journal (résultats par fichier, accumulé pendant/après un run) ──────
+
+    /**
+     * Contrairement à lblStatus (écrasé à chaque fichier), ce journal accumule chaque résultat
+     * final (TAGGED/SKIPPED/ERROR) et reste visible après la fin du run — évite d'avoir à filtrer
+     * la colonne Statut après coup ou à recoller des logs console pour diagnostiquer un problème.
+     */
+    private JPanel buildLogPanel() {
+        logModel = new DefaultListModel<>();
+        logList  = new JList<>(logModel);
+        logList.setVisibleRowCount(6);
+        logList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> l, Object v, int idx,
+                    boolean sel, boolean foc) {
+                JLabel c = (JLabel) super.getListCellRendererComponent(l, v, idx, sel, foc);
+                LogEntry e = (LogEntry) v;
+                c.setText("[" + e.time() + "] " + e.text());
+                if (!sel) {
+                    Color fg = switch (e.status()) {
+                        case ERROR   -> new Color(230, 90, 90);
+                        case SKIPPED -> new Color(210, 160, 40);
+                        default      -> UIManager.getColor("List.foreground");
+                    };
+                    c.setForeground(fg);
+                }
+                return c;
+            }
+        });
+
+        chkLogErrorsOnly = new JCheckBox("Erreurs seulement");
+        chkLogErrorsOnly.addActionListener(e -> rebuildLogModel());
+        JButton btnClearLog = new JButton("Vider");
+        btnClearLog.addActionListener(e -> { logHistory.clear(); logModel.clear(); });
+
+        JLabel lblTitle = new JLabel("  Journal");
+        lblTitle.setFont(lblTitle.getFont().deriveFont(Font.BOLD));
+        JPanel headerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
+        headerRight.add(chkLogErrorsOnly);
+        headerRight.add(btnClearLog);
+        JPanel header = new JPanel(new BorderLayout());
+        header.add(lblTitle,     BorderLayout.WEST);
+        header.add(headerRight,  BorderLayout.EAST);
+
+        JScrollPane scroll = new JScrollPane(logList);
+        scroll.setBorder(new MatteBorder(1, 0, 0, 0, sep()));
+
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.add(header, BorderLayout.NORTH);
+        panel.add(scroll, BorderLayout.CENTER);
+        return panel;
+    }
+
+    /** Ajoute une ligne de séparation au début d'un run (taguage, re-taguage forcé, passe complète). */
+    private void logRunStart(String label, int count) {
+        LogEntry sep = new LogEntry(nowHms(), "── " + label + " : " + count + " fichier(s) ──",
+                FileEntry.Status.PENDING);
+        logHistory.add(sep);
+        logModel.addElement(sep);
+    }
+
+    /** Ajoute le résultat final d'un fichier (ignore les mises à jour PROCESSING transitoires). */
+    private void appendLog(FileEntry entry) {
+        if (entry.status == FileEntry.Status.PROCESSING) return;
+        String statusText = switch (entry.status) {
+            case TAGGED  -> "✓ Tagué";
+            case SKIPPED -> "⚠ Ignoré";
+            case ERROR   -> "✗ Erreur";
+            default      -> entry.status.toString();
+        };
+        if (entry.message != null && !entry.message.isBlank()) statusText += " — " + entry.message;
+        LogEntry e = new LogEntry(nowHms(), entry.filename() + " — " + statusText, entry.status);
+        logHistory.add(e);
+        if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
+            logModel.addElement(e);
+    }
+
+    private void rebuildLogModel() {
+        logModel.clear();
+        for (LogEntry e : logHistory)
+            if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
+                logModel.addElement(e);
+    }
+
+    private static String nowHms() {
+        return java.time.LocalTime.now().toString().substring(0, 8);
+    }
+
+    /** Texte ETA à ajouter à la barre de progression, ou "" avant que le taux soit mesurable. */
+    private String etaText(int doneCount, int totalCount) {
+        if (doneCount <= 0 || doneCount >= totalCount) return "";
+        long elapsedMs = System.currentTimeMillis() - runStartMillis;
+        if (elapsedMs <= 0) return "";
+        long remainingMs = elapsedMs * (totalCount - doneCount) / doneCount;
+        long remainingSec = remainingMs / 1000;
+        if (remainingSec < 60) return " · ~" + Math.max(1, remainingSec) + " s restantes";
+        return " · ~" + (remainingSec / 60 + 1) + " min restantes";
     }
 
     // ── Bandeau de scan dossiers (Jaikoz-style) ──────────────────────────────
@@ -1679,22 +1824,15 @@ public class MainFrame extends JFrame {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
         final int totalFiles = toTag.size();
+        runStartMillis = System.currentTimeMillis();
+        logRunStart("Taguage", totalFiles);
         worker = new TaggingWorker(toTag, Config.get().useAcoustId(), autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
                 table.repaint();
-                if (entry.status == FileEntry.Status.PROCESSING) {
-                    int modelRow = tableModel.indexOf(entry);
-                    if (modelRow >= 0) {
-                        int viewRow = table.convertRowIndexToView(modelRow);
-                        if (viewRow >= 0)
-                            table.scrollRectToVisible(table.getCellRect(viewRow, 0, true));
-                    }
-                }
-                int sel = table.getSelectedRow();
-                if (sel >= 0 && tableModel.get(table.convertRowIndexToModel(sel)) == entry)
-                    refreshDetail();
+                followProcessing(entry);
+                if (entry.status != FileEntry.Status.PROCESSING) appendLog(entry);
                 // Throttle : rafraîchir les chips au plus toutes les 300ms
                 long now = System.currentTimeMillis();
                 if (now - lastStatsRefreshMs >= 300) {
@@ -1708,7 +1846,7 @@ public class MainFrame extends JFrame {
                 int pct = (Integer) evt.getNewValue();
                 progress.setValue(pct);
                 int fileDone = (int) Math.round(pct * totalFiles / 100.0);
-                progress.setString(fileDone + " / " + totalFiles);
+                progress.setString(fileDone + " / " + totalFiles + etaText(fileDone, totalFiles));
                 // Refresher les chips à chaque % de progression (≤101 appels au total)
                 // plutôt qu'à chaque fichier — évite O(n²) sur 100k+ fichiers.
                 refreshStats();
@@ -1794,14 +1932,21 @@ public class MainFrame extends JFrame {
         progress.setVisible(true);
         progress.setMaximum(targets.size());
         progress.setValue(0);
+        runStartMillis = System.currentTimeMillis();
+        logRunStart("Passe complète", targets.size());
 
         infoCompleter = new InfoCompleterWorker(
             targets,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
-            entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); refreshStats(); }),
+            entry -> SwingUtilities.invokeLater(() -> {
+                tableModel.update(entry);
+                followProcessing(entry);
+                appendLog(entry);
+                refreshStats();
+            }),
             (done, total) -> SwingUtilities.invokeLater(() -> {
                 progress.setValue(done);
-                progress.setString(done + "/" + total);
+                progress.setString(done + "/" + total + etaText(done, total));
             })
         );
         infoCompleter.addPropertyChangeListener(evt -> {
@@ -1966,14 +2111,22 @@ public class MainFrame extends JFrame {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0;
         final int forcedTotal = forcedTargets.size();
+        runStartMillis = System.currentTimeMillis();
+        logRunStart("Re-taguage forcé", forcedTotal);
         worker = new TaggingWorker(forcedTargets, useAcoustId, autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
-            entry -> { tableModel.update(entry); table.repaint(); });
+            entry -> {
+                tableModel.update(entry);
+                table.repaint();
+                followProcessing(entry);
+                if (entry.status != FileEntry.Status.PROCESSING) appendLog(entry);
+            });
         worker.addPropertyChangeListener(evt -> {
             if ("progress".equals(evt.getPropertyName())) {
                 int pct = (Integer) evt.getNewValue();
                 progress.setValue(pct);
-                progress.setString((int) Math.round(pct * forcedTotal / 100.0) + " / " + forcedTotal);
+                int fileDone = (int) Math.round(pct * forcedTotal / 100.0);
+                progress.setString(fileDone + " / " + forcedTotal + etaText(fileDone, forcedTotal));
                 refreshStats();
             }
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
