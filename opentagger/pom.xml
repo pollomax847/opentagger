@@ -121,6 +121,14 @@
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>com.opentagger.App</mainClass>
+                  <manifestEntries>
+                    <!-- Source de vérité pour la version affichée (titre fenêtre, splash, User-Agent) —
+                         lue via getPackage().getImplementationVersion() plutôt que depuis
+                         settings.properties, qui n'est écrit qu'une fois à la création du fichier
+                         de config utilisateur et restait figé à l'ancienne version après chaque
+                         mise à jour de l'appli tant que ce fichier existait déjà. -->
+                    <Implementation-Version>${project.version}</Implementation-Version>
+                  </manifestEntries>
                 </transformer>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
               </transformers>

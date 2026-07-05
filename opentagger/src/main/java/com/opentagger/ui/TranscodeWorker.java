@@ -7,12 +7,23 @@ import com.opentagger.model.FileEntry;
 
 import javax.swing.*;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
  * SwingWorker pour le transcodage en lot.
  * Met à jour {@link FileEntry#currentPath} vers le fichier transcodé.
+ *
+ * Parallélisé (même clé de config "batch.threads" que TaggingWorker/BatchProcessor/
+ * AlbumCompletionWorker/InfoCompleterWorker) — un ffmpeg par fichier, séquentiel avant, avec le
+ * même profil "subprocess bloquant par fichier" que la chaîne de repli M4A de TagWriter, déjà
+ * parallélisée ailleurs. AudioTranscoder est sans état (seul champ : chemin ffmpeg, final),
+ * partagé tel quel entre les tâches.
  */
 public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progress> {
 
@@ -34,36 +45,48 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
     }
 
     @Override
-    protected String doInBackground() {
+    protected String doInBackground() throws Exception {
         Config cfg    = Config.get();
         Format format = Format.fromId(cfg.transcodeFormat());
         int    bitrate       = cfg.transcodeBitrate();
         boolean deleteSource = cfg.transcodeDeleteSource();
 
         AudioTranscoder tx = new AudioTranscoder();
-        int done = 0, skipped = 0, errors = 0;
+        AtomicInteger done = new AtomicInteger(), skipped = new AtomicInteger(), errors = new AtomicInteger();
         int total = entries.size();
 
-        for (int i = 0; i < entries.size(); i++) {
+        int threads = Math.max(1, cfg.num("batch.threads", 3));
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Future<?>> futures = new ArrayList<>();
+
+        for (FileEntry e : entries) {
             if (isCancelled()) break;
-            FileEntry e = entries.get(i);
-            try {
-                Path newPath = tx.transcode(e.currentPath, format, bitrate, deleteSource);
-                if (newPath != null) {
-                    done++;
-                    publish(new Progress(e, newPath, null, done + skipped + errors, total));
-                } else {
-                    skipped++;
-                    publish(new Progress(e, null, null, done + skipped + errors, total));
+            futures.add(pool.submit(() -> {
+                if (isCancelled()) return;
+                try {
+                    Path newPath = tx.transcode(e.currentPath, format, bitrate, deleteSource);
+                    if (newPath != null) {
+                        done.incrementAndGet();
+                        publish(new Progress(e, newPath, null, done.get() + skipped.get() + errors.get(), total));
+                    } else {
+                        skipped.incrementAndGet();
+                        publish(new Progress(e, null, null, done.get() + skipped.get() + errors.get(), total));
+                    }
+                } catch (Exception ex) {
+                    errors.incrementAndGet();
+                    String msg = ex.getMessage() != null ? ex.getMessage() : "erreur";
+                    publish(new Progress(e, null, msg, done.get() + skipped.get() + errors.get(), total));
                 }
-            } catch (Exception ex) {
-                errors++;
-                String msg = ex.getMessage() != null ? ex.getMessage() : "erreur";
-                publish(new Progress(e, null, msg, done + skipped + errors, total));
-            }
+            }));
         }
+
+        pool.shutdown();
+        for (Future<?> f : futures) {
+            try { f.get(); } catch (Exception ignored) {}
+        }
+
         return String.format("Transcodage — ✓ %d converti(s)  déjà OK %d  ✗ %d erreur(s)",
-                done, skipped, errors);
+                done.get(), skipped.get(), errors.get());
     }
 
     @Override

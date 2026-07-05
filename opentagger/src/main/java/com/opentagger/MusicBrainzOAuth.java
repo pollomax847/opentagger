@@ -46,7 +46,7 @@ public class MusicBrainzOAuth {
     private static final Path   CODE_FILE       = Paths.get(System.getProperty("user.home"),
                                                       ".opentagger", "oauth-code.tmp");
 
-    private static final String APP_VER   = Config.get().str("app.version", "0.1.0");
+    private static final String APP_VER   = Config.get().appVersion();
     private static final String TAG_URL   = "https://musicbrainz.org/ws/2/tag?client=OpenTagger-" + APP_VER;
     private static final String RATE_URL  = "https://musicbrainz.org/ws/2/rating?client=OpenTagger-" + APP_VER;
 
@@ -72,7 +72,8 @@ public class MusicBrainzOAuth {
         String clientSecret = Config.get().mbClientSecret();
         if (clientId.isBlank() || clientSecret.isBlank())
             throw new IllegalStateException(
-                "Client ID et Client Secret non configurés dans Préférences → MusicBrainz.");
+                "Client ID/Secret MusicBrainz manquants dans la configuration de l'application "
+                + "(ce n'est plus un réglage utilisateur — contactez le développeur ou réinstallez OpenTagger).");
 
         String mode = Config.get().str("mb.oauth.mode", "scheme");
         return switch (mode) {
@@ -356,6 +357,19 @@ public class MusicBrainzOAuth {
         post(RATE_URL, xml, token, "rating soumission");
     }
 
+    // ── Ajout à une collection utilisateur ────────────────────────────────────
+
+    /**
+     * Ajoute une release à une collection MusicBrainz existante de l'utilisateur.
+     * La collection doit déjà exister (créée manuellement sur musicbrainz.org — l'API ne permet
+     * pas d'en créer une) ; son MBID se trouve dans l'URL de la page de la collection.
+     */
+    public void addReleaseToCollection(String collectionMbid, String releaseMbid, String token) throws Exception {
+        String url = "https://musicbrainz.org/ws/2/collection/" + collectionMbid + "/releases/" + releaseMbid
+                + "?client=OpenTagger-" + APP_VER;
+        put(url, token, "ajout à la collection");
+    }
+
     // ── Helpers HTTP ──────────────────────────────────────────────────────────
 
     private void post(String url, String xmlBody, String token, String desc) throws Exception {
@@ -369,6 +383,27 @@ public class MusicBrainzOAuth {
         }
         if (resp.statusCode() >= 400)
             throw new Exception(desc + " — HTTP " + resp.statusCode() + " : " + resp.body());
+    }
+
+    private void put(String url, String token, String desc) throws Exception {
+        HttpResponse<String> resp = doPut(url, token);
+        if (resp.statusCode() == 401) {
+            String refreshed = refreshAccessToken();
+            if (refreshed != null)
+                resp = doPut(url, refreshed);
+        }
+        if (resp.statusCode() >= 400)
+            throw new Exception(desc + " — HTTP " + resp.statusCode() + " : " + resp.body());
+    }
+
+    private HttpResponse<String> doPut(String url, String token) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + token)
+                .header("User-Agent", Config.get().userAgent())
+                .PUT(HttpRequest.BodyPublishers.noBody())
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> doPost(String url, String xmlBody, String token) throws Exception {

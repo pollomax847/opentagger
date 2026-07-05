@@ -77,7 +77,7 @@ public class SplashScreen extends JWindow {
             // ── Version ───────────────────────────────────────────────────
             g.setColor(new Color(120, 144, 156));
             g.setFont(new Font("SansSerif", Font.PLAIN, 12));
-            String ver = "v" + Config.get().str("app.version", "0.1.0");
+            String ver = "v" + Config.get().appVersion();
             g.drawString(ver, 150, H / 2 + 38);
 
             // ── Bande de couleur décorative (accent) ──────────────────────

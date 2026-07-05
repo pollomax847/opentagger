@@ -117,6 +117,17 @@ public final class TagEnrichment {
             int rating = parseStars(info.rating);
             if (rating > 0) { mbOauth.submitRating(info.recordingMbid, rating, token); log.accept("MB rating soumis: " + rating); }
         } catch (Exception e) { log.accept("MB rating skip: " + e.getMessage()); }
+
+        // Ajout à la collection MB personnelle (optionnel — nécessite une collection existante
+        // configurée dans Préférences > MusicBrainz). Nécessite releaseMbid (pas recordingMbid :
+        // l'API collection travaille sur des releases, pas des enregistrements individuels).
+        String collectionId = Config.get().mbCollectionId();
+        if (!collectionId.isBlank() && !info.releaseMbid.isBlank()) {
+            try {
+                mbOauth.addReleaseToCollection(collectionId, info.releaseMbid, token);
+                log.accept("MB collection : release ajoutée");
+            } catch (Exception e) { log.accept("MB collection skip: " + e.getMessage()); }
+        }
     }
 
     /** Convertit une valeur de rating brute (1-5 ou 1-255) en étoiles 1-5. Retourne 0 si non applicable. */

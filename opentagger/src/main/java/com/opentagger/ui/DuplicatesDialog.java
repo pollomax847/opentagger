@@ -82,9 +82,10 @@ public class DuplicatesDialog extends JDialog {
         FileEntry best   = DuplicateDetector.bestInGroup(group.files());
         String    label  = DuplicateDetector.groupLabel(group);
         Color     badgeColor = switch (group.confidence()) {
-            case MBID_EXACT     -> new Color(0x1b5e20); // vert foncé
-            case ACOUSTID_EXACT -> new Color(0x0d47a1); // bleu foncé
-            case TITLE_HEURISTIC-> new Color(0x6d4c41); // marron
+            case MBID_EXACT        -> new Color(0x1b5e20); // vert foncé
+            case ACOUSTID_EXACT    -> new Color(0x0d47a1); // bleu foncé
+            case FINGERPRINT_EXACT -> new Color(0x4527a0); // violet foncé
+            case TITLE_HEURISTIC   -> new Color(0x6d4c41); // marron
         };
 
         // Badge de confiance

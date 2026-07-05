@@ -47,6 +47,9 @@ public class LastFmClient {
     /** Enrichit le genre d'un TagInfo depuis les tags Last.fm. Ne modifie genre que si vide. */
     public void enrichGenres(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
+        // Sans clé configurée, la requête échouerait de toute façon — éviter l'appel réseau
+        // inutile sur chaque fichier, même pattern que DiscogsClient/FanArtClient.
+        if (Config.get().lastfmKey().isBlank()) return;
         if (!info.genre.isBlank()) return;
 
         List<GenreFilter.Candidate> allTags = fetchAllTags(info);
@@ -61,6 +64,7 @@ public class LastFmClient {
     /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible). */
     public void enrichArtistUrls(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
+        if (Config.get().lastfmKey().isBlank()) return;
         if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank()) return;
         if (info.artist.isBlank()) return;
 
@@ -94,6 +98,7 @@ public class LastFmClient {
     /** Enrichit le mood d'un TagInfo depuis les tags Last.fm. Ne modifie mood que si vide. */
     public void enrichMood(TagInfo info) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
+        if (Config.get().lastfmKey().isBlank()) return;
         if (!info.mood.isBlank()) return;
 
         List<GenreFilter.Candidate> allTags = fetchAllTags(info);

@@ -129,7 +129,21 @@ public class Config {
     }
 
     public String userAgent() {
-        return "OpenTagger/" + str("app.version", "0.1") + " (" + contact() + ")";
+        return "OpenTagger/" + appVersion() + " (" + contact() + ")";
+    }
+
+    /**
+     * Version affichée (titre fenêtre, splash, User-Agent). Priorité au manifeste du jar
+     * (Implementation-Version, injecté depuis project.version à la construction — voir pom.xml)
+     * plutôt qu'à settings.properties : ce fichier n'est écrit qu'une fois à la création de la
+     * config utilisateur et restait figé à l'ancienne version après chaque mise à jour tant que
+     * ce fichier existait déjà (constaté en direct : app.version=0.9.1 après une mise à jour vers
+     * 0.9.3, dans un bac à sable créé avant la mise à jour). Le repli sur settings.properties ne
+     * sert qu'en développement (lancement depuis target/classes, sans jar/manifeste réel).
+     */
+    public String appVersion() {
+        String fromManifest = getClass().getPackage().getImplementationVersion();
+        return fromManifest != null ? fromManifest : str("app.version", "0.1.0");
     }
 
     // --- Tags écriture ---
@@ -231,6 +245,11 @@ public class Config {
     public String mbClientId()     { return str("mb.oauth.client_id"); }
     public String mbClientSecret() { return str("mb.oauth.client_secret"); }
     public boolean mbConnected()   { return !mbToken().isBlank(); }
+    /** MBID de la collection MusicBrainz personnelle où ajouter les releases taguées (optionnel). */
+    public String mbCollectionId() { return str("mb.oauth.collection_id", ""); }
+
+    public String listenbrainzUsername()  { return str("listenbrainz.username", ""); }
+    public int    listenbrainzMaxTracks() { return num("listenbrainz.max_tracks", 1000); }
 
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {

@@ -51,6 +51,7 @@ public class MainFrame extends JFrame {
     private TaggingWorker           worker;
     private AlbumCompletionWorker   completionWorker;
     private InfoCompleterWorker     infoCompleter;
+    private ListenBrainzSyncWorker  lbSyncWorker;
     private int                     currentMask = Config.get().defaultRenameMask();
 
     // ── Composants header ────────────────────────────────────────────────────
@@ -120,7 +121,7 @@ public class MainFrame extends JFrame {
     }
 
     public MainFrame() {
-        super("OpenTagger  " + Config.get().str("app.version", "0.1.0"));
+        super("OpenTagger  " + Config.get().appVersion());
         // installDragDrop doit précéder buildUI : buildMainSplit() appelle
         // table.setTransferHandler(getTransferHandler()) — sans handler préalable
         // la table reçoit null et le drag-drop ne fonctionne pas sur la zone principale.
@@ -370,83 +371,102 @@ public class MainFrame extends JFrame {
 
         setStatus("Rafraîchissement de " + targets.size() + " fichier(s)…");
 
+        // Parallélisé (même clé "batch.threads" que TaggingWorker/BatchProcessor/
+        // AlbumCompletionWorker/InfoCompleterWorker) — cette action traitait un fichier à la fois
+        // malgré le même profil d'appels bloquants (lookup MB, pochette CAA/FanArt) que les autres
+        // pipelines déjà parallélisés. MusicBrainzClient tient un état mutable entre appels (même
+        // règle déjà établie ailleurs) — instance fraîche par tâche ; CaaClient/FanArtClient/
+        // TagWriter sont sans état, partagés tels quels.
         new SwingWorker<Void, com.opentagger.model.FileEntry>() {
-            final com.opentagger.MusicBrainzClient mbClient = new com.opentagger.MusicBrainzClient();
             final com.opentagger.CaaClient         caa      = new com.opentagger.CaaClient();
             final com.opentagger.FanArtClient      fanArt   = new com.opentagger.FanArtClient();
             final com.opentagger.TagWriter         writer   = new com.opentagger.TagWriter();
-            int done = 0;
+            final java.util.concurrent.atomic.AtomicInteger done = new java.util.concurrent.atomic.AtomicInteger();
 
             @Override protected Void doInBackground() throws Exception {
+                int threads = Math.max(1, com.opentagger.Config.get().num("batch.threads", 3));
+                java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+                java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
                 for (com.opentagger.model.FileEntry e : targets) {
-                    com.opentagger.model.TagInfo current = e.activeTags();
-                    // Ne PAS muter `current`/`e` ici : c'est l'objet live affiché et trié par le
-                    // TableRowSorter sur l'EDT. Les valeurs fraîches sont calculées sur ce thread
-                    // (lectures réseau) puis appliquées d'un coup sur l'EDT plus bas — sinon même
-                    // défaut que le crash de tri déjà vu 697× en 3 jours (TaggingWorker).
-                    String releaseMbidForCaa      = current.releaseMbid;
-                    String releaseGroupMbidForCaa = current.releaseGroupMbid;
+                    if (isCancelled()) break;
+                    futures.add(pool.submit(() -> processOne(e, new com.opentagger.MusicBrainzClient())));
+                }
 
-                    // 1. Tags frais depuis MB via recordingMbid
-                    if (!current.recordingMbid.isBlank()) {
-                        try {
-                            com.opentagger.model.TagInfo fresh = mbClient.lookupRecording(current.recordingMbid);
-                            if (fresh != null) {
-                                if (!fresh.releaseMbid.isBlank())      releaseMbidForCaa      = fresh.releaseMbid;
-                                if (!fresh.releaseGroupMbid.isBlank()) releaseGroupMbidForCaa = fresh.releaseGroupMbid;
-                                SwingUtilities.invokeLater(() -> {
-                                    // Ne mettre à jour que les champs clés — ne pas écraser les données manuelles
-                                    if (!fresh.title.isBlank())       current.title       = fresh.title;
-                                    if (!fresh.artist.isBlank())      current.artist      = fresh.artist;
-                                    if (!fresh.albumArtist.isBlank()) current.albumArtist = fresh.albumArtist;
-                                    if (!fresh.album.isBlank())       current.album       = fresh.album;
-                                    if (!fresh.year.isBlank())        current.year        = fresh.year;
-                                    if (!fresh.track.isBlank())       current.track       = fresh.track;
-                                    if (!fresh.trackTotal.isBlank())  current.trackTotal  = fresh.trackTotal;
-                                    if (!fresh.releaseMbid.isBlank()) current.releaseMbid = fresh.releaseMbid;
-                                    if (!fresh.releaseGroupMbid.isBlank()) current.releaseGroupMbid = fresh.releaseGroupMbid;
-                                    e.result = current;
-                                    e.status = com.opentagger.model.FileEntry.Status.TAGGED;
-                                });
-                            }
-                        } catch (Exception ignored) {}
-                        try { Thread.sleep(1100); } catch (InterruptedException ie) { break; } // MB rate-limit
-                    }
-
-                    // 2. Pochette fraîche via la cascade de fournisseurs configurée (valeurs
-                    // locales : pas besoin d'attendre que la mutation ci-dessus soit passée sur
-                    // l'EDT). Passe par TagEnrichment.resolveCover comme les autres pipelines —
-                    // corrige un bypass complet de la config (CaaClient appelé en direct, aucun
-                    // fournisseur autre que CAA release n'avait jamais sa chance ici).
-                    if (!releaseMbidForCaa.isBlank() || !releaseGroupMbidForCaa.isBlank()) {
-                        try {
-                            com.opentagger.model.TagInfo forCover = new com.opentagger.model.TagInfo();
-                            forCover.releaseMbid      = releaseMbidForCaa;
-                            forCover.releaseGroupMbid = releaseGroupMbidForCaa;
-                            forCover.artistMbid       = current.artistMbid;
-                            java.nio.file.Path img = com.opentagger.TagEnrichment.resolveCover(
-                                    forCover, e.file, caa, fanArt);
-                            if (img != null) {
-                                writer.writeCoverOnly(e.file, img);
-                                java.nio.file.Files.deleteIfExists(img);
-                            }
-                        } catch (Exception ignored) {}
-                    }
-
-                    done++;
-                    publish(e);
+                pool.shutdown();
+                for (java.util.concurrent.Future<?> f : futures) {
+                    try { f.get(); } catch (Exception ignored) {}
                 }
                 return null;
             }
 
+            private void processOne(com.opentagger.model.FileEntry e, com.opentagger.MusicBrainzClient mbClient) {
+                if (isCancelled()) return;
+                com.opentagger.model.TagInfo current = e.activeTags();
+                // Ne PAS muter `current`/`e` ici : c'est l'objet live affiché et trié par le
+                // TableRowSorter sur l'EDT. Les valeurs fraîches sont calculées sur ce thread
+                // (lectures réseau) puis appliquées d'un coup sur l'EDT plus bas — sinon même
+                // défaut que le crash de tri déjà vu 697× en 3 jours (TaggingWorker).
+                String releaseMbidForCaa      = current.releaseMbid;
+                String releaseGroupMbidForCaa = current.releaseGroupMbid;
+
+                // 1. Tags frais depuis MB via recordingMbid
+                if (!current.recordingMbid.isBlank()) {
+                    try {
+                        com.opentagger.model.TagInfo fresh = mbClient.lookupRecording(current.recordingMbid);
+                        if (fresh != null) {
+                            if (!fresh.releaseMbid.isBlank())      releaseMbidForCaa      = fresh.releaseMbid;
+                            if (!fresh.releaseGroupMbid.isBlank()) releaseGroupMbidForCaa = fresh.releaseGroupMbid;
+                            SwingUtilities.invokeLater(() -> {
+                                // Ne mettre à jour que les champs clés — ne pas écraser les données manuelles
+                                if (!fresh.title.isBlank())       current.title       = fresh.title;
+                                if (!fresh.artist.isBlank())      current.artist      = fresh.artist;
+                                if (!fresh.albumArtist.isBlank()) current.albumArtist = fresh.albumArtist;
+                                if (!fresh.album.isBlank())       current.album       = fresh.album;
+                                if (!fresh.year.isBlank())        current.year        = fresh.year;
+                                if (!fresh.track.isBlank())       current.track       = fresh.track;
+                                if (!fresh.trackTotal.isBlank())  current.trackTotal  = fresh.trackTotal;
+                                if (!fresh.releaseMbid.isBlank()) current.releaseMbid = fresh.releaseMbid;
+                                if (!fresh.releaseGroupMbid.isBlank()) current.releaseGroupMbid = fresh.releaseGroupMbid;
+                                e.result = current;
+                                e.status = com.opentagger.model.FileEntry.Status.TAGGED;
+                            });
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                // 2. Pochette fraîche via la cascade de fournisseurs configurée (valeurs
+                // locales : pas besoin d'attendre que la mutation ci-dessus soit passée sur
+                // l'EDT). Passe par TagEnrichment.resolveCover comme les autres pipelines —
+                // corrige un bypass complet de la config (CaaClient appelé en direct, aucun
+                // fournisseur autre que CAA release n'avait jamais sa chance ici).
+                if (!releaseMbidForCaa.isBlank() || !releaseGroupMbidForCaa.isBlank()) {
+                    try {
+                        com.opentagger.model.TagInfo forCover = new com.opentagger.model.TagInfo();
+                        forCover.releaseMbid      = releaseMbidForCaa;
+                        forCover.releaseGroupMbid = releaseGroupMbidForCaa;
+                        forCover.artistMbid       = current.artistMbid;
+                        java.nio.file.Path img = com.opentagger.TagEnrichment.resolveCover(
+                                forCover, e.file, caa, fanArt);
+                        if (img != null) {
+                            writer.writeCoverOnly(e.file, img);
+                            java.nio.file.Files.deleteIfExists(img);
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                done.incrementAndGet();
+                publish(e);
+            }
+
             @Override protected void process(java.util.List<com.opentagger.model.FileEntry> chunks) {
                 for (com.opentagger.model.FileEntry e : chunks) tableModel.update(e);
-                setStatus("Rafraîchissement : " + done + "/" + targets.size() + "…");
+                setStatus("Rafraîchissement : " + done.get() + "/" + targets.size() + "…");
             }
 
             @Override protected void done() {
                 refreshStats();
-                setStatus("Rafraîchissement terminé — " + done + " fichier(s) mis à jour.");
+                setStatus("Rafraîchissement terminé — " + done.get() + " fichier(s) mis à jour.");
             }
         }.execute();
     }
@@ -519,6 +539,7 @@ public class MainFrame extends JFrame {
         m.add(mitem("Forcer le re-taguage…",    null,      e -> forceRetag()));
         m.add(mitem("Rattraper les non identifiés (AcoustID forcé)…", null, e -> retryUnidentifiedForceAcoustId()));
         m.add(mitem("Passe complète…",          "Ctrl+P",  e -> completeAllInfo()));
+        m.add(mitem("Synchroniser ListenBrainz…", null,    e -> syncListenBrainz()));
         m.addSeparator();
         m.add(mitem("Tagger comme podcast…",    null,      e -> openPodcastDialog()));
         m.add(mitem("Détecter les doublons…",  null,      e -> detectDuplicates()));
@@ -656,6 +677,7 @@ public class MainFrame extends JFrame {
         new String[]{"forceRetag",         "Forcer le re-taguage"},
         new String[]{"retryUnidentified",  "Rattraper les non identifiés"},
         new String[]{"completeAllInfo",    "Passe complète"},
+        new String[]{"syncListenBrainz",   "Synchroniser ListenBrainz"},
         new String[]{"podcastDialog",      "Tagger comme podcast"},
         new String[]{"detectDuplicates",   "Détecter les doublons"},
         new String[]{"historyDialog",      "Historique de taguage"}
@@ -684,6 +706,8 @@ public class MainFrame extends JFrame {
                 "Retente les fichiers non identifiés avec AcoustID forcé", this::retryUnidentifiedForceAcoustId));
         list.add(new ToolbarAction("completeAllInfo", "Passe complète",
                 "Compléter les infos manquantes (Ctrl+P)", this::completeAllInfo));
+        list.add(new ToolbarAction("syncListenBrainz", "Synchroniser ListenBrainz",
+                "Récupérer le nombre d'écoutes ListenBrainz pour les fichiers tagués", this::syncListenBrainz));
         list.add(new ToolbarAction("podcastDialog", "Tagger comme podcast",
                 "Ouvrir le dialogue de taguage podcast", this::openPodcastDialog));
         list.add(new ToolbarAction("detectDuplicates", "Détecter les doublons",
@@ -1969,6 +1993,64 @@ public class MainFrame extends JFrame {
         infoCompleter.execute();
     }
 
+    /**
+     * Synchronise le nombre d'écoutes ListenBrainz sur les fichiers déjà tagués du tableau — un
+     * seul appel réseau couvre tout le lot (voir ListenBrainzSyncWorker), contrairement aux autres
+     * actions ci-dessus qui font un appel par fichier. Action manuelle uniquement.
+     */
+    private void syncListenBrainz() {
+        if (lbSyncWorker != null && !lbSyncWorker.isDone()) {
+            lbSyncWorker.cancel(false);
+            setStatus("Synchronisation ListenBrainz annulée.");
+            return;
+        }
+        if (worker != null && !worker.isDone()) {
+            setStatus("Taguage en cours — attendez la fin avant de synchroniser ListenBrainz.");
+            return;
+        }
+
+        if (Config.get().listenbrainzUsername().isBlank()) {
+            JOptionPane.showMessageDialog(this,
+                "Configurez d'abord votre nom d'utilisateur ListenBrainz dans Préférences → APIs.",
+                "ListenBrainz", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        List<FileEntry> targets = new ArrayList<>();
+        java.util.Set<String> seenPaths = new java.util.HashSet<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.status != FileEntry.Status.TAGGED) continue;
+            String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
+            if (seenPaths.add(p)) targets.add(e);
+        }
+        if (targets.isEmpty()) {
+            setStatus("Aucun fichier tagué à synchroniser.");
+            return;
+        }
+
+        progress.setVisible(true);
+        progress.setIndeterminate(true);
+        setStatus("Synchronisation ListenBrainz…");
+
+        lbSyncWorker = new ListenBrainzSyncWorker(
+            targets,
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
+            entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); refreshStats(); })
+        );
+        lbSyncWorker.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    progress.setIndeterminate(false);
+                    progress.setVisible(false);
+                    refreshStats();
+                });
+            }
+        });
+        lbSyncWorker.execute();
+    }
+
     private void forceRetag() {
         // Cette action lance elle aussi un TaggingWorker (via launchForcedTagging) — même garde
         // que startTagging()/completeAllInfo()/completeAlbums(), sinon un worker déjà actif est
@@ -2397,7 +2479,6 @@ public class MainFrame extends JFrame {
         setStatus("Complétion des albums en cours…");
         completionWorker = new AlbumCompletionWorker(
             tableModel,
-            new com.opentagger.MusicBrainzClient(),
             this::setStatus,
             () -> SwingUtilities.invokeLater(() -> setStatus("Complétion albums terminée."))
         );

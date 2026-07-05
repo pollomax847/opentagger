@@ -6,6 +6,8 @@ import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
 import org.jaudiotagger.tag.id3.AbstractID3v2Tag;
+import org.jaudiotagger.tag.id3.ID3v22Frame;
+import org.jaudiotagger.tag.id3.ID3v22Tag;
 import org.jaudiotagger.tag.id3.ID3v23Frame;
 import org.jaudiotagger.tag.id3.ID3v23Tag;
 import org.jaudiotagger.tag.id3.ID3v24Frame;
@@ -399,6 +401,9 @@ public class TagWriter {
         setCustomField(tag, "EPISODETYPE",   i.podcastEpisodeType);
         setCustomField(tag, "KEYWORDS",      i.podcastKeywords);
 
+        // ── Statistiques d'écoute ───────────────────────────────────────────────
+        setCustomField(tag, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+
         // ── URLs ──────────────────────────────────────────────────────────────
         sf(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE,   i.artistOfficialUrl);
         sf(tag, FieldKey.URL_WIKIPEDIA_ARTIST_SITE,  i.artistWikipediaUrl);
@@ -499,6 +504,9 @@ public class TagWriter {
         apFreeform(cmd, "EPISODE",      i.podcastEpisode);
         apFreeform(cmd, "EPISODETYPE",  i.podcastEpisodeType);
         apFreeform(cmd, "KEYWORDS",     i.podcastKeywords);
+
+        // Statistiques d'écoute
+        apFreeform(cmd, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
 
         cmd.add("--overWrite");
 
@@ -649,11 +657,20 @@ public class TagWriter {
     private static void writeTxxx(AbstractID3v2Tag id3, String description, String value) {
         try {
             FrameBodyTXXX body = new FrameBodyTXXX((byte) 0, description, value);
-            // Choisir ID3v2.4 ou ID3v2.3 selon le tag existant
+            // Choisir la version de frame selon le tag existant. Un tag ID3v2.2 attend des
+            // ID3v22Frame (identifiants 3 caractères, ex. "TXX") — lui donner une ID3v23Frame/
+            // ID3v24Frame ("TXXX", 4 caractères) produit une frame illisible à la relecture
+            // ("Invalid Frame:TXX is invalid frame"), pour CE champ et tous les autres écrits
+            // via setCustomField() sur un fichier ID3v2.2 (REPLAYGAIN_*, DISCOGS_RELEASE_ID,
+            // PODCAST_*, etc.) — pas seulement les nouveaux champs.
             if (id3 instanceof ID3v24Tag) {
                 ID3v24Frame frame = new ID3v24Frame("TXXX");
                 frame.setBody(body);
                 id3.setFrame(frame);
+            } else if (id3 instanceof ID3v22Tag) {
+                ID3v23Frame tmp = new ID3v23Frame("TXXX");
+                tmp.setBody(body);
+                id3.setFrame(new ID3v22Frame(tmp));
             } else {
                 ID3v23Frame frame = new ID3v23Frame("TXXX");
                 frame.setBody(body);

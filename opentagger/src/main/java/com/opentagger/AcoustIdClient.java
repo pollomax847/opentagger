@@ -33,6 +33,11 @@ public class AcoustIdClient {
         lastFingerprint = "";
         lastAcoustId    = "";
 
+        // Sans clé configurée, la requête AcoustID échouerait de toute façon — éviter le calcul
+        // d'empreinte (fpcalc, coûteux en CPU) ET l'appel réseau inutiles sur chaque fichier,
+        // même pattern que DiscogsClient/FanArtClient/LastFmClient.
+        if (Config.get().acoustidKey().isBlank()) return List.of();
+
         // 1. Générer l'empreinte audio avec fpcalc (JSON, max 120s comme Picard)
         Fingerprinter.Result fp;
         try {

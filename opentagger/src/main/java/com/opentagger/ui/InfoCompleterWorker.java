@@ -12,6 +12,11 @@ import javax.swing.*;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -27,6 +32,15 @@ import java.util.function.Consumer;
  *   - BPM            → ffmpeg
  *   - paroles        → LyricsClient
  *   - pochette       → FanArt.tv / Cover Art Archive (si absente du fichier)
+ *
+ * Parallélisé (un thread-pool, même clé de config "batch.threads" que TaggingWorker/
+ * BatchProcessor/AlbumCompletionWorker) — avant ça, cette passe traitait un fichier à la fois
+ * malgré exactement le même profil d'appels bloquants (MB, Discogs/Last.fm, BPM ffmpeg, paroles,
+ * pochette, écriture) que TaggingWorker avant sa propre parallélisation. MusicBrainzClient et
+ * LastFmClient tiennent un état mutable entre appels (même règle déjà établie ailleurs) — instance
+ * fraîche par tâche ; Discogs/FanArt/Caa/Lyrics/BpmDetector/TagWriter sont sans état, et
+ * TaggerScript/FileRenamer/MetadataCache sont protégés en interne par leurs propres synchronized —
+ * tous les quatre restent des champs partagés, comme dans TaggingWorker.
  */
 public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
@@ -35,13 +49,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final Consumer<FileEntry>    onUpdate;
     private final BiConsumer<Integer,Integer> onCount; // (done, total)
 
-    private final MusicBrainzClient mb      = new MusicBrainzClient();
     private final DiscogsClient     discogs = new DiscogsClient();
-    private final LastFmClient      lastFm  = new LastFmClient();
     private final FanArtClient      fanArt  = new FanArtClient();
     private final CaaClient         caa     = new CaaClient();
     private final TaggerScript      taggerScript = new TaggerScript();
-    private final java.util.Map<String, String> aliasCache = new java.util.HashMap<>();
+    private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
     private final TagWriter         writer  = new TagWriter();
@@ -52,6 +64,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
     private final boolean autoRename   = Config.get().autoRenameEnabled();
     private final int     autoMaskIdx  = Config.get().defaultRenameMask();
+
+    private final AtomicInteger doneCount = new AtomicInteger();
 
     public InfoCompleterWorker(List<FileEntry> entries,
                                Consumer<String> onProgress,
@@ -66,41 +80,62 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     @Override
     protected Void doInBackground() throws Exception {
         int total = entries.size();
-        int done  = 0;
 
-        for (FileEntry entry : entries) {
+        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Future<?>> futures = new java.util.ArrayList<>();
+
+        for (int i = 0; i < entries.size(); i++) {
             if (isCancelled()) break;
-
-            File fichier = entry.currentPath != null
-                    ? entry.currentPath.toFile()
-                    : entry.file;
-
-            onProgress.accept("[" + (done+1) + "/" + total + "] " + fichier.getName());
-
-            if (!fichier.exists()) {
-                log("▶ SKIP " + fichier.getName() + " (fichier introuvable)");
-                done++;
-                onCount.accept(done, total);
-                publish(entry);
-                continue;
-            }
-
-            log("▶ COMPLÉTER " + fichier.getName());
-
-            try {
-                completeEntry(entry, fichier);
-            } catch (Exception ex) {
-                log("  ✗ erreur: " + ex.getMessage());
-            }
-
-            done++;
-            onCount.accept(done, total);
-            publish(entry);
+            final FileEntry entry  = entries.get(i);
+            final int       fileIdx = i + 1;
+            futures.add(pool.submit(() ->
+                    processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient())));
         }
+
+        pool.shutdown();
+        for (Future<?> f : futures) {
+            try { f.get(); } catch (Exception ignored) {}
+        }
+        // cache n'était jamais fermé avant — connexion SQLite qui fuyait pour toute la durée de
+        // vie de l'objet (contrairement à AlbumCompletionWorker/TaggingWorker, qui ferment déjà
+        // leur MetadataCache). Fermer seulement après que toutes les tâches ont fini d'écrire.
+        cache.close();
         return null;
     }
 
-    private void completeEntry(FileEntry entry, File fichier) throws Exception {
+    /** Traite un fichier. Appelé en parallèle, une tâche par fichier, depuis le pool créé dans
+     *  doInBackground(). */
+    private void processOne(FileEntry entry, int fileIdx, int total,
+                             MusicBrainzClient mb, LastFmClient lastFm) {
+        if (isCancelled()) return;
+
+        File fichier = entry.currentPath != null
+                ? entry.currentPath.toFile()
+                : entry.file;
+
+        onProgress.accept("[" + fileIdx + "/" + total + "] " + fichier.getName());
+
+        if (!fichier.exists()) {
+            log("▶ SKIP " + fichier.getName() + " (fichier introuvable)");
+            onCount.accept(doneCount.incrementAndGet(), total);
+            publish(entry);
+            return;
+        }
+
+        log("▶ COMPLÉTER " + fichier.getName());
+
+        try {
+            completeEntry(entry, fichier, mb, lastFm);
+        } catch (Exception ex) {
+            log("  ✗ erreur: " + ex.getMessage());
+        }
+
+        onCount.accept(doneCount.incrementAndGet(), total);
+        publish(entry);
+    }
+
+    private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm) throws Exception {
         // Lire le TagInfo actuel depuis e.result ou depuis le fichier
         TagInfo ti = entry.result != null ? entry.result : readTagsFromFile(fichier);
         if (ti == null || (ti.artist.isBlank() && ti.title.isBlank())) {
@@ -120,7 +155,6 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             if (!ti.recordingMbid.isBlank()) {
                 log("  MB lookup: " + ti.recordingMbid);
                 TagInfo full = mb.lookupRecording(ti.recordingMbid);
-                Thread.sleep(1100);
                 if (full != null && !full.title.isBlank()) {
                     mbr = full;
                     log("  MB lookup→ " + full.artist + " – " + full.title + " [" + full.album + " " + full.year + "]");
@@ -130,11 +164,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             // Fallback : recherche texte si lookup échoue ou MBID absent
             if (mbr == null) {
                 log("  MB search: '" + ti.artist + "' / '" + ti.title + "'");
-                mbr = mbLookup(ti.artist, ti.title);
+                mbr = mbLookup(mb, ti.artist, ti.title);
                 if (mbr == null && ti.title.contains("(")) {
                     String clean = ti.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
                     log("  MB search (nettoyé): '" + clean + "'");
-                    mbr = mbLookup(ti.artist, clean);
+                    mbr = mbLookup(mb, ti.artist, clean);
                 }
                 if (mbr == null && !ti.title.isBlank()) {
                     // Dernier essai avec titre tronqué — seuil plus élevé (90%)
@@ -142,14 +176,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                     String[] words = ti.title.split("\\s+");
                     if (words.length > 1) {
                         String short1 = words[0] + " " + words[1];
-                        TagInfo candidate = mbLookupStrict(ti.artist, short1, 90);
+                        TagInfo candidate = mbLookupStrict(mb, ti.artist, short1, 90);
                         if (candidate != null && titlesSimilar(ti.title, candidate.title)) {
                             mbr = candidate;
                             log("  MB search (titre court): '" + short1 + "'");
                         }
                     }
                 }
-                Thread.sleep(1100);
             }
 
             if (mbr != null) {
@@ -183,7 +216,6 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                     log("  artistMbid←MB: " + amid);
                     changed = true;
                 }
-                Thread.sleep(1100);
             }
         }
 
@@ -300,12 +332,12 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /** Cherche dans MB et retourne le meilleur résultat si score ≥ 70, sinon null. */
-    private TagInfo mbLookup(String artist, String title) {
-        return mbLookupStrict(artist, title, 70);
+    private TagInfo mbLookup(MusicBrainzClient mb, String artist, String title) {
+        return mbLookupStrict(mb, artist, title, 70);
     }
 
     /** Cherche dans MB et retourne le meilleur résultat si score ≥ minScore, sinon null. */
-    private TagInfo mbLookupStrict(String artist, String title, int minScore) {
+    private TagInfo mbLookupStrict(MusicBrainzClient mb, String artist, String title, int minScore) {
         try {
             List<TagInfo> results = mb.searchRecording(artist, title);
             if (!results.isEmpty() && results.get(0).score >= minScore)

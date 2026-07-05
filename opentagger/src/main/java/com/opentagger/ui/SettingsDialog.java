@@ -68,6 +68,10 @@ public class SettingsDialog extends JDialog {
     private JTextField tfRapidApiKey;
     private JTextField tfAudDToken;
 
+    // ── Onglet APIs (ListenBrainz) ────────────────────────────────────────────
+    private JTextField tfListenBrainzUsername;
+    private JSpinner   spListenBrainzMaxTracks;
+
     // ── Onglet Tags ───────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbId3Version;
@@ -194,9 +198,8 @@ public class SettingsDialog extends JDialog {
     }
 
     // ── Onglet MusicBrainz OAuth ──────────────────────────────────────────────
-    private JTextField tfMbClientId;
-    private JTextField tfMbClientSecret;
     private JLabel     lblMbAccount;
+    private JTextField tfMbCollectionId;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbMbOAuthMode;
 
@@ -345,13 +348,23 @@ public class SettingsDialog extends JDialog {
     private JPanel buildApiPanel() {
         tfMbUserAgent      = tf();
         tfAcoustIdKey      = tf();
+        tfAcoustIdKey.setToolTipText("Clé d'APPLICATION AcoustID (paramètre \"client\") — à obtenir en "
+                + "enregistrant une application sur acoustid.org/new-application. Différente de la clé "
+                + "personnelle ci-dessous : ne pas mettre la même valeur dans les deux champs.");
         tfAcoustIdUserToken= tf();
+        tfAcoustIdUserToken.setToolTipText("Clé personnelle AcoustID (paramètre \"user\") — depuis votre "
+                + "compte sur acoustid.org/api-key. Utilisée uniquement pour attribuer les soumissions "
+                + "d'empreintes à votre compte, différente de la clé d'application ci-dessus.");
         tfDiscogsKey       = tf();
         tfDiscogsSecret    = tf();
         tfLastFmKey        = tf();
         tfFanArtKey        = tf();
         tfRapidApiKey      = tf();
         tfAudDToken        = tf();
+        tfListenBrainzUsername  = tf();
+        spListenBrainzMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
+        spListenBrainzMaxTracks.setToolTipText("Nombre max de pistes à récupérer dans le classement "
+                + "ListenBrainz (au-delà, les pistes les moins écoutées ne sont pas synchronisées).");
         // FanArt.tv est activé/désactivé depuis la liste des fournisseurs de pochette
         // (onglet Tags) — pas de case séparée ici pour éviter deux réglages contradictoires.
         chkLastfmEnabled   = new JCheckBox("Activer l'enrichissement Last.fm");
@@ -362,7 +375,7 @@ public class SettingsDialog extends JDialog {
 
         Object[][] rows = {
             { "MusicBrainz User-Agent :",   tfMbUserAgent,        null },
-            { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/api-key" },
+            { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/new-application" },
             { "AcoustID User Token :",      tfAcoustIdUserToken,  "https://acoustid.org/api-key" },
             { "Discogs Consumer Key :",     tfDiscogsKey,         "https://www.discogs.com/settings/developers" },
             { "Discogs Consumer Secret :",  tfDiscogsSecret,      "https://www.discogs.com/settings/developers" },
@@ -370,6 +383,8 @@ public class SettingsDialog extends JDialog {
             { "FanArt.tv API Key :",        tfFanArtKey,          "https://fanart.tv/get-an-api-key/" },
             { "RapidAPI Key (Shazam) :",    tfRapidApiKey,        "https://rapidapi.com/apidojo/api/shazam" },
             { "AudD API Token :",           tfAudDToken,          "https://dashboard.audd.io/" },
+            { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/" },
+            { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null },
         };
 
         for (int i = 0; i < rows.length; i++) {
@@ -1384,61 +1399,35 @@ public class SettingsDialog extends JDialog {
 
     @SuppressWarnings("unchecked")
     private JPanel buildMbOAuthPanel() {
-        tfMbClientId     = tf();
-        tfMbClientSecret = tf();
         lblMbAccount     = new JLabel();
         cmbMbOAuthMode   = new JComboBox<>(new String[]{
             "scheme (URL handler)", "localhost (port 8484)", "oob (copier-coller)"});
+        tfMbCollectionId = tf();
+        tfMbCollectionId.setToolTipText("MBID de votre collection MusicBrainz (visible dans l'URL de la "
+                + "page de la collection sur musicbrainz.org) — les releases taguées y seront ajoutées "
+                + "automatiquement. Laisser vide pour désactiver. La collection doit déjà exister.");
 
-        // Bouton unique qui change selon l'état : "Obtenir ID/Secret" → "Se connecter"
-        JButton btnAction = new JButton();
+        // Client ID/Secret n'est plus affiché ici : c'est l'identité de l'APPLICATION (embarquée,
+        // partagée par tous les utilisateurs — voir settings.properties), pas une information
+        // propre à chaque utilisateur. Avant ce changement, ces deux champs de texte étaient
+        // visibles et modifiables dans ce panneau alors que 99% des utilisateurs n'ont ni besoin
+        // ni intérêt à les voir/modifier ; seule l'autorisation personnelle (bouton ci-dessous)
+        // les concerne.
+        JButton btnAction = new JButton("🔑  Se connecter à MusicBrainz");
+        btnAction.setToolTipText("Ouvrir le navigateur pour autoriser OpenTagger à accéder à votre compte");
+        btnAction.putClientProperty("FlatLaf.style", "background: #1a6030");
         JButton btnLogout = new JButton("Déconnexion");
         refreshMbStatus(lblMbAccount, btnAction, btnLogout);
 
-        Runnable updateBtn = () -> {
-            if (Config.get().mbConnected()) return;
-            boolean hasCredentials = !tfMbClientId.getText().trim().isBlank()
-                                  && !tfMbClientSecret.getText().trim().isBlank();
-            if (hasCredentials) {
-                btnAction.setText("🔑  Se connecter à MusicBrainz");
-                btnAction.setToolTipText("Ouvrir le navigateur pour autoriser OpenTagger");
-                btnAction.putClientProperty("FlatLaf.style", "background: #1a6030");
-            } else {
-                btnAction.setText("🌐  Obtenir l'ID et le Secret");
-                btnAction.setToolTipText("Ouvre musicbrainz.org pour enregistrer l'application");
-                btnAction.putClientProperty("FlatLaf.style", "");
-            }
-            btnAction.setEnabled(true);
-            btnAction.repaint();
-        };
-
-        javax.swing.event.DocumentListener dl = new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e)  { updateBtn.run(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e)  { updateBtn.run(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { updateBtn.run(); }
-        };
-        tfMbClientId    .getDocument().addDocumentListener(dl);
-        tfMbClientSecret.getDocument().addDocumentListener(dl);
-
         btnAction.addActionListener(e -> {
-            boolean hasCredentials = !tfMbClientId.getText().trim().isBlank()
-                                  && !tfMbClientSecret.getText().trim().isBlank();
-            if (!hasCredentials) {
-                // Ouvrir la page d'enregistrement MusicBrainz
-                try {
-                    java.awt.Desktop.getDesktop().browse(
-                        java.net.URI.create("https://musicbrainz.org/account/applications/register"));
-                } catch (Exception ex) {
-                    JOptionPane.showMessageDialog(SettingsDialog.this,
-                        "Ouvrez : https://musicbrainz.org/account/applications/register\n" +
-                        "Redirect URI : http://localhost",
-                        "Enregistrement MusicBrainz", JOptionPane.INFORMATION_MESSAGE);
-                }
+            if (Config.get().mbClientId().isBlank() || Config.get().mbClientSecret().isBlank()) {
+                JOptionPane.showMessageDialog(SettingsDialog.this,
+                    "Client ID/Secret MusicBrainz manquants dans la configuration de l'application.\n"
+                    + "Ce n'est pas quelque chose à saisir manuellement — contactez le développeur "
+                    + "ou réinstallez OpenTagger.",
+                    "Configuration incomplète", JOptionPane.ERROR_MESSAGE);
                 return;
             }
-            // Credentials remplis → lancer OAuth
-            Config.get().set("mb.oauth.client_id",     tfMbClientId.getText().trim());
-            Config.get().set("mb.oauth.client_secret", tfMbClientSecret.getText().trim());
             btnAction.setEnabled(false);
             btnAction.setText("Ouverture du navigateur…");
             new SwingWorker<String, Void>() {
@@ -1453,8 +1442,7 @@ public class SettingsDialog extends JDialog {
                 }
             }.execute();
         });
-        btnLogout.addActionListener(e -> { MusicBrainzOAuth.logout(); refreshMbStatus(lblMbAccount, btnAction, btnLogout); updateBtn.run(); });
-        updateBtn.run();
+        btnLogout.addActionListener(e -> { MusicBrainzOAuth.logout(); refreshMbStatus(lblMbAccount, btnAction, btnLogout); });
 
         // Si token présent mais username manquant/inconnu → re-fetch automatique
         if (Config.get().mbConnected()) {
@@ -1489,8 +1477,8 @@ public class SettingsDialog extends JDialog {
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), "Compte MusicBrainz (contribution OAuth2)"));
-        String[] labels = {"Client ID :", "Client Secret :", "Compte connecté :", "Mode OAuth :"};
-        JComponent[] fields = {tfMbClientId, tfMbClientSecret, lblMbAccount, cmbMbOAuthMode};
+        String[] labels = {"Compte connecté :", "Mode OAuth :", "Collection MB (optionnel) :"};
+        JComponent[] fields = {lblMbAccount, cmbMbOAuthMode, tfMbCollectionId};
         for (int i = 0; i < labels.length; i++) {
             GridBagConstraints lc = new GridBagConstraints();
             lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(4,10,4,8);
@@ -1500,7 +1488,7 @@ public class SettingsDialog extends JDialog {
             inner.add(fields[i], fc);
         }
         GridBagConstraints bc = new GridBagConstraints();
-        bc.gridx = 1; bc.gridy = 4; bc.anchor = GridBagConstraints.WEST; bc.insets = new Insets(6,0,4,10);
+        bc.gridx = 1; bc.gridy = labels.length; bc.anchor = GridBagConstraints.WEST; bc.insets = new Insets(6,0,4,10);
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         btnRow.add(btnAction); btnRow.add(btnLogout);
         inner.add(btnRow, bc);
@@ -1561,6 +1549,8 @@ public class SettingsDialog extends JDialog {
         chkLyricsEnabled.setSelected(cfg.bool("lyrics.enabled",        true));
         tfRapidApiKey.setText(cfg.str("rapidapi.key",    ""));
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
+        tfListenBrainzUsername .setText(cfg.listenbrainzUsername());
+        spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
 
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkReplayGainEnabled.setSelected(cfg.replayGainEnabled());
@@ -1656,11 +1646,10 @@ public class SettingsDialog extends JDialog {
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
         spBatchThreads            .setValue(cfg.num("batch.threads", 3));
 
-        tfMbClientId    .setText(cfg.mbClientId());
-        tfMbClientSecret.setText(cfg.mbClientSecret());
         String mode = cfg.str("mb.oauth.mode", "scheme");
         cmbMbOAuthMode.setSelectedIndex(
             "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
+        tfMbCollectionId.setText(cfg.mbCollectionId());
 
         scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
         currentScriptIndex = -1;
@@ -1729,6 +1718,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("lyrics.enabled",                String.valueOf(chkLyricsEnabled.isSelected()));
         p.setProperty("rapidapi.key",   tfRapidApiKey.getText().trim());
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
+        p.setProperty("listenbrainz.username",   tfListenBrainzUsername.getText().trim());
+        p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
 
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("replaygain.enabled",     String.valueOf(chkReplayGainEnabled.isSelected()));
@@ -1811,14 +1802,16 @@ public class SettingsDialog extends JDialog {
         p.setProperty("transcode.bitrate_kbps",    String.valueOf(spTranscodeBitrate.getValue()));
         p.setProperty("transcode.delete_source",   String.valueOf(chkTranscodeDeleteSource.isSelected()));
 
-        p.setProperty("mb.oauth.client_id",            tfMbClientId.getText().trim());
-        p.setProperty("mb.oauth.client_secret",        tfMbClientSecret.getText().trim());
-        // Conserver le token, refresh_token et username existants
+        // Conserver le client_id/secret (identité d'application embarquée, plus modifiable
+        // depuis ce dialogue — voir buildMbOAuthPanel), le token, refresh_token et username existants
+        p.setProperty("mb.oauth.client_id",           Config.get().mbClientId());
+        p.setProperty("mb.oauth.client_secret",       Config.get().mbClientSecret());
         p.setProperty("mb.oauth.token",               Config.get().mbToken());
         p.setProperty("mb.oauth.refresh_token",       Config.get().str("mb.oauth.refresh_token", ""));
         p.setProperty("mb.oauth.username",            Config.get().mbUsername());
         String[] oauthModes = {"scheme", "localhost", "oob"};
         p.setProperty("mb.oauth.mode", oauthModes[cmbMbOAuthMode.getSelectedIndex()]);
+        p.setProperty("mb.oauth.collection_id",       tfMbCollectionId.getText().trim());
 
         // Mémoriser les dossiers déjà connus avant la sauvegarde
         java.util.Set<String> alreadyKnown = new java.util.HashSet<>(

@@ -153,6 +153,9 @@ public class TagInfo {
     public String podcastEpisodeType  = "";    // full/trailer/bonus (TXXX:EPISODETYPE)
     public String podcastKeywords     = "";    // mots-clés (TXXX:KEYWORDS)
 
+    // ── Statistiques d'écoute ────────────────────────────────────────────────
+    public String listenbrainzPlayCount = "";  // nombre d'écoutes ListenBrainz (TXXX:LISTENBRAINZ_PLAYCOUNT)
+
     /** Copie superficielle — tous les champs String sont indépendants (immutables). */
     public TagInfo copy() {
         try {
