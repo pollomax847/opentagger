@@ -326,6 +326,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
                     File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
 
+                    // Vérifier que le fichier existe encore avant tout traitement coûteux — sur une
+                    // session longue (des heures), un fichier peut déjà avoir été renommé/déplacé
+                    // par une passe précédente sans que cette entrée en mémoire ait été rafraîchie.
+                    // Sans ce garde-fou, chaque fichier "fantôme" grillait plusieurs secondes dans
+                    // toute la chaîne d'enrichissement PUIS la chaîne de repli M4A complète
+                    // (jaudiotagger+ffmpeg+AtomicParsley+ffmpeg) pour un échec garanti — observé en
+                    // direct : des centaines de fichiers déjà renommés bloquant toute la passe
+                    // album-first (et donc tout le reste, via la garde mutuelle-exclusion de
+                    // MainFrame — ce chemin tourne séquentiellement, pas en pool comme le reste).
+                    if (!fichier.exists()) {
+                        log(I18n.t("[album-first] %s → fichier introuvable (déjà déplacé/renommé ?), ignoré", entry.filename()));
+                        continue;
+                    }
+
                     // Toutes les étapes d'enrichissement ci-dessous existaient déjà dans la boucle
                     // piste-par-piste plus bas, mais l'album-first pass (chemin emprunté par la
                     // majorité d'une grosse bibliothèque bien organisée en albums) les sautait

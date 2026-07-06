@@ -4,6 +4,8 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 public class AudioScanner {
 
@@ -15,19 +17,36 @@ public class AudioScanner {
 
     public List<File> scan(File dossier) {
         List<File> fichiers = new ArrayList<>();
-        scanRecursif(dossier, fichiers);
+        scan(dossier, fichiers::add);
         return fichiers;
     }
 
-    private void scanRecursif(File dossier, List<File> fichiers) {
+    /** Variante en flux : appelle onFound dès qu'un fichier audio est trouvé, plutôt que
+     *  d'attendre la fin du parcours complet de l'arborescence pour tout renvoyer d'un coup —
+     *  sur une grosse bibliothèque (disque externe, des dizaines de milliers de fichiers), le
+     *  parcours seul (avant même la lecture des tags) peut prendre un temps notable, et rien ne
+     *  s'affichait dans le tableau tant qu'il n'était pas terminé. */
+    public void scan(File dossier, Consumer<File> onFound) {
+        scan(dossier, onFound, () -> false);
+    }
+
+    /** Variante en flux + annulable : cancelled est vérifié à chaque fichier/dossier, permettant
+     *  d'interrompre un parcours en cours (bouton Annuler) sans attendre qu'il se termine tout seul. */
+    public void scan(File dossier, Consumer<File> onFound, BooleanSupplier cancelled) {
+        scanRecursif(dossier, onFound, cancelled);
+    }
+
+    private void scanRecursif(File dossier, Consumer<File> onFound, BooleanSupplier cancelled) {
+        if (cancelled.getAsBoolean()) return;
         File[] contenu = dossier.listFiles();
         if (contenu == null) return;
 
         for (File f : contenu) {
+            if (cancelled.getAsBoolean()) return;
             if (f.isDirectory()) {
-                scanRecursif(f, fichiers);
+                scanRecursif(f, onFound, cancelled);
             } else if (isAudio(f)) {
-                fichiers.add(f);
+                onFound.accept(f);
             }
         }
     }

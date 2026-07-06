@@ -79,6 +79,7 @@ public class MainFrame extends JFrame {
     // ── Undo / Redo ───────────────────────────────────────────────────────────
     private final com.opentagger.UndoManager undoManager = new com.opentagger.UndoManager();
     private JButton btnUndo, btnRedo;
+    private JCheckBoxMenuItem chkForceAcoustId, chkCompleteIncomplete;
 
     // ── Barre de statut ───────────────────────────────────────────────────────
     private JLabel       lblStatus;
@@ -509,6 +510,12 @@ public class MainFrame extends JFrame {
                 tableModel.remove(table.convertRowIndexToModel(rows[i]));
         }));
         m.addSeparator();
+        m.add(mitem(I18n.t("Tout sélectionner"),       "Ctrl+A", e -> {
+            if (table.getRowCount() > 0) table.setRowSelectionInterval(0, table.getRowCount() - 1);
+        }));
+        m.add(mitem(I18n.t("Désélectionner tout"),     null,      e -> table.clearSelection()));
+        m.addSeparator();
+        m.add(mitem(I18n.t("Sélectionner les tagués"),         null, e -> selectByStatus(FileEntry.Status.TAGGED)));
         m.add(mitem(I18n.t("Sélectionner les non identifiés"), null, e -> selectByStatus(FileEntry.Status.SKIPPED)));
         m.add(mitem(I18n.t("Sélectionner les erreurs"),        null, e -> selectByStatus(FileEntry.Status.ERROR)));
         m.add(mitem(I18n.t("Sélectionner les en attente"),     null, e -> selectByStatus(FileEntry.Status.PENDING)));
@@ -517,11 +524,45 @@ public class MainFrame extends JFrame {
         return m;
     }
 
+    /**
+     * "Rattraper les non identifiés (AcoustID forcé)" et "Passe complète" ont été fusionnées ici en
+     * options à cocher plutôt que des actions séparées (retour utilisateur : trop d'actions
+     * distinctes pour une même intention "tagger mes fichiers"). "Tout tagger" traite déjà tout ce
+     * qui n'est pas TAGGED (donc déjà les non-identifiés) — la case ci-dessous ne fait que forcer
+     * AcoustID pour cette exécution au lieu du réglage des Préférences. La case "compléter aussi"
+     * enchaîne après le taguage (ou immédiatement si rien de nouveau à taguer) une passe qui
+     * comble les champs manquants des fichiers déjà tagués, sans jamais les réidentifier — même
+     * portée que l'ancienne "Passe complète", juste sans son propre bouton. Volontairement PAS
+     * fusionné : "Forcer le re-taguage" (efface cache+MBID de fichiers déjà tagués avec succès —
+     * une case à cocher oubliée cochée risquerait de redétruire l'identification de toute une
+     * bibliothèque au prochain "Tout tagger" ; reste une action séparée avec sa confirmation).
+     */
     private JMenu buildMenuTagger() {
         JMenu m = new JMenu(I18n.t("Tagger"));
         m.setMnemonic('T');
         m.add(mitem(I18n.t("Tout tagger (cochés)"),    "F6",  e -> startTagging(false)));
         m.add(mitem(I18n.t("Tagger la sélection"),     "F7",  e -> startTagging(true)));
+        m.addSeparator();
+        chkForceAcoustId = new JCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
+        chkForceAcoustId.setSelected(Config.get().bool("tagging.force_acoustid_ui", false));
+        chkForceAcoustId.addActionListener(e -> {
+            Config.get().set("tagging.force_acoustid_ui", String.valueOf(chkForceAcoustId.isSelected()));
+            if (chkForceAcoustId.isSelected() && !com.opentagger.AcoustIdSubmitter.isAvailable()) {
+                JOptionPane.showMessageDialog(this,
+                    I18n.t("fpcalc introuvable — installez chromaprint pour utiliser AcoustID."),
+                    I18n.t("Configuration requise"), JOptionPane.WARNING_MESSAGE);
+            } else if (chkForceAcoustId.isSelected() && Config.get().acoustidKey().isBlank()) {
+                JOptionPane.showMessageDialog(this,
+                    I18n.t("Clé AcoustID non configurée (Préférences → APIs → AcoustID API Key)."),
+                    I18n.t("Configuration requise"), JOptionPane.WARNING_MESSAGE);
+            }
+        });
+        m.add(chkForceAcoustId);
+        chkCompleteIncomplete = new JCheckBoxMenuItem(I18n.t("Compléter aussi les fichiers tagués mais incomplets"));
+        chkCompleteIncomplete.setSelected(Config.get().bool("tagging.auto_complete_incomplete", false));
+        chkCompleteIncomplete.addActionListener(e ->
+                Config.get().set("tagging.auto_complete_incomplete", String.valueOf(chkCompleteIncomplete.isSelected())));
+        m.add(chkCompleteIncomplete);
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> cancelTagging()));
         m.addSeparator();
@@ -536,26 +577,40 @@ public class MainFrame extends JFrame {
         return m;
     }
 
+    /**
+     * Regroupé en sous-menus (au lieu de 12 entrées à plat) — retour utilisateur : trop d'actions
+     * visibles d'un coup dans "Outils". Aucune action supprimée/renommée, juste réorganisée par
+     * thème : correction manuelle, re-traitement, bibliothèque, MusicBrainz.
+     */
     private JMenu buildMenuOutils() {
         JMenu m = new JMenu(I18n.t("Outils"));
         m.setMnemonic('O');
-        m.add(mitem(I18n.t("Correspondance manuelle…"),"Ctrl+M",  e -> openMatchDialog()));
-        m.add(mitem(I18n.t("Gérer la pochette…"),      null,      e -> openCoverDialog()));
+
+        JMenu correction = new JMenu(I18n.t("Correction manuelle"));
+        correction.add(mitem(I18n.t("Correspondance manuelle…"),"Ctrl+M",  e -> openMatchDialog()));
+        correction.add(mitem(I18n.t("Gérer la pochette…"),      null,      e -> openCoverDialog()));
+        m.add(correction);
+
+        JMenu retraitement = new JMenu(I18n.t("Re-traitement"));
+        retraitement.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
+        retraitement.add(mitem(I18n.t("Synchroniser ListenBrainz…"), null,    e -> syncListenBrainz()));
+        m.add(retraitement);
+
+        JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
+        bibliotheque.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
+        bibliotheque.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
+        bibliotheque.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
+        bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
+        m.add(bibliotheque);
+
+        JMenu musicbrainz = new JMenu("MusicBrainz");
+        musicbrainz.add(mitem(I18n.t("Modifier sur MusicBrainz"),null,      e -> openMbEditPage()));
+        musicbrainz.add(mitem(I18n.t("Contribuer à MusicBrainz…"), null,   e -> openMbContribute()));
+        musicbrainz.add(mitem(I18n.t("Soumettre fingerprint AcoustID"), null, e -> submitAcoustId()));
+        m.add(musicbrainz);
+
         m.addSeparator();
-        m.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
-        m.add(mitem(I18n.t("Rattraper les non identifiés (AcoustID forcé)…"), null, e -> retryUnidentifiedForceAcoustId()));
-        m.add(mitem(I18n.t("Passe complète…"),          "Ctrl+P",  e -> completeAllInfo()));
-        m.add(mitem(I18n.t("Synchroniser ListenBrainz…"), null,    e -> syncListenBrainz()));
-        m.addSeparator();
-        m.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
-        m.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
-        m.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
-        m.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         m.add(mitem(I18n.t("Vérifier les mises à jour…"), null,   e -> checkForUpdates(true)));
-        m.addSeparator();
-        m.add(mitem(I18n.t("Modifier sur MusicBrainz"),null,      e -> openMbEditPage()));
-        m.add(mitem(I18n.t("Contribuer à MusicBrainz…"), null,   e -> openMbContribute()));
-        m.add(mitem(I18n.t("Soumettre fingerprint AcoustID"), null, e -> submitAcoustId()));
         return m;
     }
 
@@ -683,8 +738,6 @@ public class MainFrame extends JFrame {
         new String[]{"coverDialog",        I18n.t("Gérer la pochette")},
         new String[]{"refreshMeta",        I18n.t("Rafraîchir tags + pochette")},
         new String[]{"forceRetag",         I18n.t("Forcer le re-taguage")},
-        new String[]{"retryUnidentified",  I18n.t("Rattraper les non identifiés")},
-        new String[]{"completeAllInfo",    I18n.t("Passe complète")},
         new String[]{"syncListenBrainz",   I18n.t("Synchroniser ListenBrainz")},
         new String[]{"podcastDialog",      I18n.t("Tagger comme podcast")},
         new String[]{"detectDuplicates",   I18n.t("Détecter les doublons")},
@@ -713,10 +766,6 @@ public class MainFrame extends JFrame {
                 + "corriger tout un album sélectionné d'un coup)"), this::refreshSelectedMeta));
         list.add(new ToolbarAction("forceRetag", I18n.t("Forcer le re-taguage"),
                 I18n.t("Remettre en PENDING et re-taguer"), this::forceRetag));
-        list.add(new ToolbarAction("retryUnidentified", I18n.t("Rattraper les non identifiés"),
-                I18n.t("Retente les fichiers non identifiés avec AcoustID forcé"), this::retryUnidentifiedForceAcoustId));
-        list.add(new ToolbarAction("completeAllInfo", I18n.t("Passe complète"),
-                I18n.t("Compléter les infos manquantes (Ctrl+P)"), this::completeAllInfo));
         list.add(new ToolbarAction("syncListenBrainz", I18n.t("Synchroniser ListenBrainz"),
                 I18n.t("Récupérer le nombre d'écoutes ListenBrainz pour les fichiers tagués"), this::syncListenBrainz));
         list.add(new ToolbarAction("podcastDialog", I18n.t("Tagger comme podcast"),
@@ -1702,24 +1751,36 @@ public class MainFrame extends JFrame {
             final java.util.Set<FileEntry> addedByThisScan = new java.util.LinkedHashSet<>();
 
             @Override protected int[] doInBackground() throws Exception {
-                // ── Phase 1 : lister les fichiers (filesystem seulement, ~instant) ──
-                List<File> files = new AudioScanner().scan(dir);
-                List<FileEntry> newEntries = new ArrayList<>(files.size());
-                for (File f : files) {
-                    if (isCancelled()) return new int[]{0, 0};
-                    if (alreadyInTable.contains(f.toPath().toAbsolutePath())) continue;
+                // ── Phase 1 : lister les fichiers, EN FLUX ──────────────────────────
+                // Avant : AudioScanner().scan(dir) parcourait toute l'arborescence et ne renvoyait
+                // qu'une fois terminé — sur une grosse bibliothèque (disque externe, dizaines de
+                // milliers de fichiers dans des milliers de sous-dossiers), ce parcours seul (avant
+                // même la lecture des tags) pouvait prendre un temps notable pendant lequel RIEN
+                // n'apparaissait dans le tableau. Publier par lots au fur et à mesure de la
+                // découverte fait apparaître les premiers fichiers en continu plutôt qu'en un seul
+                // bloc à la fin.
+                List<FileEntry> newEntries = new ArrayList<>();
+                List<FileEntry> batch = new ArrayList<>();
+                final long[] lastBatchMs = { System.currentTimeMillis() };
+                new AudioScanner().scan(dir, f -> {
+                    if (isCancelled()) return;
+                    if (alreadyInTable.contains(f.toPath().toAbsolutePath())) return;
                     FileEntry e = new FileEntry(f, new com.opentagger.model.TagInfo());
                     e.scanRoot = root;
                     newEntries.add(e);
-                }
+                    batch.add(e);
+                    long now = System.currentTimeMillis();
+                    if (batch.size() >= 200 || now - lastBatchMs[0] >= 200) {
+                        publish(new Object[]{ new ArrayList<>(batch) });
+                        batch.clear();
+                        lastBatchMs[0] = now;
+                    }
+                }, this::isCancelled);
+                if (!batch.isEmpty()) publish(new Object[]{ new ArrayList<>(batch) });
                 if (isCancelled()) return new int[]{0, 0};
 
                 // Enregistrer le dossier pour l'auto-watch (hors EDT — walkFileTree peut être long)
                 if (folderWatcher != null) folderWatcher.watch(dir.toPath());
-
-                @SuppressWarnings("unchecked")
-                Object[] phase1 = new Object[]{ new ArrayList<>(newEntries) };
-                publish(phase1);  // → table peuplée instantanément avec noms seuls
 
                 // ── Cache : juste les chemins → mbid (pas de TagInfo en RAM) ─────
                 // Optimisation mémoire : on ne charge pas toute la tagging_history en heap.
@@ -1730,32 +1791,39 @@ public class MainFrame extends JFrame {
                 cache.close();
 
                 // ── Phase 2 : lecture des tags (parallèle — N threads I/O) ─────────
-                // On soumet tous les readTags en parallèle, puis on parcourt les futures
-                // dans l'ordre pour publish() sur le SwingWorker (thread-safe car chaque
-                // readTags() crée ses propres objets JAudioTagger indépendants).
-                int threads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+                // Nombre de threads : lecture de tags = attente d'E/S (disque, et souvent disque
+                // externe/réseau dans ce cas d'usage), pas de calcul CPU — un plafond basé sur le
+                // nombre de cœurs (l'ancien Math.min(8, cores)) sous-utilisait largement la
+                // capacité de parallélisme possible pour de l'E/S. Publication dans l'ORDRE DE FIN
+                // RÉEL (ExecutorCompletionService) plutôt que dans l'ordre de soumission : avant,
+                // un seul fichier lent (gros FLAC, latence disque externe) bloquait l'affichage de
+                // TOUS les fichiers soumis après lui même si leur lecture était déjà terminée.
+                int threads = Math.max(4, Math.min(16, Runtime.getRuntime().availableProcessors() * 2));
                 java.util.concurrent.ExecutorService tagPool =
                     java.util.concurrent.Executors.newFixedThreadPool(threads);
+                java.util.concurrent.CompletionService<Object[]> completion =
+                    new java.util.concurrent.ExecutorCompletionService<>(tagPool);
 
-                // Soumettre toutes les tâches de lecture avant de collecter les résultats
-                java.util.List<java.util.concurrent.Future<com.opentagger.model.TagInfo>> tagFutures =
-                    new java.util.ArrayList<>(newEntries.size());
                 for (FileEntry entry : newEntries) {
                     final File f = entry.file;
-                    tagFutures.add(tagPool.submit(() -> readTags(f)));
+                    completion.submit(() -> {
+                        com.opentagger.model.TagInfo ti;
+                        try { ti = readTags(f); }
+                        catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
+                        boolean wasPreviouslyTagged = taggedPaths.contains(f.getAbsolutePath());
+                        return new Object[]{ entry, ti, wasPreviouslyTagged };
+                    });
                 }
                 tagPool.shutdown();
 
                 int tagged = 0;
                 for (int i = 0; i < newEntries.size(); i++) {
                     if (isCancelled()) { tagPool.shutdownNow(); break; }
-                    FileEntry entry = newEntries.get(i);
-                    com.opentagger.model.TagInfo ti;
-                    try { ti = tagFutures.get(i).get(); }
-                    catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
-                    boolean wasPreviouslyTagged = taggedPaths.contains(entry.file.getAbsolutePath());
-                    if (wasPreviouslyTagged) tagged++;
-                    publish(new Object[]{ entry, ti, wasPreviouslyTagged });
+                    Object[] result;
+                    try { result = completion.take().get(); }
+                    catch (Exception e) { continue; }
+                    if (Boolean.TRUE.equals(result[2])) tagged++;
+                    publish(result);
                 }
                 return new int[]{ newEntries.size(), tagged };
             }
@@ -1833,7 +1901,7 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
         }
-        // Symétrique de la garde de completeAlbums()/completeAllInfo() : lancer un taguage
+        // Symétrique de la garde de completeAlbums()/autoCompleteIncomplete() : lancer un taguage
         // pendant qu'un de ces deux workers tourne encore provoque la même course (connexions
         // MetadataCache concurrentes + FileEntry/TagInfo mutés par deux threads en parallèle).
         if (completionWorker != null && !completionWorker.isDone()) {
@@ -1855,7 +1923,12 @@ public class MainFrame extends JFrame {
             }
         }
         if (toTag.isEmpty()) {
-            setStatus(I18n.t("Aucun fichier à taguer (tous déjà tagués — utilisez « Forcer le re-taguage » pour les re-traiter)."));
+            if (chkCompleteIncomplete.isSelected()) {
+                setStatus(I18n.t("Aucun nouveau fichier à taguer — recherche des fichiers incomplets…"));
+                autoCompleteIncomplete(() -> setStatus(I18n.t("Complétion terminée.")));
+            } else {
+                setStatus(I18n.t("Aucun fichier à taguer (tous déjà tagués — utilisez « Forcer le re-taguage » pour les re-traiter)."));
+            }
             return;
         }
 
@@ -1866,9 +1939,10 @@ public class MainFrame extends JFrame {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
         final int totalFiles = toTag.size();
+        boolean useAcoustId = chkForceAcoustId.isSelected() || Config.get().useAcoustId();
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Taguage"), totalFiles);
-        worker = new TaggingWorker(toTag, Config.get().useAcoustId(), autoMask,
+        worker = new TaggingWorker(toTag, useAcoustId, autoMask,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
@@ -1912,95 +1986,6 @@ public class MainFrame extends JFrame {
         }
         refreshStats();
         setStatus(I18n.t("Arrêté.")); resetBtns();
-    }
-
-    // ── Passe complète (compléter les infos manquantes) ──────────────────────
-
-    private void completeAllInfo() {
-        if (infoCompleter != null && !infoCompleter.isDone()) {
-            infoCompleter.cancel(false);
-            setStatus(I18n.t("Passe complète annulée."));
-            return;
-        }
-        if (worker != null && !worker.isDone()) {
-            setStatus(I18n.t("Taguage en cours — attendez la fin avant de lancer la passe complète."));
-            return;
-        }
-        if (completionWorker != null && !completionWorker.isDone()) {
-            setStatus(I18n.t("Complétion des albums en cours — attendez la fin avant de lancer la passe complète."));
-            return;
-        }
-
-        // Cible : sélection si ≥1, sinon tous les TAGGED avec champs manquants
-        int[] sel = table != null ? table.getSelectedRows() : new int[0];
-        List<FileEntry> targets = new ArrayList<>();
-        java.util.Set<String> seenPaths = new java.util.HashSet<>();
-        if (sel.length > 0) {
-            for (int r : sel) {
-                FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
-                if (e.status == FileEntry.Status.TAGGED) {
-                    String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
-                    if (seenPaths.add(p)) targets.add(e);
-                }
-            }
-        } else {
-            for (int i = 0; i < tableModel.getRowCount(); i++) {
-                FileEntry e = tableModel.get(i);
-                if (e.status != FileEntry.Status.TAGGED) continue;
-                String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
-                if (!seenPaths.add(p)) continue;
-                TagInfo ti = e.result;
-                boolean incomplete = ti == null
-                    || ti.artistMbid.isBlank() || ti.album.isBlank()
-                    || ti.year.isBlank()        || ti.genre.isBlank()
-                    || ti.mood.isBlank()         || ti.bpm.isBlank()
-                    || ti.lyrics.isBlank();
-                if (incomplete) targets.add(e);
-            }
-        }
-
-        if (targets.isEmpty()) {
-            setStatus(I18n.t("Tous les fichiers tagués sont déjà complets."));
-            return;
-        }
-
-        int confirm = JOptionPane.showConfirmDialog(this,
-            I18n.t("%d fichier(s) ont des infos manquantes.\nLa passe complète va chercher album, année, pochette, genre, mood, BPM et paroles.\nDurée estimée : %d–%d secondes.",
-                targets.size(), targets.size() * 2, targets.size() * 4),
-            I18n.t("Passe complète"), JOptionPane.OK_CANCEL_OPTION);
-        if (confirm != JOptionPane.OK_OPTION) return;
-
-        progress.setVisible(true);
-        progress.setMaximum(targets.size());
-        progress.setValue(0);
-        runStartMillis = System.currentTimeMillis();
-        logRunStart(I18n.t("Passe complète"), targets.size());
-
-        infoCompleter = new InfoCompleterWorker(
-            targets,
-            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
-            entry -> SwingUtilities.invokeLater(() -> {
-                tableModel.update(entry);
-                followProcessing(entry);
-                appendLog(entry);
-                refreshStats();
-            }),
-            (done, total) -> SwingUtilities.invokeLater(() -> {
-                progress.setValue(done);
-                progress.setString(done + "/" + total + etaText(done, total));
-            })
-        );
-        infoCompleter.addPropertyChangeListener(evt -> {
-            if ("state".equals(evt.getPropertyName())
-                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
-                SwingUtilities.invokeLater(() -> {
-                    progress.setVisible(false);
-                    setStatus(I18n.t("Passe complète terminée — %d fichier(s) traités.", targets.size()));
-                    refreshStats();
-                });
-            }
-        });
-        infoCompleter.execute();
     }
 
     /**
@@ -2132,8 +2117,8 @@ public class MainFrame extends JFrame {
 
     private void forceRetag() {
         // Cette action lance elle aussi un TaggingWorker (via launchForcedTagging) — même garde
-        // que startTagging()/completeAllInfo()/completeAlbums(), sinon un worker déjà actif est
-        // silencieusement remplacé dans le champ `worker` alors qu'il continue de tourner.
+        // que startTagging()/autoCompleteIncomplete()/completeAlbums(), sinon un worker déjà actif
+        // est silencieusement remplacé dans le champ `worker` alors qu'il continue de tourner.
         if (worker != null && !worker.isDone()) {
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
@@ -2170,7 +2155,6 @@ public class MainFrame extends JFrame {
     /**
      * Réinitialise une liste de fichiers pour forcer une nouvelle identification : vide leur
      * entrée de cache, supprime les tags MBID sur le fichier disque, remet le statut à PENDING.
-     * Extrait de forceRetag() pour être réutilisé par retryUnidentifiedForceAcoustId().
      *
      * Effacer cache + MBIDs disque = un AudioFileIO.read/commit PAR FICHIER. Fait en arrière-plan
      * (SwingWorker) — synchrone sur l'EDT, ça gelait toute l'interface le temps de retraiter toute
@@ -2225,55 +2209,7 @@ public class MainFrame extends JFrame {
         }.execute();
     }
 
-    /**
-     * Sélectionne tous les fichiers SKIPPED (non identifiés) et retente leur identification en
-     * forçant AcoustID en priorité pour cette exécution seulement — sans toucher au réglage
-     * persisté dans Préférences. Utile après une session de "Soumettre AcoustID" (la base
-     * communautaire a pu s'enrichir) ou simplement pour donner sa chance à AcoustID en premier
-     * plutôt qu'en dernier recours. Ce n'est pas un algorithme différent : un fichier déjà passé
-     * par AcoustID (avec succès ou non) a de bonnes chances d'échouer à nouveau.
-     */
-    private void retryUnidentifiedForceAcoustId() {
-        if (worker != null && !worker.isDone()) {
-            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
-            return;
-        }
-        if (completionWorker != null && !completionWorker.isDone()) {
-            setStatus(I18n.t("Complétion des albums en cours — attendez la fin."));
-            return;
-        }
-        if (infoCompleter != null && !infoCompleter.isDone()) {
-            setStatus(I18n.t("Passe complète en cours — attendez la fin."));
-            return;
-        }
-        if (!com.opentagger.AcoustIdSubmitter.isAvailable()) {
-            showError(I18n.t("fpcalc introuvable — installez chromaprint pour utiliser AcoustID."));
-            return;
-        }
-        if (Config.get().acoustidKey().isBlank()) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Clé AcoustID non configurée (Préférences → APIs → AcoustID API Key)."),
-                I18n.t("Configuration requise"), JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-
-        List<FileEntry> targets = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
-            if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
-        }
-        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier non identifié à rattraper.")); return; }
-
-        int confirm = JOptionPane.showConfirmDialog(this,
-            I18n.t("%d fichier(s) non identifié(s) vont être retentés avec AcoustID forcé "
-            + "en priorité pour cette exécution (le réglage des Préférences n'est pas modifié).", targets.size()),
-            I18n.t("Rattraper les non identifiés"), JOptionPane.OK_CANCEL_OPTION);
-        if (confirm != JOptionPane.OK_OPTION) return;
-
-        resetForReidentification(targets, () -> launchForcedTagging(targets, true));
-    }
-
-    /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag()/retryUnidentifiedForceAcoustId(). */
+    /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag(). */
     private void launchForcedTagging(List<FileEntry> forcedTargets, boolean useAcoustId) {
         int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0;
@@ -2314,8 +2250,75 @@ public class MainFrame extends JFrame {
         resetBtns();
         detectLocalCompilations();
         refreshStats();
-        // Lancer la complétion albums automatiquement après chaque session de tagging
-        completeAlbums();
+        // Lancer la complétion albums automatiquement après chaque session de tagging — et, si la
+        // case "Compléter aussi les fichiers tagués mais incomplets" est cochée, la faire précéder
+        // par une passe de complétion (sinon les deux workers se bloqueraient mutuellement via les
+        // gardes d'exclusion : completeAlbums() refuse de démarrer tant qu'un InfoCompleterWorker
+        // tourne encore).
+        if (chkCompleteIncomplete.isSelected()) {
+            autoCompleteIncomplete(this::completeAlbums);
+        } else {
+            completeAlbums();
+        }
+    }
+
+    /**
+     * Comble les champs manquants (album/année/genre/mood/BPM/paroles/pochette) des fichiers déjà
+     * tagués mais incomplets, sans jamais les réidentifier — même portée que l'ancienne action
+     * "Passe complète…", mais déclenchée automatiquement (case à cocher du menu Tagger) plutôt que
+     * par un bouton séparé, et donc sans la boîte de confirmation manuelle (l'utilisateur a déjà
+     * donné son accord en cochant la case).
+     */
+    private void autoCompleteIncomplete(Runnable onDone) {
+        List<FileEntry> targets = new ArrayList<>();
+        java.util.Set<String> seenPaths = new java.util.HashSet<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.status != FileEntry.Status.TAGGED) continue;
+            String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
+            if (!seenPaths.add(p)) continue;
+            TagInfo ti = e.result;
+            boolean incomplete = ti == null
+                || ti.artistMbid.isBlank() || ti.album.isBlank()
+                || ti.year.isBlank()        || ti.genre.isBlank()
+                || ti.mood.isBlank()         || ti.bpm.isBlank()
+                || ti.lyrics.isBlank();
+            if (incomplete) targets.add(e);
+        }
+        if (targets.isEmpty()) { onDone.run(); return; }
+
+        progress.setVisible(true);
+        progress.setMaximum(targets.size());
+        progress.setValue(0);
+        runStartMillis = System.currentTimeMillis();
+        logRunStart(I18n.t("Passe complète"), targets.size());
+        setStatus(I18n.t("Complétion de %d fichier(s) incomplet(s)…", targets.size()));
+
+        infoCompleter = new InfoCompleterWorker(
+            targets,
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
+            entry -> SwingUtilities.invokeLater(() -> {
+                tableModel.update(entry);
+                followProcessing(entry);
+                appendLog(entry);
+                refreshStats();
+            }),
+            (doneCount, total) -> SwingUtilities.invokeLater(() -> {
+                progress.setValue(doneCount);
+                progress.setString(doneCount + "/" + total + etaText(doneCount, total));
+            })
+        );
+        infoCompleter.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    progress.setVisible(false);
+                    refreshStats();
+                    onDone.run();
+                });
+            }
+        });
+        infoCompleter.execute();
     }
 
     /**
@@ -2543,8 +2546,8 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Complétion annulée."));
             return;
         }
-        // Même garde que completeAllInfo() : sans elle, ce worker et un TaggingWorker/
-        // InfoCompleterWorker en cours écrivent en même temps dans MetadataCache (connexions
+        // Même garde que startTagging()/autoCompleteIncomplete() : sans elle, ce worker et un
+        // TaggingWorker/InfoCompleterWorker en cours écrivent en même temps dans MetadataCache (connexions
         // SQLite distinctes) et mutent les mêmes FileEntry/TagInfo affichés par le tableau.
         if (worker != null && !worker.isDone()) {
             setStatus(I18n.t("Taguage en cours — attendez la fin avant de compléter les albums."));
@@ -2880,16 +2883,22 @@ public class MainFrame extends JFrame {
                 table.addRowSelectionInterval(viewRow, viewRow);
         }
         int n = table.getSelectedRowCount();
-        String label = statuses[0] == FileEntry.Status.SKIPPED ? I18n.t("non identifié(s)")
-                     : statuses[0] == FileEntry.Status.ERROR   ? I18n.t("en erreur")
-                     : I18n.t("en attente");
+        String label = switch (statuses[0]) {
+            case TAGGED  -> I18n.t("tagué(s)");
+            case SKIPPED -> I18n.t("non identifié(s)");
+            case ERROR   -> I18n.t("en erreur");
+            default      -> I18n.t("en attente");
+        };
         setStatus(n > 0 ? I18n.t("%d fichier(s) %s sélectionné(s).", n, label)
                         : I18n.t("Aucun fichier %s dans la liste.", label));
         // Aussi basculer le filtre visuel pour les voir clairement
         if (n > 0) {
-            cbFilterStatus.setSelectedIndex(
-                statuses[0] == FileEntry.Status.SKIPPED ? 3
-              : statuses[0] == FileEntry.Status.ERROR   ? 4 : 1);
+            cbFilterStatus.setSelectedIndex(switch (statuses[0]) {
+                case TAGGED  -> 2;
+                case SKIPPED -> 3;
+                case ERROR   -> 4;
+                default      -> 1;
+            });
         }
     }
 
