@@ -95,7 +95,7 @@ public class CoverArtDialog extends JDialog {
 
     private JPanel buildActions() {
         JButton btnLocal  = new JButton("📂  " + I18n.t("Choisir image locale…"));
-        JButton btnCaa    = new JButton("🌐  Cover Art Archive (MB)");
+        JButton btnCaa    = new JButton("🌐  " + I18n.t("Cover Art Archive (MB)"));
         JButton btnDelete = new JButton("🗑  " + I18n.t("Supprimer la pochette"));
         JButton btnFolder = new JButton("💾  " + I18n.t("Sauver en folder.jpg"));
 

@@ -15,9 +15,6 @@ import com.opentagger.TaggerScript;
 import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
-import org.jaudiotagger.audio.AudioFileIO;
-import org.jaudiotagger.tag.FieldKey;
-import org.jaudiotagger.tag.Tag;
 
 import javax.swing.*;
 import java.io.File;
@@ -128,15 +125,22 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         publish(I18n.t("Analyse de %d album(s) — %d fichier(s) à récupérer possible(s)…",
                 releaseGroups.size(), candidates.size()));
 
-        // Index titre normalisé → FileEntry pour les candidats (on lit le titre intégré dans le
-        // fichier). Partagé entre toutes les tâches parallèles ci-dessous — accès protégé par
-        // synchronized (voir processRelease).
-        Map<String, FileEntry> candidateIndex = new LinkedHashMap<>();
+        // Index titre normalisé → FileEntry pour les candidats. Partagé entre toutes les tâches
+        // parallèles ci-dessous — accès protégé par synchronized (voir processRelease).
+        // N'appelle PLUS AudioFileIO.read() par candidat : e.current a déjà été rempli au scan
+        // (MainFrame.loadDirectory()/loadSingleFile()) avec les tags exacts du fichier — les
+        // relire ici referait le même travail pour rien. Avant ce fix, cette étape (un
+        // AudioFileIO.read() par candidat, même en parallèle) pouvait à elle seule prendre
+        // plusieurs minutes sur une grosse bibliothèque, avant même que le traitement par release
+        // ne démarre — observé en direct via jstack, "Tout tagger" semblait bloqué ici alors que le
+        // vrai traitement par release n'avait pas encore commencé. Étant maintenant du pur accès
+        // mémoire (pas d'I/O), plus besoin de thread-pool du tout.
+        Map<String, FileEntry> candidateIndex = new ConcurrentHashMap<>();
         for (FileEntry e : candidates) {
             if (isCancelled()) break;
             java.nio.file.Path p = e.currentPath != null ? e.currentPath : e.file.toPath();
             if (!java.nio.file.Files.exists(p)) continue; // fichier introuvable, ignorer
-            String t = readEmbeddedTitle(p.toFile());
+            String t = (e.current != null && e.current.title != null) ? e.current.title.trim() : "";
             if (t.isBlank()) t = filenameTitle(p.getFileName().toString());
             String key = normalize(t);
             if (!key.isBlank()) candidateIndex.put(key, e);
@@ -381,16 +385,6 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         s = s.replaceAll("[^a-z0-9 ]", " ");
         s = s.replaceAll("\\s+", " ").trim();
         return s;
-    }
-
-    private String readEmbeddedTitle(File f) {
-        try {
-            var af  = AudioFileIO.read(f);
-            Tag tag = af.getTag();
-            if (tag == null) return "";
-            String v = tag.getFirst(FieldKey.TITLE);
-            return v != null ? v.trim() : "";
-        } catch (Exception e) { return ""; }
     }
 
     private String filenameTitle(String filename) {

@@ -68,12 +68,15 @@ Tags podcast écrits (compatibles iTunes / Plex / Jellyfin) :
 ### Gestion des fichiers
 
 - **Undo/Redo illimité** (Ctrl+Z / Ctrl+Y)
-- **Détection de doublons** — 3 niveaux de confiance (MBID exact, AcoustID exact, heuristique titre+artiste). Sélection intelligente du meilleur fichier par qualité (FLAC > ALAC > M4A > OGG > MP3) puis taille.
+- **Détection de doublons** — 4 niveaux de confiance (MBID exact, AcoustID exact, empreinte brute exacte, heuristique titre+artiste). Sélection intelligente du meilleur fichier par qualité (FLAC > ALAC > M4A > OGG > MP3) puis taille.
 - **Album Completion** — complète les fichiers SKIPPED d'un album en se basant sur les fichiers déjà identifiés par source fiable (pas SOURCE_TEXT)
+- **Transcodage audio** (via ffmpeg) — convertit vers MP3/AAC/FLAC/Opus/etc. avec bitrate configurable, suppression optionnelle de la source (ne supprime qu'après confirmation que la conversion a réussi)
+- **Script utilisateur** (JavaScript/Nashorn) — règles personnalisées appliquées à chaque fichier avant écriture (Préférences → Scripts), plusieurs scripts activables en parallèle
 - **Suppression des fichiers illisibles/corrompus**
 - **Export CSV**, export/import historique JSON
 - **Drag & drop** de dossiers et fichiers
 - **Surveillance de dossier** (FolderWatcher) — rechargement automatique si fichiers ajoutés
+- **Cache de scan incrémental** — au relancement, les fichiers inchangés depuis le dernier scan (même date de modification + taille) ne sont pas relus, seulement les nouveaux/modifiés
 
 ### Intégration système
 
@@ -84,16 +87,18 @@ Tags podcast écrits (compatibles iTunes / Plex / Jellyfin) :
 ### Interface
 
 - Layout **table à gauche / détail à droite** avec pochette 140×140
-- **Barre de stats live** : Total / Tagués / Non identifiés / Erreurs
-- **Filtre par statut** : isoler les fichiers non identifiés, en erreur, en attente
+- **Chips de statut cliquables** (Total / Tagués / Non identifiés / Erreurs / En attente) — cliquer filtre directement la table par statut, recliquer désactive ; recherche texte + sélecteur de champ juste à côté
+- **Indicateur RAM en direct** (bas de fenêtre) — utile pour surveiller une session longue sur une grosse bibliothèque
 - Thème dark FlatLaf, accent teal
 - **Journal de correction** généré après chaque session
+- **Confirmation avant de quitter** si une opération de fond (taguage, transcodage, complétion d'albums…) est encore en cours
 
 ### Contribution
 
 - Soumission d'empreintes **AcoustID**
-- Contribution à **MusicBrainz** via OAuth2
+- Contribution à **MusicBrainz** via OAuth2 (tags, ratings, ajout à une collection)
 - Correspondance manuelle avec recherche MusicBrainz
+- **Synchronisation ListenBrainz** — récupère le nombre d'écoutes par piste et l'écrit en tag personnalisé (aucune clé API requise)
 
 ---
 
@@ -129,7 +134,7 @@ Fichier audio chargé
 ### Prérequis
 
 - **Java 21+**
-- **ffmpeg** (BPM, extraction segment audio pour SongRec)
+- **ffmpeg** (BPM, extraction segment audio pour SongRec, transcodage audio)
 - **fpcalc** (Chromaprint) — téléchargeable via **Préférences → Audio** si absent
 - **SongRec** (optionnel, Linux/macOS) — `sudo apt install songrec` ou [github.com/marin-m/SongRec](https://github.com/marin-m/SongRec)
 
@@ -191,6 +196,7 @@ Au premier lancement, **Préférences** (Ctrl+,) :
 | APIs | Clé Discogs | [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | APIs | Clé Last.fm | [last.fm/api](https://www.last.fm/api/account/create) |
 | APIs | Clé FanArt TV | [fanart.tv/get-an-api-key](https://fanart.tv/get-an-api-key/) |
+| APIs | Nom d'utilisateur ListenBrainz | Aucune clé requise — juste votre pseudo public |
 | Audio | Chemin fpcalc | Ou cliquer **Télécharger fpcalc** |
 | Renommage | Dossier racine bibliothèque | Ex. `/nas/Musique` |
 | Renommage | Dossier racine podcasts | Ex. `/nas/Podcasts` |

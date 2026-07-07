@@ -282,7 +282,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     continue;
                 }
 
-                MusicBrainzClient.ReleaseTracklist tl = mb.lookupRelease(relMbid);
+                MusicBrainzClient.ReleaseTracklist tl = fetchTracklistCached(relMbid);
                 if (tl == null || tl.tracks().isEmpty()) continue;
 
                 onProgress.accept(I18n.t(
@@ -435,6 +435,35 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             onProgress.accept(I18n.t("[album-first] %d fichier(s) tagué(s) par album — %d restant(s) en pipeline normal",
                     done.size(), queue.size() - done.size()));
         return done;
+    }
+
+    /**
+     * Récupère la tracklist d'une release via le cache local si déjà connue, sinon MusicBrainz
+     * (et alimente le cache pour la prochaine fois) — même mécanisme que
+     * {@code AlbumCompletionWorker.fetchTracklist()}, déjà en production. Avant ce fix,
+     * albumFirstPass()/clusterAlbums() appelaient toutes deux mb.lookupRelease() en direct sans
+     * jamais consulter ce cache : une même release pouvait être re-téléchargée deux fois dans UN
+     * SEUL run (une fois par chacune de ces deux méthodes), et à chaque nouveau lancement de
+     * l'appli pour des releases déjà connues d'un run précédent — observé en direct sur le log
+     * réel de l'utilisateur (relances fréquentes, même bibliothèque).
+     */
+    private MusicBrainzClient.ReleaseTracklist fetchTracklistCached(String relMbid) {
+        String cacheKey = "release:" + relMbid;
+        try {
+            String cached = cache.getLookup(cacheKey);
+            if (cached != null) {
+                MusicBrainzClient.ReleaseTracklist tl = mb.parseReleaseFromCache(cached);
+                if (tl != null) return tl;
+            }
+            MusicBrainzClient.ReleaseTracklist tl = mb.lookupRelease(relMbid);
+            if (tl != null) {
+                String raw = mb.lastRawJson();
+                if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
+            }
+            return tl;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** Apparie un fichier à une piste de la tracklist : d'abord par numéro, puis par titre. */
@@ -1309,7 +1338,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             String releaseMbid = group.getKey();
             log(I18n.t("  cluster: %s fichiers pour release %s", albumFiles.size(), releaseMbid));
             try {
-                MusicBrainzClient.ReleaseTracklist tracklist = mb.lookupRelease(releaseMbid);
+                MusicBrainzClient.ReleaseTracklist tracklist = fetchTracklistCached(releaseMbid);
                 if (tracklist == null || tracklist.tracks().isEmpty()) continue;
 
                 int maxDisc = tracklist.tracks().stream().mapToInt(MusicBrainzClient.ReleaseTrack::disc).max().orElse(0);

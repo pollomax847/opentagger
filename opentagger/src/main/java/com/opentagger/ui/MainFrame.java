@@ -46,6 +46,13 @@ public class MainFrame extends JFrame {
     private static final Color COL_SKIPPED    = new Color(200, 150, 30,  45);
     private static final Color ACCENT         = new Color(0x4DB6AC); // teal
     private static final Color HEADER_BG      = new Color(0x1E1F22);
+    // Couleurs des chips de statut (bande de stats cliquable) — mêmes constantes utilisées à la
+    // construction (buildStatsStrip()) et à chaque restylage actif/inactif (refreshStats()).
+    private static final Color CHIP_TOTAL     = new Color(0x78909C);
+    private static final Color CHIP_TAGGED    = new Color(0x4CAF50);
+    private static final Color CHIP_SKIPPED   = new Color(0xFFA726);
+    private static final Color CHIP_ERROR     = new Color(0xEF5350);
+    private static final Color CHIP_PENDING   = new Color(0x90A4AE);
 
     // ── État ─────────────────────────────────────────────────────────────────
     private final FileTableModel tableModel = new FileTableModel();
@@ -60,16 +67,24 @@ public class MainFrame extends JFrame {
     private JCheckBox  chkAcoustId;
     private JLabel     lblMask;
 
-    // ── Stats live ───────────────────────────────────────────────────────────
+    // ── Stats live (chips cliquables = filtre statut, remplace l'ancien menu déroulant) ───
     private JLabel     lblStatTotal, lblStatTagged, lblStatSkipped,
                        lblStatError, lblStatPending;
+    private static final int FILTER_ALL = 0, FILTER_PENDING = 1, FILTER_TAGGED = 2,
+                              FILTER_SKIPPED = 3, FILTER_ERROR = 4;
+    private int activeStatusFilter = FILTER_ALL;
+    private JLabel lblMemory;
 
     // ── Table + tri/filtre ────────────────────────────────────────────────────
     private JTable                          table;
     private TableRowSorter<FileTableModel>  rowSorter;
     private JTextField                      tfFilter;
     private JComboBox<String>               cbFilterField;
-    private JComboBox<String>               cbFilterStatus;
+    // Profondeur de "chargement en masse" en cours (voir beginBulkTableUpdate()) — plusieurs
+    // scans de dossiers peuvent tourner en même temps (activeScanWorkers), donc compteur plutôt
+    // qu'un simple booléen.
+    private final java.util.concurrent.atomic.AtomicInteger bulkLoadDepth =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
     // ── Panneau de détail ─────────────────────────────────────────────────────
     private DetailPanel detailPanel;
@@ -87,12 +102,17 @@ public class MainFrame extends JFrame {
     private long          runStartMillis;
 
     // ── Journal (persiste les résultats par fichier pendant/après un run) ────
+    // Cap nécessaire : une session de plusieurs jours sur une bibliothèque de 100k+ fichiers
+    // (plusieurs passes complètes) accumulerait sinon des centaines de milliers d'entrées.
+    private static final int MAX_LOG_ENTRIES = 20_000;
     private final java.util.List<LogEntry>   logHistory = new java.util.ArrayList<>();
     private DefaultListModel<LogEntry>       logModel;
     private JList<LogEntry>                  logList;
     private JCheckBox                        chkLogErrorsOnly;
 
-    private record LogEntry(String time, String text, FileEntry.Status status) {}
+    // file : null pour une ligne séparatrice de run (logRunStart()), le FileEntry concerné sinon
+    // — permet de retrouver la ligne dans le tableau (double-clic, voir installLogListMouse()).
+    private record LogEntry(String time, String text, FileEntry.Status status, FileEntry file) {}
 
     // ── Throttle stats (évite O(n²) sur 100k+ fichiers) ──────────────────────
     private volatile long lastStatsRefreshMs = 0;
@@ -101,8 +121,40 @@ public class MainFrame extends JFrame {
     private final JPanel scanBanner  = new JPanel();
     private final JPanel scanEntries = new JPanel();
     private int          activeScanCount = 0;
+    // Résumé repliable affiché dès que plusieurs scans tournent en même temps (ex : plusieurs
+    // dossiers de démarrage scannés en parallèle) — évite d'empiler une ligne par dossier.
+    private JPanel  scanSummaryRow;
+    private JLabel  lblScanSummary;
+    private boolean scanDetailsExpanded = false;
     // Workers de scan actifs — permettent l'annulation
     private final java.util.List<SwingWorker<?,?>> activeScanWorkers = new java.util.ArrayList<>();
+
+    // Pool PARTAGÉ pour la lecture de tags pendant un scan de dossier (phase 2) — un par scan
+    // (16 threads, cores*2) causait un vrai blocage constaté en direct : plusieurs dossiers
+    // ajoutés en peu de temps faisaient tourner PLUSIEURS pools de 16 threads EN MÊME TEMPS,
+    // plus celui d'AlbumCompletionWorker, jusqu'à 32+ threads martelant simultanément le même
+    // disque externe/USB — sur un disque mécanique/USB unique (pas du réseau ni du SSD), une telle
+    // concurrence cause un thrashing sévère (le disque saute constamment d'un fichier à l'autre)
+    // au lieu d'aider : l'appli restait figée des heures, aucune progression réelle. Un seul pool
+    // partagé, borné bas, quel que soit le nombre de scans lancés en parallèle par l'utilisateur.
+    private final java.util.concurrent.ExecutorService scanTagPool =
+        java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
+            Thread t = new Thread(r, "scan-tag-reader");
+            t.setDaemon(true);
+            return t;
+        });
+
+    // Même leçon que scanTagPool ci-dessus, appliquée à la PHASE 1 (listage récursif de dossiers,
+    // AudioScanner.scanRecursif) — jusque-là totalement non bridée : avec plusieurs dossiers de
+    // démarrage configurés (6 chez cet utilisateur, dont 2 sur le MÊME disque externe
+    // /mnt/MyBook), chaque loadDirectory() lance sa propre marche récursive en parallèle, bridée
+    // seulement par le pool interne par défaut de SwingWorker — jusqu'à plusieurs scans à la fois
+    // martelant le même disque en listFiles(). Conséquence concrète observée en direct : la phase 1
+    // pouvait rester active de longues minutes, ce qui gardait aussi le RowSorter détaché tout ce
+    // temps (voir beginBulkTableUpdate()) — le filtre semblait "ne plus marcher du tout". Un
+    // sémaphore à 2 permis borne le nombre de marches récursives simultanées, libéré avant la phase
+    // 2 (déjà bridée séparément par scanTagPool) pour ne pas la retarder inutilement.
+    private final java.util.concurrent.Semaphore phase1Semaphore = new java.util.concurrent.Semaphore(2);
 
     // Surveillance automatique des dossiers chargés (WatchService)
     private com.opentagger.FolderWatcher folderWatcher;
@@ -138,14 +190,15 @@ public class MainFrame extends JFrame {
 
     private void buildUI() {
         setIconImages(AppIcon.all());
-        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        // DO_NOTHING_ON_CLOSE (pas EXIT_ON_CLOSE) : EXIT_ON_CLOSE appelle System.exit() sans
+        // condition après windowClosing(), impossible à annuler même si l'utilisateur choisit
+        // "Attendre" dans confirmQuit() — quitApp() gère la fermeture réelle lui-même.
+        setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         setMinimumSize(new Dimension(960, 600));
         restoreWindowGeometry();  // taille/position sauvegardées, ou 85% écran par défaut
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent e) {
-                saveWindowGeometry();
-                saveColumnWidths();
-                if (folderWatcher != null) try { folderWatcher.close(); } catch (Exception ignored) {}
+                quitApp();
             }
         });
 
@@ -182,14 +235,11 @@ public class MainFrame extends JFrame {
 
         setJMenuBar(buildMenuBar());
 
-        // ── Header + stats + filtre ─────────────────────────────────────────
+        // ── Header + stats/filtre (fusionnés : chips cliquables + recherche) ────
         JPanel topArea = new JPanel(new BorderLayout(0, 0));
         topArea.add(buildHeader(),    BorderLayout.NORTH);
         topArea.add(buildStatsStrip(), BorderLayout.CENTER);
-        JPanel filterAndScan = new JPanel(new BorderLayout(0, 0));
-        filterAndScan.add(buildFilterBar(),  BorderLayout.NORTH);
-        filterAndScan.add(buildScanBanner(), BorderLayout.SOUTH);
-        topArea.add(filterAndScan, BorderLayout.SOUTH);
+        topArea.add(buildScanBanner(), BorderLayout.SOUTH);
         add(topArea, BorderLayout.NORTH);
 
         // ── Split horizontal : table gauche | détail droit ──────────────────
@@ -329,14 +379,21 @@ public class MainFrame extends JFrame {
         m.add(mitem(I18n.t("Exporter playlist M3U…"),  null,      e -> exportPlaylist("m3u")));
         m.add(mitem(I18n.t("Exporter playlist XSPF…"), null,      e -> exportPlaylist("xspf")));
         m.addSeparator();
-        m.add(mitem(I18n.t("Quitter"),                 null,      e -> System.exit(0)));
+        m.add(mitem(I18n.t("Quitter"),                 null,      e -> quitApp()));
         return m;
     }
 
     private void clearFileList() {
-        if (worker != null && !worker.isDone()) {
-            JOptionPane.showMessageDialog(this, I18n.t("Arrêtez le taguage avant de vider la liste."),
-                I18n.t("Taguage en cours"), JOptionPane.WARNING_MESSAGE);
+        // Ne vérifiait que "worker" (Taguage) — même trou que transcodeFiles()/startTagging()
+        // avant leur correctif : vider la table PENDANT qu'un scan/complétion/transcodage/passe
+        // complète tourne encore laisse ce worker continuer à écrire sur des fichiers qui ne sont
+        // plus dans la liste, ou (pour un scan actif) réinsérer des entrées dans une table qu'on
+        // vient de vider sous ses pieds.
+        java.util.List<String> ops = activeOperations();
+        if (!ops.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Encore en cours : %s — attendez la fin avant de vider la liste.", String.join(", ", ops)),
+                I18n.t("Opération en cours"), JOptionPane.WARNING_MESSAGE);
             return;
         }
         tableModel.clear();
@@ -502,26 +559,40 @@ public class MainFrame extends JFrame {
         JMenuItem miRedo = mitem(I18n.t("Rétablir"),   "Ctrl+Y",  e -> performRedo());
         m.add(miUndo); m.add(miRedo);
         m.addSeparator();
+        // Cases ☑ (FileEntry.selected, ce que "Tout tagger" traite) — concept différent de la
+        // SÉLECTION de lignes (surbrillance table) regroupée ci-dessous dans son propre sous-menu.
         m.add(mitem(I18n.t("Tout cocher"),             null,      e -> setAllSelected(true)));
         m.add(mitem(I18n.t("Tout décocher"),           null,      e -> setAllSelected(false)));
-        m.add(mitem(I18n.t("Retirer la sélection"),    null,  e -> {
+        m.addSeparator();
+        m.add(buildSubmenuSelection());
+        m.addSeparator();
+        m.add(mitem(I18n.t("Préférences…"),            "Ctrl+Virgule", e -> new SettingsDialog(this, this::loadFiles).setVisible(true)));
+        return m;
+    }
+
+    /**
+     * Regroupe les actions de SÉLECTION de lignes (surbrillance table, pas les cases ☑ — voir
+     * buildMenuEdition()) — même motif déjà validé pour "Outils" : 7 items à plat, trop d'un coup.
+     * "Retirer la sélection" était groupée avec les cases ☑ dans l'ancienne version ; elle agit en
+     * réalité sur la SÉLECTION de lignes, sa place logique est ici.
+     */
+    private JMenu buildSubmenuSelection() {
+        JMenu sel = new JMenu(I18n.t("Sélection"));
+        sel.add(mitem(I18n.t("Tout sélectionner"),       "Ctrl+A", e -> {
+            if (table.getRowCount() > 0) table.setRowSelectionInterval(0, table.getRowCount() - 1);
+        }));
+        sel.add(mitem(I18n.t("Désélectionner tout"),     null,      e -> table.clearSelection()));
+        sel.add(mitem(I18n.t("Retirer la sélection"),    null,  e -> {
             int[] rows = table.getSelectedRows();
             for (int i = rows.length - 1; i >= 0; i--)
                 tableModel.remove(table.convertRowIndexToModel(rows[i]));
         }));
-        m.addSeparator();
-        m.add(mitem(I18n.t("Tout sélectionner"),       "Ctrl+A", e -> {
-            if (table.getRowCount() > 0) table.setRowSelectionInterval(0, table.getRowCount() - 1);
-        }));
-        m.add(mitem(I18n.t("Désélectionner tout"),     null,      e -> table.clearSelection()));
-        m.addSeparator();
-        m.add(mitem(I18n.t("Sélectionner les tagués"),         null, e -> selectByStatus(FileEntry.Status.TAGGED)));
-        m.add(mitem(I18n.t("Sélectionner les non identifiés"), null, e -> selectByStatus(FileEntry.Status.SKIPPED)));
-        m.add(mitem(I18n.t("Sélectionner les erreurs"),        null, e -> selectByStatus(FileEntry.Status.ERROR)));
-        m.add(mitem(I18n.t("Sélectionner les en attente"),     null, e -> selectByStatus(FileEntry.Status.PENDING)));
-        m.addSeparator();
-        m.add(mitem(I18n.t("Préférences…"),            "Ctrl+Virgule", e -> new SettingsDialog(this, this::loadFiles).setVisible(true)));
-        return m;
+        sel.addSeparator();
+        sel.add(mitem(I18n.t("Sélectionner les tagués"),         null, e -> selectByStatus(FileEntry.Status.TAGGED)));
+        sel.add(mitem(I18n.t("Sélectionner les non identifiés"), null, e -> selectByStatus(FileEntry.Status.SKIPPED)));
+        sel.add(mitem(I18n.t("Sélectionner les erreurs"),        null, e -> selectByStatus(FileEntry.Status.ERROR)));
+        sel.add(mitem(I18n.t("Sélectionner les en attente"),     null, e -> selectByStatus(FileEntry.Status.PENDING)));
+        return sel;
     }
 
     /**
@@ -611,6 +682,7 @@ public class MainFrame extends JFrame {
 
         m.addSeparator();
         m.add(mitem(I18n.t("Vérifier les mises à jour…"), null,   e -> checkForUpdates(true)));
+        m.add(mitem(I18n.t("À propos d'OpenTagger…"),     null,   e -> showAboutDialog()));
         return m;
     }
 
@@ -691,7 +763,7 @@ public class MainFrame extends JFrame {
         for (String id : secondary) {
             ToolbarAction action = findToolbarAction(id.trim());
             if (action == null) continue;
-            JButton btn = headerBtn(action.label(), action.tooltip());
+            JButton btn = secondaryBtn(action.label(), action.tooltip());
             btn.addActionListener(e -> action.handler().run());
             if ("transcode".equals(action.id())) btnTranscode = btn; // conservé : lu par transcodeFiles()
             actionsPanel.add(btn);
@@ -799,6 +871,19 @@ public class MainFrame extends JFrame {
         return b;
     }
 
+    /** Même rôle que headerBtn() mais plus discret (police plus petite, gris atténué) — utilisé
+     *  pour les actions secondaires personnalisables (Transcoder, Soumettre AcoustID…) afin de les
+     *  distinguer visuellement des 5 actions fixes (Ouvrir/Rafraîchir/Tout tagger/Tagger la
+     *  sélection/Annuler), plutôt que d'avoir 8+ boutons de poids visuel identique dans la même
+     *  rangée. */
+    private JButton secondaryBtn(String text, String tip) {
+        JButton b = new JButton(text);
+        b.setToolTipText(tip);
+        b.setFocusPainted(false);
+        b.putClientProperty("FlatLaf.style", "foreground: #90A4AE; font: 11 $defaultFont");
+        return b;
+    }
+
     private JButton iconBtn(String text, String tip) {
         JButton b = new JButton(text);
         b.setToolTipText(tip);
@@ -830,11 +915,15 @@ public class MainFrame extends JFrame {
         p.setBackground(new Color(0x252527));
         p.setBorder(new MatteBorder(0, 0, 1, 0, new Color(0x3A3B3E)));
 
-        lblStatTotal   = statChip(I18n.t("Total"),        "0",  new Color(0x78909C));
-        lblStatTagged  = statChip(I18n.t("Tagués"),        "0",  new Color(0x4CAF50));
-        lblStatSkipped = statChip(I18n.t("Non identifiés"),"0",  new Color(0xFFA726));
-        lblStatError   = statChip(I18n.t("Erreurs"),       "0",  new Color(0xEF5350));
-        lblStatPending = statChip(I18n.t("En attente"),    "0",  new Color(0x90A4AE));
+        // Chips cliquables : cliquer filtre directement par statut (remplace l'ancien menu
+        // déroulant "Statut :" — même filtre au final (applyFilter()/RowFilter sur la colonne
+        // statut), juste déclenché en cliquant le chip coloré plutôt qu'un JComboBox séparé.
+        // "Total" réinitialise (montre tout) ; les 4 autres basculent (recliquer désactive).
+        lblStatTotal   = statChip(I18n.t("Total"),        "0",  CHIP_TOTAL,   FILTER_ALL);
+        lblStatTagged  = statChip(I18n.t("Tagués"),        "0",  CHIP_TAGGED,  FILTER_TAGGED);
+        lblStatSkipped = statChip(I18n.t("Non identifiés"),"0",  CHIP_SKIPPED, FILTER_SKIPPED);
+        lblStatError   = statChip(I18n.t("Erreurs"),       "0",  CHIP_ERROR,   FILTER_ERROR);
+        lblStatPending = statChip(I18n.t("En attente"),    "0",  CHIP_PENDING, FILTER_PENDING);
 
         p.add(new JLabel("  "));
         p.add(lblStatTotal);
@@ -843,17 +932,65 @@ public class MainFrame extends JFrame {
         p.add(lblStatSkipped);
         p.add(lblStatError);
         p.add(lblStatPending);
+
+        // Recherche + champ ciblé — regroupés ici avec les chips plutôt que sur une 2e ligne
+        // séparée (l'ancienne "barre de filtre" faisait doublon visuel avec les chips juste
+        // au-dessus). Le filtre "Statut :" (JComboBox) a disparu, remplacé par les chips.
+        p.add(new JSeparator(JSeparator.VERTICAL));
+        tfFilter = new JTextField(16);
+        tfFilter.putClientProperty("JTextField.placeholderText", I18n.t("Rechercher…"));
+        cbFilterField = new JComboBox<>(new String[]{
+            I18n.t("Tous les champs"), I18n.t("Artiste"), I18n.t("Artiste album"), I18n.t("Titre"),
+            I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste")});
+        JButton btnClearFilter = new JButton("✕");
+        btnClearFilter.setFont(btnClearFilter.getFont().deriveFont(10f));
+        btnClearFilter.setToolTipText(I18n.t("Effacer les filtres"));
+
+        tfFilter.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
+        });
+        cbFilterField.addActionListener(e -> applyFilter());
+        btnClearFilter.addActionListener(e -> {
+            tfFilter.setText("");
+            activeStatusFilter = FILTER_ALL;
+            applyFilter();
+        });
+
+        p.add(tfFilter);
+        p.add(cbFilterField);
+        p.add(btnClearFilter);
         return p;
     }
 
-    private JLabel statChip(String label, String val, Color color) {
+    private JLabel statChip(String label, String val, Color color, int filterIndex) {
         JLabel l = new JLabel(label + "  " + val);
-        l.setForeground(color);
         l.putClientProperty("FlatLaf.style", "font: bold 11 $defaultFont");
-        l.setBorder(new CompoundBorder(
-            new LineBorder(color.darker(), 1, true),
-            new EmptyBorder(2, 7, 2, 7)));
+        l.setOpaque(true);
+        l.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        l.setToolTipText(filterIndex == FILTER_ALL
+            ? I18n.t("Cliquer pour tout afficher")
+            : I18n.t("Cliquer pour filtrer sur ce statut (recliquer pour désactiver)"));
+        l.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                activeStatusFilter = (filterIndex == FILTER_ALL) ? FILTER_ALL
+                    : (activeStatusFilter == filterIndex ? FILTER_ALL : filterIndex);
+                applyFilter();
+            }
+        });
+        styleChip(l, color, false);
         return l;
+    }
+
+    /** Applique l'apparence active/inactive d'un chip (fond teinté + bordure épaisse si actif). */
+    private void styleChip(JLabel chip, Color color, boolean active) {
+        Color translucent = new Color(color.getRed(), color.getGreen(), color.getBlue(), 90);
+        chip.setForeground(active ? Color.WHITE : color);
+        chip.setBackground(active ? blend(new Color(0x252527), translucent) : new Color(0x252527));
+        chip.setBorder(new CompoundBorder(
+            new LineBorder(color.darker(), active ? 2 : 1, true),
+            new EmptyBorder(2, 7, 2, 7)));
     }
 
     private JLabel sep3() {
@@ -862,6 +999,11 @@ public class MainFrame extends JFrame {
     }
 
     private void refreshStats() {
+        // Purge d'abord les entrées qui ont cessé de correspondre au filtre actif depuis leur
+        // dernier update() (voir FileTableModel.dirty) — refreshStats() est déjà appelé à
+        // intervalle régulier (throttlé) dans toutes les boucles de scan/taguage, point de purge
+        // naturel sans bookkeeping de throttle supplémentaire ici.
+        tableModel.rebuildVisibleIfDirty();
         int total = 0, tagged = 0, skipped = 0, error = 0, pending = 0;
         // Compter depuis la VUE filtrée (table.getRowCount) plutôt que le modèle
         // pour que les chips reflètent toujours ce que l'utilisateur voit.
@@ -877,15 +1019,24 @@ public class MainFrame extends JFrame {
                 default         -> pending++;
             }
         }
-        // Si un filtre est actif, afficher "N / total_modèle"
-        int modelTotal = tableModel.getRowCount();
-        String totalText = (table != null && rowSorter.getRowFilter() != null && total != modelTotal)
+        // Si un filtre est actif, afficher "N / total_modèle" (total VRAI, filtre ignoré —
+        // tableModel.getRowCount() ne renvoie plus que la vue filtrée depuis le passage au
+        // filtrage niveau modèle, voir FileTableModel).
+        int modelTotal = tableModel.totalCount();
+        String totalText = (tableModel.isFiltered() && total != modelTotal)
                 ? total + " / " + modelTotal : String.valueOf(total);
         lblStatTotal  .setText(I18n.t("Total  %s", totalText));
         lblStatTagged .setText(I18n.t("Tagués  %d", tagged));
         lblStatSkipped.setText(I18n.t("Non identifiés  %d", skipped));
         lblStatError  .setText(I18n.t("Erreurs  %d", error));
         lblStatPending.setText(I18n.t("En attente  %d", pending));
+
+        // Chip actif = celui qui correspond au filtre statut actuellement appliqué.
+        styleChip(lblStatTotal,   CHIP_TOTAL,   activeStatusFilter == FILTER_ALL);
+        styleChip(lblStatTagged,  CHIP_TAGGED,  activeStatusFilter == FILTER_TAGGED);
+        styleChip(lblStatSkipped, CHIP_SKIPPED, activeStatusFilter == FILTER_SKIPPED);
+        styleChip(lblStatError,   CHIP_ERROR,   activeStatusFilter == FILTER_ERROR);
+        styleChip(lblStatPending, CHIP_PENDING, activeStatusFilter == FILTER_PENDING);
     }
 
     // ── Split pane table / détail ─────────────────────────────────────────────
@@ -938,13 +1089,18 @@ public class MainFrame extends JFrame {
         table.setRowSorter(rowSorter);
         table.getTableHeader().setReorderingAllowed(false);
 
+        // Largeurs par défaut élargies (colonnes 1-5) — les valeurs d'origine tronquaient
+        // fréquemment "Artiste Album" ("Various Artists"…) et "Album" (titres de compilation
+        // longs, ex. "The Ultimate Music Collection") sur une vraie bibliothèque. N'affecte que
+        // les nouvelles installs / colonnes jamais redimensionnées manuellement — colWidth() lit
+        // d'abord une largeur sauvegardée (PREFS) si l'utilisateur l'a déjà ajustée lui-même.
         TableColumnModel cm = table.getColumnModel();
         colWidth(cm, 0, 30,  28,  30);   // ☑
-        colWidth(cm, 1, 200, 110, 400);  // Fichier
-        colWidth(cm, 2, 150, 70,  280);  // Artiste
-        colWidth(cm, 3, 150, 70,  280);  // Artiste album
-        colWidth(cm, 4, 180, 80,  340);  // Titre
-        colWidth(cm, 5, 150, 60,  280);  // Album
+        colWidth(cm, 1, 220, 110, 420);  // Fichier
+        colWidth(cm, 2, 170, 70,  320);  // Artiste
+        colWidth(cm, 3, 190, 70,  340);  // Artiste album
+        colWidth(cm, 4, 200, 80,  380);  // Titre
+        colWidth(cm, 5, 200, 60,  360);  // Album
         colWidth(cm, 6, 52,  36,  68);   // Année
         colWidth(cm, 7, 120, 50,  220);  // Genre
         colWidth(cm, 8, 44,  28,  60);   // Piste
@@ -968,6 +1124,35 @@ public class MainFrame extends JFrame {
         for (int i = 1; i < cm.getColumnCount(); i++)
             cm.getColumn(i).setCellRenderer(renderer);
     }
+
+    /**
+     * Détache temporairement le RowSorter pendant un chargement en masse (scan de dossier).
+     * Sans ça, chaque lot de {@code fireTableRowsInserted} (voir {@code FileTableModel.addAll})
+     * redéclenche un tri complet O(n log n) de TOUTE la table sur l'EDT — {@code sortsOnUpdates}
+     * (déjà à false) ne protège que les MISES À JOUR de lignes, pas les INSERTIONS, qui passent
+     * toujours par {@code DefaultRowSorter.rowsInserted()}. Sur une bibliothèque de plusieurs
+     * centaines de milliers de fichiers (2 To réels), ce coût grandit à chaque nouveau lot ajouté
+     * pendant le scan — confirmé en direct via jstack : l'EDT restait bloqué dans
+     * {@code DefaultRowSorter.sort()} pendant qu'un scan tournait, gelant toute l'interface bien
+     * que le travail de fond progressait normalement. Compteur de profondeur (pas un simple
+     * booléen) car plusieurs scans peuvent tourner en même temps (voir {@code activeScanWorkers})
+     * — ne réattacher qu'une fois TOUS terminés, pour un seul tri final au lieu d'un par lot.
+     * Doit être appelé sur l'EDT.
+     */
+    private void beginBulkTableUpdate() {
+        if (bulkLoadDepth.getAndIncrement() == 0) table.setRowSorter(null);
+    }
+
+    /** Contrepartie de {@link #beginBulkTableUpdate()}. Doit être appelé sur l'EDT. */
+    private void endBulkTableUpdate() {
+        if (bulkLoadDepth.decrementAndGet() == 0) table.setRowSorter(rowSorter);
+    }
+
+    // Marqueurs publiés par loadDirectory() : START dès que ce scan obtient réellement son permis
+    // phase1Semaphore (pas seulement mis en file), DONE dès que sa phase 1 se termine — signalent
+    // à process() quand détacher/réattacher le RowSorter, sans compter les scans encore en attente.
+    private static final Object PHASE1_START_MARKER = new Object();
+    private static final Object PHASE1_DONE_MARKER  = new Object();
 
     private Color rowBg(FileEntry.Status s, int row) {
         boolean alt = (row % 2 == 1);
@@ -1436,13 +1621,34 @@ public class MainFrame extends JFrame {
         progress.setStringPainted(true);
         progress.setVisible(false);
 
+        // Indicateur RAM en bas à droite — utile pour surveiller une session de plusieurs jours
+        // sur une grosse bibliothèque (demandé explicitement par l'utilisateur).
+        lblMemory = new JLabel();
+        lblMemory.setForeground(new Color(0x90A4AE));
+        lblMemory.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
+        updateMemoryLabel();
+        new javax.swing.Timer(2000, e -> updateMemoryLabel()).start();
+
+        JPanel eastPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        eastPanel.setOpaque(false);
+        eastPanel.add(lblMemory);
+        eastPanel.add(progress);
+
         JPanel bar = new JPanel(new BorderLayout(8, 0));
         bar.setBorder(new CompoundBorder(
             new MatteBorder(1, 0, 0, 0, sep()),
             new EmptyBorder(5, 12, 5, 12)));
-        bar.add(lblStatus, BorderLayout.WEST);
-        bar.add(progress,  BorderLayout.EAST);
+        bar.add(lblStatus,  BorderLayout.WEST);
+        bar.add(eastPanel,  BorderLayout.EAST);
         return bar;
+    }
+
+    /** Mémoire JVM réellement utilisée / plafond -Xmx — rafraîchi périodiquement (Timer EDT). */
+    private void updateMemoryLabel() {
+        Runtime rt = Runtime.getRuntime();
+        long usedMo = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024);
+        long maxMo  = rt.maxMemory() / (1024 * 1024);
+        lblMemory.setText(I18n.t("RAM : %d / %d Mo", usedMo, maxMo));
     }
 
     // ── Journal (résultats par fichier, accumulé pendant/après un run) ──────
@@ -1456,6 +1662,7 @@ public class MainFrame extends JFrame {
         logModel = new DefaultListModel<>();
         logList  = new JList<>(logModel);
         logList.setVisibleRowCount(6);
+        logList.setToolTipText(I18n.t("Double-clic : localiser dans le tableau — Ctrl+C : copier"));
         logList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
             public Component getListCellRendererComponent(JList<?> l, Object v, int idx,
@@ -1472,6 +1679,34 @@ public class MainFrame extends JFrame {
                     c.setForeground(fg);
                 }
                 return c;
+            }
+        });
+
+        // Double-clic : localiser le fichier dans le tableau principal — chaque ligne (sauf les
+        // séparateurs de run) correspond 1:1 à un FileEntry déjà affiché ; avant, aucun moyen de
+        // relier une ligne du journal à sa ligne dans la table sans chercher le nom à la main.
+        logList.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() != 2) return;
+                int idx = logList.locationToIndex(e.getPoint());
+                if (idx < 0) return;
+                LogEntry le = logModel.getElementAt(idx);
+                if (le.file() != null) followProcessing(le.file());
+            }
+        });
+        // Ctrl+C : copier les lignes sélectionnées — JList ne le fait pas nativement (contrairement
+        // à un composant texte), gênant pour un panneau dont le rôle principal est de diagnostiquer
+        // des erreurs qu'on veut souvent coller ailleurs.
+        logList.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke("control C"), "copyLogSelection");
+        logList.getActionMap().put("copyLogSelection", new AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) {
+                java.util.List<LogEntry> sel = logList.getSelectedValuesList();
+                if (sel.isEmpty()) return;
+                String text = sel.stream()
+                    .map(le -> "[" + le.time() + "] " + le.text())
+                    .collect(java.util.stream.Collectors.joining("\n"));
+                java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .setContents(new java.awt.datatransfer.StringSelection(text), null);
             }
         });
 
@@ -1501,8 +1736,9 @@ public class MainFrame extends JFrame {
     /** Ajoute une ligne de séparation au début d'un run (taguage, re-taguage forcé, passe complète). */
     private void logRunStart(String label, int count) {
         LogEntry sep = new LogEntry(nowHms(), I18n.t("── %s : %d fichier(s) ──", label, count),
-                FileEntry.Status.PENDING);
+                FileEntry.Status.PENDING, null);
         logHistory.add(sep);
+        if (trimLogHistoryIfNeeded()) return;
         logModel.addElement(sep);
     }
 
@@ -1516,8 +1752,9 @@ public class MainFrame extends JFrame {
             default      -> entry.status.toString();
         };
         if (entry.message != null && !entry.message.isBlank()) statusText += " — " + entry.message;
-        LogEntry e = new LogEntry(nowHms(), entry.filename() + " — " + statusText, entry.status);
+        LogEntry e = new LogEntry(nowHms(), entry.filename() + " — " + statusText, entry.status, entry);
         logHistory.add(e);
+        if (trimLogHistoryIfNeeded()) return;
         if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
             logModel.addElement(e);
     }
@@ -1527,6 +1764,18 @@ public class MainFrame extends JFrame {
         for (LogEntry e : logHistory)
             if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
                 logModel.addElement(e);
+    }
+
+    /** Purge par lots les plus anciennes entrées au-delà de {@link #MAX_LOG_ENTRIES} (jamais une
+     *  à la fois — amortit le coût de resynchronisation de logModel sur des milliers d'ajouts).
+     *  Retourne true si une purge a eu lieu (logModel déjà resynchronisé via rebuildLogModel() ;
+     *  l'appelant ne doit alors pas ajouter sa propre entrée une 2e fois). */
+    private boolean trimLogHistoryIfNeeded() {
+        if (logHistory.size() <= MAX_LOG_ENTRIES) return false;
+        int toRemove = logHistory.size() - (MAX_LOG_ENTRIES * 3 / 4);
+        logHistory.subList(0, toRemove).clear();
+        rebuildLogModel();
+        return true;
     }
 
     private static String nowHms() {
@@ -1549,11 +1798,47 @@ public class MainFrame extends JFrame {
     private JPanel buildScanBanner() {
         scanEntries.setLayout(new BoxLayout(scanEntries, BoxLayout.Y_AXIS));
         scanEntries.setOpaque(false);
+
+        lblScanSummary = new JLabel();
+        lblScanSummary.setForeground(new Color(0x5599FF));
+        lblScanSummary.setFont(lblScanSummary.getFont().deriveFont(11f));
+        lblScanSummary.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        lblScanSummary.setToolTipText(I18n.t("Cliquer pour afficher/masquer le détail par dossier"));
+        lblScanSummary.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent e) {
+                scanDetailsExpanded = !scanDetailsExpanded;
+                updateScanSummaryVisibility();
+            }
+        });
+        scanSummaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 3));
+        scanSummaryRow.setOpaque(false);
+        scanSummaryRow.add(lblScanSummary);
+        scanSummaryRow.setVisible(false);
+
         scanBanner.setLayout(new BorderLayout());
-        scanBanner.add(scanEntries, BorderLayout.CENTER);
+        scanBanner.add(scanSummaryRow, BorderLayout.NORTH);
+        scanBanner.add(scanEntries,    BorderLayout.CENTER);
         scanBanner.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, sep()));
         scanBanner.setVisible(false);
         return scanBanner;
+    }
+
+    /** Regroupe les lignes de scan individuelles sous un résumé repliable dès qu'il y en a PLUS
+     *  D'UNE (plusieurs dossiers de démarrage scannés en parallèle, par ex.) — évite d'empiler
+     *  une ligne par dossier comme avant. Avec un seul scan actif : comportement inchangé (ligne
+     *  directe, pas de résumé). */
+    private void updateScanSummaryVisibility() {
+        if (activeScanCount > 1) {
+            lblScanSummary.setText((scanDetailsExpanded ? "▾ " : "▸ ")
+                + I18n.t("%d dossiers en cours de scan…", activeScanCount));
+            scanSummaryRow.setVisible(true);
+            scanEntries.setVisible(scanDetailsExpanded);
+        } else {
+            scanSummaryRow.setVisible(false);
+            scanEntries.setVisible(true);
+        }
+        scanBanner.revalidate();
+        scanBanner.repaint();
     }
 
     /** Ajoute une entrée de scan dans le bandeau. Retourne le panneau pour mise à jour ultérieure. */
@@ -1593,6 +1878,7 @@ public class MainFrame extends JFrame {
         SwingUtilities.invokeLater(() -> {
             scanEntries.add(row);
             scanBanner.setVisible(true);
+            updateScanSummaryVisibility();
             scanBanner.revalidate();
             scanBanner.repaint();
         });
@@ -1602,6 +1888,7 @@ public class MainFrame extends JFrame {
     /** Met à jour l'entrée de scan à la fin du chargement et la supprime après 3 s. */
     private void completeScanEntry(JPanel row, String dirName, int total, long tagged, Exception error) {
         activeScanCount--;
+        updateScanSummaryVisibility();
         Timer anim = (Timer) row.getClientProperty("anim");
         if (anim != null) anim.stop();
         JLabel lbl = (JLabel) row.getClientProperty("lbl");
@@ -1620,6 +1907,7 @@ public class MainFrame extends JFrame {
             ((Timer)e.getSource()).stop();
             scanEntries.remove(row);
             if (scanEntries.getComponentCount() == 0) scanBanner.setVisible(false);
+            updateScanSummaryVisibility();
             scanBanner.revalidate();
             scanBanner.repaint();
         }) {{ setRepeats(false); }}.start();
@@ -1734,6 +2022,10 @@ public class MainFrame extends JFrame {
         final Path   root    = dir.toPath();
         final JPanel scanRow = addScanEntry(dirName);
         setStatus(I18n.t("Scan de %s…", dirName));
+        // beginBulkTableUpdate() n'est PLUS appelé ici : avec phase1Semaphore (2 marches
+        // récursives max à la fois), un dossier de démarrage encore en FILE D'ATTENTE derrière
+        // les 2 premiers ne doit pas empêcher le RowSorter de se rattacher pour autant — seul un
+        // scan qui a VRAIMENT commencé sa phase 1 doit compter (voir PHASE1_START_MARKER).
 
         // Snapshot des chemins déjà dans la table (sur EDT, avant démarrage du worker)
         final Set<Path> alreadyInTable = new java.util.HashSet<>();
@@ -1749,6 +2041,21 @@ public class MainFrame extends JFrame {
 
             // Entrées ajoutées par CE scan — permet le rollback si annulé
             final java.util.Set<FileEntry> addedByThisScan = new java.util.LinkedHashSet<>();
+            // Le RowSorter ne doit rester détaché QUE pendant la phase 1 (fireTableRowsInserted en
+            // rafale — la source du gel). La phase 2 n'appelle que tableModel.update() (mise à jour,
+            // pas insertion), déjà bon marché (sortsOnUpdates=false) — le garder détaché jusqu'à la
+            // toute fin de done() bloquait aussi le FILTRE (chips cliquables/recherche) pendant toute
+            // la durée de la phase 2, potentiellement très longue sur 2 To (bug réel signalé par
+            // l'utilisateur : cliquer un chip de statut pendant un scan n'avait aucun effet visible).
+            // bulkStarted : begin() n'a été appelé que si ce scan a vraiment dépassé la file
+            // d'attente de phase1Semaphore (voir PHASE1_START_MARKER) — sinon end() ne doit rien
+            // faire (jamais commencé). bulkEnded évite un end() en double (marqueur fin-de-phase-1
+            // + filet de sécurité dans done()).
+            boolean bulkStarted = false;
+            boolean bulkEnded   = false;
+            private void endBulkOnce() {
+                if (!bulkEnded) { bulkEnded = true; if (bulkStarted) endBulkTableUpdate(); }
+            }
 
             @Override protected int[] doInBackground() throws Exception {
                 // ── Phase 1 : lister les fichiers, EN FLUX ──────────────────────────
@@ -1762,6 +2069,14 @@ public class MainFrame extends JFrame {
                 List<FileEntry> newEntries = new ArrayList<>();
                 List<FileEntry> batch = new ArrayList<>();
                 final long[] lastBatchMs = { System.currentTimeMillis() };
+                // Au plus 2 marches récursives à la fois, tous dossiers de démarrage confondus —
+                // voir phase1Semaphore. Bloque CE thread de fond (pas l'EDT) jusqu'à son tour.
+                phase1Semaphore.acquire();
+                // Détacher le RowSorter seulement maintenant que ce scan a VRAIMENT son permis —
+                // pas pendant qu'il patientait en file, ce qui aurait inutilement prolongé la
+                // période où le filtre est indisponible pour les autres scans déjà en cours.
+                publish(new Object[]{ PHASE1_START_MARKER });
+                try {
                 new AudioScanner().scan(dir, f -> {
                     if (isCancelled()) return;
                     if (alreadyInTable.contains(f.toPath().toAbsolutePath())) return;
@@ -1776,8 +2091,16 @@ public class MainFrame extends JFrame {
                         lastBatchMs[0] = now;
                     }
                 }, this::isCancelled);
+                } finally {
+                    phase1Semaphore.release();
+                }
                 if (!batch.isEmpty()) publish(new Object[]{ new ArrayList<>(batch) });
                 if (isCancelled()) return new int[]{0, 0};
+                // Phase 1 terminée : plus aucune insertion en rafale à venir pour ce scan — signaler
+                // à l'EDT de réattacher le RowSorter dès maintenant (voir PHASE1_DONE_MARKER) plutôt
+                // que d'attendre la fin de toute la phase 2, pour que le filtre redevienne utilisable
+                // pendant la lecture des tags (qui peut prendre longtemps sur 2 To).
+                publish(new Object[]{ PHASE1_DONE_MARKER });
 
                 // Enregistrer le dossier pour l'auto-watch (hors EDT — walkFileTree peut être long)
                 if (folderWatcher != null) folderWatcher.watch(dir.toPath());
@@ -1788,43 +2111,59 @@ public class MainFrame extends JFrame {
                 // (déjà écrits dans le fichier), ce qui est identique à ce qu'on afficherait.
                 MetadataCache cache = new MetadataCache();
                 java.util.Set<String> taggedPaths = cache.loadTaggedPaths();
-                cache.close();
+                // Chargé une fois (pas un SELECT par fichier) : path → tags déjà lus lors d'un
+                // scan précédent + l'empreinte mtime/size de l'époque. Sur une bibliothèque de
+                // 100k+ fichiers relancée régulièrement (session de plusieurs jours), la quasi-
+                // totalité des fichiers n'ont pas changé depuis le dernier scan — inutile de
+                // refaire un AudioFileIO.read() coûteux pour chacun.
+                java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap = cache.loadScanCacheMap();
 
-                // ── Phase 2 : lecture des tags (parallèle — N threads I/O) ─────────
-                // Nombre de threads : lecture de tags = attente d'E/S (disque, et souvent disque
-                // externe/réseau dans ce cas d'usage), pas de calcul CPU — un plafond basé sur le
-                // nombre de cœurs (l'ancien Math.min(8, cores)) sous-utilisait largement la
-                // capacité de parallélisme possible pour de l'E/S. Publication dans l'ORDRE DE FIN
-                // RÉEL (ExecutorCompletionService) plutôt que dans l'ordre de soumission : avant,
-                // un seul fichier lent (gros FLAC, latence disque externe) bloquait l'affichage de
-                // TOUS les fichiers soumis après lui même si leur lecture était déjà terminée.
-                int threads = Math.max(4, Math.min(16, Runtime.getRuntime().availableProcessors() * 2));
-                java.util.concurrent.ExecutorService tagPool =
-                    java.util.concurrent.Executors.newFixedThreadPool(threads);
+                // ── Phase 2 : lecture des tags (parallèle, pool PARTAGÉ — voir scanTagPool) ──
+                // Publication dans l'ORDRE DE FIN RÉEL (ExecutorCompletionService) plutôt que dans
+                // l'ordre de soumission : un seul fichier lent (gros FLAC, latence disque externe)
+                // ne bloque plus l'affichage de tous les fichiers soumis après lui.
                 java.util.concurrent.CompletionService<Object[]> completion =
-                    new java.util.concurrent.ExecutorCompletionService<>(tagPool);
+                    new java.util.concurrent.ExecutorCompletionService<>(scanTagPool);
 
                 for (FileEntry entry : newEntries) {
                     final File f = entry.file;
                     completion.submit(() -> {
                         com.opentagger.model.TagInfo ti;
-                        try { ti = readTags(f); }
-                        catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
+                        long mtime = f.lastModified();
+                        long size  = f.length();
+                        MetadataCache.ScanCacheEntry cached = scanCacheMap.get(f.getAbsolutePath());
+                        if (cached != null && cached.mtime() == mtime && cached.size() == size) {
+                            // Inchangé depuis le dernier scan (même mtime + taille) : on réutilise
+                            // les tags déjà lus plutôt que de rouvrir le fichier.
+                            ti = cached.tagInfo();
+                        } else {
+                            try { ti = readTags(f); }
+                            catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
+                            cache.putScanCache(f.getAbsolutePath(), mtime, size, ti);
+                        }
                         boolean wasPreviouslyTagged = taggedPaths.contains(f.getAbsolutePath());
                         return new Object[]{ entry, ti, wasPreviouslyTagged };
                     });
                 }
-                tagPool.shutdown();
+                // PAS de shutdown() ici : scanTagPool est partagé entre tous les scans, pas
+                // propre à celui-ci. Idem à l'annulation — abandonner la queue plutôt que tuer un
+                // pool utilisé par d'éventuels autres scans en cours.
 
                 int tagged = 0;
+                boolean fullyDrained = true;
                 for (int i = 0; i < newEntries.size(); i++) {
-                    if (isCancelled()) { tagPool.shutdownNow(); break; }
+                    if (isCancelled()) { fullyDrained = false; break; }
                     Object[] result;
                     try { result = completion.take().get(); }
                     catch (Exception e) { continue; }
                     if (Boolean.TRUE.equals(result[2])) tagged++;
                     publish(result);
                 }
+                // cache reste ouvert tant que des tâches soumises au pool partagé peuvent encore
+                // y écrire (putScanCache) — ne fermer qu'une fois certain que le pool est vidé
+                // (boucle complète, jamais annulée). Sur annulation, la connexion est laissée
+                // ouverte plutôt que risquer une fermeture concurrente avec une tâche en cours.
+                if (fullyDrained) cache.close();
                 return new int[]{ newEntries.size(), tagged };
             }
 
@@ -1832,7 +2171,12 @@ public class MainFrame extends JFrame {
             @SuppressWarnings("unchecked")
             protected void process(List<Object[]> chunks) {
                 for (Object[] chunk : chunks) {
-                    if (chunk[0] instanceof List) {
+                    if (chunk[0] == PHASE1_START_MARKER) {
+                        bulkStarted = true;
+                        beginBulkTableUpdate();
+                    } else if (chunk[0] == PHASE1_DONE_MARKER) {
+                        endBulkOnce();
+                    } else if (chunk[0] instanceof List) {
                         // Phase 1 : ajouter toutes les entrées vides d'un coup
                         List<FileEntry> batch = (List<FileEntry>) chunk[0];
                         tableModel.addAll(batch);
@@ -1868,6 +2212,7 @@ public class MainFrame extends JFrame {
                     refreshStats();
                     completeScanEntry(scanRow, dirName, 0, 0, null);
                     setStatus(I18n.t("Scan annulé."));
+                    endBulkOnce(); // filet de sécurité si annulé avant le marqueur fin-de-phase-1
                     return;
                 }
                 try {
@@ -1879,6 +2224,8 @@ public class MainFrame extends JFrame {
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
+                } finally {
+                    endBulkOnce(); // filet de sécurité si le marqueur fin-de-phase-1 n'est jamais arrivé
                 }
             }
         };
@@ -1910,6 +2257,14 @@ public class MainFrame extends JFrame {
         }
         if (infoCompleter != null && !infoCompleter.isDone()) {
             setStatus(I18n.t("Passe complète en cours — attendez la fin avant de taguer."));
+            return;
+        }
+        // Même raisonnement : un transcodage en cours réécrit/supprime des fichiers sur lesquels
+        // ce taguage pourrait écrire en même temps (course confirmée en direct via jstack : les
+        // deux tournaient simultanément faute de cette garde, aucune des deux méthodes ne
+        // vérifiant l'autre).
+        if (transcodeWorker != null && !transcodeWorker.isDone()) {
+            setStatus(I18n.t("Transcodage en cours — attendez la fin avant de taguer."));
             return;
         }
         List<FileEntry> toTag = new ArrayList<>();
@@ -1996,6 +2351,56 @@ public class MainFrame extends JFrame {
      * limitée à 60 requêtes/heure par IP). Appel manuel (menu) : toujours vérifié, résultat
      * toujours affiché, y compris "déjà à jour".
      */
+    /** Absent jusqu'ici — aucun endroit dans l'appli pour voir la version ou trouver le dépôt sans
+     *  passer par un terminal. Réutilise le même idiome que SettingsDialog.apiLinkBtn() (bouton
+     *  stylé en lien + Desktop.browse(), avec repli en boîte de dialogue si non supporté). */
+    private void showAboutDialog() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(new EmptyBorder(4, 4, 4, 4));
+
+        JLabel title = new JLabel("OpenTagger");
+        title.putClientProperty("FlatLaf.style", "font: bold 18 $defaultFont");
+        title.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel version = new JLabel(I18n.t("Version %s", Config.get().appVersion()));
+        version.putClientProperty("FlatLaf.style", "foreground: #90A4AE");
+        version.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel desc = new JLabel(I18n.t(
+            "<html>Tagger audio automatique open-source —<br>alternative libre à Jaikoz.</html>"));
+        desc.setAlignmentX(Component.LEFT_ALIGNMENT);
+        desc.setBorder(new EmptyBorder(10, 0, 12, 0));
+
+        panel.add(title);
+        panel.add(version);
+        panel.add(desc);
+        panel.add(aboutLinkRow(I18n.t("Code source :"), "https://github.com/pollomax847/opentagger"));
+        panel.add(aboutLinkRow(I18n.t("Téléchargements :"), "https://github.com/pollomax847/opentagger-releases"));
+
+        JOptionPane.showMessageDialog(this, panel, I18n.t("À propos d'OpenTagger"), JOptionPane.PLAIN_MESSAGE);
+    }
+
+    private JPanel aboutLinkRow(String label, String url) {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.add(new JLabel(label));
+        JButton link = new JButton("🔗 " + url);
+        link.putClientProperty("FlatLaf.style", "font: 11 $defaultFont; background: null; arc: 6");
+        link.setBorderPainted(false);
+        link.setFocusPainted(false);
+        link.setContentAreaFilled(false);
+        link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        link.addActionListener(e -> {
+            try { Desktop.getDesktop().browse(java.net.URI.create(url)); }
+            catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, I18n.t("Ouvrez : %s", url), I18n.t("Lien"), JOptionPane.INFORMATION_MESSAGE);
+            }
+        });
+        row.add(link);
+        return row;
+    }
+
     private void checkForUpdates(boolean manual) {
         if (!manual) {
             if (!Config.get().updateCheckEnabled()) return;
@@ -2041,9 +2446,19 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 try {
                     get();
-                    int rr = JOptionPane.showConfirmDialog(MainFrame.this,
-                        I18n.t("Mise à jour installée — redémarrer maintenant ?"),
-                        I18n.t("Mise à jour installée"), JOptionPane.YES_NO_OPTION);
+                    // Même risque qu'un quitApp() classique (voir confirmQuit()) : redémarrer
+                    // maintenant tue la JVM en plein milieu d'une opération de fond éventuellement
+                    // active — avertir avec la même liste plutôt que de redémarrer en silence.
+                    java.util.List<String> ops = activeOperations();
+                    int rr = ops.isEmpty()
+                        ? JOptionPane.showConfirmDialog(MainFrame.this,
+                            I18n.t("Mise à jour installée — redémarrer maintenant ?"),
+                            I18n.t("Mise à jour installée"), JOptionPane.YES_NO_OPTION)
+                        : JOptionPane.showConfirmDialog(MainFrame.this,
+                            I18n.t("<html>Mise à jour installée.<br><br>Encore en cours : <b>%s</b> — "
+                                 + "redémarrer maintenant interrompra cette opération.<br><br>"
+                                 + "Redémarrer quand même ?</html>", String.join(", ", ops)),
+                            I18n.t("Mise à jour installée"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
                     if (rr == JOptionPane.YES_OPTION) {
                         try { com.opentagger.UpdateChecker.restartApp(); }
                         catch (Exception ex) { showError(I18n.t("Redémarrage échoué : %s", ex.getMessage())); }
@@ -2129,6 +2544,10 @@ public class MainFrame extends JFrame {
         }
         if (infoCompleter != null && !infoCompleter.isDone()) {
             setStatus(I18n.t("Passe complète en cours — attendez la fin avant de forcer le re-taguage."));
+            return;
+        }
+        if (transcodeWorker != null && !transcodeWorker.isDone()) {
+            setStatus(I18n.t("Transcodage en cours — attendez la fin avant de forcer le re-taguage."));
             return;
         }
         // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
@@ -2486,6 +2905,21 @@ public class MainFrame extends JFrame {
                     I18n.t("En cours"), JOptionPane.WARNING_MESSAGE);
             return;
         }
+        // Garde manquante trouvée en direct (jstack a montré TranscodeWorker et
+        // AlbumCompletionWorker tourner EN MÊME TEMPS, sans protection) : le transcodage
+        // remplace/supprime des fichiers sur lesquels un taguage/complétion en cours pourrait
+        // écrire au même moment — même risque que startTagging()/completeAlbums(), gardé
+        // symétriquement ici.
+        String blocking = null;
+        if (worker != null && !worker.isDone())                     blocking = I18n.t("Taguage en cours");
+        else if (completionWorker != null && !completionWorker.isDone()) blocking = I18n.t("Complétion des albums en cours");
+        else if (infoCompleter != null && !infoCompleter.isDone())  blocking = I18n.t("Passe complète en cours");
+        if (blocking != null) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("%s — attendez la fin avant de transcoder.", blocking),
+                    I18n.t("En cours"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
 
         // Construire la liste des fichiers à transcoder
         List<FileEntry> toTranscode = new ArrayList<>();
@@ -2557,6 +2991,10 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Passe complète en cours — attendez la fin avant de compléter les albums."));
             return;
         }
+        if (transcodeWorker != null && !transcodeWorker.isDone()) {
+            setStatus(I18n.t("Transcodage en cours — attendez la fin avant de compléter les albums."));
+            return;
+        }
         setStatus(I18n.t("Complétion des albums en cours…"));
         completionWorker = new AlbumCompletionWorker(
             tableModel,
@@ -2572,6 +3010,13 @@ public class MainFrame extends JFrame {
     private int  organizeMask = 3; // défaut : AlbumArtist/Album/Track - Artist - Title
 
     private void organizeFiles() {
+        // Déplace des fichiers sur disque — même risque de course qu'un transcodage si un autre
+        // worker (taguage/complétion/passe complète/transcodage/scan) touche encore ces fichiers.
+        java.util.List<String> ops = activeOperations();
+        if (!ops.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'organiser les fichiers.", String.join(", ", ops)));
+            return;
+        }
         long tagged = 0;
         for (int i = 0; i < tableModel.getRowCount(); i++)
             if (tableModel.get(i).status == FileEntry.Status.TAGGED) tagged++;
@@ -2783,92 +3228,65 @@ public class MainFrame extends JFrame {
         catch (Exception e) { return ""; }
     }
 
-    // ── Barre de filtrage rapide ──────────────────────────────────────────────
-
-    private JPanel buildFilterBar() {
-        tfFilter      = new JTextField(20);
-        cbFilterField = new JComboBox<>(new String[]{
-            I18n.t("Tous les champs"), I18n.t("Artiste"), I18n.t("Artiste album"), I18n.t("Titre"),
-            I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste")});
-        cbFilterStatus = new JComboBox<>(new String[]{
-            I18n.t("Tous les statuts"), "⏳ " + I18n.t("En attente"), "✓ " + I18n.t("Tagués"),
-            "⚠ " + I18n.t("Non identifiés"), "✗ " + I18n.t("Erreurs")});
-
-        tfFilter.putClientProperty("JTextField.placeholderText", I18n.t("Rechercher…"));
-        JButton btnClear = new JButton("✕");
-        btnClear.setFont(btnClear.getFont().deriveFont(10f));
-        btnClear.setToolTipText(I18n.t("Effacer les filtres"));
-
-        tfFilter.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
-        });
-        cbFilterField .addActionListener(e -> applyFilter());
-        cbFilterStatus.addActionListener(e -> applyFilter());
-        btnClear.addActionListener(e -> {
-            tfFilter.setText("");
-            cbFilterStatus.setSelectedIndex(0);
-            applyFilter();
-        });
-
-        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
-        p.setBorder(new MatteBorder(0, 0, 1, 0, sep()));
-        p.add(new JLabel(I18n.t("Filtre :")));
-        p.add(tfFilter);
-        p.add(cbFilterField);
-        p.add(new JSeparator(JSeparator.VERTICAL));
-        p.add(new JLabel(I18n.t("Statut :")));
-        p.add(cbFilterStatus);
-        p.add(btnClear);
-        return p;
-    }
+    // ── Filtrage rapide (recherche + chips de statut cliquables dans buildStatsStrip()) ──────
 
     private void applyFilter() {
         String text   = tfFilter.getText().trim();
-        int statusSel = cbFilterStatus.getSelectedIndex(); // 0=tous,1=pending,2=tagged,3=skipped,4=error
+        int statusSel = activeStatusFilter; // 0=tous,1=pending,2=tagged,3=skipped,4=error
+        int fieldSel  = cbFilterField.getSelectedIndex(); // 0=tous les champs, 1..7=colonne précise
 
-        RowFilter<Object, Object> textFilter   = null;
-        RowFilter<Object, Object> statusFilter = null;
+        // Filtre appliqué directement dans FileTableModel (pas via RowSorter.setRowFilter) — voir
+        // le commentaire en tête de FileTableModel : un RowFilter actif sur le RowSorter rend
+        // chaque insertion ~45x plus lente (mesuré), ce qui gelait le filtre pendant un scan actif.
+        // Ici, la recherche texte lit directement les champs (activeTags()), pas les colonnes
+        // rendues — mêmes champs que l'ancien filtre (2 à 8 = Artiste→Piste, jamais le nom de
+        // fichier), juste sans passer par une regex sur le texte affiché.
+        java.util.function.Predicate<FileEntry> pred = e -> true;
 
-        // ── Filtre texte ──────────────────────────────────────────────────
         if (!text.isBlank()) {
-            String escaped = Pattern.quote(text);
-            int sel = cbFilterField.getSelectedIndex();
-            if (sel == 0) {
-                List<RowFilter<Object, Object>> cols = new ArrayList<>();
-                for (int c = 2; c <= 8; c++) cols.add(RowFilter.regexFilter("(?i)" + escaped, c));
-                textFilter = RowFilter.orFilter(cols);
-            } else {
-                textFilter = RowFilter.regexFilter("(?i)" + escaped, sel + 1);
-            }
+            String needle = text.toLowerCase();
+            pred = pred.and(e -> {
+                TagInfo ti = e.activeTags();
+                if (fieldSel == 0) {
+                    return containsIgnoreCase(ti.artist, needle) || containsIgnoreCase(ti.albumArtist, needle)
+                        || containsIgnoreCase(ti.title, needle)  || containsIgnoreCase(ti.album, needle)
+                        || containsIgnoreCase(ti.year, needle)   || containsIgnoreCase(ti.genre, needle)
+                        || containsIgnoreCase(ti.track, needle);
+                }
+                String field = switch (fieldSel) {
+                    case 1 -> ti.artist;
+                    case 2 -> ti.albumArtist;
+                    case 3 -> ti.title;
+                    case 4 -> ti.album;
+                    case 5 -> ti.year;
+                    case 6 -> ti.genre;
+                    case 7 -> ti.track;
+                    default -> "";
+                };
+                return containsIgnoreCase(field, needle);
+            });
         }
 
-        // ── Filtre statut (colonne 9 = COL_STATUS) ────────────────────────
-        if (statusSel > 0) {
-            String pat = switch (statusSel) {
-                case 1 -> "^—$|^⏳";         // PENDING + PROCESSING (reste visible)
-                case 2 -> "^✓";             // TAGGED
-                case 3 -> "^⚠";             // SKIPPED
-                case 4 -> "^✗";             // ERROR
-                default -> null;
+        if (statusSel != FILTER_ALL) {
+            java.util.function.Predicate<FileEntry> statusPred = switch (statusSel) {
+                case FILTER_PENDING -> e -> e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.PROCESSING;
+                case FILTER_TAGGED  -> e -> e.status == FileEntry.Status.TAGGED;
+                case FILTER_SKIPPED -> e -> e.status == FileEntry.Status.SKIPPED;
+                case FILTER_ERROR   -> e -> e.status == FileEntry.Status.ERROR;
+                default             -> e -> true;
             };
-            if (pat != null) statusFilter = RowFilter.regexFilter(pat, 9);
+            pred = pred.and(statusPred);
         }
 
-        // ── Combiner ─────────────────────────────────────────────────────
-        if (textFilter == null && statusFilter == null) {
-            rowSorter.setRowFilter(null);
-        } else if (textFilter == null) {
-            rowSorter.setRowFilter(statusFilter);
-        } else if (statusFilter == null) {
-            rowSorter.setRowFilter(textFilter);
-        } else {
-            rowSorter.setRowFilter(RowFilter.andFilter(List.of(textFilter, statusFilter)));
-        }
+        boolean noFilter = text.isBlank() && statusSel == FILTER_ALL;
+        tableModel.setFilter(noFilter ? null : pred);
 
         // Mettre à jour les chips de stats pour refléter la vue filtrée
         refreshStats();
+    }
+
+    private static boolean containsIgnoreCase(String haystack, String needleLower) {
+        return haystack != null && haystack.toLowerCase().contains(needleLower);
     }
 
     // ── Sélection par statut ──────────────────────────────────────────────────
@@ -2891,14 +3309,15 @@ public class MainFrame extends JFrame {
         };
         setStatus(n > 0 ? I18n.t("%d fichier(s) %s sélectionné(s).", n, label)
                         : I18n.t("Aucun fichier %s dans la liste.", label));
-        // Aussi basculer le filtre visuel pour les voir clairement
+        // Aussi basculer le filtre visuel (chip) pour les voir clairement
         if (n > 0) {
-            cbFilterStatus.setSelectedIndex(switch (statuses[0]) {
-                case TAGGED  -> 2;
-                case SKIPPED -> 3;
-                case ERROR   -> 4;
-                default      -> 1;
-            });
+            activeStatusFilter = switch (statuses[0]) {
+                case TAGGED  -> FILTER_TAGGED;
+                case SKIPPED -> FILTER_SKIPPED;
+                case ERROR   -> FILTER_ERROR;
+                default      -> FILTER_PENDING;
+            };
+            applyFilter();
         }
     }
 
@@ -2997,6 +3416,15 @@ public class MainFrame extends JFrame {
     // ── Détection de doublons ─────────────────────────────────────────────────
 
     private void detectDuplicates() {
+        // La détection elle-même ne fait que lire — le vrai risque est la suppression définitive
+        // (DuplicatesDialog.deleteSelected()) pendant qu'un autre worker écrit encore sur les mêmes
+        // fichiers. Le dialogue étant modal, vérifier ICI (avant l'ouverture) suffit : aucune
+        // nouvelle opération ne peut démarrer depuis MainFrame tant qu'il reste ouvert.
+        java.util.List<String> ops = activeOperations();
+        if (!ops.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de détecter les doublons.", String.join(", ", ops)));
+            return;
+        }
         if (tableModel.getRowCount() == 0) { setStatus(I18n.t("Aucun fichier chargé.")); return; }
         List<FileEntry> all = new ArrayList<>();
         for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
@@ -3199,18 +3627,41 @@ public class MainFrame extends JFrame {
             java.util.prefs.Preferences.userNodeForPackage(MainFrame.class);
 
     private void restoreWindowGeometry() {
-        java.awt.Dimension screen = java.awt.Toolkit.getDefaultToolkit().getScreenSize();
-        int defW = Math.max(960, (int)(screen.width  * 0.85));
-        int defH = Math.max(600, (int)(screen.height * 0.85));
+        // Bornes du moniteur PRINCIPAL — PAS Toolkit.getScreenSize(), qui sur un poste multi-écran
+        // (X11 notamment) renvoie la taille du BUREAU VIRTUEL COMBINÉ de tous les moniteurs. Sur
+        // cette machine, 2 écrans côte à côte (2128×1197 + 1920×1080) donnent un bureau combiné de
+        // 4048×1197 — calculer "85% de l'écran" là-dessus produit une fenêtre ~2× trop large,
+        // ou centrée à cheval sur les deux écrans, au lieu d'être dimensionnée pour UN moniteur.
+        java.awt.Rectangle primary = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment()
+            .getDefaultScreenDevice().getDefaultConfiguration().getBounds();
+        int defW = Math.max(960, (int)(primary.width  * 0.85));
+        int defH = Math.max(600, (int)(primary.height * 0.85));
         int w    = PREFS.getInt("win.w", defW);
         int h    = PREFS.getInt("win.h", defH);
-        int x    = PREFS.getInt("win.x", (screen.width  - w) / 2);
-        int y    = PREFS.getInt("win.y", (screen.height - h) / 2);
-        // Vérifier que la fenêtre est bien sur un écran visible
-        java.awt.Rectangle screenBounds = new java.awt.Rectangle(screen);
-        if (!screenBounds.intersects(new java.awt.Rectangle(x, y, w, h))) {
-            x = (screen.width - w) / 2;
-            y = (screen.height - h) / 2;
+        int x, y;
+        // Une taille sauvegardée sur un écran/moniteur plus PETIT restait minuscule pour toujours
+        // sur un écran plus grand — le code ne validait que la POSITION (visible ou non), jamais
+        // la taille elle-même. Si nettement plus petite que ce que donnerait le calcul par défaut
+        // sur le moniteur principal ACTUEL, on la considère issue d'un autre écran : on ignore
+        // aussi la position sauvegardée (calculée pour cette ancienne taille) et on recentre à
+        // neuf sur le moniteur principal avec les dimensions par défaut.
+        if (w < defW * 0.5 || h < defH * 0.5) {
+            w = defW; h = defH;
+            x = primary.x + (primary.width  - w) / 2;
+            y = primary.y + (primary.height - h) / 2;
+        } else {
+            x = PREFS.getInt("win.x", primary.x + (primary.width  - w) / 2);
+            y = PREFS.getInt("win.y", primary.y + (primary.height - h) / 2);
+        }
+        // Vérifier que la fenêtre est bien visible sur AU MOINS UN moniteur connecté — ici le
+        // bureau virtuel combiné est le bon référentiel (une position sauvegardée sur un moniteur
+        // secondaire reste légitime), contrairement au calcul de taille par défaut ci-dessus.
+        java.awt.Rectangle virtualDesktop = new java.awt.Rectangle();
+        for (java.awt.GraphicsDevice gd : java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().getScreenDevices())
+            virtualDesktop = virtualDesktop.union(gd.getDefaultConfiguration().getBounds());
+        if (!virtualDesktop.intersects(new java.awt.Rectangle(x, y, w, h))) {
+            x = primary.x + (primary.width  - w) / 2;
+            y = primary.y + (primary.height - h) / 2;
         }
         setBounds(x, y, w, h);
         if (PREFS.getBoolean("win.max", false))
@@ -3227,6 +3678,51 @@ public class MainFrame extends JFrame {
             PREFS.putInt("win.y", getY());
         }
         try { PREFS.flush(); } catch (Exception ignored) {}
+    }
+
+    // ── Fermeture de l'application ────────────────────────────────────────────
+
+    /** Liste les opérations de fond actuellement actives (nom affichable), vide si rien ne tourne.
+     *  Couvre les passes longues qui ont déjà des gardes d'exclusion mutuelle entre elles ailleurs
+     *  dans cette classe (voir startTagging()/completeAlbums()/transcodeFiles()) — les mêmes
+     *  champs, donc aucun risque de diverger de ce que ces gardes considèrent déjà "en cours". */
+    private java.util.List<String> activeOperations() {
+        java.util.List<String> ops = new java.util.ArrayList<>();
+        if (worker != null && !worker.isDone())                     ops.add(I18n.t("Taguage"));
+        if (completionWorker != null && !completionWorker.isDone()) ops.add(I18n.t("Complétion des albums"));
+        if (infoCompleter != null && !infoCompleter.isDone())       ops.add(I18n.t("Passe complète"));
+        if (transcodeWorker != null && !transcodeWorker.isDone())   ops.add(I18n.t("Transcodage"));
+        if (lbSyncWorker != null && !lbSyncWorker.isDone())         ops.add(I18n.t("Synchronisation ListenBrainz"));
+        if (!activeScanWorkers.isEmpty())                           ops.add(I18n.t("Scan de dossier"));
+        return ops;
+    }
+
+    /** Si du travail de fond tourne encore, demande à l'utilisateur s'il veut attendre ou quitter
+     *  quand même. Retourne true si l'appli doit vraiment se fermer (rien en cours, ou choix
+     *  explicite de quitter quand même), false pour annuler la fermeture (choix d'attendre). */
+    private boolean confirmQuit() {
+        java.util.List<String> ops = activeOperations();
+        if (ops.isEmpty()) return true;
+        Object[] options = { I18n.t("Attendre la fin"), I18n.t("Quitter quand même") };
+        int choice = JOptionPane.showOptionDialog(this,
+            I18n.t("<html>Encore en cours : <b>%s</b>.<br><br>"
+                 + "Quitter maintenant peut interrompre une écriture de fichier en plein milieu "
+                 + "ou perdre la progression en cours.</html>", String.join(", ", ops)),
+            I18n.t("Opération en cours — vraiment quitter ?"),
+            JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE,
+            null, options, options[0]); // "Attendre" par défaut (choix le plus sûr)
+        return choice == 1; // seul "Quitter quand même" (index 1) confirme la fermeture
+    }
+
+    /** Point d'entrée UNIQUE pour quitter — utilisé par le bouton X de la fenêtre ET le menu
+     *  "Quitter", pour que les deux se comportent pareil (l'ancien menu appelait System.exit(0)
+     *  directement, sans confirmation ET sans sauvegarder géométrie/largeurs de colonnes). */
+    private void quitApp() {
+        if (!confirmQuit()) return;
+        saveWindowGeometry();
+        saveColumnWidths();
+        if (folderWatcher != null) try { folderWatcher.close(); } catch (Exception ignored) {}
+        System.exit(0);
     }
 
     private Color sep() {

@@ -194,12 +194,16 @@ public class DuplicatesDialog extends JDialog {
         left.add(Box.createHorizontalStrut(16));
         left.add(chkCleanDirs);
 
+        // Fermer AVANT l'action principale (pas après) : les 5 autres dialogues de l'appli
+        // (MatchDialog, CoverArtDialog, etc.) placent tous l'action de confirmation/principale à
+        // l'extrême droite, avec Annuler/Fermer juste à sa gauche — l'ordre inverse ici était une
+        // incohérence risquant un clic sur le mauvais bouton (juste à côté d'une action rouge).
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         right.add(btnSmart);
         right.add(btnNone);
         right.add(Box.createHorizontalStrut(12));
-        right.add(btnDelete);
         right.add(btnClose);
+        right.add(btnDelete);
         p.add(left,  BorderLayout.WEST);
         p.add(right, BorderLayout.EAST);
         return p;

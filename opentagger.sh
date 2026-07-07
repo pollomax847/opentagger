@@ -22,7 +22,10 @@ if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ];
     mv "$LOG" "${LOG}.old"
 fi
 
-java -Xms150m -Xmx1200m \
+java -Xms256m -Xmx3g \
+     -XX:+UseG1GC \
+     -XX:MaxGCPauseMillis=200 \
+     -XX:SoftRefLRUPolicyMSPerMB=1 \
      -Dawt.useSystemAAFontSettings=on \
      -Dswing.aatext=true \
      -jar "$JAR" "$@" 2>&1 | tee -a "$LOG"

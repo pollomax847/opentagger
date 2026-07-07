@@ -46,7 +46,7 @@ public class DetailPanel extends JPanel {
     private final JTextField tfEnsemble          = tf(24);
     private final JTextField tfChoir             = tf(24);
     private final JTextField tfWork              = tf(24);
-    private final JTextField tfWorkMbid          = tf(24);
+    private final JTextField tfWorkMbid          = tf(36); // largeur d'un UUID MB, comme les autres MBID
     private final JTextField tfMovement          = tf(24);
     private final JTextField tfMovementNo        = tf(5);
     private final JTextField tfMovementTotal     = tf(5);
@@ -154,10 +154,13 @@ public class DetailPanel extends JPanel {
             tf.setEditable(false);
             tf.putClientProperty("FlatLaf.style", "foreground: #8899bb");
         }
-        // Champs MB IDs en lecture seule
+        // Champs MB IDs en lecture seule — tfWorkMbid ajouté ici : il était éditable par erreur
+        // (seul MBID du panneau à ne pas être dans cette liste) alors que collect() ne l'a jamais
+        // relu vers TagInfo.workMbid — un utilisateur qui le modifiait voyait sa saisie disparaître
+        // silencieusement au clic "Appliquer", sans aucune erreur ni message.
         for (JTextField tf : new JTextField[]{
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid,
-            tfArtistMbid, tfAcoustidId}) {
+            tfArtistMbid, tfAcoustidId, tfWorkMbid}) {
             tf.setEditable(false);
             tf.putClientProperty("FlatLaf.style", "foreground: #8899bb");
         }

@@ -225,8 +225,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Matching"),     scrollWrap(buildMatchingPanel()));
         tabs.addTab(I18n.t("Tags"),         scrollWrap(buildTagsPanel()));
         tabs.addTab(I18n.t("Renommage"),    scrollWrap(buildRenamePanel()));
-        tabs.addTab(I18n.t("Audio"),        scrollWrap(buildAudioPanel()));
-        tabs.addTab(I18n.t("Transcodage"),  scrollWrap(buildTranscodePanel()));
+        tabs.addTab(I18n.t("Audio / Transcodage"), scrollWrap(buildAudioPanel()));
         tabs.addTab(I18n.t("Script"),       scrollWrap(buildScriptPanel()));
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
         tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
@@ -437,6 +436,21 @@ public class SettingsDialog extends JDialog {
             c.gridx = 0; c.gridy = 0; c.anchor = GridBagConstraints.WEST;
             c.insets = new Insets(3, 10, 3, 8); c.gridwidth = 3;
             enrichInner.add(chkLastfmEnabled, c);
+        }
+        {
+            // Repère explicite pour l'utilisateur — avant, ce lien n'existait que dans un
+            // commentaire de code (voir plus haut), pas dans l'UI elle-même : la clé FanArt.tv est
+            // ici, mais son activation/priorité est dans un tout autre onglet (Tags), et les
+            // réglages de comptage Last.fm sont dans un 3e (Matching) — rien ne les reliait.
+            JLabel hint = new JLabel(I18n.t(
+                "<html><i>FanArt.tv : activer/désactiver et priorité dans l'onglet Tags → "
+                + "Fournisseurs de pochette.<br>Last.fm : nombre de genres max dans l'onglet "
+                + "Matching → Sources de genres.</i></html>"));
+            hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+            GridBagConstraints c = new GridBagConstraints();
+            c.gridx = 0; c.gridy = 1; c.anchor = GridBagConstraints.WEST;
+            c.insets = new Insets(2, 10, 4, 8); c.gridwidth = 3;
+            enrichInner.add(hint, c);
         }
 
         JPanel p = new JPanel(new BorderLayout(0, 4));
@@ -1022,10 +1036,23 @@ public class SettingsDialog extends JDialog {
         src.anchor = GridBagConstraints.WEST; src.insets = new Insets(4, 8, 2, 8);
         inner.add(songrecRow, src);
 
-        JPanel p = new JPanel(new BorderLayout(0, 4));
+        JPanel audioSection = new JPanel(new BorderLayout(0, 4));
+        audioSection.add(inner, BorderLayout.CENTER);
+        audioSection.add(lblFpcalcStatus, BorderLayout.SOUTH);
+        audioSection.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPanel transcodeSection = buildTranscodeSection();
+        transcodeSection.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // Onglets "Audio" + "Transcodage" fusionnés (2 des 10 onglets de Préférences, tous deux
+        // liés à ffmpeg) — piste identifiée dans une session précédente mais laissée de côté à
+        // l'époque, reprise ici sur demande explicite.
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
         p.setBorder(new EmptyBorder(8, 8, 8, 8));
-        p.add(inner, BorderLayout.CENTER);
-        p.add(lblFpcalcStatus, BorderLayout.SOUTH);
+        p.add(audioSection);
+        p.add(Box.createVerticalStrut(14));
+        p.add(transcodeSection);
         return p;
     }
 
@@ -1069,8 +1096,10 @@ public class SettingsDialog extends JDialog {
         }.execute();
     }
 
+    /** Contenu de l'ancien onglet "Transcodage", maintenant empilé sous celui d'"Audio" (voir
+     *  buildAudioPanel()) — plus un onglet séparé, juste une 2e carte dans le même onglet. */
     @SuppressWarnings("unchecked")
-    private JPanel buildTranscodePanel() {
+    private JPanel buildTranscodeSection() {
         chkTranscodeAuto = new JCheckBox(I18n.t("Transcoder automatiquement avant le taguage"));
         cmbTranscodeFormat = new JComboBox<>(new String[]{"MP3", "FLAC", "AAC (M4A)", "OGG", "OPUS"});
         spTranscodeBitrate = new JSpinner(new SpinnerNumberModel(320, 64, 320, 32));
@@ -1116,7 +1145,6 @@ public class SettingsDialog extends JDialog {
         note.putClientProperty("FlatLaf.style", "foreground: #aaaaaa; font: 11 $defaultFont");
 
         JPanel p = new JPanel(new BorderLayout(0, 8));
-        p.setBorder(new EmptyBorder(8, 8, 8, 8));
         p.add(inner, BorderLayout.NORTH);
         p.add(note,  BorderLayout.CENTER);
         return p;
@@ -1249,6 +1277,13 @@ public class SettingsDialog extends JDialog {
         btnDeleteScript.addActionListener(e -> {
             int sel = lstScripts.getSelectedIndex();
             if (sel < 0) return;
+            // Un script peut représenter des dizaines de lignes écrites à la main — supprimait
+            // avant sans aucune confirmation, contrairement à des suppressions bien moins coûteuses
+            // ailleurs (historique de taguage, doublons) qui, elles, avertissent explicitement.
+            int choice = JOptionPane.showConfirmDialog(this,
+                I18n.t("Supprimer le script « %s » ?\nCette action est irréversible.", scriptDefs.get(sel).name()),
+                I18n.t("Confirmer la suppression"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (choice != JOptionPane.YES_OPTION) return;
             scriptDefs.remove(sel);
             currentScriptIndex = -1;
             refreshScriptsList();
@@ -1417,7 +1452,7 @@ public class SettingsDialog extends JDialog {
     private JPanel buildMbOAuthPanel() {
         lblMbAccount     = new JLabel();
         cmbMbOAuthMode   = new JComboBox<>(new String[]{
-            "scheme (URL handler)", "localhost (port 8484)", I18n.t("oob (copier-coller)")});
+            I18n.t("scheme (URL handler)"), I18n.t("localhost (port 8484)"), I18n.t("oob (copier-coller)")});
         tfMbCollectionId = tf();
         tfMbCollectionId.setToolTipText(I18n.t("MBID de votre collection MusicBrainz (visible dans l'URL de la "
                 + "page de la collection sur musicbrainz.org) — les releases taguées y seront ajoutées "

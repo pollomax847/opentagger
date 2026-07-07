@@ -59,6 +59,10 @@ public class MetadataCache {
                 // WAL mode : permet les lectures concurrentes pendant les écritures
                 st.execute("PRAGMA journal_mode=WAL");
                 st.execute("PRAGMA synchronous=NORMAL");
+                // Chaque worker ouvre sa propre connexion (synchronized ne protège que sa
+                // propre instance) — sans busy_timeout, un accès concurrent depuis une autre
+                // connexion échoue immédiatement en SQLITE_BUSY au lieu d'attendre son tour.
+                st.execute("PRAGMA busy_timeout=5000");
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS recordings (
                         query_hash TEXT PRIMARY KEY,
@@ -104,6 +108,21 @@ public class MetadataCache {
                 catch (SQLException ignored) { /* colonne déjà présente */ }
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_artist ON tagging_history(artist)");
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_title  ON tagging_history(title)");
+                // ── Cache du scan (relecture des tags) ──────────────────────
+                // Évite de rappeler AudioFileIO.read() (lecture disque + parsing complet) pour un
+                // fichier déjà scanné dont ni la taille ni la date de modification n'ont changé
+                // depuis — la même heuristique que make/rsync. json = le TagInfo tel que lu par
+                // readTags() lui-même (pas une approximation venant d'un autre pipeline comme
+                // tagging_history), donc aucun risque de divergence avec ce qu'un vrai reread
+                // afficherait.
+                st.execute("""
+                    CREATE TABLE IF NOT EXISTS scan_cache (
+                        path  TEXT    PRIMARY KEY,
+                        mtime INTEGER NOT NULL,
+                        size  INTEGER NOT NULL,
+                        json  TEXT    NOT NULL,
+                        ts    INTEGER NOT NULL
+                    )""");
             }
         } catch (Exception e) {
             LOG.warning("Cache SQLite indisponible : " + e.getMessage());
@@ -444,6 +463,47 @@ public class MetadataCache {
             }
         } catch (Exception e) { LOG.warning("importHistory : " + e.getMessage()); }
         return count;
+    }
+
+    // ── Cache du scan (path → TagInfo déjà lu, valide tant que mtime/size collent) ───
+
+    public record ScanCacheEntry(long mtime, long size, TagInfo tagInfo) {}
+
+    /**
+     * Charge tout scan_cache en mémoire en un seul aller-retour (path → mtime/size/TagInfo),
+     * pour éviter N requêtes SQL individuelles pendant le scan d'une bibliothèque de 100k+
+     * fichiers — même principe que loadFileHistoryMap()/loadTaggingHistoryMap().
+     */
+    public synchronized java.util.Map<String, ScanCacheEntry> loadScanCacheMap() {
+        java.util.Map<String, ScanCacheEntry> map = new java.util.HashMap<>();
+        if (conn == null) return map;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT path, mtime, size, json FROM scan_cache")) {
+            while (rs.next()) {
+                try {
+                    TagInfo ti = mapper.readValue(rs.getString(4), TagInfo.class);
+                    map.put(rs.getString(1), new ScanCacheEntry(rs.getLong(2), rs.getLong(3), ti));
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception e) { LOG.warning("loadScanCacheMap: " + e.getMessage()); }
+        return map;
+    }
+
+    /** Enregistre (ou met à jour) le TagInfo lu pour ce chemin, avec son empreinte mtime/size. */
+    public synchronized void putScanCache(String path, long mtime, long size, TagInfo ti) {
+        if (conn == null || path == null) return;
+        try {
+            String json = mapper.writeValueAsString(ti);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT OR REPLACE INTO scan_cache(path,mtime,size,json,ts) VALUES(?,?,?,?,?)")) {
+                ps.setString(1, path);
+                ps.setLong(2, mtime);
+                ps.setLong(3, size);
+                ps.setString(4, json);
+                ps.setLong(5, System.currentTimeMillis());
+                ps.executeUpdate();
+            }
+        } catch (Exception e) { LOG.fine("putScanCache: " + e.getMessage()); }
     }
 
     private static String nullStr(String s) { return s != null ? s : ""; }

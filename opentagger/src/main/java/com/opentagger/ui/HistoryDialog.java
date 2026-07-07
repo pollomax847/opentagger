@@ -128,12 +128,15 @@ public class HistoryDialog extends JDialog {
         p.setBorder(new CompoundBorder(
             new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")),
             new EmptyBorder(8, 12, 8, 12)));
+        // Même correctif de cohérence que DuplicatesDialog : Fermer avant l'action principale,
+        // pas après (les 5 autres dialogues de l'appli placent tous l'action de
+        // confirmation/principale à l'extrême droite).
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         right.add(btnImport);
         right.add(btnExport);
         right.add(Box.createHorizontalStrut(8));
-        right.add(btnPurge);
         right.add(btnClose);
+        right.add(btnPurge);
         p.add(buildStats(), BorderLayout.WEST);
         p.add(right,        BorderLayout.EAST);
         return p;
