@@ -60,6 +60,7 @@ public class MainFrame extends JFrame {
     private AlbumCompletionWorker   completionWorker;
     private InfoCompleterWorker     infoCompleter;
     private ListenBrainzSyncWorker  lbSyncWorker;
+    private AlbumClusterWorker      clusterWorker;
     private int                     currentMask = Config.get().defaultRenameMask();
 
     // ── Composants header ────────────────────────────────────────────────────
@@ -642,6 +643,7 @@ public class MainFrame extends JFrame {
         m.add(mitem(I18n.t("Choisir le masque…"),      null,      e -> chooseMask()));
         m.addSeparator();
         m.add(mitem(I18n.t("Compléter les albums…"),   "Ctrl+L", e -> completeAlbums()));
+        m.add(mitem(I18n.t("Grouper les albums…"),     "Ctrl+K", e -> clusterAlbums()));
         m.addSeparator();
         m.add(mitem(I18n.t("Transcoder les fichiers…"),   "Ctrl+T", e -> transcodeFiles(false)));
         m.add(mitem(I18n.t("Transcoder la sélection…"),   null,     e -> transcodeFiles(true)));
@@ -1088,6 +1090,18 @@ public class MainFrame extends JFrame {
         rowSorter = new SafeTableRowSorter<>(tableModel);
         table.setRowSorter(rowSorter);
         table.getTableHeader().setReorderingAllowed(false);
+        // Comparateur texte RAPIDE pour toutes les colonnes String — le comparateur PAR DÉFAUT de
+        // TableRowSorter pour une colonne String utilise Collator.getInstance() (comparaison
+        // sensible à la locale/aux accents), dont le coût explose sur une grosse bibliothèque :
+        // confirmé en direct via jstack sur la bibliothèque réelle de l'utilisateur (285k lignes)
+        // — un tri de colonne restait bloqué plusieurs minutes dans Collator.compare(), l'EDT
+        // (donc toute l'interface) totalement figé pendant ce temps. Perd la finesse linguistique
+        // de l'ordre des accents, mais String.compareToIgnoreCase() est des ordres de grandeur
+        // plus rapide (pas de normalisation Unicode ni de règles de collation) — largement
+        // préférable à un gel de plusieurs minutes au moindre clic sur un en-tête de colonne.
+        java.util.Comparator<String> fastTextCompare = (a, b) ->
+            (a != null ? a : "").compareToIgnoreCase(b != null ? b : "");
+        for (int col = 1; col <= 9; col++) rowSorter.setComparator(col, fastTextCompare);
 
         // Largeurs par défaut élargies (colonnes 1-5) — les valeurs d'origine tronquaient
         // fréquemment "Artiste Album" ("Various Artists"…) et "Album" (titres de compilation
@@ -2267,6 +2281,10 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Transcodage en cours — attendez la fin avant de taguer."));
             return;
         }
+        if (clusterWorker != null && !clusterWorker.isDone()) {
+            setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de taguer."));
+            return;
+        }
         List<FileEntry> toTag = new ArrayList<>();
         if (selOnly) {
             for (int r : table.getSelectedRows())
@@ -2548,6 +2566,10 @@ public class MainFrame extends JFrame {
         }
         if (transcodeWorker != null && !transcodeWorker.isDone()) {
             setStatus(I18n.t("Transcodage en cours — attendez la fin avant de forcer le re-taguage."));
+            return;
+        }
+        if (clusterWorker != null && !clusterWorker.isDone()) {
+            setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de forcer le re-taguage."));
             return;
         }
         // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
@@ -2914,6 +2936,7 @@ public class MainFrame extends JFrame {
         if (worker != null && !worker.isDone())                     blocking = I18n.t("Taguage en cours");
         else if (completionWorker != null && !completionWorker.isDone()) blocking = I18n.t("Complétion des albums en cours");
         else if (infoCompleter != null && !infoCompleter.isDone())  blocking = I18n.t("Passe complète en cours");
+        else if (clusterWorker != null && !clusterWorker.isDone())  blocking = I18n.t("Groupement des albums en cours");
         if (blocking != null) {
             JOptionPane.showMessageDialog(this,
                     I18n.t("%s — attendez la fin avant de transcoder.", blocking),
@@ -2995,6 +3018,10 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Transcodage en cours — attendez la fin avant de compléter les albums."));
             return;
         }
+        if (clusterWorker != null && !clusterWorker.isDone()) {
+            setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de compléter les albums."));
+            return;
+        }
         setStatus(I18n.t("Complétion des albums en cours…"));
         completionWorker = new AlbumCompletionWorker(
             tableModel,
@@ -3002,6 +3029,40 @@ public class MainFrame extends JFrame {
             () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Complétion albums terminée.")))
         );
         completionWorker.execute();
+    }
+
+    // ── Groupement des albums (ReplayGain d'album, n° piste/disque) ────────────
+
+    private void clusterAlbums() {
+        if (clusterWorker != null && !clusterWorker.isDone()) {
+            clusterWorker.cancel(true);
+            setStatus(I18n.t("Groupement annulé."));
+            return;
+        }
+        java.util.List<String> ops = activeOperations();
+        if (!ops.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de grouper les albums.", String.join(", ", ops)));
+            return;
+        }
+        // Condition explicitement demandée par l'utilisateur : cette passe ne doit se lancer que
+        // sur une bibliothèque taguée à 100%, jamais sur un sous-ensemble encore en cours de
+        // taguage — sinon elle recalcule un ReplayGain d'album / réordonne des pistes sur un
+        // groupe incomplet, puis les réécrit à nouveau à la passe suivante quand le reste de
+        // l'album se tague (c'est exactement le "beaucoup de conflits" signalé).
+        long unfinished = tableModel.allEntries().stream()
+                .filter(e -> e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.PROCESSING)
+                .count();
+        if (unfinished > 0) {
+            setStatus(I18n.t("%d fichier(s) pas encore tagué(s) — la bibliothèque doit être taguée à 100%% avant de grouper les albums.", unfinished));
+            return;
+        }
+        setStatus(I18n.t("Groupement des albums en cours…"));
+        clusterWorker = new AlbumClusterWorker(
+            tableModel,
+            this::setStatus,
+            () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Groupement des albums terminé.")))
+        );
+        clusterWorker.execute();
     }
 
     // ── Organiser en dossiers ─────────────────────────────────────────────────
@@ -3693,6 +3754,7 @@ public class MainFrame extends JFrame {
         if (infoCompleter != null && !infoCompleter.isDone())       ops.add(I18n.t("Passe complète"));
         if (transcodeWorker != null && !transcodeWorker.isDone())   ops.add(I18n.t("Transcodage"));
         if (lbSyncWorker != null && !lbSyncWorker.isDone())         ops.add(I18n.t("Synchronisation ListenBrainz"));
+        if (clusterWorker != null && !clusterWorker.isDone())       ops.add(I18n.t("Groupement des albums"));
         if (!activeScanWorkers.isEmpty())                           ops.add(I18n.t("Scan de dossier"));
         return ops;
     }

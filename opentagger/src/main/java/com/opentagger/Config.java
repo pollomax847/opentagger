@@ -211,9 +211,6 @@ public class Config {
     public boolean translateArtists()  { return bool("metadata.translate_artists", false); }
     public String  translateLocale()   { return str ("metadata.translate_locale",  "en"); }
 
-    // --- Album clustering ---
-    public boolean albumClusterEnabled(){ return bool("albums.cluster",           false); }
-
     // --- Ordre de traitement : fichiers incomplets en priorité ---
     public boolean prioritizeIncomplete(){ return bool("batch.prioritize_incomplete", true); }
 

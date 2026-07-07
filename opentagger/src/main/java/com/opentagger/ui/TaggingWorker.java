@@ -198,10 +198,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        // ── Album clustering : passe 2 — corriger numéros de piste par album ──────
-        if (Config.get().albumClusterEnabled() && !isCancelled()) {
-            clusterAlbums(entries);
-        }
+        // Album clustering (regroupement par album, ReplayGain) : n'est plus déclenché ici
+        // automatiquement — voir AlbumClusterWorker (2026-07-07). Cette passe ne voyait que les
+        // fichiers de CE run, pas toute la bibliothèque, ce qui reclusterait/réécrivait les mêmes
+        // fichiers avec des valeurs différentes au fil de plusieurs passes successives sur une
+        // grosse bibliothèque taguée progressivement — devenue une action manuelle séparée.
 
         cache.purgeExpired();
         cache.close();
@@ -1316,156 +1317,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return results;
     }
 
-    /**
-     * Passe 2 : groupe les fichiers taguées par releaseMbid, fait un seul lookupRelease
-     * par album, et re-corrige numéros/totaux de piste + albumArtist cohérent.
-     */
-    private void clusterAlbums(List<FileEntry> entries) {
-        // Grouper par releaseMbid
-        java.util.Map<String, java.util.List<FileEntry>> groups = new java.util.LinkedHashMap<>();
-        for (FileEntry e : entries) {
-            if (e.status == FileEntry.Status.TAGGED && e.result != null
-                    && !e.result.releaseMbid.isBlank()) {
-                groups.computeIfAbsent(e.result.releaseMbid, k -> new java.util.ArrayList<>()).add(e);
-            }
-        }
-
-        for (java.util.Map.Entry<String, java.util.List<FileEntry>> group : groups.entrySet()) {
-            if (isCancelled()) break;
-            java.util.List<FileEntry> albumFiles = group.getValue();
-            if (albumFiles.size() < 2) continue;
-
-            String releaseMbid = group.getKey();
-            log(I18n.t("  cluster: %s fichiers pour release %s", albumFiles.size(), releaseMbid));
-            try {
-                MusicBrainzClient.ReleaseTracklist tracklist = fetchTracklistCached(releaseMbid);
-                if (tracklist == null || tracklist.tracks().isEmpty()) continue;
-
-                int maxDisc = tracklist.tracks().stream().mapToInt(MusicBrainzClient.ReleaseTrack::disc).max().orElse(0);
-
-                for (FileEntry entry : albumFiles) {
-                    TagInfo result = entry.result;
-                    File entryFile = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-                    MusicBrainzClient.ReleaseTrack matched = findBestTrack(tracklist, result, entryFile);
-                    if (matched == null) continue;
-
-                    boolean changed = false;
-                    if (matched.trackNo() > 0 && !String.valueOf(matched.trackNo()).equals(result.track)) {
-                        result.track = String.valueOf(matched.trackNo()); changed = true;
-                    }
-                    if (matched.trackTotal() > 0 && !String.valueOf(matched.trackTotal()).equals(result.trackTotal)) {
-                        result.trackTotal = String.valueOf(matched.trackTotal()); changed = true;
-                    }
-                    if (maxDisc > 1 && matched.disc() > 0) {
-                        result.discNo    = String.valueOf(matched.disc());
-                        result.discTotal = String.valueOf(maxDisc);
-                        changed = true;
-                    }
-                    if (!tracklist.albumArtist().isBlank()) result.albumArtist     = tracklist.albumArtist();
-                    if (!tracklist.albumArtistSort().isBlank()) result.albumArtistSort = tracklist.albumArtistSort();
-                    if (tracklist.isCompilation()) result.isCompilation = "1";
-
-                    if (changed) {
-                        File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-                        result = writer.write(fichier, result);
-                        log(I18n.t("  cluster ok: %s → piste %s/%s", fichier.getName(), result.track, result.trackTotal));
-                        entry.result = result;
-                        publish(entry);
-                    }
-                }
-                // ── Album ReplayGain (concat analyse) ─────────────────────────────
-                if (rgEnabled) {
-                    java.util.List<String> paths = albumFiles.stream()
-                        .map(e -> e.currentPath != null ? e.currentPath.toString() : e.file.getAbsolutePath())
-                        .collect(java.util.stream.Collectors.toList());
-                    log(I18n.t("  album RG: analyse %s pistes...", paths.size()));
-                    ReplayGainAnalyzer.RGResult albumRg = ReplayGainAnalyzer.analyzeAlbum(paths);
-                    if (albumRg != null) {
-                        log(I18n.t("  album RG: gain=%s peak=%s", albumRg.trackGain(), albumRg.trackPeak()));
-                        for (FileEntry entry : albumFiles) {
-                            File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-                            writer.writeAlbumReplayGain(f, albumRg.trackGain(), albumRg.trackPeak());
-                        }
-                    }
-                }
-
-            } catch (Exception e) {
-                log(I18n.t("  cluster erreur: %s", e.getMessage()));
-            }
-        }
-    }
-
-    /** Tolérance de matching par durée entre le fichier et la piste MB (rips/encodages varient de 1-2 s). */
-    private static final int DURATION_TOLERANCE_SEC = 3;
-
-    private MusicBrainzClient.ReleaseTrack findBestTrack(MusicBrainzClient.ReleaseTracklist tracklist,
-                                                          TagInfo result, File audioFile) {
-        // 1. Correspondance par recordingMbid (100% fiable)
-        if (!result.recordingMbid.isBlank()) {
-            for (var t : tracklist.tracks())
-                if (result.recordingMbid.equals(t.recordingMbid())) return t;
-        }
-        String titleLow = result.title.toLowerCase().trim();
-
-        // 2. Correspondance par numéro de piste (+ disque si connu). Sur une release multi-disques,
-        // si le disque n'est pas connu et que plusieurs disques ont ce numéro de piste, NE PAS
-        // deviner (bug corrigé : renvoyait silencieusement le disque 1 par défaut) — laisser
-        // les étapes suivantes (durée, titre) trancher.
-        if (!result.track.isBlank()) {
-            try {
-                int n = Integer.parseInt(result.track.trim());
-                Integer d = result.discNo.isBlank() ? null : Integer.parseInt(result.discNo.trim());
-                List<MusicBrainzClient.ReleaseTrack> sameNumber = new java.util.ArrayList<>();
-                for (var t : tracklist.tracks()) {
-                    if (t.trackNo() != n) continue;
-                    if (d != null && t.disc() != 0 && t.disc() != d) continue;
-                    sameNumber.add(t);
-                }
-                if (sameNumber.size() == 1) return sameNumber.get(0);
-            } catch (NumberFormatException ignored) {}
-        }
-
-        // 3. Correspondance par durée du fichier (utile quand ni le numéro de piste ni le titre
-        // ne permettent de trancher — fichier générique/mal renseigné, comme Picard le fait).
-        int fileDurSec = audioFile != null ? AudioDuration.probeSeconds(audioFile.getAbsolutePath()) : -1;
-        if (fileDurSec > 0) {
-            List<MusicBrainzClient.ReleaseTrack> withinTolerance = new java.util.ArrayList<>();
-            for (var t : tracklist.tracks()) {
-                if (t.lengthMs() <= 0) continue;
-                if (Math.abs(t.lengthMs() / 1000 - fileDurSec) <= DURATION_TOLERANCE_SEC) withinTolerance.add(t);
-            }
-            if (withinTolerance.size() == 1) return withinTolerance.get(0);
-            if (withinTolerance.size() > 1 && !titleLow.isBlank()) {
-                MusicBrainzClient.ReleaseTrack best = null;
-                int bestScore = 0;
-                for (var t : withinTolerance) {
-                    int sim = titleSimilarity(titleLow, t.title().toLowerCase().trim());
-                    if (sim > bestScore) { bestScore = sim; best = t; }
-                }
-                if (best != null) return best;
-            }
-        }
-
-        // 4. Correspondance par similarité de titre (dernier recours, toute la tracklist)
-        if (titleLow.isBlank()) return null;
-        MusicBrainzClient.ReleaseTrack best = null;
-        int bestScore = 0;
-        for (var t : tracklist.tracks()) {
-            int sim = titleSimilarity(titleLow, t.title().toLowerCase().trim());
-            if (sim > bestScore && sim >= 70) { bestScore = sim; best = t; }
-        }
-        return best;
-    }
-
-    private static int titleSimilarity(String a, String b) {
-        if (a.equals(b)) return 100;
-        if (a.contains(b) || b.contains(a)) return 90;
-        java.util.Set<String> ta = new java.util.HashSet<>(java.util.Arrays.asList(a.split("\\s+")));
-        java.util.Set<String> tb = new java.util.HashSet<>(java.util.Arrays.asList(b.split("\\s+")));
-        long common = ta.stream().filter(tb::contains).count();
-        int total = ta.size() + tb.size();
-        return total == 0 ? 0 : (int)(common * 2 * 100 / total);
-    }
+    // clusterAlbums()/findBestTrack()/titleSimilarity() : extraits vers AlbumClusterWorker
+    // (2026-07-07, voir sa Javadoc pour le pourquoi).
 
     private String readTag(File f, FieldKey key) {
         try {

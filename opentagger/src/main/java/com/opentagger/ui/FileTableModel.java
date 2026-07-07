@@ -103,6 +103,11 @@ public class FileTableModel extends AbstractTableModel {
     public int totalCount() { return entries.size(); }
     public boolean isFiltered() { return filter != null; }
 
+    /** Vue non modifiable de TOUS les fichiers, filtre ignoré — pour les actions qui doivent
+     *  raisonner sur la bibliothèque entière (ex: AlbumClusterWorker) plutôt que la vue filtrée
+     *  actuelle, contrairement à get()/getRowCount() qui portent sur `visible`. */
+    public List<FileEntry> allEntries() { return java.util.Collections.unmodifiableList(entries); }
+
     public void replaceAll(List<FileEntry> list) {
         entries.clear();
         entries.addAll(list);

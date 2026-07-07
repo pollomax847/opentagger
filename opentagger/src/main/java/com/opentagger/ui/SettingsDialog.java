@@ -144,7 +144,6 @@ public class SettingsDialog extends JDialog {
         {"pl", "Polonais"}, {"ru", "Russe"}, {"ja", "Japonais"}, {"ko", "Coréen"},
         {"zh", "Chinois"}, {"ar", "Arabe"}, {"tr", "Turc"},
     };
-    private JCheckBox  chkAlbumCluster;
     private JCheckBox  chkPrioritizeIncomplete;
     @SuppressWarnings("unchecked")
     private JComboBox<String>         cmbCountryPicker;
@@ -629,17 +628,6 @@ public class SettingsDialog extends JDialog {
             "Ordre de traitement");
         priorityInner.add(priorityHint, BorderLayout.SOUTH);
 
-        // ── Album clustering ──────────────────────────────────────────────────
-        chkAlbumCluster = new JCheckBox(I18n.t("Grouper par album et corriger numéros de piste (passe 2 après taguage)"));
-        JLabel clusterHint = new JLabel(I18n.t("<html><i>Pour chaque groupe de ≥2 fichiers partageant le même releaseMbid,<br>" +
-            "un seul lookupRelease MB corrige trackNo, trackTotal, discNo, albumArtist.</i></html>"));
-        clusterHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
-        clusterHint.setBorder(new EmptyBorder(0, 10, 4, 0));
-        JPanel clusterPanel = new JPanel(new BorderLayout()); clusterPanel.setBorder(new EmptyBorder(8,8,8,8));
-        JPanel clusterInner = form(new String[]{""}, new JComponent[]{chkAlbumCluster}, "Album Clustering");
-        clusterInner.add(clusterHint, BorderLayout.SOUTH);
-        clusterPanel.add(clusterInner, BorderLayout.CENTER);
-
         // ── Filtres types de release ───────────────────────────────────────────
         for (int i = 0; i < PRIMARY_TYPES.length; i++)   chkPrimaryTypes[i]      = new JCheckBox(PRIMARY_TYPES[i]);
         for (int i = 0; i < SECONDARY_TYPES.length; i++) chkExcludedSecondary[i] = new JCheckBox(SECONDARY_TYPES[i]);
@@ -681,7 +669,6 @@ public class SettingsDialog extends JDialog {
         combined.add(mbGenrePanel);
         combined.add(transPanel);
         combined.add(priorityInner);
-        combined.add(clusterPanel);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -1645,7 +1632,6 @@ public class SettingsDialog extends JDialog {
                 if (TRANSLATE_LOCALES[i][0].equalsIgnoreCase(savedLocale)) { idx = i; break; }
             cmbTranslateLocale.setSelectedIndex(idx);
         }
-        chkAlbumCluster           .setSelected(cfg.albumClusterEnabled());
         chkPrioritizeIncomplete   .setSelected(cfg.prioritizeIncomplete());
 
         // ─ Transcodage ─
@@ -1812,7 +1798,6 @@ public class SettingsDialog extends JDialog {
         p.setProperty("metadata.standardize_artists",  String.valueOf(chkStandardizeArtists.isSelected()));
         p.setProperty("metadata.translate_artists",    String.valueOf(chkTranslateArtists.isSelected()));
         p.setProperty("metadata.translate_locale",     codeFromLabel((String) cmbTranslateLocale.getSelectedItem()));
-        p.setProperty("albums.cluster",                String.valueOf(chkAlbumCluster.isSelected()));
         p.setProperty("batch.prioritize_incomplete",   String.valueOf(chkPrioritizeIncomplete.isSelected()));
 
         // ─ MB Genres ─
