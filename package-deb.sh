@@ -78,6 +78,39 @@ jpackage \
     --linux-package-deps "ffmpeg"
 
 DEB="$(ls "$DIST"/*.deb 2>/dev/null | head -1)"
+
+# ── Post-traitement : métadonnées AppStream + icône dans le thème d'icônes ──────────────
+# jpackage n'a pas d'option pour ajouter des fichiers arbitraires à l'image installée — on
+# extrait le .deb qu'il vient de produire, on ajoute ce qui manque, on le reconstruit. Sans ça,
+# l'appli reste invisible en dehors du terminal une fois le dépôt apt ajouté ; avec, elle apparaît
+# proprement (icône, description) dans GNOME Software / KDE Discover.
+if command -v appstreamcli >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/io.github.pollomax847.OpenTagger.metainfo.xml" ]; then
+    echo "→ Ajout des métadonnées AppStream…"
+    UNPACK="$PROJECT/target/deb-unpack"
+    rm -rf "$UNPACK"
+    mkdir -p "$UNPACK"
+    dpkg-deb -R "$DEB" "$UNPACK"
+
+    mkdir -p "$UNPACK/usr/share/metainfo" \
+             "$UNPACK/usr/share/icons/hicolor/256x256/apps" \
+             "$UNPACK/usr/share/icons/hicolor/48x48/apps"
+    # Version/date de la release mises à jour à chaque build — pas besoin de retoucher le
+    # fichier source (dépôt git) à chaque publication.
+    sed "s|version=\"[^\"]*\" date=\"[^\"]*\"|version=\"$VERSION\" date=\"$(date +%Y-%m-%d)\"|" \
+        "$SCRIPT_DIR/io.github.pollomax847.OpenTagger.metainfo.xml" \
+        > "$UNPACK/usr/share/metainfo/io.github.pollomax847.OpenTagger.metainfo.xml"
+    cp "$SCRIPT_DIR/logo.png"   "$UNPACK/usr/share/icons/hicolor/256x256/apps/opentagger.png"
+    cp "$SCRIPT_DIR/logo48.png" "$UNPACK/usr/share/icons/hicolor/48x48/apps/opentagger.png"
+
+    appstreamcli validate --no-net "$UNPACK/usr/share/metainfo/io.github.pollomax847.OpenTagger.metainfo.xml"
+
+    rm -f "$DEB"
+    dpkg-deb --build --root-owner-group "$UNPACK" "$DEB"
+    echo "→ Métadonnées AppStream ajoutées, .deb reconstruit."
+else
+    echo "⚠ appstreamcli introuvable ou métadonnées absentes — .deb produit sans AppStream (fonctionne, mais n'apparaîtra pas dans GNOME Software/KDE Discover)."
+fi
+
 echo
 echo "✓ Paquet généré : $DEB"
 echo "  Installation : sudo apt install ./$(basename "$DEB")"
