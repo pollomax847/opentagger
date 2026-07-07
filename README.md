@@ -140,13 +140,25 @@ Fichier audio chargé
 
 ### Linux
 
+**Debian / Ubuntu** — dépôt apt signé, dépendances (ffmpeg, JRE) résolues automatiquement :
+
+```bash
+curl -fsSL https://pollomax847.github.io/opentagger-releases/apt/opentagger-apt.asc \
+    | sudo tee /usr/share/keyrings/opentagger.asc >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/opentagger.asc] https://pollomax847.github.io/opentagger-releases/apt ./" \
+    | sudo tee /etc/apt/sources.list.d/opentagger.list
+sudo apt update && sudo apt install opentagger
+```
+
+**Autres distributions / depuis les sources :**
+
 ```bash
 git clone https://github.com/pollomax847/opentagger
 cd opentagger
-chmod +x install.sh && ./install.sh
+bash install-opentagger.sh
 ```
 
-Installe le `.desktop`, l'icône et crée un lanceur dans `~/.local/bin/opentagger`.
+Installe le `.desktop` (avec intégration clic-droit "Ouvrir avec"), l'icône et un lanceur autonome dans `~/.local/bin/opentagger` — le `.jar` est copié dans `~/.local/share/opentagger/`, indépendant du dépôt cloné.
 
 ### Windows
 
