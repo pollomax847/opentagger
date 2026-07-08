@@ -84,6 +84,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // ── Journal de corrections ────────────────────────────────────────────────
     private final com.opentagger.CorrectionLog correctionLog = new com.opentagger.CorrectionLog();
 
+    // Pool des tâches par fichier (voir doInBackground()) — champ plutôt que variable locale
+    // uniquement pour que cancel() (ci-dessous) puisse l'atteindre. Nécessaire car
+    // MainFrame.cancelTagging() appelle worker.cancel(true) pendant que ce pool tourne encore :
+    // sans ce champ, cancel(true) n'interrompt QUE le thread de doInBackground() lui-même — pas
+    // les tâches déjà soumises au pool, qui continuaient de taguer jusqu'à leur fin naturelle
+    // (retour utilisateur : "j'ai cliqué sur arrêter et l'application continue de tagguer").
+    private volatile ExecutorService pool;
+
     public TaggingWorker(List<FileEntry> entries, boolean useAcoustId, int maskIndex,
                          Consumer<String> onProgress, Consumer<FileEntry> onUpdate) {
         this.entries     = entries;
@@ -91,6 +99,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         this.maskIndex   = maskIndex;
         this.onProgress  = onProgress;
         this.onUpdate    = onUpdate;
+    }
+
+    /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final, donc pas
+     *  substituable) — interrompt aussi les tâches déjà en cours dans le pool (voir le commentaire
+     *  sur `pool`) : cancel(true) seul ne coupe que la boucle de soumission, pas les fichiers déjà
+     *  en train d'être identifiés/écrits, qui continuaient jusqu'à leur fin naturelle (retour
+     *  utilisateur : "j'ai cliqué sur arrêter et l'application continue de tagguer"). */
+    public void stopNow() {
+        ExecutorService p = pool;
+        if (p != null) p.shutdownNow();
+        cancel(true);
     }
 
     @Override
@@ -131,7 +150,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
 
         int threads = Math.max(1, Config.get().num("batch.threads", 3));
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
         int startIdx = done.get();
 

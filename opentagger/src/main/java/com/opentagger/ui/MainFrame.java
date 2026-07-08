@@ -95,7 +95,7 @@ public class MainFrame extends JFrame {
     // ── Undo / Redo ───────────────────────────────────────────────────────────
     private final com.opentagger.UndoManager undoManager = new com.opentagger.UndoManager();
     private JButton btnUndo, btnRedo;
-    private JCheckBoxMenuItem chkForceAcoustId, chkCompleteIncomplete;
+    private JCheckBoxMenuItem chkForceAcoustId, chkCompleteIncomplete, chkAutoCompleteAlbums;
 
     // ── Barre de statut ───────────────────────────────────────────────────────
     private JLabel       lblStatus;
@@ -635,6 +635,14 @@ public class MainFrame extends JFrame {
         chkCompleteIncomplete.addActionListener(e ->
                 Config.get().set("tagging.auto_complete_incomplete", String.valueOf(chkCompleteIncomplete.isSelected())));
         m.add(chkCompleteIncomplete);
+        // Retour utilisateur : "Compléter les albums" se relançait automatiquement après CHAQUE
+        // taguage sans aucun moyen de le désactiver — surprenant sur un run non attendu. Devenu
+        // opt-in, off par défaut (symétrique de chkCompleteIncomplete ci-dessus).
+        chkAutoCompleteAlbums = new JCheckBoxMenuItem(I18n.t("Compléter les albums automatiquement après le taguage"));
+        chkAutoCompleteAlbums.setSelected(Config.get().bool("tagging.auto_complete_albums", false));
+        chkAutoCompleteAlbums.addActionListener(e ->
+                Config.get().set("tagging.auto_complete_albums", String.valueOf(chkAutoCompleteAlbums.isSelected())));
+        m.add(chkAutoCompleteAlbums);
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> cancelTagging()));
         m.addSeparator();
@@ -2347,7 +2355,7 @@ public class MainFrame extends JFrame {
     }
 
     private void cancelTagging() {
-        if (worker != null) worker.cancel(true);
+        if (worker != null) worker.stopNow();
         // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
@@ -2686,19 +2694,25 @@ public class MainFrame extends JFrame {
         long ok   = done.stream().filter(e -> e.status == FileEntry.Status.TAGGED).count();
         long skip = done.stream().filter(e -> e.status == FileEntry.Status.SKIPPED).count();
         long err  = done.stream().filter(e -> e.status == FileEntry.Status.ERROR).count();
-        setStatus(I18n.t("Terminé — ✓ %d tagué(s)  ⚠ %d ignoré(s)  ✗ %d erreur(s)  — complétion albums…",
-                ok, skip, err));
         resetBtns();
         detectLocalCompilations();
         refreshStats();
-        // Lancer la complétion albums automatiquement après chaque session de tagging — et, si la
-        // case "Compléter aussi les fichiers tagués mais incomplets" est cochée, la faire précéder
-        // par une passe de complétion (sinon les deux workers se bloqueraient mutuellement via les
-        // gardes d'exclusion : completeAlbums() refuse de démarrer tant qu'un InfoCompleterWorker
-        // tourne encore).
-        if (chkCompleteIncomplete.isSelected()) {
-            autoCompleteIncomplete(this::completeAlbums);
-        } else {
+        // Complétion des albums : automatique seulement si explicitement activé (case "Compléter
+        // les albums automatiquement après le taguage", off par défaut) — retour utilisateur : se
+        // lançait sans aucune option pour le désactiver, surprenant sur un run non attendu. Si la
+        // case "Compléter aussi les fichiers tagués mais incomplets" est cochée, cette passe la
+        // précède toujours (sinon les deux workers se bloqueraient mutuellement via les gardes
+        // d'exclusion : completeAlbums() refuse de démarrer tant qu'un InfoCompleterWorker tourne
+        // encore) — que la complétion albums suive ou non dépend uniquement de chkAutoCompleteAlbums.
+        boolean autoAlbums      = chkAutoCompleteAlbums.isSelected();
+        boolean autoIncomplete  = chkCompleteIncomplete.isSelected();
+        String suffix = autoIncomplete
+                ? I18n.t("  — complétion des fichiers incomplets…")
+                : (autoAlbums ? I18n.t("  — complétion albums…") : "");
+        setStatus(I18n.t("Terminé — ✓ %d tagué(s)  ⚠ %d ignoré(s)  ✗ %d erreur(s)", ok, skip, err) + suffix);
+        if (autoIncomplete) {
+            autoCompleteIncomplete(autoAlbums ? this::completeAlbums : () -> {});
+        } else if (autoAlbums) {
             completeAlbums();
         }
     }
@@ -2999,7 +3013,7 @@ public class MainFrame extends JFrame {
 
     private void completeAlbums() {
         if (completionWorker != null && !completionWorker.isDone()) {
-            completionWorker.cancel(true);
+            completionWorker.stopNow();
             setStatus(I18n.t("Complétion annulée."));
             return;
         }

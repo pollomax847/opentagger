@@ -70,11 +70,25 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private final AtomicInteger releases = new AtomicInteger();
     private final Map<String, String> aliasCache = new ConcurrentHashMap<>();
 
+    // Champ plutôt que variable locale de doInBackground() — même raison que TaggingWorker.pool
+    // (voir son commentaire) : sans ça, completionWorker.cancel(true) (le "annuler" self-toggle de
+    // MainFrame.completeAlbums()) n'interrompait que le thread de doInBackground(), pas les
+    // releases déjà en cours de traitement dans le pool.
+    private volatile ExecutorService pool;
+
     public AlbumCompletionWorker(FileTableModel tableModel,
                                  Consumer<String> statusCallback, Runnable doneCallback) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
         this.doneCallback   = doneCallback;
+    }
+
+    /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final) — voir
+     *  TaggingWorker.stopNow(), même raison et même correctif. */
+    public void stopNow() {
+        ExecutorService p = pool;
+        if (p != null) p.shutdownNow();
+        cancel(true);
     }
 
     @Override
@@ -150,7 +164,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         MetadataCache cache = new MetadataCache();
         try {
             int threads = Math.max(1, com.opentagger.Config.get().num("batch.threads", 3));
-            ExecutorService pool = Executors.newFixedThreadPool(threads);
+            pool = Executors.newFixedThreadPool(threads);
             List<Future<?>> futures = new ArrayList<>();
 
             for (Map.Entry<String, Map<String, FileEntry>> group : releaseGroups.entrySet()) {
