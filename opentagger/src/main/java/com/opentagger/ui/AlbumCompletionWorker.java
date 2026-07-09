@@ -353,6 +353,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private FileEntry findCandidate(Map<String, FileEntry> index, String trackTitle) {
         String norm = normalize(trackTitle);
         if (norm.isBlank()) return null;
+        // Piste MB au titre générique ("Unknown", "Track 5"...) : rare sur une vraie release
+        // cataloguée mais pas impossible (bootlegs, field recordings) — un candidat SKIPPED tout
+        // aussi mal nommé (dictaphone) matcherait sinon même en correspondance "exacte" (étape 1),
+        // qui ne vérifie aujourd'hui aucune ressemblance de contenu réel.
+        if (isGenericTitle(norm)) return null;
 
         // 1. Correspondance exacte
         FileEntry hit = index.get(norm);
@@ -386,6 +391,28 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         int count = 0;
         for (String w : a) if (setB.contains(w)) count++;
         return count;
+    }
+
+    // Mots sans aucun pouvoir discriminant dans un titre (dictaphone/téléphone : "Recording 001",
+    // "Titre_Inconnu", "Musique_29007"...) — un fichier ou une piste ainsi nommé(e) n'est presque
+    // jamais un vrai titre catalogué sur MusicBrainz. Laisser deux titres "se ressembler" alors que
+    // les deux sont génériques (ex. une piste MB vaguement titrée "Recording 001" et un fichier
+    // candidat dictaphone du même nom) revient à faire confiance à du bruit textuel plutôt qu'à une
+    // vraie correspondance. Partagé avec TaggingWorker.matchFileToTrack() (même risque, extrait ici
+    // pour éviter que ce garde-fou existe dans un seul des deux appariements piste↔fichier du projet
+    // — trouvé lors d'un audit ultérieur : ce fix n'avait été appliqué qu'à TaggingWorker jusque-là).
+    static final java.util.Set<String> GENERIC_TITLE_WORDS = java.util.Set.of(
+            "recording", "rec", "track", "piste", "titre", "title", "inconnu", "unknown",
+            "untitled", "download", "audio", "voice", "memo", "musique", "daily", "sound", "clip");
+
+    static boolean isGenericTitle(String normTitle) {
+        if (normTitle.isBlank()) return false; // le cas "aucun titre" est géré séparément
+        for (String w : normTitle.split("\\s+")) {
+            if (w.isEmpty()) continue;
+            if (w.chars().allMatch(Character::isDigit)) continue; // un numéro seul est ignoré
+            if (!GENERIC_TITLE_WORDS.contains(w)) return false; // mot informatif → pas générique
+        }
+        return true;
     }
 
     static String normalize(String s) {

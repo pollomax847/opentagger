@@ -6,18 +6,31 @@ import javax.swing.table.TableRowSorter;
 import java.util.List;
 
 /**
- * TableRowSorter qui survit à "Comparison method violates its general contract!".
+ * TableRowSorter qui survit à "Comparison method violates its general contract!" et aux
+ * incohérences transitoires de rang face au modèle.
  *
- * Cette exception apparaît quand une ligne affichée est comparée deux fois avec des valeurs
- * différentes AU MILIEU d'un même tri — ici parce que des workers d'arrière-plan (TaggingWorker
- * en tête, confirmé 697 fois en 3 jours de logs de production) mutent encore certains champs de
- * FileEntry/TagInfo pendant que ce thread trie, avant d'avoir fini de notifier l'EDT. La plupart
- * de ces sites ont été corrigés à la source (mutation différée sur l'EDT), mais TaggingWorker
- * gère aussi l'annulation en relisant son propre statut de manière synchrone entre deux étapes :
- * y appliquer le même correctif risquait d'introduire un vrai bug de contrôle pour éliminer un
- * bug d'affichage. Ce filet de sécurité couvre ce cas (et tout autre non prévu) sans toucher à
- * cette logique : le tri en échec est simplement abandonné, et se corrige de lui-même au
+ * Cette première exception apparaît quand une ligne affichée est comparée deux fois avec des
+ * valeurs différentes AU MILIEU d'un même tri — ici parce que des workers d'arrière-plan
+ * (TaggingWorker en tête, confirmé 697 fois en 3 jours de logs de production) mutent encore
+ * certains champs de FileEntry/TagInfo pendant que ce thread trie, avant d'avoir fini de notifier
+ * l'EDT. La plupart de ces sites ont été corrigés à la source (mutation différée sur l'EDT), mais
+ * TaggingWorker gère aussi l'annulation en relisant son propre statut de manière synchrone entre
+ * deux étapes : y appliquer le même correctif risquait d'introduire un vrai bug de contrôle pour
+ * éliminer un bug d'affichage. Ce filet de sécurité couvre ce cas (et tout autre non prévu) sans
+ * toucher à cette logique : le tri en échec est simplement abandonné, et se corrige de lui-même au
  * prochain événement de la table (très proche dans le temps pendant un taguage actif).
+ *
+ * Trouvé en production (log utilisateur réel, "invalid range" répété 4600+ fois pendant un
+ * taguage de bibliothèque de plusieurs heures) : `DefaultRowSorter.checkAgainstModel()` lève un
+ * `IndexOutOfBoundsException("Invalid range")` — PAS un `IllegalArgumentException` — quand le
+ * nombre de lignes qu'on lui annonce ne correspond plus au modèle au moment où l'EDT traite
+ * l'événement (même cause racine que ci-dessus : plusieurs `FileTableModel.update()` mettant à
+ * jour des lignes différentes se chevauchent avec l'ajout/retrait de lignes pendant un run actif).
+ * Cette exception est une sœur d'`IllegalArgumentException` (pas une sous-classe) : elle passait
+ * donc tout droit à travers l'ancien filtre, plantait l'EDT à chaque occurrence malgré le
+ * commentaire de classe promettant de couvrir "tout autre [cas] non prévu". Élargi à
+ * `RuntimeException` — filet de sécurité d'affichage déjà scopé à 4 méthodes qui ne font que
+ * déléguer au sorter Swing, donc élargir n'y cache aucune vraie erreur de logique métier ailleurs.
  */
 public class SafeTableRowSorter<M extends TableModel> extends TableRowSorter<M> {
 
@@ -29,8 +42,8 @@ public class SafeTableRowSorter<M extends TableModel> extends TableRowSorter<M> 
     public void sort() {
         try {
             super.sort();
-        } catch (IllegalArgumentException ignored) {
-            // Comparateur temporairement incohérent — pas fatal, on retente au prochain événement.
+        } catch (RuntimeException ignored) {
+            // Comparateur/rang temporairement incohérent — pas fatal, on retente au prochain événement.
         }
     }
 
@@ -38,21 +51,21 @@ public class SafeTableRowSorter<M extends TableModel> extends TableRowSorter<M> 
     public void rowsUpdated(int firstRow, int endRow) {
         try {
             super.rowsUpdated(firstRow, endRow);
-        } catch (IllegalArgumentException ignored) {}
+        } catch (RuntimeException ignored) {}
     }
 
     @Override
     public void rowsUpdated(int firstRow, int endRow, int column) {
         try {
             super.rowsUpdated(firstRow, endRow, column);
-        } catch (IllegalArgumentException ignored) {}
+        } catch (RuntimeException ignored) {}
     }
 
     @Override
     public List<? extends RowSorter.SortKey> getSortKeys() {
         try {
             return super.getSortKeys();
-        } catch (IllegalArgumentException ignored) {
+        } catch (RuntimeException ignored) {
             return List.of();
         }
     }

@@ -314,7 +314,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 java.util.Set<String> usedTracks = new java.util.HashSet<>();
                 for (FileEntry entry : files) {
                     if (isCancelled()) break;
-                    MusicBrainzClient.ReleaseTrack track = matchFileToTrack(entry, tl.tracks());
+                    File entryFile = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+                    MusicBrainzClient.ReleaseTrack track = matchFileToTrack(entry, tl.tracks(), entryFile);
                     if (track == null) {
                         log(I18n.t("[album-first] %s → pas d'appariement dans tracklist", entry.filename()));
                         continue;
@@ -486,33 +487,18 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
     }
 
-    /** Apparie un fichier à une piste de la tracklist : d'abord par numéro, puis par titre. */
-    // Mots sans aucun pouvoir discriminant dans un titre (dictaphone/téléphone : "Recording 001",
-    // "Titre_Inconnu", "Musique_29007"...) — un fichier ainsi nommé n'est presque jamais un vrai
-    // titre catalogué sur MusicBrainz. Le laisser "ressembler" à une piste MB tout aussi générique
-    // (ex. un bootleg catalogué "Recording 001" par coïncidence) revient à faire confiance à du
-    // bruit textuel. Trouvé en observant un run réel : un fichier déjà nommé "Recording 001" par
-    // un dictaphone a matché une piste MB tout aussi vaguement nommée "Recording 001".
-    private static final java.util.Set<String> GENERIC_TITLE_WORDS = java.util.Set.of(
-            "recording", "rec", "track", "piste", "titre", "title", "inconnu", "unknown",
-            "untitled", "download", "audio", "voice", "memo", "musique", "daily", "sound", "clip");
-
-    private boolean isGenericTitle(String normTitle) {
-        if (normTitle.isBlank()) return false; // le cas "aucun titre" est géré séparément
-        for (String w : normTitle.split("\\s+")) {
-            if (w.isEmpty()) continue;
-            if (w.chars().allMatch(Character::isDigit)) continue; // un numéro seul est ignoré
-            if (!GENERIC_TITLE_WORDS.contains(w)) return false; // mot informatif → pas générique
-        }
-        return true;
-    }
-
+    /** Apparie un fichier à une piste de la tracklist : d'abord par numéro, puis par titre.
+     *  Le garde-fou "titre générique" (GENERIC_TITLE_WORDS/isGenericTitle) vit maintenant dans
+     *  AlbumCompletionWorker (avec normalize()) et est partagé par les deux appariements
+     *  piste↔fichier du projet — voir son commentaire pour le pourquoi. */
     private MusicBrainzClient.ReleaseTrack matchFileToTrack(
-            FileEntry entry, List<MusicBrainzClient.ReleaseTrack> tracks) {
+            FileEntry entry, List<MusicBrainzClient.ReleaseTrack> tracks, File audioFile) {
         String title = (entry.current != null && !entry.current.title.isBlank())
                 ? entry.current.title : filenameToTitle(entry.filename());
         String normTitle = title.isBlank() ? "" : AlbumCompletionWorker.normalize(title);
-        if (isGenericTitle(normTitle)) return null;
+        if (AlbumCompletionWorker.isGenericTitle(normTitle)) return null;
+
+        List<MusicBrainzClient.ReleaseTrack> sameNumber = null;
 
         // 1. Par numéro de piste (tag existant ou préfixe dans le nom de fichier) — accepté
         // seulement si aucun titre n'est exploitable pour vérifier (fichier sans tag, nom
@@ -522,12 +508,62 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // dossier "vrac" (morceaux totalement sans rapport partageant juste un préfixe numérique
         // coïncidant, ex. "1-01 10 Casseurs Flowters - ...") se faisait réassigner en masse aux
         // pistes d'un album MusicBrainz sans aucun rapport, sur le seul numéro extrait du nom.
+        //
+        // Sur une release multi-disques, plusieurs disques partagent souvent le même numéro de
+        // piste (disque 1 piste 3 ET disque 2 piste 3) — si le disque du fichier n'est pas connu
+        // et qu'aucun titre exploitable ne permet de trancher, prendre "le premier trouvé" revient
+        // à toujours deviner le disque 1 silencieusement. Même garde-fou que
+        // AlbumClusterWorker.findBestTrack() (le sibling qui a hérité de ce correctif d'origine) :
+        // ne jamais deviner entre plusieurs disques, ne matcher que si le disque du fichier est
+        // connu OU si le titre désigne sans ambiguïté une seule candidate parmi elles.
         int num = extractTrackNumber(entry);
         if (num > 0) {
+            Integer discHint = null;
+            if (entry.current != null && !entry.current.discNo.isBlank()) {
+                try { discHint = Integer.parseInt(entry.current.discNo.trim()); } catch (NumberFormatException ignored) {}
+            }
+            sameNumber = new java.util.ArrayList<>();
             for (MusicBrainzClient.ReleaseTrack t : tracks) {
                 if (t.trackNo() != num) continue;
+                if (discHint != null && t.disc() != 0 && t.disc() != discHint) continue;
+                sameNumber.add(t);
+            }
+            if (sameNumber.size() == 1) {
+                MusicBrainzClient.ReleaseTrack t = sameNumber.get(0);
                 if (normTitle.isBlank() || titlesResemble(normTitle, AlbumCompletionWorker.normalize(t.title())))
                     return t;
+            } else if (sameNumber.size() > 1 && !normTitle.isBlank()) {
+                MusicBrainzClient.ReleaseTrack onlyMatch = null;
+                int resembling = 0;
+                for (MusicBrainzClient.ReleaseTrack t : sameNumber) {
+                    if (titlesResemble(normTitle, AlbumCompletionWorker.normalize(t.title()))) {
+                        onlyMatch = t; resembling++;
+                    }
+                }
+                if (resembling == 1) return onlyMatch;
+            }
+            // sameNumber.size() > 1 sans titre exploitable pour trancher : ambigu, ne pas deviner —
+            // tombe sur l'étape 1.5/2 ci-dessous, ou sur le pipeline normal piste-par-piste si
+            // celles-ci échouent aussi.
+        }
+
+        // 1.5. Par durée du fichier (±3s, même tolérance que AlbumClusterWorker.findBestTrack) —
+        // seulement dans les cas que le numéro de piste n'a pas suffi à trancher (pas de numéro
+        // exploitable, ou ambigu entre plusieurs disques) : évite de renvoyer ce fichier vers le
+        // pipeline complet piste-par-piste (SongRec/AcoustID/recherche MB texte, bien plus coûteux)
+        // pour un cas que la seule durée aurait suffi à résoudre sans ambiguïté. Restreint aux
+        // candidats déjà filtrés par numéro/disque quand ils existent, sinon toute la tracklist.
+        if (audioFile != null) {
+            int fileDurSec = AudioDuration.probeSeconds(audioFile.getAbsolutePath());
+            if (fileDurSec > 0) {
+                List<MusicBrainzClient.ReleaseTrack> pool =
+                        (sameNumber != null && !sameNumber.isEmpty()) ? sameNumber : tracks;
+                List<MusicBrainzClient.ReleaseTrack> withinTolerance = new java.util.ArrayList<>();
+                for (MusicBrainzClient.ReleaseTrack t : pool) {
+                    if (t.lengthMs() <= 0) continue;
+                    if (Math.abs(t.lengthMs() / 1000 - fileDurSec) <= 3) withinTolerance.add(t);
+                }
+                if (withinTolerance.size() == 1) return withinTolerance.get(0);
             }
         }
 
