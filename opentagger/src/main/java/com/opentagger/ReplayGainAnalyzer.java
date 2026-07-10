@@ -34,6 +34,11 @@ public class ReplayGainAnalyzer {
      */
     public static RGResult analyzeAlbum(java.util.List<String> filePaths) {
         if (filePaths == null || filePaths.size() < 2) return null;
+        // Cette analyse lit l'intégralité de TOUTES les pistes de l'album concaténées — la plus
+        // grosse lecture disque du lot. Un seul permis pris sur la première piste : elles vivent
+        // normalement toutes sur le même disque physique (même dossier d'album), voir
+        // DiskIoThrottle pour le pourquoi de la limite.
+        java.util.concurrent.Semaphore gate = DiskIoThrottle.acquireFor(new java.io.File(filePaths.get(0)));
         try {
             String ffmpeg = Config.get().str("audio.ffmpeg_path", "ffmpeg");
             java.util.List<String> cmd = new java.util.ArrayList<>();
@@ -52,7 +57,9 @@ public class ReplayGainAnalyzer {
             if (output == null) return null; // timeout — process tué, pas de résultat exploitable
 
             return parseOutput(output);
-        } catch (Exception e) { return null; }
+        } catch (Exception e) { return null; } finally {
+            DiskIoThrottle.release(gate);
+        }
     }
 
     /**
@@ -62,6 +69,9 @@ public class ReplayGainAnalyzer {
      *   [replaygain @ 0x…] track_peak = 0.983547
      */
     public RGResult analyze(String filePath) {
+        // Lit l'intégralité du fichier (nécessaire pour un ReplayGain correct, pas de raccourci
+        // possible) — la plus grosse lecture disque par piste du pipeline. Voir DiskIoThrottle.
+        java.util.concurrent.Semaphore gate = DiskIoThrottle.acquireFor(new java.io.File(filePath));
         try {
             String ffmpeg = Config.get().str("audio.ffmpeg_path", "ffmpeg");
             ProcessBuilder pb = new ProcessBuilder(
@@ -71,7 +81,9 @@ public class ReplayGainAnalyzer {
             if (output == null) return null;
 
             return parseOutput(output);
-        } catch (Exception e) { return null; }
+        } catch (Exception e) { return null; } finally {
+            DiskIoThrottle.release(gate);
+        }
     }
 
     private static RGResult parseOutput(String output) {

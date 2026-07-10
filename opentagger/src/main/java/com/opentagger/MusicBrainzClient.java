@@ -666,6 +666,58 @@ public class MusicBrainzClient {
         return info;
     }
 
+    /** Une release parmi celles où un recording apparaît — voir {@link #lookupRecordingReleases}.
+     *  Contrairement à {@link #lookupRecording}, qui n'en retient qu'une seule (via
+     *  {@code findBestRelease}), ceci expose TOUTES les releases pour laisser l'appelant décider
+     *  (ex. {@code ui.CompilationClusterWorker} cherche celle qui correspond à une série de
+     *  compilation configurée par l'utilisateur). */
+    public record RecordingRelease(String releaseId, String releaseTitle, String releaseGroupTitle,
+                                    List<String> secondaryTypes) {}
+
+    /**
+     * Comme {@link #lookupRecording}, mais retourne TOUTES les releases où l'enregistrement
+     * apparaît (album studio original, compilations diverses…) au lieu d'en réduire une seule via
+     * {@code findBestRelease}. Utilisé par {@code ui.CompilationClusterWorker} pour vérifier si un
+     * recording déjà tagué existe aussi sur une compilation nommée que l'utilisateur a configurée.
+     */
+    public List<RecordingRelease> lookupRecordingReleases(String recordingMbid) throws Exception {
+        if (recordingMbid == null || recordingMbid.isBlank()) return List.of();
+        String url = BASE_URL + "/recording/" + recordingMbid.trim()
+                + "?fmt=json&inc=releases+release-groups";
+
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return List.of();
+
+        lastRawJson = response.body();
+        return parseRecordingReleasesFromCache(lastRawJson);
+    }
+
+    /** Reparse une réponse déjà mise en cache par {@link #lookupRecordingReleases} (même motif que
+     *  {@link #parseReleaseFromCache}) — évite un aller-retour réseau (et le rate-limit MB) pour un
+     *  recording déjà vérifié lors d'une exécution précédente de l'outil. */
+    public List<RecordingRelease> parseRecordingReleasesFromCache(String json) {
+        try {
+            JsonNode rec = mapper.readTree(json);
+            JsonNode releases = rec.path("releases");
+            if (!releases.isArray()) return List.of();
+
+            List<RecordingRelease> result = new ArrayList<>();
+            for (JsonNode release : releases) {
+                JsonNode releaseGroup = release.path("release-group");
+                List<String> secTypes = new ArrayList<>();
+                for (JsonNode t : releaseGroup.path("secondary-types")) secTypes.add(t.asText());
+                result.add(new RecordingRelease(
+                        release.path("id").asText("").trim(),
+                        release.path("title").asText("").trim(),
+                        releaseGroup.path("title").asText("").trim(),
+                        secTypes));
+            }
+            return result;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
     /**
      * Parse les genres folksonomy MB. Filtre par vote minimum et liste noire.
      * Format API : [{"name":"rock","count":15,"disambiguation":""},…]
@@ -720,10 +772,23 @@ public class MusicBrainzClient {
 
     /**
      * Cherche un alias latin pour un artiste MB (translittération).
-     * Retourne l'alias correspondant au locale préféré (ex: "en"), ou "" si introuvable.
-     * Exemple : artiste MB "宇多田ヒカル" → alias "Hikaru Utada" (locale=en)
+     * Essaie chaque locale de {@code preferredLocales} dans l'ordre, retourne le premier alias
+     * trouvé, ou "" si aucune ne donne de résultat. Exemple : artiste MB "宇多田ヒカル" → alias
+     * "Hikaru Utada" (locale=en).
+     *
+     * Repli sur "en" (si absente de la liste) puis sur n'importe quel alias déjà en écriture
+     * latine si aucune locale demandée n'a rien donné — trouvé en vérifiant en direct sur
+     * MusicBrainz (2026-07-10, artistes réels "蔡依林"/Jolin Tsai et "Ханна"/Hanna) que la
+     * quasi-totalité des alias de romanisation sont tagués locale=en, quelle que soit la langue
+     * de l'utilisateur — un alias "fr" (ou toute autre langue que l'anglais) spécifique existe
+     * rarement. Sans ce repli, la translittération échouait silencieusement pour quasiment tout
+     * le monde qui n'avait pas explicitement choisi "en", même avec la fonctionnalité activée et
+     * un artistMbid valide — confirmé : zéro traduction réussie sur toute une session de plusieurs
+     * jours avec locale=fr seule, malgré des dizaines d'artistes non-latins rencontrés qui ONT un
+     * alias "en" utile. L'utilisateur peut maintenant lister plusieurs locales par ordre de
+     * priorité plutôt que de dépendre uniquement de ce repli automatique.
      */
-    public String lookupArtistAlias(String artistMbid, String preferredLocale) throws Exception {
+    public String lookupArtistAlias(String artistMbid, String[] preferredLocales) throws Exception {
         if (artistMbid == null || artistMbid.isBlank()) return "";
         String url = BASE_URL + "/artist/" + artistMbid.trim() + "?fmt=json&inc=aliases";
         HttpResponse<String> resp = getWithRetry(url);
@@ -732,8 +797,36 @@ public class MusicBrainzClient {
         JsonNode aliases = root.path("aliases");
         if (!aliases.isArray() || aliases.isEmpty()) return "";
 
-        String prefix = preferredLocale == null ? "en" : preferredLocale.toLowerCase();
+        java.util.List<String> locales = (preferredLocales == null || preferredLocales.length == 0)
+                ? java.util.List.of("en") : java.util.Arrays.asList(preferredLocales);
 
+        boolean hasEnglish = false;
+        for (String locale : locales) {
+            String prefix = locale == null ? "" : locale.trim().toLowerCase();
+            if (prefix.isBlank()) continue;
+            if ("en".equals(prefix)) hasEnglish = true;
+            String result = findAliasByLocale(aliases, prefix);
+            if (!result.isBlank()) return result;
+        }
+
+        if (!hasEnglish) {
+            String result = findAliasByLocale(aliases, "en");
+            if (!result.isBlank()) return result;
+        }
+
+        // Dernier repli : n'importe quel alias "Artist name" déjà en écriture latine, peu importe
+        // son locale déclaré (certains alias utiles n'ont carrément pas de locale renseigné).
+        for (JsonNode alias : aliases) {
+            String type = alias.path("type").asText("");
+            String name = alias.path("name").asText("").trim();
+            if (!name.isBlank() && "Artist name".equalsIgnoreCase(type) && !TagEnrichment.hasNonLatinChars(name)) {
+                return name;
+            }
+        }
+        return "";
+    }
+
+    private static String findAliasByLocale(JsonNode aliases, String prefix) {
         // 1er passage : alias dont le locale commence par le préféré et dont le type est "Artist name"
         for (JsonNode alias : aliases) {
             String locale = alias.path("locale").asText("").toLowerCase();

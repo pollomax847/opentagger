@@ -66,6 +66,7 @@ public class MainFrame extends JFrame {
     private InfoCompleterWorker     infoCompleter;
     private ListenBrainzSyncWorker  lbSyncWorker;
     private AlbumClusterWorker      clusterWorker;
+    private CompilationClusterWorker compilationClusterWorker;
     private SaveWorker              saveWorker;
     private int                     currentMask = Config.get().defaultRenameMask();
     // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
@@ -109,6 +110,7 @@ public class MainFrame extends JFrame {
     private final com.opentagger.UndoManager undoManager = new com.opentagger.UndoManager();
     private JButton btnUndo, btnRedo;
     private JCheckBoxMenuItem chkForceAcoustId, chkCompleteIncomplete, chkAutoCompleteAlbums;
+    private JCheckBoxMenuItem chkAutoGroupCompilations;
 
     // ── Barre de statut ───────────────────────────────────────────────────────
     private JLabel       lblStatus;
@@ -665,6 +667,18 @@ public class MainFrame extends JFrame {
         chkAutoCompleteAlbums.addActionListener(e ->
                 Config.get().set("tagging.auto_complete_albums", String.valueOf(chkAutoCompleteAlbums.isSelected())));
         m.add(chkAutoCompleteAlbums);
+        // Demandé le 2026-07-10, juste après avoir choisi le mode "proactif" (revue manuelle) pour
+        // "Grouper par compilations…" plutôt qu'une réécriture automatique — l'utilisateur voulait
+        // aussi pouvoir déclencher la RECHERCHE toute seule, sans pour autant perdre la revue avant
+        // écriture. Déclenché après "Enregistrer tout" (pas après "Tout tagger" comme les deux
+        // cases ci-dessus) : les fichiers ne passent à TAGGED (recordingMbid fiable, condition de
+        // CompilationClusterWorker) qu'à l'Enregistrement, jamais juste après l'identification
+        // (façon Picard) — voir le hook sur saveWorker plus bas plutôt que onTaggingDone().
+        chkAutoGroupCompilations = new JCheckBoxMenuItem(I18n.t("Grouper par compilations automatiquement après l'enregistrement"));
+        chkAutoGroupCompilations.setSelected(Config.get().bool("tagging.auto_group_compilations", false));
+        chkAutoGroupCompilations.addActionListener(e ->
+                Config.get().set("tagging.auto_group_compilations", String.valueOf(chkAutoGroupCompilations.isSelected())));
+        m.add(chkAutoGroupCompilations);
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> stopAll()));
         m.addSeparator();
@@ -674,6 +688,7 @@ public class MainFrame extends JFrame {
         m.addSeparator();
         m.add(mitem(I18n.t("Compléter les albums…"),   "Ctrl+L", e -> completeAlbums()));
         m.add(mitem(I18n.t("Grouper les albums…"),     "Ctrl+K", e -> clusterAlbums()));
+        m.add(mitem(I18n.t("Grouper par compilations…"), null,   e -> groupByCompilations()));
         m.addSeparator();
         m.add(mitem(I18n.t("Transcoder les fichiers…"),   "Ctrl+T", e -> transcodeFiles(false)));
         m.add(mitem(I18n.t("Transcoder la sélection…"),   null,     e -> transcodeFiles(true)));
@@ -701,6 +716,7 @@ public class MainFrame extends JFrame {
 
         JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
         bibliotheque.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
+        bibliotheque.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
         bibliotheque.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
         bibliotheque.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
         bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
@@ -2535,6 +2551,12 @@ public class MainFrame extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     progress.setVisible(false);
                     refreshStats();
+                    // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
+                    // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
+                    // qu'à l'Enregistrement. groupByCompilations() garde ses propres gardes
+                    // (activeOperations, etc.) ; si quelque chose bloque, la recherche est juste
+                    // sautée cette fois-ci, sans forcer.
+                    if (chkAutoGroupCompilations.isSelected()) groupByCompilations();
                 });
             }
         });
@@ -3263,6 +3285,43 @@ public class MainFrame extends JFrame {
         clusterWorker.execute();
     }
 
+    // ── Grouper par compilations (Stars 80, NRJ, Fun Radio, RFM…) ─────────────
+
+    private void groupByCompilations() {
+        if (compilationClusterWorker != null && !compilationClusterWorker.isDone()) {
+            compilationClusterWorker.cancel(true);
+            setStatus(I18n.t("Groupement par compilations annulé."));
+            return;
+        }
+        java.util.List<String> ops = activeOperations();
+        if (!ops.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de grouper par compilations.", String.join(", ", ops)));
+            return;
+        }
+        // Même garde que clusterAlbums() et pour la même raison : ne traiter qu'une bibliothèque
+        // taguée à 100%, jamais un sous-ensemble encore en cours de taguage.
+        long unfinished = tableModel.allEntries().stream()
+                .filter(e -> e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.PROCESSING)
+                .count();
+        if (unfinished > 0) {
+            setStatus(I18n.t("%d fichier(s) pas encore tagué(s) — la bibliothèque doit être taguée à 100%% avant de grouper par compilations.", unfinished));
+            return;
+        }
+        setStatus(I18n.t("Recherche de correspondances de compilations…"));
+        compilationClusterWorker = new CompilationClusterWorker(
+            tableModel,
+            this::setStatus,
+            matches -> SwingUtilities.invokeLater(() -> {
+                if (matches.isEmpty()) {
+                    setStatus(I18n.t("Aucune correspondance de compilation trouvée."));
+                } else {
+                    new CompilationMatchDialog(this, matches, tableModel).setVisible(true);
+                }
+            })
+        );
+        compilationClusterWorker.execute();
+    }
+
     // ── Organiser en dossiers ─────────────────────────────────────────────────
 
     private Path organizeDestRoot;
@@ -3692,6 +3751,12 @@ public class MainFrame extends JFrame {
         for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
         new PodcastDialog(this, all, tableModel).setVisible(true);
         refreshStats();
+    }
+
+    // ── Récupération audio de vidéos non reconnues ────────────────────────────
+
+    private void openVideoRecoveryDialog() {
+        new VideoRecoveryDialog(this).setVisible(true);
     }
 
     // ── Détection de doublons ─────────────────────────────────────────────────

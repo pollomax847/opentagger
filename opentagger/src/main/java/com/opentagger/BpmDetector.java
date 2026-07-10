@@ -33,9 +33,17 @@ public class BpmDetector {
      * @return BPM arrondi, ou -1 si échec / ffmpeg indisponible.
      */
     public int detect(String filePath) {
-        float[] energy = extractEnergyEnvelope(filePath);
-        if (energy == null || energy.length < 100) return -1;
-        return computeBpmByAutocorrelation(energy, SAMPLE_RATE / FRAME_SIZE);
+        // Limite l'accès disque concurrent si ce fichier vit sur un disque mécanique détecté —
+        // voir DiskIoThrottle pour le pourquoi (mesuré en direct : disques à 80-98% d'utilisation
+        // pendant que le CPU restait très majoritairement idle).
+        java.util.concurrent.Semaphore gate = DiskIoThrottle.acquireFor(new File(filePath));
+        try {
+            float[] energy = extractEnergyEnvelope(filePath);
+            if (energy == null || energy.length < 100) return -1;
+            return computeBpmByAutocorrelation(energy, SAMPLE_RATE / FRAME_SIZE);
+        } finally {
+            DiskIoThrottle.release(gate);
+        }
     }
 
     // ── Décodage PCM via ffmpeg ───────────────────────────────────────────────

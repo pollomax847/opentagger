@@ -136,8 +136,22 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet Matching — releases préférées + méta ───────────────────────────
     private JCheckBox  chkTranslateArtists;
+    // Plusieurs locales, par ordre de priorité (même widget qu'un pays préféré : "+"/"−"/"↑"/"↓")
+    // — la plupart des alias de romanisation MusicBrainz sont tagués locale=en peu importe la
+    // langue réellement préférée par l'utilisateur, donc une seule langue choisie manquait souvent
+    // sa cible (confirmé en direct : zéro traduction réussie avec juste "fr" configuré, malgré des
+    // dizaines d'artistes non-latins ayant un alias "en" exploitable). Repli automatique sur "en"
+    // déjà en place côté MusicBrainzClient si aucune des langues listées ici ne donne de résultat.
     @SuppressWarnings("unchecked")
-    private JComboBox<String> cmbTranslateLocale;
+    private JComboBox<String>        cmbTranslateLocalePicker;
+    private DefaultListModel<String> lstTranslateLocalesModel = new DefaultListModel<>();
+    private JList<String>            lstTranslateLocales;
+    // Séries de compilations (ex. "Stars 80", "NRJ", "Fun Radio", "RFM") que l'utilisateur veut
+    // voir reliées à ses morceaux déjà tagués — voir ui.CompilationClusterWorker. Texte libre (pas
+    // de vocabulaire fermé comme les pays/locales ci-dessus), donc un JTextField plutôt qu'un combo.
+    private JTextField                tfCompilationSeriesInput;
+    private DefaultListModel<String>  lstCompilationSeriesModel = new DefaultListModel<>();
+    private JList<String>             lstCompilationSeries;
     // code MB (locale d'alias, ex. "en") — libellé affiché. codeFromLabel() (déjà utilisée pour
     // les pays préférés) extrait le code avant " — " pour la sauvegarde.
     private static final String[][] TRANSLATE_LOCALES = {
@@ -188,6 +202,11 @@ public class SettingsDialog extends JDialog {
     }
     private static String codeFromLabel(String label) {
         return label.contains(" — ") ? label.substring(0, label.indexOf(" — ")) : label;
+    }
+    private static String localeLabel(String code) {
+        for (String[] entry : TRANSLATE_LOCALES)
+            if (entry[0].equalsIgnoreCase(code)) return entry[0] + " — " + I18n.t(entry[1]);
+        return code; // locale inconnue de la liste curatée (config éditée à la main) : garder tel quel
     }
 
     // ── Onglet MusicBrainz OAuth ──────────────────────────────────────────────
@@ -638,12 +657,59 @@ public class SettingsDialog extends JDialog {
         String[] localeItems = new String[TRANSLATE_LOCALES.length];
         for (int i = 0; i < TRANSLATE_LOCALES.length; i++)
             localeItems[i] = TRANSLATE_LOCALES[i][0] + " — " + I18n.t(TRANSLATE_LOCALES[i][1]);
-        cmbTranslateLocale = new JComboBox<>(localeItems);
-        JLabel transHint = new JLabel(I18n.t("<html><i>Exemple : 宇多田ヒカル → Hikaru Utada (locale=en).<br>Nécessite un artistMbid valide.</i></html>"));
+
+        // Même widget "+/−/↑/↓" que les pays préférés (countryPicker ci-dessus) : plusieurs
+        // langues, essayées dans l'ordre — MusicBrainzClient se rabat automatiquement sur "en"
+        // en dernier recours si aucune de la liste ne donne de résultat.
+        cmbTranslateLocalePicker = new JComboBox<>(localeItems);
+        lstTranslateLocales = new JList<>(lstTranslateLocalesModel);
+        lstTranslateLocales.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        lstTranslateLocales.setVisibleRowCount(4);
+        JScrollPane localesScroll = new JScrollPane(lstTranslateLocales);
+        localesScroll.setPreferredSize(new Dimension(220, 80));
+
+        JButton btnAddLocale    = new JButton("+");
+        JButton btnRemoveLocale = new JButton("−");
+        JButton btnUpLocale     = new JButton("↑");
+        JButton btnDownLocale   = new JButton("↓");
+        for (JButton b : new JButton[]{btnAddLocale, btnRemoveLocale, btnUpLocale, btnDownLocale})
+            b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnAddLocale.addActionListener(e -> {
+            String label = (String) cmbTranslateLocalePicker.getSelectedItem();
+            if (label == null) return;
+            String code = codeFromLabel(label);
+            for (int i = 0; i < lstTranslateLocalesModel.size(); i++)
+                if (codeFromLabel(lstTranslateLocalesModel.get(i)).equals(code)) return; // pas de doublon
+            lstTranslateLocalesModel.addElement(label);
+        });
+        btnRemoveLocale.addActionListener(e -> {
+            int sel = lstTranslateLocales.getSelectedIndex();
+            if (sel >= 0) lstTranslateLocalesModel.remove(sel);
+        });
+        btnUpLocale.addActionListener(e -> {
+            int sel = lstTranslateLocales.getSelectedIndex();
+            if (sel > 0) { String v = lstTranslateLocalesModel.remove(sel); lstTranslateLocalesModel.add(sel-1, v); lstTranslateLocales.setSelectedIndex(sel-1); }
+        });
+        btnDownLocale.addActionListener(e -> {
+            int sel = lstTranslateLocales.getSelectedIndex();
+            if (sel >= 0 && sel < lstTranslateLocalesModel.size()-1) { String v = lstTranslateLocalesModel.remove(sel); lstTranslateLocalesModel.add(sel+1, v); lstTranslateLocales.setSelectedIndex(sel+1); }
+        });
+
+        JPanel localeBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
+        for (JButton b : new JButton[]{btnAddLocale, btnRemoveLocale, btnUpLocale, btnDownLocale})
+            localeBtns.add(b);
+
+        JPanel localePicker = new JPanel(new BorderLayout(0, 4));
+        localePicker.add(cmbTranslateLocalePicker, BorderLayout.NORTH);
+        localePicker.add(localesScroll,             BorderLayout.CENTER);
+        localePicker.add(localeBtns,                BorderLayout.SOUTH);
+
+        JLabel transHint = new JLabel(I18n.t("<html><i>Exemple : 宇多田ヒカル → Hikaru Utada (locale=en).<br>Essayées dans l'ordre ; repli automatique sur \"en\" si aucune ne trouve d'alias.<br>Nécessite un artistMbid valide.</i></html>"));
         transHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         transHint.setBorder(new EmptyBorder(0, 10, 4, 0));
         JPanel transPanel = new JPanel(new BorderLayout()); transPanel.setBorder(new EmptyBorder(8,8,0,8));
-        JPanel transInner = form(new String[]{"", "Locale cible :"}, new JComponent[]{chkTranslateArtists, cmbTranslateLocale}, "Translittération artistes");
+        JPanel transInner = form(new String[]{"", "Locales cibles (priorité décroissante) :"}, new JComponent[]{chkTranslateArtists, localePicker}, "Translittération artistes");
         transInner.add(transHint, BorderLayout.SOUTH);
         transPanel.add(transInner, BorderLayout.CENTER);
 
@@ -695,11 +761,77 @@ public class SettingsDialog extends JDialog {
         releaseTypeWrap.setBorder(new EmptyBorder(8, 8, 0, 8));
         releaseTypeWrap.add(releaseTypePanel, BorderLayout.CENTER);
 
+        // ── Séries de compilations à repérer (Stars 80, NRJ, Fun Radio, RFM…) ──────────────
+        tfCompilationSeriesInput = new JTextField();
+        lstCompilationSeries = new JList<>(lstCompilationSeriesModel);
+        lstCompilationSeries.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        lstCompilationSeries.setVisibleRowCount(4);
+        JScrollPane compilationSeriesScroll = new JScrollPane(lstCompilationSeries);
+        compilationSeriesScroll.setPreferredSize(new Dimension(220, 80));
+
+        JButton btnAddCompilationSeries    = new JButton("+");
+        JButton btnRemoveCompilationSeries = new JButton("−");
+        JButton btnUpCompilationSeries     = new JButton("↑");
+        JButton btnDownCompilationSeries   = new JButton("↓");
+        for (JButton b : new JButton[]{btnAddCompilationSeries, btnRemoveCompilationSeries,
+                btnUpCompilationSeries, btnDownCompilationSeries})
+            b.setMargin(new Insets(1, 6, 1, 6));
+
+        Runnable addCompilationSeries = () -> {
+            String name = tfCompilationSeriesInput.getText().trim();
+            if (name.isBlank()) return;
+            for (int i = 0; i < lstCompilationSeriesModel.size(); i++)
+                if (lstCompilationSeriesModel.get(i).equalsIgnoreCase(name)) {
+                    tfCompilationSeriesInput.setText(""); return; // pas de doublon
+                }
+            lstCompilationSeriesModel.addElement(name);
+            tfCompilationSeriesInput.setText("");
+        };
+        btnAddCompilationSeries.addActionListener(e -> addCompilationSeries.run());
+        tfCompilationSeriesInput.addActionListener(e -> addCompilationSeries.run());
+        btnRemoveCompilationSeries.addActionListener(e -> {
+            int sel = lstCompilationSeries.getSelectedIndex();
+            if (sel >= 0) lstCompilationSeriesModel.remove(sel);
+        });
+        btnUpCompilationSeries.addActionListener(e -> {
+            int sel = lstCompilationSeries.getSelectedIndex();
+            if (sel > 0) { String v = lstCompilationSeriesModel.remove(sel); lstCompilationSeriesModel.add(sel-1, v); lstCompilationSeries.setSelectedIndex(sel-1); }
+        });
+        btnDownCompilationSeries.addActionListener(e -> {
+            int sel = lstCompilationSeries.getSelectedIndex();
+            if (sel >= 0 && sel < lstCompilationSeriesModel.size()-1) { String v = lstCompilationSeriesModel.remove(sel); lstCompilationSeriesModel.add(sel+1, v); lstCompilationSeries.setSelectedIndex(sel+1); }
+        });
+
+        JPanel compilationSeriesBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
+        for (JButton b : new JButton[]{btnAddCompilationSeries, btnRemoveCompilationSeries,
+                btnUpCompilationSeries, btnDownCompilationSeries})
+            compilationSeriesBtns.add(b);
+
+        JPanel compilationSeriesPicker = new JPanel(new BorderLayout(0, 4));
+        compilationSeriesPicker.add(tfCompilationSeriesInput,   BorderLayout.NORTH);
+        compilationSeriesPicker.add(compilationSeriesScroll,    BorderLayout.CENTER);
+        compilationSeriesPicker.add(compilationSeriesBtns,      BorderLayout.SOUTH);
+
+        JLabel compilationSeriesHint = new JLabel(I18n.t(
+            "<html><i>Ex. Stars 80, NRJ, Fun Radio, RFM. Les morceaux dont l'enregistrement existe<br>"
+          + "aussi sur une release dont le titre contient un de ces noms seront reliés à cette<br>"
+          + "compilation via Outils → Grouper par compilations.</i></html>"));
+        compilationSeriesHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        compilationSeriesHint.setBorder(new EmptyBorder(0, 10, 4, 0));
+
+        JPanel compilationSeriesPanel = new JPanel(new BorderLayout());
+        compilationSeriesPanel.setBorder(new EmptyBorder(8, 8, 0, 8));
+        JPanel compilationSeriesInner = form(new String[]{I18n.t("Séries de compilations à repérer :")},
+                new JComponent[]{compilationSeriesPicker}, I18n.t("Compilations connues"));
+        compilationSeriesInner.add(compilationSeriesHint, BorderLayout.SOUTH);
+        compilationSeriesPanel.add(compilationSeriesInner, BorderLayout.CENTER);
+
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
         combined.add(matchPanel);
         combined.add(releasesPanel);
         combined.add(releaseTypeWrap);
+        combined.add(compilationSeriesPanel);
         combined.add(genrePanel);
         combined.add(mbGenrePanel);
         combined.add(transPanel);
@@ -1662,13 +1794,12 @@ public class SettingsDialog extends JDialog {
             for (String t : excludedSecStr.split(",")) excludedSecSet.add(t.trim());
         for (int i = 0; i < SECONDARY_TYPES.length; i++)
             chkExcludedSecondary[i].setSelected(excludedSecSet.contains(SECONDARY_TYPES[i]));
-        {
-            String savedLocale = cfg.translateLocale();
-            int idx = 0; // repli sur "en" (premier de la liste) si la valeur sauvée est inconnue
-            for (int i = 0; i < TRANSLATE_LOCALES.length; i++)
-                if (TRANSLATE_LOCALES[i][0].equalsIgnoreCase(savedLocale)) { idx = i; break; }
-            cmbTranslateLocale.setSelectedIndex(idx);
-        }
+        lstTranslateLocalesModel.clear();
+        for (String code : cfg.translateLocales())
+            if (!code.isBlank()) lstTranslateLocalesModel.addElement(localeLabel(code.trim()));
+        lstCompilationSeriesModel.clear();
+        for (String name : cfg.compilationSeriesNames())
+            if (!name.isBlank()) lstCompilationSeriesModel.addElement(name.trim());
         chkPrioritizeIncomplete   .setSelected(cfg.prioritizeIncomplete());
 
         // ─ Transcodage ─
@@ -1838,7 +1969,24 @@ public class SettingsDialog extends JDialog {
                                                       ? "Various Artists" : tfVaName.getText().trim());
         p.setProperty("metadata.standardize_artists",  String.valueOf(chkStandardizeArtists.isSelected()));
         p.setProperty("metadata.translate_artists",    String.valueOf(chkTranslateArtists.isSelected()));
-        p.setProperty("metadata.translate_locale",     codeFromLabel((String) cmbTranslateLocale.getSelectedItem()));
+        {
+            StringBuilder sbLocales = new StringBuilder();
+            for (int i = 0; i < lstTranslateLocalesModel.size(); i++) {
+                if (i > 0) sbLocales.append(',');
+                sbLocales.append(codeFromLabel(lstTranslateLocalesModel.get(i)));
+            }
+            // Liste vide (aucune langue ajoutée) → "en" : comportement identique à avant l'ajout
+            // du multi-locale plutôt qu'une chaîne vide qui désactiverait silencieusement le repli.
+            p.setProperty("metadata.translate_locale", sbLocales.length() > 0 ? sbLocales.toString() : "en");
+        }
+        {
+            StringBuilder sbSeries = new StringBuilder();
+            for (int i = 0; i < lstCompilationSeriesModel.size(); i++) {
+                if (i > 0) sbSeries.append(',');
+                sbSeries.append(lstCompilationSeriesModel.get(i));
+            }
+            p.setProperty("compilation.series_names", sbSeries.toString());
+        }
         p.setProperty("batch.prioritize_incomplete",   String.valueOf(chkPrioritizeIncomplete.isSelected()));
 
         // ─ MB Genres ─

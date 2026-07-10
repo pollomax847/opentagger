@@ -268,15 +268,27 @@ public class FileRenamer {
     private static final java.util.regex.Pattern AUDIO_EXT =
             java.util.regex.Pattern.compile("(?i)\\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|aiff|ape|wv)$");
 
+    // Limite volontairement généreuse mais sûre pour un segment de chemin (dossier ou nom de
+    // fichier avant extension) — jaudiotagger (AudioFileWriter.write()) crée un fichier temporaire
+    // nommé d'après le nom de fichier d'origine + ".tmp" DANS LE MÊME DOSSIER ; au-delà de la
+    // limite du système de fichiers (255 octets sur ext4, souvent moins sur exFAT/NTFS/CIFS via
+    // FUSE), cette création échoue et jaudiotagger plante avec un NullPointerException cryptique au
+    // lieu de son repli prévu (voir TagWriter.translateKnownJaudiotaggerBug() pour le détail du bug
+    // tiers) — un titre/artiste/album réel dépasse très rarement 180 caractères, donc tronquer ici
+    // n'affecte en pratique que les cas déjà à risque.
+    private static final int MAX_SEGMENT_LENGTH = 180;
+
     private String sanitize(String s) {
         if (s == null || s.isBlank()) return "";
         // Retirer l'extension audio si le tag la contient (ex: title="Song.mp3")
         s = AUDIO_EXT.matcher(s.trim()).replaceAll("");
-        return s.trim()
+        String cleaned = s.trim()
                 .replaceAll("[\\\\:*?\"<>|]", "_")
                 .replaceAll("\\.{2,}", ".")
                 .replaceAll("\\s+", " ")
                 .trim();
+        return cleaned.length() > MAX_SEGMENT_LENGTH
+                ? cleaned.substring(0, MAX_SEGMENT_LENGTH).trim() : cleaned;
     }
 
     private String pad(String track) {
@@ -356,12 +368,28 @@ public class FileRenamer {
         Path dir = sourceDir;
         while (dir != null && !dir.equals(stopAt)) {
             if (!Files.isDirectory(dir)) { dir = dir.getParent(); continue; }
-            try (Stream<Path> entries = Files.list(dir)) {
-                if (entries.findAny().isPresent()) break;
+            try (Stream<Path> listing = Files.list(dir)) {
+                List<Path> entries = listing.toList();
+                if (!entries.stream().allMatch(FileRenamer::isDeletableLeftover)) break;
+                for (Path leftover : entries) Files.deleteIfExists(leftover);
                 Files.delete(dir);
             } catch (IOException e) { break; }
             dir = dir.getParent();
         }
+    }
+
+    /** Vrai si {@code p} est un résidu que le taguage peut avoir laissé derrière lui une fois
+     *  toutes les pistes déplacées — pochette locale (folder.jpg, cover.jpg…, y compris le nom
+     *  configuré via cover.filename) ou journal de session ({@code opentagger_*.log}, voir
+     *  CorrectionLog) — jamais un sous-dossier ni un fichier inconnu, pour ne jamais supprimer un
+     *  dossier qui contient encore quelque chose de réel. */
+    private static boolean isDeletableLeftover(Path p) {
+        if (Files.isDirectory(p)) return false;
+        String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (TagEnrichment.LOCAL_COVER_FILENAMES.contains(name)) return true;
+        String coverBase = Config.get().str("cover.filename", "cover").toLowerCase(Locale.ROOT);
+        if (name.equals(coverBase + ".jpg") || name.equals(coverBase + ".png")) return true;
+        return name.startsWith("opentagger_") && name.endsWith(".log");
     }
 
     // ── CLI ───────────────────────────────────────────────────────────────────

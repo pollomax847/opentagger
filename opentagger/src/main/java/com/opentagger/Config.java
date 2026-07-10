@@ -247,7 +247,28 @@ public class Config {
 
     // --- Translittération artistes ---
     public boolean translateArtists()  { return bool("metadata.translate_artists", false); }
-    public String  translateLocale()   { return str ("metadata.translate_locale",  "en"); }
+
+    /** Locales cibles pour l'alias de translittération, par ordre de priorité (ex: "fr,en") —
+     *  essayées une à une avant le repli automatique sur "en" (voir MusicBrainzClient.
+     *  lookupArtistAlias) : la plupart des alias de romanisation MusicBrainz sont tagués
+     *  locale=en, peu importe la langue réellement préférée par l'utilisateur, donc une seule
+     *  langue choisie manquait souvent sa cible — confirmé en direct (2026-07-10) : zéro
+     *  traduction réussie avec juste "fr" configuré, malgré des dizaines d'artistes non-latins
+     *  ayant en fait un alias "en" exploitable sur MusicBrainz. */
+    public String[] translateLocales() {
+        String v = str("metadata.translate_locale", "en");
+        return v.isBlank() ? new String[]{"en"} : v.split(",");
+    }
+
+    /** Noms de séries de compilations (ex. "Stars 80", "NRJ", "Fun Radio", "RFM") que l'utilisateur
+     *  veut voir reliées à ses morceaux déjà tagués — voir ui.CompilationClusterWorker ("Grouper
+     *  par compilations…"), qui vérifie si le recording d'une piste existe aussi sur une release
+     *  dont le titre contient un de ces noms. Vide par défaut : aucune série ne correspond tant que
+     *  l'utilisateur n'en a pas explicitement listé dans les Réglages. */
+    public String[] compilationSeriesNames() {
+        String v = str("compilation.series_names", "");
+        return v.isBlank() ? new String[0] : v.split(",");
+    }
 
     // --- Ordre de traitement : fichiers incomplets en priorité ---
     public boolean prioritizeIncomplete(){ return bool("batch.prioritize_incomplete", true); }

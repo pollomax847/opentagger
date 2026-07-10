@@ -23,26 +23,34 @@ public class SongRecClient {
     private final ObjectMapper  mapper      = new ObjectMapper();
 
     public TagInfo recognize(File audioFile) throws Exception {
-        String bin = Config.get().str("songrec.path", SONGREC_BIN);
+        // Jusqu'à 3 extractions ffmpeg à des offsets différents = jusqu'à 3 déplacements de tête
+        // de lecture séparés sur un disque mécanique — un seul permis pour tout l'appel (pas un
+        // par offset) évite de le reprendre/relâcher inutilement 3 fois de suite. Voir DiskIoThrottle.
+        java.util.concurrent.Semaphore gate = DiskIoThrottle.acquireFor(audioFile);
+        try {
+            String bin = Config.get().str("songrec.path", SONGREC_BIN);
 
-        // Récupérer la durée avec ffprobe pour choisir les offsets
-        double duration = probeDuration(audioFile);
-        int[] offsets;
-        if (duration <= 0) {
-            offsets = new int[]{0};
-        } else if (duration < 60) {
-            offsets = new int[]{0};
-        } else if (duration < 180) {
-            offsets = new int[]{0, (int)(duration / 3)};
-        } else {
-            offsets = new int[]{0, (int)(duration / 4), (int)(duration / 2)};
-        }
+            // Récupérer la durée avec ffprobe pour choisir les offsets
+            double duration = probeDuration(audioFile);
+            int[] offsets;
+            if (duration <= 0) {
+                offsets = new int[]{0};
+            } else if (duration < 60) {
+                offsets = new int[]{0};
+            } else if (duration < 180) {
+                offsets = new int[]{0, (int)(duration / 3)};
+            } else {
+                offsets = new int[]{0, (int)(duration / 4), (int)(duration / 2)};
+            }
 
-        for (int offset : offsets) {
-            TagInfo result = recognizeAt(bin, audioFile, offset, duration);
-            if (result != null) return result;
+            for (int offset : offsets) {
+                TagInfo result = recognizeAt(bin, audioFile, offset, duration);
+                if (result != null) return result;
+            }
+            return null;
+        } finally {
+            DiskIoThrottle.release(gate);
         }
-        return null;
     }
 
     private TagInfo recognizeAt(String bin, File audioFile, int offsetSec, double duration) throws Exception {

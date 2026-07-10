@@ -46,11 +46,19 @@ public final class Fingerprinter {
                 .redirectErrorStream(false);
         String output;
         Semaphore permit = gate();
+        // Deux limites indépendantes empilées : `permit` (fpcalcThreads, réglage utilisateur —
+        // combien de fpcalc en même temps dans TOUT le process) et le disque physique détecté
+        // (DiskIoThrottle — combien d'accès concurrents CE disque précis tolère avant de
+        // thrasher). Un disque mécanique limite déjà à 1 par lui-même, donc le cas qui compte
+        // vraiment ici est plusieurs disques mécaniques DIFFÉRENTS traités en parallèle : chacun
+        // garde son propre permis, fpcalcThreads reste la limite globale par-dessus.
+        Semaphore diskGate = DiskIoThrottle.acquireFor(fichier);
         permit.acquire();
         try {
             output = ProcessUtils.readStringWithTimeout(pb, 60);
         } finally {
             permit.release();
+            DiskIoThrottle.release(diskGate);
         }
         if (output == null || output.isBlank())
             throw new Exception("fpcalc timeout ou sortie vide pour " + fichier.getName());

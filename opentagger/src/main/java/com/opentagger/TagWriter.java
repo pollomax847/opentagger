@@ -21,6 +21,7 @@ import org.jaudiotagger.tag.vorbiscomment.VorbisCommentTag;
 import org.jaudiotagger.tag.vorbiscomment.VorbisCommentTagField;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -154,7 +155,7 @@ public class TagWriter {
             doWriteNative(fichier, i, coverImage, preserved, clearExisting);
             return;
         } catch (Exception e) {
-            if (!fichier.getName().toLowerCase().endsWith(".m4a")) throw e;
+            if (!fichier.getName().toLowerCase().endsWith(".m4a")) throw translateKnownJaudiotaggerBug(fichier, e);
         }
 
         // jaudiotagger réécrit l'arbre d'atomes M4A directement sur le fichier original ; si sa
@@ -191,6 +192,31 @@ public class TagWriter {
                 + (restored ? " — original restauré" : " — AUCUNE sauvegarde disponible")
                 + " : " + finalError.getMessage() + diag, finalError);
         }
+    }
+
+    /**
+     * jaudiotagger ({@code AudioFileWriter.write()}) crée un fichier temporaire nommé d'après le
+     * fichier d'origine (+ ".tmp") DANS LE MÊME DOSSIER ; si ce nom dépasse la limite du système de
+     * fichiers, la création du fichier temporaire échoue avec une IOException — que jaudiotagger
+     * tente de détecter via {@code ioException.getMessage().equals("File name too long")}
+     * (confirmé par décompilation du bytecode de {@code AudioFileWriter.class}, jaudiotagger 3.0.1)
+     * SANS vérifier que ce message n'est pas null (arrive par ex. sur certains montages FUSE/exFAT
+     * où l'OS ne renvoie pas ce texte exact) — ce qui plante avec un NullPointerException cryptique
+     * ("Cannot invoke \"String.equals(Object)\" because the return value of
+     * \"java.io.IOException.getMessage()\" is null") au lieu du repli prévu par la bibliothèque.
+     * Bug du jar tiers, non corrigeable ici — on se contente de transformer le crash en message
+     * actionnable plutôt que de laisser filer le texte cryptique tel quel dans les logs.
+     */
+    private static Exception translateKnownJaudiotaggerBug(File fichier, Exception e) {
+        if (e instanceof NullPointerException && e.getMessage() != null
+                && e.getMessage().contains("IOException.getMessage()")) {
+            return new IOException(
+                "Écriture impossible : nom de fichier probablement trop long pour le système de"
+              + " fichiers (\"" + fichier.getName() + "\", " + fichier.getName().length()
+              + " caractères) — bug connu de jaudiotagger lors de la création d'un fichier"
+              + " temporaire. Raccourcissez le nom du fichier ou son chemin.", e);
+        }
+        return e;
     }
 
     /** Copie de sécurité avant toute tentative de réparation/écriture M4A risquée. */

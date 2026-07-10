@@ -4,6 +4,8 @@ import com.opentagger.model.TagInfo;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Étapes d'enrichissement/bookkeeping partagées entre les pipelines de tagging
@@ -75,16 +77,89 @@ public final class TagEnrichment {
         }
     }
 
+    /** Noms de fichiers de pochette locale reconnus (aussi utilisé par
+     *  {@link FileRenamer#deleteEmptyAncestors} pour savoir quels fichiers restants sont de simples
+     *  résidus, pas du contenu réel, quand il nettoie les dossiers vidés de leurs pistes). */
+    public static final Set<String> LOCAL_COVER_FILENAMES = Set.of(
+            "folder.jpg", "cover.jpg", "front.jpg", "albumart.jpg", "album.jpg",
+            "folder.png", "cover.png", "front.png");
+
     /** Cherche une pochette dans le dossier : folder.jpg, cover.jpg, front.jpg… */
     public static Path findLocalCover(File dir) {
         if (dir == null || !dir.isDirectory()) return null;
-        for (String name : new String[]{
-                "folder.jpg", "cover.jpg", "front.jpg", "albumart.jpg", "album.jpg",
-                "folder.png", "cover.png", "front.png"}) {
+        for (String name : LOCAL_COVER_FILENAMES) {
             File f = new File(dir, name);
             if (f.exists() && f.length() > 512) return f.toPath();
         }
         return null;
+    }
+
+    // ── Identification vidéo (clips téléchargés dans un conteneur non-audio) ──────────────────
+
+    /**
+     * Cascade d'identification indépendante pour un fichier vidéo (webm/vob/mpg/avi/mkv…) —
+     * SongRec (Shazam) → AcoustID → AudD, même ordre documenté que TaggingWorker.findTags().
+     * Écrite à neuf plutôt que réutilisée : findTags() est privée, ~400 lignes, et couplée à des
+     * hypothèses inapplicables ici (tags déjà présents sur le fichier, ThreadLocal de session).
+     * fpcalc/ffmpeg (dans SongRecClient/AcoustIdClient/AudDClient) n'ont aucune vérification
+     * d'extension côté entrée : le fichier vidéo peut leur être passé directement.
+     *
+     * @return le résultat reconnu, ou {@code null} si rien n'est reconnu — signal pour ne PAS
+     *         toucher la vidéo d'origine.
+     */
+    public static TagInfo identifyFromAudio(File fichier, SongRecClient songRec, AcoustIdClient acoustId,
+                                             AudDClient audd, MusicBrainzClient mb,
+                                             java.util.function.Consumer<String> log) throws Exception {
+        if (SongRecClient.isAvailable()) {
+            log.accept("  SongRec...");
+            TagInfo sr = songRec.recognize(fichier);
+            if (sr != null && !sr.artist.isBlank() && !sr.title.isBlank()) {
+                TagInfo result = enrichViaMusicBrainz(sr, mb, log);
+                result.identificationSource = MetadataCache.SOURCE_SONGREC;
+                return result;
+            }
+        }
+
+        if (!Config.get().acoustidKey().isBlank()) {
+            log.accept("  AcoustID...");
+            List<TagInfo> r = acoustId.identify(fichier);
+            if (!r.isEmpty()) {
+                TagInfo result = r.get(0);
+                result.identificationSource = MetadataCache.SOURCE_ACOUSTID;
+                return result;
+            }
+        }
+
+        if (AudDClient.isAvailable()) {
+            log.accept("  AudD...");
+            TagInfo ad = audd.recognize(fichier);
+            if (ad != null && !ad.artist.isBlank() && !ad.title.isBlank()) {
+                return enrichViaMusicBrainz(ad, mb, log);
+            }
+        }
+
+        return null;
+    }
+
+    /** Complète un résultat SongRec/AudD brut via une recherche MusicBrainz (MBID, album, piste,
+     *  disque…) si elle confirme avec un score ≥ 50 — même seuil que la cascade existante de
+     *  TaggingWorker — sinon garde le résultat brut avec score 85. */
+    private static TagInfo enrichViaMusicBrainz(TagInfo raw, MusicBrainzClient mb,
+                                                 java.util.function.Consumer<String> log) throws Exception {
+        List<TagInfo> mbResults = mb.searchRecording(raw.artist, raw.title);
+        if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
+            TagInfo best = mbResults.get(0);
+            if (best.album.isBlank()   && !raw.album.isBlank())   best.album   = raw.album;
+            if (best.year.isBlank()    && !raw.year.isBlank())    best.year    = raw.year;
+            if (best.genre.isBlank()   && !raw.genre.isBlank())   best.genre   = raw.genre;
+            if (best.comment.isBlank() && !raw.comment.isBlank()) best.comment = raw.comment;
+            best.score = 90;
+            log.accept("  → " + best.artist + " – " + best.title + " [" + best.album + "]");
+            return best;
+        }
+        raw.score = 85;
+        log.accept("  → " + raw.artist + " – " + raw.title + " (MB non confirmé)");
+        return raw;
     }
 
     /** Enregistre un tagging réussi dans le cache pour éviter les re-lookups. */
@@ -239,17 +314,18 @@ public final class TagEnrichment {
     }
 
     /**
-     * Translittère l'artiste vers l'alias MusicBrainz dans la locale préférée si son nom n'est
-     * pas en écriture latine (ex. cyrillique, japonais, coréen, chinois, arabe…) et que l'option
-     * est activée. {@code aliasCache} évite de refaire le lookup réseau pour le même artiste sur
-     * plusieurs pistes — passer une {@code ConcurrentHashMap} si l'appelant tourne dans un pool
-     * de threads (voir TaggingWorker).
+     * Translittère l'artiste vers l'alias MusicBrainz dans l'une des locales préférées (par ordre
+     * de priorité, voir Config.translateLocales()) si son nom n'est pas en écriture latine (ex.
+     * cyrillique, japonais, coréen, chinois, arabe…) et que l'option est activée. {@code
+     * aliasCache} évite de refaire le lookup réseau pour le même artiste sur plusieurs pistes —
+     * passer une {@code ConcurrentHashMap} si l'appelant tourne dans un pool de threads (voir
+     * TaggingWorker).
      */
     public static void translateArtist(TagInfo ti, MusicBrainzClient mb, java.util.Map<String, String> aliasCache) {
         if (!Config.get().translateArtists() || ti.artistMbid.isBlank() || !hasNonLatinChars(ti.artist)) return;
         try {
             String alias = aliasCache.computeIfAbsent(ti.artistMbid, mbid -> {
-                try { return mb.lookupArtistAlias(mbid, Config.get().translateLocale()); }
+                try { return mb.lookupArtistAlias(mbid, Config.get().translateLocales()); }
                 catch (Exception e) { return ""; }
             });
             if (!alias.isBlank()) {
