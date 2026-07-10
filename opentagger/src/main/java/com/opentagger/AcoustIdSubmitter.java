@@ -36,12 +36,24 @@ public class AcoustIdSubmitter {
 
     private static final String SUBMIT_URL = "https://api.acoustid.org/v2/submit";
 
+    // Limite documentée par l'API AcoustID (~1 Mo par requête) — mêmes constantes que Picard
+    // (picard/acoustid/manager.py: MAX_PAYLOAD, BATCH_SIZE_REDUCTION_FACTOR). Avant ce fix,
+    // submitBatch envoyait TOUS les fichiers fournis dans une seule requête HTTP sans jamais
+    // vérifier la taille — sur une grosse sélection (bibliothèque de plusieurs centaines de
+    // milliers de fichiers), ça dépasse cette limite et échoue entièrement au lieu de découper
+    // automatiquement en plusieurs requêtes, comme le fait Picard.
+    private static final int    MAX_PAYLOAD                 = 1_000_000;
+    private static final double BATCH_SIZE_REDUCTION_FACTOR  = 0.7;
+
     private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
     public record SubmissionResult(File file, boolean accepted, String message) {}
+
+    /** Une soumission déjà préparée (empreinte calculée) mais pas encore envoyée. */
+    private record PreparedSubmission(File file, List<String[]> params, int estimatedSize) {}
 
     /** Soumet un seul fichier — raccourci pratique, passe par submitBatch avec 1 élément. */
     public SubmissionResult submit(File file, TagInfo tags) throws Exception {
@@ -71,12 +83,11 @@ public class AcoustIdSubmitter {
             "dans ~/.opentagger/settings.properties");
 
         List<SubmissionResult> results = new ArrayList<>();
-        List<File> included = new ArrayList<>(); // fichiers réellement inclus dans la requête (fingerprint OK)
 
-        StringBuilder body = new StringBuilder();
-        append(body, "client", appKey);
-        append(body, "user",   userToken);
-
+        // ── 1. Fingerprinting local (par fichier) — construit les paramètres de chaque
+        // soumission SANS l'index (attribué plus tard, par requête HTTP, pas globalement,
+        // puisqu'un même fichier peut se retrouver dans n'importe quel morceau après découpage).
+        List<PreparedSubmission> prepared = new ArrayList<>();
         for (int i = 0; i < files.size(); i++) {
             File file = files.get(i);
             TagInfo tags = tagsList.get(i);
@@ -88,32 +99,92 @@ public class AcoustIdSubmitter {
                 results.add(new SubmissionResult(file, false, ex.getMessage()));
                 continue;
             }
-            int idx = included.size();
-            append(body, "duration." + idx,    fp.duration());
-            append(body, "fingerprint." + idx, fp.fingerprint());
-            if (!tags.recordingMbid.isBlank()) append(body, "mbid."        + idx, tags.recordingMbid);
-            if (!tags.title.isBlank())         append(body, "track."       + idx, tags.title);
-            if (!tags.artist.isBlank())        append(body, "artist."      + idx, tags.artist);
-            if (!tags.album.isBlank())         append(body, "album."       + idx, tags.album);
-            if (!tags.albumArtist.isBlank())   append(body, "albumartist." + idx, tags.albumArtist);
-            if (!tags.year.isBlank())          append(body, "year."        + idx, tags.year);
-            if (!tags.track.isBlank())         append(body, "trackno."     + idx, tags.track);
-            if (!tags.discNo.isBlank())        append(body, "discno."      + idx, tags.discNo);
-            included.add(file);
+            List<String[]> params = new ArrayList<>();
+            params.add(new String[]{"duration",    fp.duration()});
+            params.add(new String[]{"fingerprint", fp.fingerprint()});
+            if (!tags.recordingMbid.isBlank()) params.add(new String[]{"mbid",        tags.recordingMbid});
+            if (!tags.title.isBlank())         params.add(new String[]{"track",       tags.title});
+            if (!tags.artist.isBlank())        params.add(new String[]{"artist",      tags.artist});
+            if (!tags.album.isBlank())         params.add(new String[]{"album",       tags.album});
+            if (!tags.albumArtist.isBlank())   params.add(new String[]{"albumartist", tags.albumArtist});
+            if (!tags.year.isBlank())          params.add(new String[]{"year",        tags.year});
+            if (!tags.track.isBlank())         params.add(new String[]{"trackno",     tags.track});
+            if (!tags.discNo.isBlank())        params.add(new String[]{"discno",      tags.discNo});
+
+            // Approximation de la taille du payload — même formule que Picard
+            // (Submission.__len__) : somme(clé+valeur+2) puis marge de 3% pour l'urlencode.
+            int size = 0;
+            for (String[] kv : params) size += kv[0].length() + kv[1].length() + 2;
+            prepared.add(new PreparedSubmission(file, params, (int) (size * 1.03)));
         }
 
-        if (included.isEmpty()) return results; // tout a échoué au fingerprinting local
+        if (prepared.isEmpty()) return results; // tout a échoué au fingerprinting local
 
-        if (onProgress != null) onProgress.accept("Envoi de " + included.size() + " empreinte(s) à AcoustID…");
+        // ── 2. Envoi en plusieurs requêtes si nécessaire, chacune sous MAX_PAYLOAD — découpage
+        // adaptatif façon Picard : sur un HTTP 413 (payload trop gros), réduire la taille de lot
+        // de 30% et réessayer CE morceau, sans perdre ce qui a déjà été envoyé avec succès avant.
+        int batchCap = MAX_PAYLOAD;
+        int idx = 0;
+        while (idx < prepared.size()) {
+            List<PreparedSubmission> chunk = new ArrayList<>();
+            int chunkSize = 0;
+            int j = idx;
+            while (j < prepared.size()) {
+                PreparedSubmission ps = prepared.get(j);
+                if (!chunk.isEmpty() && chunkSize + ps.estimatedSize() > batchCap) break;
+                chunk.add(ps);
+                chunkSize += ps.estimatedSize();
+                j++;
+            }
 
+            if (onProgress != null)
+                onProgress.accept("Envoi de " + chunk.size() + " empreinte(s) à AcoustID… ("
+                        + (idx + chunk.size()) + "/" + prepared.size() + ")");
+
+            HttpResponse<String> resp = sendChunk(appKey, userToken, chunk);
+
+            if (resp.statusCode() == 413 && chunk.size() > 1) {
+                // Payload trop gros : réduire la taille de lot et réessayer CE morceau (pas
+                // d'avancement de idx) — même logique que Picard (BATCH_SIZE_REDUCTION_FACTOR).
+                batchCap = Math.max(1, (int) (batchCap * BATCH_SIZE_REDUCTION_FACTOR));
+                continue;
+            }
+
+            addChunkResults(results, chunk, resp);
+            idx += chunk.size();
+        }
+        return results;
+    }
+
+    private HttpResponse<String> sendChunk(String appKey, String userToken,
+                                            List<PreparedSubmission> chunk) throws Exception {
+        StringBuilder body = new StringBuilder();
+        append(body, "client", appKey);
+        append(body, "user",   userToken);
+        for (int i = 0; i < chunk.size(); i++) {
+            for (String[] kv : chunk.get(i).params()) {
+                append(body, kv[0] + "." + i, kv[1]);
+            }
+        }
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(SUBMIT_URL))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("User-Agent", Config.get().userAgent())
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                 .build();
-        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        JsonNode root = mapper.readTree(resp.body());
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private void addChunkResults(List<SubmissionResult> results, List<PreparedSubmission> chunk,
+                                  HttpResponse<String> resp) throws Exception {
+        JsonNode root;
+        try {
+            root = mapper.readTree(resp.body());
+        } catch (Exception e) {
+            for (PreparedSubmission ps : chunk)
+                results.add(new SubmissionResult(ps.file(), false, "Réponse invalide (HTTP " + resp.statusCode() + ")"));
+            return;
+        }
 
         // DIAGNOSTIC TEMPORAIRE — à retirer une fois le format "submissions"/"pending" confirmé
         // par un essai réel réussi (on n'a pour l'instant confirmé que le format des ERREURS).
@@ -122,30 +193,30 @@ public class AcoustIdSubmitter {
         String status = root.path("status").asText("");
         if (!"ok".equals(status)) {
             String msg = root.path("error").path("message").asText("Réponse inattendue (HTTP " + resp.statusCode() + ")");
-            for (File f : included) results.add(new SubmissionResult(f, false, msg + diag));
-            return results;
+            for (PreparedSubmission ps : chunk) results.add(new SubmissionResult(ps.file(), false, msg + diag));
+            return;
         }
 
         // Réponse documentée : {"status":"ok","submissions":[{"index":0,"id":...,"status":"pending"}, ...]}
         JsonNode submissions = root.path("submissions");
-        for (int i = 0; i < included.size(); i++) {
+        for (int i = 0; i < chunk.size(); i++) {
+            File file = chunk.get(i).file();
             JsonNode entry = findByIndex(submissions, i);
             if (entry == null) {
-                results.add(new SubmissionResult(included.get(i), false, "Pas de résultat retourné pour cet élément" + diag));
+                results.add(new SubmissionResult(file, false, "Pas de résultat retourné pour cet élément" + diag));
                 continue;
             }
             String subStatus = entry.path("status").asText("");
             String subId     = entry.path("id").asText("");
             if ("error".equals(subStatus)) {
                 String msg = entry.path("error").path("message").asText("Erreur inconnue");
-                results.add(new SubmissionResult(included.get(i), false, msg + diag));
+                results.add(new SubmissionResult(file, false, msg + diag));
             } else {
                 // "pending" = accepté, traitement asynchrone côté AcoustID (pas de confirmation immédiate d'import)
-                results.add(new SubmissionResult(included.get(i), true,
+                results.add(new SubmissionResult(file, true,
                         "Accepté (id=" + subId + ", statut=" + subStatus + ")" + diag));
             }
         }
-        return results;
     }
 
     private JsonNode findByIndex(JsonNode submissions, int index) {

@@ -44,15 +44,20 @@ public class MainFrame extends JFrame {
     private static final Color COL_ERROR      = new Color(220, 60,  60,  55);
     private static final Color COL_PROCESSING = new Color(60,  130, 255, 55);
     private static final Color COL_SKIPPED    = new Color(200, 150, 30,  45);
+    // Identifié en mémoire mais pas encore écrit sur le disque (voir FileEntry.Status.IDENTIFIED)
+    // — teinte bleue distincte du vert de TAGGED, pour rester visuellement entre "en attente" et
+    // "tagué" (même esprit que COL_PROCESSING, mais persistant plutôt que transitoire).
+    private static final Color COL_IDENTIFIED = new Color(60,  140, 220, 45);
     private static final Color ACCENT         = new Color(0x4DB6AC); // teal
     private static final Color HEADER_BG      = new Color(0x1E1F22);
     // Couleurs des chips de statut (bande de stats cliquable) — mêmes constantes utilisées à la
     // construction (buildStatsStrip()) et à chaque restylage actif/inactif (refreshStats()).
-    private static final Color CHIP_TOTAL     = new Color(0x78909C);
-    private static final Color CHIP_TAGGED    = new Color(0x4CAF50);
-    private static final Color CHIP_SKIPPED   = new Color(0xFFA726);
-    private static final Color CHIP_ERROR     = new Color(0xEF5350);
-    private static final Color CHIP_PENDING   = new Color(0x90A4AE);
+    private static final Color CHIP_TOTAL      = new Color(0x78909C);
+    private static final Color CHIP_TAGGED     = new Color(0x4CAF50);
+    private static final Color CHIP_IDENTIFIED = new Color(0x42A5F5);
+    private static final Color CHIP_SKIPPED    = new Color(0xFFA726);
+    private static final Color CHIP_ERROR      = new Color(0xEF5350);
+    private static final Color CHIP_PENDING    = new Color(0x90A4AE);
 
     // ── État ─────────────────────────────────────────────────────────────────
     private final FileTableModel tableModel = new FileTableModel();
@@ -61,18 +66,26 @@ public class MainFrame extends JFrame {
     private InfoCompleterWorker     infoCompleter;
     private ListenBrainzSyncWorker  lbSyncWorker;
     private AlbumClusterWorker      clusterWorker;
+    private SaveWorker              saveWorker;
     private int                     currentMask = Config.get().defaultRenameMask();
+    // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
+    // onPreferencesSaved() d'écraser ce choix par le masque par défaut des Préférences.
+    private boolean                 maskManuallyChosen = false;
 
     // ── Composants header ────────────────────────────────────────────────────
-    private JButton    btnTagAll, btnTagSel, btnCancel, btnTranscode, btnRefresh;
+    // btnRefresh n'est plus fixe (voir buildHeader()) : peut être null si l'utilisateur l'a retiré
+    // de la barre d'outils secondaire personnalisable — tout accès doit être null-safe.
+    private JButton    btnTagAll, btnTagSel, btnSaveAll, btnCancel, btnTranscode, btnRefresh;
+    // Conteneur des boutons secondaires personnalisables — voir populateSecondaryToolbar().
+    private JPanel     secondaryToolbarPanel;
     private JCheckBox  chkAcoustId;
     private JLabel     lblMask;
 
     // ── Stats live (chips cliquables = filtre statut, remplace l'ancien menu déroulant) ───
-    private JLabel     lblStatTotal, lblStatTagged, lblStatSkipped,
+    private JLabel     lblStatTotal, lblStatTagged, lblStatIdentified, lblStatSkipped,
                        lblStatError, lblStatPending;
     private static final int FILTER_ALL = 0, FILTER_PENDING = 1, FILTER_TAGGED = 2,
-                              FILTER_SKIPPED = 3, FILTER_ERROR = 4;
+                              FILTER_SKIPPED = 3, FILTER_ERROR = 4, FILTER_IDENTIFIED = 5;
     private int activeStatusFilter = FILTER_ALL;
     private JLabel lblMemory;
 
@@ -399,7 +412,7 @@ public class MainFrame extends JFrame {
         }
         tableModel.clear();
         if (folderWatcher != null) folderWatcher.clearAll();
-        btnRefresh.setEnabled(false);
+        if (btnRefresh != null) btnRefresh.setEnabled(false);
         refreshStats();
         setStatus(I18n.t("Liste vidée."));
     }
@@ -442,6 +455,11 @@ public class MainFrame extends JFrame {
             final com.opentagger.CaaClient         caa      = new com.opentagger.CaaClient();
             final com.opentagger.FanArtClient      fanArt   = new com.opentagger.FanArtClient();
             final com.opentagger.TagWriter         writer   = new com.opentagger.TagWriter();
+            // Partagée entre tous les threads du pool ci-dessous : MetadataCache est déjà
+            // synchronized (sauf close()/purgeExpired(), pas appelés ici pendant le traitement),
+            // même pattern que TaggingWorker/AlbumCompletionWorker. Sert aussi de cache réseau
+            // façon Picard pour les pochettes CAA/FanArt.
+            final com.opentagger.MetadataCache     cache    = new com.opentagger.MetadataCache();
             final java.util.concurrent.atomic.AtomicInteger done = new java.util.concurrent.atomic.AtomicInteger();
 
             @Override protected Void doInBackground() throws Exception {
@@ -458,6 +476,7 @@ public class MainFrame extends JFrame {
                 for (java.util.concurrent.Future<?> f : futures) {
                     try { f.get(); } catch (Exception ignored) {}
                 }
+                cache.close();
                 return null;
             }
 
@@ -508,7 +527,7 @@ public class MainFrame extends JFrame {
                         forCover.releaseGroupMbid = releaseGroupMbidForCaa;
                         forCover.artistMbid       = current.artistMbid;
                         java.nio.file.Path img = com.opentagger.TagEnrichment.resolveCover(
-                                forCover, e.file, caa, fanArt);
+                                forCover, e.file, caa, fanArt, cache);
                         if (img != null) {
                             writer.writeCoverOnly(e.file, img);
                             java.nio.file.Files.deleteIfExists(img);
@@ -567,7 +586,8 @@ public class MainFrame extends JFrame {
         m.addSeparator();
         m.add(buildSubmenuSelection());
         m.addSeparator();
-        m.add(mitem(I18n.t("Préférences…"),            "Ctrl+Virgule", e -> new SettingsDialog(this, this::loadFiles).setVisible(true)));
+        m.add(mitem(I18n.t("Préférences…"),            "Ctrl+Virgule",
+                e -> new SettingsDialog(this, this::loadFiles, this::onPreferencesSaved).setVisible(true)));
         return m;
     }
 
@@ -589,6 +609,7 @@ public class MainFrame extends JFrame {
                 tableModel.remove(table.convertRowIndexToModel(rows[i]));
         }));
         sel.addSeparator();
+        sel.add(mitem(I18n.t("Sélectionner les identifiés (pas encore enregistrés)"), null, e -> selectByStatus(FileEntry.Status.IDENTIFIED)));
         sel.add(mitem(I18n.t("Sélectionner les tagués"),         null, e -> selectByStatus(FileEntry.Status.TAGGED)));
         sel.add(mitem(I18n.t("Sélectionner les non identifiés"), null, e -> selectByStatus(FileEntry.Status.SKIPPED)));
         sel.add(mitem(I18n.t("Sélectionner les erreurs"),        null, e -> selectByStatus(FileEntry.Status.ERROR)));
@@ -614,6 +635,7 @@ public class MainFrame extends JFrame {
         m.setMnemonic('T');
         m.add(mitem(I18n.t("Tout tagger (cochés)"),    "F6",  e -> startTagging(false)));
         m.add(mitem(I18n.t("Tagger la sélection"),     "F7",  e -> startTagging(true)));
+        m.add(mitem(I18n.t("Enregistrer tout (cochés)"), "F8", e -> saveAll()));
         m.addSeparator();
         chkForceAcoustId = new JCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
         chkForceAcoustId.setSelected(Config.get().bool("tagging.force_acoustid_ui", false));
@@ -744,40 +766,36 @@ public class MainFrame extends JFrame {
         JButton btnOpen = accentBtn(I18n.t("Ouvrir dossier"), "Ctrl+O");
         btnOpen.addActionListener(e -> openFolder());
 
-        btnRefresh   = headerBtn("↺ " + I18n.t("Rafraîchir"), I18n.t("Rescanner les dossiers chargés pour détecter les nouveaux fichiers (F5)"));
         btnTagAll    = headerBtn(I18n.t("Tout tagger"), I18n.t("Tagger tous les fichiers cochés (F6)"));
         btnTagSel    = headerBtn(I18n.t("Tagger la sélection"), I18n.t("Tagger les lignes sélectionnées (F7)"));
+        btnSaveAll   = headerBtn(I18n.t("Enregistrer tout"), I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"));
         btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"));
-        btnRefresh.addActionListener(e -> refreshFolders());
         btnTagAll.addActionListener(e -> startTagging(false));
         btnTagSel.addActionListener(e -> startTagging(true));
+        btnSaveAll.addActionListener(e -> saveAll());
         btnCancel.addActionListener(e -> cancelTagging());
         btnCancel.setEnabled(false);
-        btnRefresh.setEnabled(false);
 
         JPanel actionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 6));
         actionsPanel.setBackground(HEADER_BG);
         actionsPanel.add(btnOpen);
-        actionsPanel.add(btnRefresh);
         actionsPanel.add(vSep());
         actionsPanel.add(btnTagAll);
         actionsPanel.add(btnTagSel);
+        actionsPanel.add(btnSaveAll);
         actionsPanel.add(btnCancel);
 
         // Actions secondaires personnalisables (façon Picard, onglet "Barre d'outils des
         // actions") — voir toolbarActionRegistry() / Config.toolbarActions(). Les boutons d'état
-        // ci-dessus (Ouvrir/Rafraîchir/Tout tagger/Tagger la sélection/Annuler) restent fixes :
-        // trop couplés à resetBtns()/launchForcedTagging() pour être rendus optionnels sans risque.
-        String[] secondary = Config.get().toolbarActions();
-        if (secondary.length > 0) actionsPanel.add(vSep());
-        for (String id : secondary) {
-            ToolbarAction action = findToolbarAction(id.trim());
-            if (action == null) continue;
-            JButton btn = secondaryBtn(action.label(), action.tooltip());
-            btn.addActionListener(e -> action.handler().run());
-            if ("transcode".equals(action.id())) btnTranscode = btn; // conservé : lu par transcodeFiles()
-            actionsPanel.add(btn);
-        }
+        // ci-dessus (Ouvrir/Tout tagger/Tagger la sélection/Enregistrer tout/Annuler) restent
+        // fixes : trop couplés à resetBtns()/launchForcedTagging() pour être rendus optionnels
+        // sans risque. Dans un panneau à part (secondaryToolbarPanel) plutôt que directement dans
+        // actionsPanel : permet de tout reconstruire en un removeAll()/repopulate depuis
+        // populateSecondaryToolbar() (rappelée après Préférences) sans toucher aux boutons fixes.
+        secondaryToolbarPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 6));
+        secondaryToolbarPanel.setBackground(HEADER_BG);
+        actionsPanel.add(secondaryToolbarPanel);
+        populateSecondaryToolbar();
 
         // ── Droite : undo/redo (boutons conservés pour updateUndoButtons) ────
         btnUndo = iconBtn("↩", I18n.t("Annuler (Ctrl+Z)"));
@@ -814,6 +832,7 @@ public class MainFrame extends JFrame {
      * {@link #toolbarActionRegistry()} (mêmes ids/libellés).
      */
     public static final java.util.List<String[]> TOOLBAR_ACTION_INFOS = java.util.List.of(
+        new String[]{"refreshFolders",     I18n.t("Rafraîchir")},
         new String[]{"transcode",          I18n.t("Transcoder")},
         new String[]{"submitAcoustId",     I18n.t("Soumettre AcoustID")},
         new String[]{"matchDialog",        I18n.t("Correspondance manuelle")},
@@ -830,10 +849,15 @@ public class MainFrame extends JFrame {
      * Registre des actions disponibles pour la barre d'outils secondaire personnalisable —
      * réutilise les méthodes déjà câblées ailleurs (menu Outils, clic-droit), aucune logique
      * dupliquée. Défaut (`Config.DEFAULT_TOOLBAR_ACTIONS`) = comportement identique à avant
-     * l'ajout de cette fonctionnalité (transcode + submitAcoustId).
+     * l'ajout de cette fonctionnalité (transcode + submitAcoustId), PLUS refreshFolders (demande
+     * explicite : "Rafraîchir" est devenu optionnel/déplaçable, en échange de "Enregistrer tout"
+     * qui est devenu un bouton fixe de l'en-tête — voir buildHeader()).
      */
     private java.util.List<ToolbarAction> toolbarActionRegistry() {
         java.util.List<ToolbarAction> list = new java.util.ArrayList<>();
+        list.add(new ToolbarAction("refreshFolders", I18n.t("Rafraîchir"),
+                I18n.t("Rescanner les dossiers chargés pour détecter les nouveaux fichiers (F5)"),
+                this::refreshFolders));
         list.add(new ToolbarAction("transcode", I18n.t("Transcoder"),
                 I18n.t("Transcoder les fichiers sélectionnés (Ctrl+T)"), () -> transcodeFiles(false)));
         list.add(new ToolbarAction("submitAcoustId", I18n.t("Soumettre AcoustID"),
@@ -862,6 +886,32 @@ public class MainFrame extends JFrame {
     private ToolbarAction findToolbarAction(String id) {
         for (ToolbarAction a : toolbarActionRegistry()) if (a.id().equals(id)) return a;
         return null;
+    }
+
+    /** (Re)construit les boutons de la barre d'outils secondaire depuis Config.toolbarActions() —
+     *  appelé une fois à la construction de la fenêtre (buildHeader()) et à nouveau après chaque
+     *  Préférences sauvegardées où la liste a changé (voir le callback passé à SettingsDialog),
+     *  pour que l'ajout/retrait d'un bouton soit visible immédiatement, sans redémarrage. */
+    private void populateSecondaryToolbar() {
+        secondaryToolbarPanel.removeAll();
+        btnRefresh = null;
+        btnTranscode = null; // ré-évalués ci-dessous — peuvent disparaître si retirés des Préférences
+        String[] secondary = Config.get().toolbarActions();
+        if (secondary.length > 0) secondaryToolbarPanel.add(vSep());
+        for (String id : secondary) {
+            ToolbarAction action = findToolbarAction(id.trim());
+            if (action == null) continue;
+            JButton btn = secondaryBtn(action.label(), action.tooltip());
+            btn.addActionListener(e -> action.handler().run());
+            if ("transcode".equals(action.id())) btnTranscode = btn; // conservé : lu par transcodeFiles()
+            if ("refreshFolders".equals(action.id())) {
+                btnRefresh = btn; // conservé : lu par plusieurs call sites (enable/disable selon contenu)
+                btnRefresh.setEnabled(!tableModel.allEntries().isEmpty());
+            }
+            secondaryToolbarPanel.add(btn);
+        }
+        secondaryToolbarPanel.revalidate();
+        secondaryToolbarPanel.repaint();
     }
 
     private JButton accentBtn(String text, String tip) {
@@ -928,16 +978,21 @@ public class MainFrame extends JFrame {
         // Chips cliquables : cliquer filtre directement par statut (remplace l'ancien menu
         // déroulant "Statut :" — même filtre au final (applyFilter()/RowFilter sur la colonne
         // statut), juste déclenché en cliquant le chip coloré plutôt qu'un JComboBox séparé.
-        // "Total" réinitialise (montre tout) ; les 4 autres basculent (recliquer désactive).
-        lblStatTotal   = statChip(I18n.t("Total"),        "0",  CHIP_TOTAL,   FILTER_ALL);
-        lblStatTagged  = statChip(I18n.t("Tagués"),        "0",  CHIP_TAGGED,  FILTER_TAGGED);
-        lblStatSkipped = statChip(I18n.t("Non identifiés"),"0",  CHIP_SKIPPED, FILTER_SKIPPED);
-        lblStatError   = statChip(I18n.t("Erreurs"),       "0",  CHIP_ERROR,   FILTER_ERROR);
-        lblStatPending = statChip(I18n.t("En attente"),    "0",  CHIP_PENDING, FILTER_PENDING);
+        // "Total" réinitialise (montre tout) ; les autres basculent (recliquer désactive).
+        lblStatTotal      = statChip(I18n.t("Total"),        "0",  CHIP_TOTAL,      FILTER_ALL);
+        // "Identifiés" (IDENTIFIED, façon Picard : pas encore écrit sur le disque, voir
+        // FileEntry.Status.IDENTIFIED) — à ne pas confondre avec "Non identifiés" (SKIPPED,
+        // ci-dessous) qui désigne l'échec total d'identification.
+        lblStatIdentified = statChip(I18n.t("Identifiés"),   "0",  CHIP_IDENTIFIED, FILTER_IDENTIFIED);
+        lblStatTagged     = statChip(I18n.t("Tagués"),        "0",  CHIP_TAGGED,  FILTER_TAGGED);
+        lblStatSkipped    = statChip(I18n.t("Non identifiés"),"0",  CHIP_SKIPPED, FILTER_SKIPPED);
+        lblStatError      = statChip(I18n.t("Erreurs"),       "0",  CHIP_ERROR,   FILTER_ERROR);
+        lblStatPending    = statChip(I18n.t("En attente"),    "0",  CHIP_PENDING, FILTER_PENDING);
 
         p.add(new JLabel("  "));
         p.add(lblStatTotal);
         p.add(sep3());
+        p.add(lblStatIdentified);
         p.add(lblStatTagged);
         p.add(lblStatSkipped);
         p.add(lblStatError);
@@ -1014,7 +1069,7 @@ public class MainFrame extends JFrame {
         // intervalle régulier (throttlé) dans toutes les boucles de scan/taguage, point de purge
         // naturel sans bookkeeping de throttle supplémentaire ici.
         tableModel.rebuildVisibleIfDirty();
-        int total = 0, tagged = 0, skipped = 0, error = 0, pending = 0;
+        int total = 0, tagged = 0, identified = 0, skipped = 0, error = 0, pending = 0;
         // Compter depuis la VUE filtrée (table.getRowCount) plutôt que le modèle
         // pour que les chips reflètent toujours ce que l'utilisateur voit.
         int viewRows = (table != null) ? table.getRowCount() : tableModel.getRowCount();
@@ -1024,6 +1079,7 @@ public class MainFrame extends JFrame {
             total++;
             switch (tableModel.get(modelRow).status) {
                 case TAGGED     -> tagged++;
+                case IDENTIFIED -> identified++;
                 case SKIPPED    -> skipped++;
                 case ERROR      -> error++;
                 default         -> pending++;
@@ -1035,18 +1091,20 @@ public class MainFrame extends JFrame {
         int modelTotal = tableModel.totalCount();
         String totalText = (tableModel.isFiltered() && total != modelTotal)
                 ? total + " / " + modelTotal : String.valueOf(total);
-        lblStatTotal  .setText(I18n.t("Total  %s", totalText));
-        lblStatTagged .setText(I18n.t("Tagués  %d", tagged));
-        lblStatSkipped.setText(I18n.t("Non identifiés  %d", skipped));
-        lblStatError  .setText(I18n.t("Erreurs  %d", error));
-        lblStatPending.setText(I18n.t("En attente  %d", pending));
+        lblStatTotal     .setText(I18n.t("Total  %s", totalText));
+        lblStatIdentified.setText(I18n.t("Identifiés  %d", identified));
+        lblStatTagged    .setText(I18n.t("Tagués  %d", tagged));
+        lblStatSkipped   .setText(I18n.t("Non identifiés  %d", skipped));
+        lblStatError     .setText(I18n.t("Erreurs  %d", error));
+        lblStatPending   .setText(I18n.t("En attente  %d", pending));
 
         // Chip actif = celui qui correspond au filtre statut actuellement appliqué.
-        styleChip(lblStatTotal,   CHIP_TOTAL,   activeStatusFilter == FILTER_ALL);
-        styleChip(lblStatTagged,  CHIP_TAGGED,  activeStatusFilter == FILTER_TAGGED);
-        styleChip(lblStatSkipped, CHIP_SKIPPED, activeStatusFilter == FILTER_SKIPPED);
-        styleChip(lblStatError,   CHIP_ERROR,   activeStatusFilter == FILTER_ERROR);
-        styleChip(lblStatPending, CHIP_PENDING, activeStatusFilter == FILTER_PENDING);
+        styleChip(lblStatTotal,      CHIP_TOTAL,      activeStatusFilter == FILTER_ALL);
+        styleChip(lblStatIdentified, CHIP_IDENTIFIED, activeStatusFilter == FILTER_IDENTIFIED);
+        styleChip(lblStatTagged,     CHIP_TAGGED,     activeStatusFilter == FILTER_TAGGED);
+        styleChip(lblStatSkipped,    CHIP_SKIPPED,    activeStatusFilter == FILTER_SKIPPED);
+        styleChip(lblStatError,      CHIP_ERROR,      activeStatusFilter == FILTER_ERROR);
+        styleChip(lblStatPending,    CHIP_PENDING,    activeStatusFilter == FILTER_PENDING);
     }
 
     // ── Split pane table / détail ─────────────────────────────────────────────
@@ -1182,6 +1240,7 @@ public class MainFrame extends JFrame {
         if (base == null) base = new Color(43, 45, 48);
         return switch (s) {
             case TAGGED     -> blend(base, COL_TAGGED);
+            case IDENTIFIED -> blend(base, COL_IDENTIFIED);
             case ERROR      -> blend(base, COL_ERROR);
             case PROCESSING -> blend(base, COL_PROCESSING);
             case SKIPPED    -> blend(base, COL_SKIPPED);
@@ -1500,9 +1559,11 @@ public class MainFrame extends JFrame {
             TagInfo   ti   = e.activeTags();
             detailPanel.collect(ti);
             refreshTableRow(mr, ti);
-            markManuallyTagged(e, ti, mr);
             undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Modifier %s", e.filename()));
-            writeTagsSafe(e, ti);
+            // Ne marquer TAGGED qu'APRÈS confirmation d'écriture réussie — sinon un échec
+            // d'écriture (permissions, fichier verrouillé...) laissait quand même le statut à
+            // TAGGED, jamais annulé (même défaut déjà corrigé dans les autres pipelines).
+            if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
             setStatus(I18n.t("Tags sauvegardés — %s", e.filename()));
         } else {
             // ── Édition en lot ─────────────────────────────────────────────
@@ -1514,9 +1575,8 @@ public class MainFrame extends JFrame {
                 TagInfo   ti   = e.activeTags();
                 detailPanel.collect(ti);
                 refreshTableRow(mr, ti);
-                markManuallyTagged(e, ti, mr);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Lot %s", e.filename()));
-                writeTagsSafe(e, ti);
+                if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
                 saved++;
             }
             setStatus(I18n.t("Tags sauvegardés — %d fichier(s).", saved));
@@ -1589,12 +1649,14 @@ public class MainFrame extends JFrame {
         }
     }
 
-    private void writeTagsSafe(FileEntry e, TagInfo ti) {
+    private boolean writeTagsSafe(FileEntry e, TagInfo ti) {
         try {
             File target = e.currentPath != null ? e.currentPath.toFile() : e.file;
             new com.opentagger.TagWriter().write(target, ti);
+            return true;
         } catch (Exception ex) {
             showError(I18n.t("Erreur écriture %s : %s", e.filename(), ex.getMessage()));
+            return false;
         }
     }
 
@@ -2009,7 +2071,7 @@ public class MainFrame extends JFrame {
         FileEntry entry = new FileEntry(f, new com.opentagger.model.TagInfo());
         entry.scanRoot = f.getParentFile().toPath();
         tableModel.add(entry);
-        btnRefresh.setEnabled(true);
+        if (btnRefresh != null) btnRefresh.setEnabled(true);
 
         // Lire les tags en arrière-plan. entry est déjà affiché/trié par le tableau (ajouté
         // ci-dessus) : on calcule ici mais on ne mute entry QUE dans done() (EDT), sinon même
@@ -2203,7 +2265,7 @@ public class MainFrame extends JFrame {
                         List<FileEntry> batch = (List<FileEntry>) chunk[0];
                         tableModel.addAll(batch);
                         addedByThisScan.addAll(batch);
-                        if (tableModel.getRowCount() > 0) btnRefresh.setEnabled(true);
+                        if (tableModel.getRowCount() > 0 && btnRefresh != null) btnRefresh.setEnabled(true);
                     } else {
                         // Phase 2 : appliquer les tags lus sur EDT (thread-safe)
                         FileEntry entry    = (FileEntry) chunk[0];
@@ -2230,7 +2292,7 @@ public class MainFrame extends JFrame {
                 if (isCancelled()) {
                     // Rollback : retirer toutes les entrées ajoutées par ce scan
                     tableModel.removeEntries(addedByThisScan);
-                    if (tableModel.getRowCount() == 0) btnRefresh.setEnabled(false);
+                    if (tableModel.getRowCount() == 0 && btnRefresh != null) btnRefresh.setEnabled(false);
                     refreshStats();
                     completeScanEntry(scanRow, dirName, 0, 0, null);
                     setStatus(I18n.t("Scan annulé."));
@@ -2293,6 +2355,12 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de taguer."));
             return;
         }
+        // Pas de garde sur saveWorker : voir le commentaire de saveAll() — Tagger et Enregistrer
+        // touchent des ensembles de fichiers disjoints par construction (Tagger exclut déjà
+        // IDENTIFIED/TAGGED de sa cible, Enregistrer ne prend que les IDENTIFIED et ne les
+        // revisite jamais après), donc sûrs de tourner en même temps. Important sur une
+        // bibliothèque dont le taguage dure des heures/jours : sans ça, impossible d'enregistrer
+        // quoi que ce soit avant la toute fin du run.
         List<FileEntry> toTag = new ArrayList<>();
         if (selOnly) {
             for (int r : table.getSelectedRows())
@@ -2300,7 +2368,11 @@ public class MainFrame extends JFrame {
         } else {
             for (int i = 0; i < tableModel.getRowCount(); i++) {
                 FileEntry e = tableModel.get(i);
-                if (e.selected && e.status != FileEntry.Status.TAGGED) toTag.add(e);
+                // IDENTIFIED exclu comme TAGGED : déjà identifié avec succès, juste pas encore
+                // enregistré — le re-identifier ici referait le même travail réseau pour rien
+                // (voir FileEntry.Status.IDENTIFIED). Utilisez "Enregistrer tout" pour ces fichiers.
+                if (e.selected && e.status != FileEntry.Status.TAGGED
+                        && e.status != FileEntry.Status.IDENTIFIED) toTag.add(e);
             }
         }
         if (toTag.isEmpty()) {
@@ -2317,13 +2389,12 @@ public class MainFrame extends JFrame {
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setVisible(true);
 
-        int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
         final int totalFiles = toTag.size();
         boolean useAcoustId = chkForceAcoustId.isSelected() || Config.get().useAcoustId();
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Taguage"), totalFiles);
-        worker = new TaggingWorker(toTag, useAcoustId, autoMask,
+        worker = new TaggingWorker(toTag, useAcoustId,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
@@ -2367,6 +2438,90 @@ public class MainFrame extends JFrame {
         }
         refreshStats();
         setStatus(I18n.t("Arrêté.")); resetBtns();
+    }
+
+    // ── Enregistrement ("Enregistrer tout") ───────────────────────────────────
+
+    /**
+     * Écrit réellement sur le disque tout ce que l'identification (TaggingWorker/
+     * AlbumCompletionWorker/InfoCompleterWorker/MatchDialog) a laissé en mémoire (statut
+     * IDENTIFIED) — contrepartie de "Tout tagger", qui depuis la séparation Identifier/
+     * Enregistrer ne fait plus qu'identifier sans jamais toucher le disque. Voir
+     * SaveWorker/TagEnrichment.saveEntry() pour ce que fait effectivement l'enregistrement
+     * (pochette, tags, renommage, cache/historique, soumissions MusicBrainz/AcoustID).
+     *
+     * Même bascule annuler/lancer qu'completeAlbums() : recliquer pendant que ça tourne annule.
+     */
+    private void saveAll() {
+        if (saveWorker != null && !saveWorker.isDone()) {
+            saveWorker.stopNow();
+            setStatus(I18n.t("Enregistrement annulé."));
+            return;
+        }
+        // PAS de garde sur `worker` (TaggingWorker) ici, volontairement — voir startTagging()/
+        // forceRetag() pour le miroir de ce choix : Tagger et Enregistrer touchent des ensembles
+        // de fichiers disjoints par construction (Tagger exclut déjà IDENTIFIED/TAGGED de sa
+        // cible ; Enregistrer ne prend que les IDENTIFIED et ne les revisite jamais après avoir
+        // été identifiés) — sûrs de tourner en même temps, y compris pendant un taguage qui dure
+        // des heures/jours (bibliothèque volumineuse) où bloquer Enregistrer jusqu'à la fin du run
+        // ferait courir un vrai risque de tout perdre (rien n'est sur le disque tant que non
+        // enregistré) en cas de plantage/fermeture prématurée. MetadataCache (SQLite) est déjà
+        // configuré pour l'accès concurrent multi-connexions (WAL + busy_timeout).
+        //
+        // Les AUTRES workers restent bloquants : AlbumCompletionWorker/InfoCompleterWorker
+        // touchent eux aussi des fichiers IDENTIFIED (depuis leur extension récente au même
+        // statut) et pourraient donc muter la même FileEntry qu'un Enregistrement en cours ;
+        // TranscodeWorker/AlbumClusterWorker déplacent/réécrivent des fichiers sur lesquels une
+        // écriture de tags pourrait être en train de se faire.
+        List<String> ops = new ArrayList<>();
+        if (completionWorker != null && !completionWorker.isDone()) ops.add(I18n.t("Complétion des albums"));
+        if (infoCompleter != null && !infoCompleter.isDone())       ops.add(I18n.t("Passe complète"));
+        if (transcodeWorker != null && !transcodeWorker.isDone())   ops.add(I18n.t("Transcodage"));
+        if (clusterWorker != null && !clusterWorker.isDone())       ops.add(I18n.t("Groupement des albums"));
+        if (!ops.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'enregistrer.", String.join(", ", ops)));
+            return;
+        }
+
+        List<FileEntry> toSave = new ArrayList<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.selected && e.status == FileEntry.Status.IDENTIFIED) toSave.add(e);
+        }
+        if (toSave.isEmpty()) {
+            setStatus(I18n.t("Aucun fichier identifié à enregistrer (utilisez « Tout tagger » d'abord)."));
+            return;
+        }
+
+        int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
+        progress.setValue(0); progress.setVisible(true);
+        runStartMillis = System.currentTimeMillis();
+        logRunStart(I18n.t("Enregistrement"), toSave.size());
+        setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
+
+        saveWorker = new SaveWorker(toSave, maskIndex,
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
+            entry -> SwingUtilities.invokeLater(() -> {
+                tableModel.update(entry);
+                followProcessing(entry);
+                appendLog(entry);
+                refreshStats();
+            }),
+            (doneCount, total) -> SwingUtilities.invokeLater(() -> {
+                progress.setValue(doneCount);
+                progress.setString(doneCount + "/" + total + etaText(doneCount, total));
+            })
+        );
+        saveWorker.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    progress.setVisible(false);
+                    refreshStats();
+                });
+            }
+        });
+        saveWorker.execute();
     }
 
     /**
@@ -2580,6 +2735,9 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de forcer le re-taguage."));
             return;
         }
+        // Pas de garde sur saveWorker : voir le commentaire de saveAll() — forceRetag() ne cible
+        // que des fichiers déjà TAGGED, jamais touchés par un Enregistrement en cours (qui ne
+        // prend que les IDENTIFIED) — ensembles disjoints, sûr de tourner en même temps.
         // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
@@ -2660,12 +2818,11 @@ public class MainFrame extends JFrame {
 
     /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag(). */
     private void launchForcedTagging(List<FileEntry> forcedTargets, boolean useAcoustId) {
-        int autoMask = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         lastStatsRefreshMs = 0;
         final int forcedTotal = forcedTargets.size();
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Re-taguage forcé"), forcedTotal);
-        worker = new TaggingWorker(forcedTargets, useAcoustId, autoMask,
+        worker = new TaggingWorker(forcedTargets, useAcoustId,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
@@ -2691,25 +2848,27 @@ public class MainFrame extends JFrame {
     }
 
     private void onTaggingDone(List<FileEntry> done) {
-        long ok   = done.stream().filter(e -> e.status == FileEntry.Status.TAGGED).count();
+        // IDENTIFIED, pas TAGGED : "Tout tagger" n'écrit plus rien sur le disque (façon Picard),
+        // voir FileEntry.Status.IDENTIFIED — TAGGED ne sera atteint qu'après "Enregistrer tout".
+        long ok   = done.stream().filter(e -> e.status == FileEntry.Status.IDENTIFIED).count();
         long skip = done.stream().filter(e -> e.status == FileEntry.Status.SKIPPED).count();
         long err  = done.stream().filter(e -> e.status == FileEntry.Status.ERROR).count();
         resetBtns();
         detectLocalCompilations();
         refreshStats();
-        // Complétion des albums : automatique seulement si explicitement activé (case "Compléter
-        // les albums automatiquement après le taguage", off par défaut) — retour utilisateur : se
-        // lançait sans aucune option pour le désactiver, surprenant sur un run non attendu. Si la
-        // case "Compléter aussi les fichiers tagués mais incomplets" est cochée, cette passe la
-        // précède toujours (sinon les deux workers se bloqueraient mutuellement via les gardes
-        // d'exclusion : completeAlbums() refuse de démarrer tant qu'un InfoCompleterWorker tourne
-        // encore) — que la complétion albums suive ou non dépend uniquement de chkAutoCompleteAlbums.
+        // Complétion des albums / des fichiers incomplets : reposent toutes deux sur des fichiers
+        // déjà TAGGED (anchors MB fiables pour l'une, "déjà identifiés" pour l'autre) — juste après
+        // l'identification, rien n'est encore TAGGED (tout reste IDENTIFIED jusqu'à
+        // "Enregistrer tout"), donc ces passes ne trouveraient réellement du travail que sur des
+        // fichiers déjà enregistrés lors d'une session précédente. Le déclenchement reste ici
+        // (comportement historique, inchangé) plutôt que déplacé après Enregistrer : au-delà du
+        // périmètre de la séparation Identifier/Enregistrer demandée.
         boolean autoAlbums      = chkAutoCompleteAlbums.isSelected();
         boolean autoIncomplete  = chkCompleteIncomplete.isSelected();
         String suffix = autoIncomplete
                 ? I18n.t("  — complétion des fichiers incomplets…")
                 : (autoAlbums ? I18n.t("  — complétion albums…") : "");
-        setStatus(I18n.t("Terminé — ✓ %d tagué(s)  ⚠ %d ignoré(s)  ✗ %d erreur(s)", ok, skip, err) + suffix);
+        setStatus(I18n.t("Terminé — ✓ %d identifié(s) (pas encore enregistré)  ⚠ %d ignoré(s)  ✗ %d erreur(s)", ok, skip, err) + suffix);
         if (autoIncomplete) {
             autoCompleteIncomplete(autoAlbums ? this::completeAlbums : () -> {});
         } else if (autoAlbums) {
@@ -2719,17 +2878,20 @@ public class MainFrame extends JFrame {
 
     /**
      * Comble les champs manquants (album/année/genre/mood/BPM/paroles/pochette) des fichiers déjà
-     * tagués mais incomplets, sans jamais les réidentifier — même portée que l'ancienne action
-     * "Passe complète…", mais déclenchée automatiquement (case à cocher du menu Tagger) plutôt que
-     * par un bouton séparé, et donc sans la boîte de confirmation manuelle (l'utilisateur a déjà
-     * donné son accord en cochant la case).
+     * identifiés (TAGGED ou IDENTIFIED — voir InfoCompleterWorker) mais incomplets, sans jamais les
+     * réidentifier — même portée que l'ancienne action "Passe complète…", mais déclenchée
+     * automatiquement (case à cocher du menu Tagger) plutôt que par un bouton séparé, et donc sans
+     * la boîte de confirmation manuelle (l'utilisateur a déjà donné son accord en cochant la case).
      */
     private void autoCompleteIncomplete(Runnable onDone) {
         List<FileEntry> targets = new ArrayList<>();
         java.util.Set<String> seenPaths = new java.util.HashSet<>();
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
-            if (e.status != FileEntry.Status.TAGGED) continue;
+            // IDENTIFIED inclus comme TAGGED : porte déjà les mêmes données d'identification
+            // complètes (juste pas encore écrites sur le disque) — inutile d'attendre un
+            // "Enregistrer tout" pour pouvoir compléter les champs manquants en mémoire.
+            if (e.status != FileEntry.Status.TAGGED && e.status != FileEntry.Status.IDENTIFIED) continue;
             String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
             if (!seenPaths.add(p)) continue;
             TagInfo ti = e.result;
@@ -2951,6 +3113,7 @@ public class MainFrame extends JFrame {
         else if (completionWorker != null && !completionWorker.isDone()) blocking = I18n.t("Complétion des albums en cours");
         else if (infoCompleter != null && !infoCompleter.isDone())  blocking = I18n.t("Passe complète en cours");
         else if (clusterWorker != null && !clusterWorker.isDone())  blocking = I18n.t("Groupement des albums en cours");
+        else if (saveWorker != null && !saveWorker.isDone())        blocking = I18n.t("Enregistrement en cours");
         if (blocking != null) {
             JOptionPane.showMessageDialog(this,
                     I18n.t("%s — attendez la fin avant de transcoder.", blocking),
@@ -3034,6 +3197,10 @@ public class MainFrame extends JFrame {
         }
         if (clusterWorker != null && !clusterWorker.isDone()) {
             setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de compléter les albums."));
+            return;
+        }
+        if (saveWorker != null && !saveWorker.isDone()) {
+            setStatus(I18n.t("Enregistrement en cours — attendez la fin avant de compléter les albums."));
             return;
         }
         setStatus(I18n.t("Complétion des albums en cours…"));
@@ -3152,8 +3319,27 @@ public class MainFrame extends JFrame {
         if (chosen == null) return;
         for (int i = 0; i < labels.length; i++)
             if (labels[i].equals(chosen)) { currentMask = i; break; }
+        maskManuallyChosen = true;
         updateMaskLabel();
         setStatus(I18n.t("Masque actif : %s", renamer.maskLabel(currentMask)));
+    }
+
+    /**
+     * Rappelé après CHAQUE sauvegarde des Préférences (OK ou Appliquer, voir SettingsDialog.save())
+     * — pas seulement à la fermeture de l'appli. Resynchronise ce que buildHeader()/le constructeur
+     * ne lisent normalement qu'une fois : la barre d'outils secondaire et le masque de renommage
+     * par défaut (seulement si l'utilisateur ne l'a jamais choisi manuellement via chooseMask() —
+     * sinon on écraserait un choix explicite fait en cours de session).
+     */
+    private void onPreferencesSaved() {
+        populateSecondaryToolbar();
+        if (!maskManuallyChosen) {
+            int fresh = Config.get().defaultRenameMask();
+            if (fresh != currentMask) {
+                currentMask = fresh;
+                updateMaskLabel();
+            }
+        }
     }
 
     private void updateMaskLabel() {
@@ -3344,10 +3530,11 @@ public class MainFrame extends JFrame {
 
         if (statusSel != FILTER_ALL) {
             java.util.function.Predicate<FileEntry> statusPred = switch (statusSel) {
-                case FILTER_PENDING -> e -> e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.PROCESSING;
-                case FILTER_TAGGED  -> e -> e.status == FileEntry.Status.TAGGED;
-                case FILTER_SKIPPED -> e -> e.status == FileEntry.Status.SKIPPED;
-                case FILTER_ERROR   -> e -> e.status == FileEntry.Status.ERROR;
+                case FILTER_PENDING    -> e -> e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.PROCESSING;
+                case FILTER_IDENTIFIED -> e -> e.status == FileEntry.Status.IDENTIFIED;
+                case FILTER_TAGGED     -> e -> e.status == FileEntry.Status.TAGGED;
+                case FILTER_SKIPPED    -> e -> e.status == FileEntry.Status.SKIPPED;
+                case FILTER_ERROR      -> e -> e.status == FileEntry.Status.ERROR;
                 default             -> e -> true;
             };
             pred = pred.and(statusPred);
@@ -3377,20 +3564,22 @@ public class MainFrame extends JFrame {
         }
         int n = table.getSelectedRowCount();
         String label = switch (statuses[0]) {
-            case TAGGED  -> I18n.t("tagué(s)");
-            case SKIPPED -> I18n.t("non identifié(s)");
-            case ERROR   -> I18n.t("en erreur");
-            default      -> I18n.t("en attente");
+            case TAGGED     -> I18n.t("tagué(s)");
+            case IDENTIFIED -> I18n.t("identifié(s), pas encore enregistré(s)");
+            case SKIPPED    -> I18n.t("non identifié(s)");
+            case ERROR      -> I18n.t("en erreur");
+            default         -> I18n.t("en attente");
         };
         setStatus(n > 0 ? I18n.t("%d fichier(s) %s sélectionné(s).", n, label)
                         : I18n.t("Aucun fichier %s dans la liste.", label));
         // Aussi basculer le filtre visuel (chip) pour les voir clairement
         if (n > 0) {
             activeStatusFilter = switch (statuses[0]) {
-                case TAGGED  -> FILTER_TAGGED;
-                case SKIPPED -> FILTER_SKIPPED;
-                case ERROR   -> FILTER_ERROR;
-                default      -> FILTER_PENDING;
+                case TAGGED     -> FILTER_TAGGED;
+                case IDENTIFIED -> FILTER_IDENTIFIED;
+                case SKIPPED    -> FILTER_SKIPPED;
+                case ERROR      -> FILTER_ERROR;
+                default         -> FILTER_PENDING;
             };
             applyFilter();
         }
@@ -3769,6 +3958,7 @@ public class MainFrame extends JFrame {
         if (transcodeWorker != null && !transcodeWorker.isDone())   ops.add(I18n.t("Transcodage"));
         if (lbSyncWorker != null && !lbSyncWorker.isDone())         ops.add(I18n.t("Synchronisation ListenBrainz"));
         if (clusterWorker != null && !clusterWorker.isDone())       ops.add(I18n.t("Groupement des albums"));
+        if (saveWorker != null && !saveWorker.isDone())             ops.add(I18n.t("Enregistrement"));
         if (!activeScanWorkers.isEmpty())                           ops.add(I18n.t("Scan de dossier"));
         return ops;
     }

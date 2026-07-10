@@ -23,12 +23,12 @@ public final class TagEnrichment {
     private TagEnrichment() {}
 
     /** Cascade de genre : Discogs puis Last.fm en repli, uniquement si absent. */
-    public static void enrichGenre(TagInfo ti, DiscogsClient discogs, LastFmClient lastFm) {
+    public static void enrichGenre(TagInfo ti, DiscogsClient discogs, LastFmClient lastFm, MetadataCache cache) {
         if (ti.genre.isBlank()) {
-            try { discogs.enrichGenres(ti); } catch (Exception ignored) {}
+            try { discogs.enrichGenres(ti, cache); } catch (Exception ignored) {}
         }
         if (ti.genre.isBlank()) {
-            try { lastFm.enrichGenres(ti); } catch (Exception ignored) {}
+            try { lastFm.enrichGenres(ti, cache); } catch (Exception ignored) {}
         }
     }
 
@@ -38,25 +38,26 @@ public final class TagEnrichment {
      * activables/réordonnables), jusqu'au premier succès. Fournisseurs connus :
      * {@code caa_release}, {@code caa_release_group}, {@code local}, {@code fanart}.
      */
-    public static Path resolveCover(TagInfo ti, File audioFile, CaaClient caa, FanArtClient fanArt) {
+    public static Path resolveCover(TagInfo ti, File audioFile, CaaClient caa, FanArtClient fanArt,
+                                     MetadataCache cache) {
         for (String provider : Config.get().coverProviderOrder()) {
-            Path cover = tryProvider(provider.trim(), ti, audioFile, caa, fanArt);
+            Path cover = tryProvider(provider.trim(), ti, audioFile, caa, fanArt, cache);
             if (cover != null) return cover;
         }
         return null;
     }
 
     private static Path tryProvider(String provider, TagInfo ti, File audioFile,
-                                     CaaClient caa, FanArtClient fanArt) {
+                                     CaaClient caa, FanArtClient fanArt, MetadataCache cache) {
         try {
             switch (provider) {
                 case "caa_release":
                     if (Config.get().caaReleaseEnabled() && !ti.releaseMbid.isBlank())
-                        return caa.downloadFromRelease(ti);
+                        return caa.downloadFromRelease(ti, cache);
                     return null;
                 case "caa_release_group":
                     if (Config.get().caaReleaseGroupEnabled() && !ti.releaseGroupMbid.isBlank())
-                        return caa.downloadFromReleaseGroup(ti);
+                        return caa.downloadFromReleaseGroup(ti, cache);
                     return null;
                 case "local":
                     if (Config.get().coverSearchLocal())
@@ -64,7 +65,7 @@ public final class TagEnrichment {
                     return null;
                 case "fanart":
                     if (Config.get().fanartEnabled() && !ti.artistMbid.isBlank())
-                        return fanArt.downloadCover(ti);
+                        return fanArt.downloadCover(ti, cache);
                     return null;
                 default:
                     return null;
@@ -90,6 +91,102 @@ public final class TagEnrichment {
     public static void recordSuccess(MetadataCache cache, File fichier, TagInfo written) {
         cache.saveTaggingHistory(written);
         cache.recordFileTagging(fichier.getAbsolutePath(), written.recordingMbid);
+    }
+
+    /** Résultat de {@link #saveEntry}. {@code cover} : pochette réellement résolue (ou null si
+     *  aucune trouvée) — les appelants qui construisent des suggestions à l'utilisateur (ex.
+     *  "Pochette non trouvée") ne peuvent le savoir qu'ICI, pas pendant l'identification. */
+    public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError) {}
+
+    /**
+     * Étape "Enregistrer" partagée (façon Picard : le disque n'est touché qu'ici, jamais pendant
+     * l'identification) — écrit les tags, renomme si demandé, enregistre le cache/historique,
+     * soumet à MusicBrainz. Consolide ce qui était dupliqué (avec des variantes divergentes, voir
+     * les notes de session) dans TaggingWorker/AlbumCompletionWorker/InfoCompleterWorker/
+     * MatchDialog — notamment le repli par clé synthétique quand recordingMbid est vide, que
+     * l'ancien {@link #recordSuccess} n'avait jamais (contrairement à 3 des 4 copies inline qu'il
+     * était censé remplacer).
+     *
+     * La pochette est résolue ICI, pas pendant l'identification : {@code resolveCover} télécharge
+     * dans un fichier TEMPORAIRE (CAA/FanArt) — le résoudre pendant l'identification puis ne
+     * l'utiliser que plus tard (potentiellement des heures après, voire une autre session une fois
+     * Identifier/Enregistrer découplés) risquerait un fichier temporaire déjà nettoyé par l'OS entre
+     * temps. Tout le reste de l'enrichissement (genre, BPM, empreinte, paroles, translittération)
+     * ne touche que des champs texte de TagInfo, sans souci de durée de vie — ça reste dans la
+     * phase Identifier comme avant.
+     *
+     * @param scanRoot   racine du dossier scanné (repli si aucune bibliothèque configurée), peut
+     *                   être null — même résolution de racine que tous les appelants historiques
+     *                   (bibliothèque configurée > scanRoot > dossier parent du fichier)
+     * @param maskIndex  index du masque de renommage, ou toute valeur < 0 pour ne pas renommer
+     *                   (le caller décide : soit directement -1, soit
+     *                   {@code Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1})
+     * @param log        callback optionnel pour les messages de soumission MusicBrainz (peut être null)
+     */
+    public static SaveResult saveEntry(File fichier, TagInfo ti, CaaClient caa, FanArtClient fanArt,
+                                        TagWriter writer, FileRenamer renamer, MetadataCache cache,
+                                        MusicBrainzOAuth mbOauth, Path scanRoot, int maskIndex,
+                                        java.util.function.Consumer<String> log) throws Exception {
+        Path cover = resolveCover(ti, fichier, caa, fanArt, cache);
+        TagInfo written = writer.write(fichier, ti, cover);
+
+        // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
+        // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
+        // de `cover`, résolu seulement maintenant (voir plus haut).
+        if (cover != null && Config.get().bool("cover.save_to_file", false)) {
+            try {
+                String fname = Config.get().str("cover.filename", "cover");
+                String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                Path dest = fichier.toPath().resolveSibling(fname + ext);
+                if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
+                    java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ignored) {}
+        }
+
+        String cacheKey = !written.recordingMbid.isBlank()
+                ? written.recordingMbid : MetadataCache.syntheticKey(written.artist, written.title);
+        String source = written.identificationSource.isBlank()
+                ? MetadataCache.SOURCE_MBID : written.identificationSource;
+        cache.saveTaggingHistory(written, cacheKey);
+        cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey, source);
+
+        // Soumission AcoustID différée jusqu'ici : avant la séparation Identifier/Enregistrer,
+        // TaggingWorker.processEntry() la déclenchait juste après writer.write(), conditionnée à
+        // lastFindTagsSource (ThreadLocal, perdu à la fin de l'appel) — désormais persistée dans
+        // TagInfo.identificationSource pour survivre à l'écart de temps entre les deux phases.
+        // N'existait QUE dans ce pipeline avant ce correctif (ni albumFirstPass, ni
+        // AlbumCompletionWorker, ni InfoCompleterWorker, ni MatchDialog ne soumettaient à
+        // AcoustID) — centralisé ici, tous les pipelines qui appellent saveEntry() en bénéficient
+        // maintenant de façon uniforme.
+        if (MetadataCache.SOURCE_ACOUSTID.equals(source) && !written.recordingMbid.isBlank()) {
+            try { new AcoustIdSubmitter().submit(fichier, written); }
+            catch (Exception ex) { if (log != null) log.accept("AcoustID submit skip: " + ex.getMessage()); }
+        }
+
+        submitToMusicBrainz(mbOauth, written, log != null ? log : msg -> {});
+
+        Path finalPath = fichier.toPath();
+        String renameError = null;
+        if (maskIndex >= 0) {
+            try {
+                Path curPath   = fichier.toPath();
+                Path oldParent = curPath.getParent();
+                String libRoot = Config.get().libraryRoot();
+                Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                        ? java.nio.file.Paths.get(libRoot)
+                        : (scanRoot != null ? scanRoot : oldParent);
+                Path newPath = renamer.rename(curPath, written, maskIndex, root);
+                if (newPath != null) {
+                    finalPath = newPath;
+                    if (Config.get().deleteEmptyDirsAfterRename()) {
+                        FileRenamer.deleteEmptyAncestors(oldParent, root);
+                    }
+                }
+            } catch (Exception ex) {
+                renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            }
+        }
+        return new SaveResult(written, cover, finalPath, renameError);
     }
 
     /**

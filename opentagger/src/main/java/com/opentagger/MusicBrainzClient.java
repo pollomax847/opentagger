@@ -325,6 +325,14 @@ public class MusicBrainzClient {
      *  - Pays préféré : +(N - rang) × 10 pts  (1er pays préféré = N×10, 2e = (N-1)×10, etc.)
      *  - Format préféré : +(N - rang) × 5 pts  (CD=1er = N×5, etc.)
      */
+    // Choix d'échelle pour ramener le score composite pondéré 0.0–1.0 de ReleaseMatcher (pays/
+    // format/type de release, façon Picard) dans le même ordre de grandeur que les bonus additifs
+    // déjà en place ci-dessous (statut officiel ±100, nom d'album préféré ±300/80) — PAS une
+    // prétention de parité numérique exacte avec les scores de Picard (échelles fondamentalement
+    // différentes : les leurs sont multipliés par le score de recherche MB, les nôtres s'ajoutent
+    // à un score à part).
+    private static final int PREFERENCE_SCALE = 100;
+
     private JsonNode findBestRelease(JsonNode releases, boolean onlyOfficial) {
         if (!releases.isArray() || releases.isEmpty()) return null;
 
@@ -332,8 +340,7 @@ public class MusicBrainzClient {
         String[]  preferredFormats    = Config.get().preferredFormats();
         String[]  allowedPrimary      = Config.get().allowedPrimaryTypes();
         String[]  excludedSecondary   = Config.get().excludedSecondaryTypes();
-        int       nc = preferredCountries.length;
-        int       nf = preferredFormats.length;
+        java.util.Map<String, Double> releaseTypeScores = Config.get().releaseTypeScores();
 
         JsonNode best      = null;
         int      bestScore = Integer.MIN_VALUE;
@@ -369,26 +376,25 @@ public class MusicBrainzClient {
             if ("Official".equalsIgnoreCase(status)) score += 100;
             else if (!"Bootleg".equalsIgnoreCase(status)) score += 10;
 
-            // Bonus pays préféré
-            String country = r.path("country").asText("").trim().toUpperCase();
-            for (int i = 0; i < nc; i++) {
-                if (preferredCountries[i].trim().equalsIgnoreCase(country)) {
-                    score += (nc - i) * 10;
-                    break;
-                }
-            }
-
-            // Bonus format préféré (premier média de la release)
-            String format = "";
+            // Préférences pays/format/type de release — score composite pondéré façon Picard
+            // (ReleaseMatcher.combinePreferences, poids réels FILE_COMPARISON_WEIGHTS
+            // ['preferences']) au lieu de 3 bonus indépendants sans lien entre eux. Le type de
+            // release (Album/Compilation/Live...) n'était pas scoré du tout avant ce fix (seulement
+            // filtré en tout-ou-rien via allowedPrimary/excludedSecondary ci-dessus) — neutre par
+            // défaut (0.5 partout) tant que releases.type_scores n'est pas configuré.
+            String country = r.path("country").asText("").trim();
+            List<String> mediaFormats = new ArrayList<>();
             JsonNode media = r.path("media");
-            if (media.isArray() && !media.isEmpty())
-                format = media.get(0).path("format").asText("").trim();
-            for (int i = 0; i < nf; i++) {
-                if (preferredFormats[i].trim().equalsIgnoreCase(format)) {
-                    score += (nf - i) * 5;
-                    break;
-                }
-            }
+            if (media.isArray()) for (JsonNode m : media) mediaFormats.add(m.path("format").asText("").trim());
+            String primaryType = r.path("release-group").path("primary-type").asText("").trim();
+            List<String> secondaryTypesForScore = new ArrayList<>();
+            JsonNode secTypesForScore = r.path("release-group").path("secondary-types");
+            if (secTypesForScore.isArray()) for (JsonNode st : secTypesForScore) secondaryTypesForScore.add(st.asText());
+
+            double preferenceScore = ReleaseMatcher.combinePreferences(
+                    country, preferredCountries, mediaFormats, preferredFormats,
+                    primaryType, secondaryTypesForScore, releaseTypeScores);
+            score += (int) Math.round(preferenceScore * PREFERENCE_SCALE);
 
             // Bonus album préféré — fort bonus si le nom d'album MB correspond à l'indice
             // fourni (tag existant ou nom de dossier iTunes). Permet de préférer la release

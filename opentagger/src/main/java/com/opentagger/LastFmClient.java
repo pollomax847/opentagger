@@ -45,14 +45,14 @@ public class LastFmClient {
     private List<GenreFilter.Candidate>  cachedTagsList = null;
 
     /** Enrichit le genre d'un TagInfo depuis les tags Last.fm. Ne modifie genre que si vide. */
-    public void enrichGenres(TagInfo info) throws Exception {
+    public void enrichGenres(TagInfo info, MetadataCache cache) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
         // Sans clé configurée, la requête échouerait de toute façon — éviter l'appel réseau
         // inutile sur chaque fichier, même pattern que DiscogsClient/FanArtClient.
         if (Config.get().lastfmKey().isBlank()) return;
         if (!info.genre.isBlank()) return;
 
-        List<GenreFilter.Candidate> allTags = fetchAllTags(info);
+        List<GenreFilter.Candidate> allTags = fetchAllTags(info, cache);
         List<GenreFilter.Candidate> genreCandidates = new ArrayList<>();
         for (GenreFilter.Candidate c : allTags)
             if (!isMoodTag(c.name().toLowerCase())) genreCandidates.add(c);
@@ -62,17 +62,22 @@ public class LastFmClient {
     }
 
     /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible). */
-    public void enrichArtistUrls(TagInfo info) throws Exception {
+    public void enrichArtistUrls(TagInfo info, MetadataCache cache) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
+        if (!Config.get().lastfmArtistUrlsEnabled()) return;
         if (Config.get().lastfmKey().isBlank()) return;
         if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank()) return;
         if (info.artist.isBlank()) return;
 
+        // Clé de cache SANS l'api_key (contrairement à l'URL réellement appelée) — un secret n'a
+        // rien à faire persisté dans le cache SQLite, et il n'a de toute façon aucune valeur
+        // discriminante pour l'identité de la requête.
+        String cacheKey = "lastfm:artistinfo:" + MetadataCache.queryHash(info.artist, "");
         JsonNode root = fetch(BASE_URL
             + "?method=artist.getInfo"
             + "&artist=" + encode(info.artist)
             + "&api_key=" + Config.get().lastfmKey()
-            + "&format=json");
+            + "&format=json", cacheKey, cache);
         if (root == null) return;
 
         JsonNode artist = root.path("artist");
@@ -96,12 +101,12 @@ public class LastFmClient {
     }
 
     /** Enrichit le mood d'un TagInfo depuis les tags Last.fm. Ne modifie mood que si vide. */
-    public void enrichMood(TagInfo info) throws Exception {
+    public void enrichMood(TagInfo info, MetadataCache cache) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
         if (Config.get().lastfmKey().isBlank()) return;
         if (!info.mood.isBlank()) return;
 
-        List<GenreFilter.Candidate> allTags = fetchAllTags(info);
+        List<GenreFilter.Candidate> allTags = fetchAllTags(info, cache);
 
         for (GenreFilter.Candidate c : allTags) {
             String t = c.name().toLowerCase().trim();
@@ -120,26 +125,31 @@ public class LastFmClient {
     }
 
     /** Récupère tous les tags bruts Last.fm avec leur popularité (morceau puis artiste en fallback). */
-    private List<GenreFilter.Candidate> fetchAllTags(TagInfo info) throws Exception {
-        // Cache : évite deux requêtes réseau quand enrichGenres() et enrichMood() sont appelés successivement
+    private List<GenreFilter.Candidate> fetchAllTags(TagInfo info, MetadataCache cache) throws Exception {
+        // Cache mémoire d'appel : évite deux requêtes réseau quand enrichGenres() et enrichMood()
+        // sont appelés successivement SUR LA MÊME instance (voir doc de classe : jamais partagée
+        // entre threads). Le cache SQLite ci-dessous (getRawTags) prend le relais entre pistes
+        // différentes/instances différentes du même artiste — façon Picard, un seul cache réseau.
         String key = info.artist + "\0" + info.title;
         if (key.equals(cachedTagsKey)) return cachedTagsList;
 
         List<GenreFilter.Candidate> tags = List.of();
         if (!info.artist.isBlank() && !info.title.isBlank()) {
+            String cacheKey = "lastfm:tags:track:" + MetadataCache.queryHash(info.artist, info.title);
             tags = getRawTags(BASE_URL
                 + "?method=track.getTopTags"
                 + "&artist=" + encode(info.artist)
                 + "&track="  + encode(info.title)
                 + "&api_key=" + Config.get().lastfmKey()
-                + "&format=json");
+                + "&format=json", cacheKey, cache);
         }
         if (tags.isEmpty() && !info.artist.isBlank()) {
+            String cacheKey = "lastfm:tags:artist:" + MetadataCache.queryHash(info.artist, "");
             tags = getRawTags(BASE_URL
                 + "?method=artist.getTopTags"
                 + "&artist="  + encode(info.artist)
                 + "&api_key=" + Config.get().lastfmKey()
-                + "&format=json");
+                + "&format=json", cacheKey, cache);
         }
         cachedTagsKey  = key;
         cachedTagsList = tags;
@@ -147,8 +157,8 @@ public class LastFmClient {
     }
 
     /** Last.fm renvoie un "count" de popularité relative (0-100) par tag — capturé pour GenreFilter. */
-    private List<GenreFilter.Candidate> getRawTags(String url) throws Exception {
-        JsonNode root = fetch(url);
+    private List<GenreFilter.Candidate> getRawTags(String url, String cacheKey, MetadataCache cache) throws Exception {
+        JsonNode root = fetch(url, cacheKey, cache);
         List<GenreFilter.Candidate> result = new ArrayList<>();
         if (root == null) return result;
 
@@ -166,7 +176,20 @@ public class LastFmClient {
         return result;
     }
 
-    private JsonNode fetch(String url) throws Exception {
+    /**
+     * Requête HTTP avec mise en cache SQLite persistante façon Picard (QNetworkDiskCache met en
+     * cache TOUT appel réseau uniformément, pas seulement MusicBrainz) — avant ce fix, chaque
+     * piste d'un même artiste/album refaisait ces appels Last.fm à l'identique. cacheKey est
+     * construit SANS l'api_key (contrairement à url) : un secret n'a rien à faire persisté dans
+     * le cache, et il n'apporte aucune valeur discriminante pour l'identité de la requête.
+     */
+    private JsonNode fetch(String url, String cacheKey, MetadataCache cache) throws Exception {
+        String cachedJson = cache.getLookup(cacheKey);
+        if (cachedJson != null) {
+            JsonNode cached = mapper.readTree(cachedJson);
+            return cached.has("error") ? null : cached;
+        }
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("User-Agent", Config.get().userAgent())
@@ -176,6 +199,7 @@ public class LastFmClient {
         if (response.statusCode() != 200) return null;
         JsonNode root = mapper.readTree(response.body());
         if (root.has("error")) return null;
+        cache.putLookup(cacheKey, response.body());
         return root;
     }
 

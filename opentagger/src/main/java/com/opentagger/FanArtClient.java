@@ -31,33 +31,41 @@ public class FanArtClient {
      * {@code CaaClient} — retiré d'ici pour ne plus interroger CAA deux fois (bug trouvé : ce
      * repli interne dupliquait un chemin de code indépendant de CaaClient).
      */
-    public Path downloadCover(TagInfo info) throws Exception {
+    public Path downloadCover(TagInfo info, MetadataCache cache) throws Exception {
         if (info.artistMbid.isBlank()) return null;
         // Sans clé API configurée, la requête échouerait de toute façon — éviter l'appel réseau
         // inutile sur chaque fichier, même pattern que DiscogsClient/lastfmEnabled().
         if (Config.get().fanartKey().isBlank()) return null;
-        JsonNode data = fetchArtistData(info.artistMbid);
+        JsonNode data = fetchArtistData(info.artistMbid, cache);
         if (data == null) return null;
 
         // Pochette de l'album exact (release group)
         if (!info.releaseGroupMbid.isBlank()) {
             String url = extractBestImage(data.path("albums").path(info.releaseGroupMbid).path("albumcover"));
-            if (url != null) return download(url);
+            if (url != null) return download(url, cache);
         }
         // Premier album dans la discographie
         JsonNode albums = data.path("albums");
         if (albums.isObject()) {
             for (JsonNode album : albums) {
                 String url = extractBestImage(album.path("albumcover"));
-                if (url != null) return download(url);
+                if (url != null) return download(url, cache);
             }
         }
         // Photo de l'artiste (dernier recours FanArt.tv)
         String url = extractBestImage(data.path("artistthumb"));
-        return url != null ? download(url) : null;
+        return url != null ? download(url, cache) : null;
     }
 
-    private JsonNode fetchArtistData(String artistMbid) throws Exception {
+    /**
+     * Mise en cache façon Picard (un seul cache réseau pour tout) — clé SANS l'api_key
+     * (contrairement à url, qui l'embarque) : un secret n'a rien à faire persisté dans le cache.
+     */
+    private JsonNode fetchArtistData(String artistMbid, MetadataCache cache) throws Exception {
+        String cacheKey = "fanart:artist:" + artistMbid;
+        String cachedJson = cache.getLookup(cacheKey);
+        if (cachedJson != null) return mapper.readTree(cachedJson);
+
         String url = BASE_URL + "/" + artistMbid + "?api_key=" + Config.get().fanartKey();
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -69,6 +77,7 @@ public class FanArtClient {
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) return null;
 
+        cache.putLookup(cacheKey, response.body());
         return mapper.readTree(response.body());
     }
 
@@ -84,7 +93,7 @@ public class FanArtClient {
         return best != null ? best.path("url").asText(null) : null;
     }
 
-    private Path download(String imageUrl) throws Exception {
-        return ImageDownloader.downloadToTempFile(imageUrl);
+    private Path download(String imageUrl, MetadataCache cache) throws Exception {
+        return ImageDownloader.downloadToTempFile(imageUrl, cache);
     }
 }

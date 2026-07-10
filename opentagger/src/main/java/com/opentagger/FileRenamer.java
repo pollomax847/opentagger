@@ -21,6 +21,20 @@ import java.util.stream.Stream;
  */
 public class FileRenamer {
 
+    // Limite le nombre de copies CROSS-DEVICE simultanées (voir moveFile()) — un rename same-device
+    // (cas courant, quasi-instantané) n'est jamais concerné. Trouvé en production : la bibliothèque
+    // cible et les dossiers scannés sont souvent sur des disques mécaniques DIFFÉRENTS (confirmé sur
+    // la machine de l'utilisateur : /home, /mnt/ssd, /mnt/MyBook et /mnt/MyBook/Music sont 4 disques
+    // physiques distincts, tous rotationnels) — plusieurs threads d'identification en parallèle
+    // (batch.threads) qui finissent tous par écrire sur LE MÊME disque de destination se gênent
+    // mutuellement (une tête de disque mécanique ne peut être qu'à un endroit à la fois), au lieu de
+    // s'accélérer. Défaut 1 (sérialise complètement les copies cross-device) ; réglable via
+    // rename.max_concurrent_cross_device_moves si l'utilisateur a une destination plus rapide (SSD,
+    // NAS avec plusieurs disques...).
+    private static final java.util.concurrent.Semaphore CROSS_DEVICE_COPY_LIMIT =
+            new java.util.concurrent.Semaphore(
+                    Math.max(1, Config.get().num("rename.max_concurrent_cross_device_moves", 1)));
+
     // ── Données des masques ───────────────────────────────────────────────────
     private final List<String> labels      = new ArrayList<>();
     private final List<String> expressions = new ArrayList<>();
@@ -308,17 +322,31 @@ public class FileRenamer {
         try {
             Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
-            // NAS (NFS/SMB) ou MergerFS cross-device : fallback copy+delete sécurisé
-            long srcSize = Files.size(src);
-            Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING,
-                                 StandardCopyOption.COPY_ATTRIBUTES);
-            long dstSize = Files.size(dst);
-            if (dstSize != srcSize) {
-                Files.deleteIfExists(dst);
-                throw new IOException("Copie incomplète (src=" + srcSize
-                        + " dst=" + dstSize + ") — fichier source conservé : " + src);
+            // NAS (NFS/SMB) ou disque cross-device : fallback copy+delete sécurisé. Coûteux en I/O
+            // disque (contrairement au rename same-device ci-dessus, quasi-instantané) — throttlé
+            // via CROSS_DEVICE_COPY_LIMIT (voir son commentaire) pour éviter que plusieurs threads
+            // ne fassent toutes converger leurs copies en même temps sur un même disque mécanique
+            // de destination.
+            try {
+                CROSS_DEVICE_COPY_LIMIT.acquire();
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Déplacement cross-device interrompu : " + src, ie);
             }
-            Files.delete(src);
+            try {
+                long srcSize = Files.size(src);
+                Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING,
+                                     StandardCopyOption.COPY_ATTRIBUTES);
+                long dstSize = Files.size(dst);
+                if (dstSize != srcSize) {
+                    Files.deleteIfExists(dst);
+                    throw new IOException("Copie incomplète (src=" + srcSize
+                            + " dst=" + dstSize + ") — fichier source conservé : " + src);
+                }
+                Files.delete(src);
+            } finally {
+                CROSS_DEVICE_COPY_LIMIT.release();
+            }
         }
     }
 

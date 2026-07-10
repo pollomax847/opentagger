@@ -7,7 +7,18 @@ import java.util.List;
 public class FileEntry {
 
     public enum Status {
-        PENDING, PROCESSING, TAGGED, SKIPPED, ERROR
+        PENDING, PROCESSING,
+        // Identifié (tags proposés en mémoire dans `result`) mais PAS ENCORE écrit sur le disque —
+        // façon Picard (scan/lookup ne touche jamais le fichier, seul un "Save" explicite écrit).
+        // Se place AVANT TAGGED, pas à sa place : tout code qui vérifie `status == TAGGED` pour
+        // décider qu'un fichier est éligible à une action (renommer, exporter, soumettre à
+        // AcoustID, synchroniser ListenBrainz...) continue de fonctionner sans changement, un
+        // fichier IDENTIFIED n'étant structurellement pas différent d'un PENDING pour ces
+        // consommateurs — c'est exactement le comportement voulu (ces actions ont besoin du
+        // fichier réellement sur le disque). Voir ui/SaveWorker.java pour ce qui fait passer
+        // IDENTIFIED → TAGGED.
+        IDENTIFIED,
+        TAGGED, SKIPPED, ERROR
     }
 
     public final File   file;

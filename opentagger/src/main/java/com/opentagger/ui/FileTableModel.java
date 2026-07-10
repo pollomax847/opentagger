@@ -248,6 +248,8 @@ public class FileTableModel extends AbstractTableModel {
         return switch (s) {
             case PENDING    -> "—";
             case PROCESSING -> I18n.t("⏳ En cours...");
+            // Identifié en mémoire, pas encore écrit sur le disque — voir FileEntry.Status.IDENTIFIED.
+            case IDENTIFIED -> (msg.isBlank() ? I18n.t("🔍 Identifié") : "🔍 " + msg) + warn;
             case TAGGED     -> (msg.isBlank() ? I18n.t("✓ Tagué") : "✓ " + msg) + warn;
             case SKIPPED    -> "⚠ " + (msg.isBlank() ? I18n.t("Ignoré") : msg);
             case ERROR      -> "✗ " + (msg.isBlank() ? I18n.t("Erreur") : msg);

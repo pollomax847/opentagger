@@ -2,6 +2,7 @@ package com.opentagger;
 
 import java.io.*;
 import java.nio.file.*;
+import java.util.Arrays;
 import java.util.Properties;
 
 /**
@@ -95,6 +96,11 @@ public class Config {
         return "true".equalsIgnoreCase(v) || "1".equals(v) || "yes".equalsIgnoreCase(v);
     }
 
+    public synchronized double dbl(String key, double fallback) {
+        try { return Double.parseDouble(props.getProperty(key, "").trim()); }
+        catch (NumberFormatException e) { return fallback; }
+    }
+
     // --- Raccourcis pour les cles les plus utilisees ---
 
     public String  uiLanguage()        { return str("ui.language", "fr"); }
@@ -109,12 +115,22 @@ public class Config {
     public String lastfmKey()          { return str("lastfm.api_key"); }
     public String contact()            { return str("app.contact"); }
     public int    minScoreAuto()       { return num("autocorrector.min_score", 85); }
+    // Seuil du score composite pondéré fichier↔piste (TrackMatcher), même valeur par défaut que
+    // Picard (picard/options.py: track_matching_threshold = 0.4) — voir TrackMatcher.findBestTrack().
+    public double trackMatchingThreshold() { return dbl("match.track_matching_threshold", 0.4); }
     public int    mbResultsLimit()     { return num("musicbrainz.results_limit", 5); }
     public boolean mbOnlyOfficial()    { return bool("musicbrainz.only_official", true); }
     public String discogsGenreSource() { return str("discogs.genre_source", "style_then_genre"); }
     public int    discogsMaxGenres()   { return num("discogs.max_genres", 3); }
     public boolean fanartEnabled()     { return bool("fanart.download_cover", true); }
     public boolean lastfmEnabled()     { return bool("lastfm.use_tags", true); }
+    // URL officielle artiste + lien Wikipedia — appel Last.fm SÉPARÉ de celui du genre/mood
+    // (artist.getInfo, pas track.getTopTags/artist.getTopTags) : ne peut pas être fusionné avec
+    // eux (données différentes), donc chaque fichier paie ce round-trip réseau en plus même si
+    // l'utilisateur ne se sert jamais de ces deux champs. Séparé de lastfmEnabled() pour que
+    // désactiver JUSTE ça (et garder genre/mood Last.fm) économise un appel réseau par fichier
+    // sans rien perdre d'autre. Défaut true = comportement inchangé pour qui ne touche pas ce réglage.
+    public boolean lastfmArtistUrlsEnabled() { return bool("lastfm.fetch_artist_urls", true); }
     public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
@@ -186,10 +202,32 @@ public class Config {
     public boolean coverSearchLocal()  { return bool("cover.search_local",       true); }
 
     // --- Barre d'outils secondaire personnalisable (façon Picard) ---
-    public static final String DEFAULT_TOOLBAR_ACTIONS = "transcode,submitAcoustId";
+    // "saveAll" ("Enregistrer tout") N'EST PLUS ICI : promu bouton fixe de l'en-tête (demande
+    // explicite, symétrique à "Rafraîchir" qui devient lui optionnel/déplaçable — voir
+    // MainFrame.buildHeader()). Toute valeur "toolbar.actions" déjà persistée contenant "saveAll"
+    // (installs qui l'avaient ajouté manuellement pendant la brève période où c'était une action
+    // secondaire) est simplement ignorée sans erreur — comportement générique déjà en place pour
+    // tout id inconnu (voir MainFrame.findToolbarAction()/SettingsDialog.load()).
+    public static final String DEFAULT_TOOLBAR_ACTIONS = "refreshFolders,transcode,submitAcoustId";
     public String[] toolbarActions() {
         String v = str("toolbar.actions", DEFAULT_TOOLBAR_ACTIONS);
-        return v.isBlank() ? new String[0] : v.split(",");
+        if (v.isBlank()) return new String[0];
+        String[] actions = v.split(",");
+        // Migration : "refreshFolders" n'existait pas comme action secondaire avant que
+        // "Rafraîchir" devienne optionnel — toute valeur "toolbar.actions" déjà persistée (installs
+        // existantes) date forcément d'avant, donc son absence n'a jamais pu être un choix
+        // délibéré de l'utilisateur. Sans ça, changer DEFAULT_TOOLBAR_ACTIONS ci-dessus ne profite
+        // qu'aux toutes nouvelles installs (le fichier de settings, une fois écrit une première
+        // fois, fige "toolbar.actions" pour de bon — même piège que app.version/mb.oauth.* déjà
+        // rencontré ce projet). Prépendu une seule fois ; devient permanent dès le prochain
+        // SettingsDialog.save() (relit cette même méthode pour peupler sa liste).
+        if (Arrays.stream(actions).noneMatch("refreshFolders"::equals)) {
+            String[] migrated = new String[actions.length + 1];
+            migrated[0] = "refreshFolders";
+            System.arraycopy(actions, 0, migrated, 1, actions.length);
+            return migrated;
+        }
+        return actions;
     }
 
     // --- Fournisseurs de pochette : activation individuelle + ordre (façon Picard) ---
@@ -238,6 +276,28 @@ public class Config {
     public String[] excludedSecondaryTypes() {
         String v = str("releases.excluded_secondary_types", "");
         return v.isBlank() ? new String[0] : v.split(",");
+    }
+
+    /**
+     * Score de préférence par type de release (Album, Compilation, Live...), format
+     * "Type:score,Type:score" (ex. "Album:1.0,Compilation:0.3") — façon Picard
+     * (picard/options.py: release_type_scores). Absent par défaut → carte vide → chaque type non
+     * configuré reçoit 0.5 (neutre, voir ReleaseMatcher), aucun changement de comportement tant
+     * que l'utilisateur ne personnalise rien. Pas encore d'éditeur dans Réglages (portée réduite,
+     * voir le plan de cette tâche) — clé modifiable à la main dans settings.properties.
+     */
+    public java.util.Map<String, Double> releaseTypeScores() {
+        java.util.Map<String, Double> map = new java.util.HashMap<>();
+        String raw = str("releases.type_scores", "");
+        if (raw.isBlank()) return map;
+        for (String pair : raw.split(",")) {
+            String[] kv = pair.split(":", 2);
+            if (kv.length == 2) {
+                try { map.put(kv[0].trim(), Double.parseDouble(kv[1].trim())); }
+                catch (NumberFormatException ignored) {}
+            }
+        }
+        return map;
     }
 
     // --- MusicBrainz OAuth ---

@@ -1,6 +1,5 @@
 package com.opentagger;
 
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -22,24 +21,42 @@ public final class ImageDownloader {
             .followRedirects(HttpClient.Redirect.ALWAYS)
             .build();
 
-    /** Télécharge une image vers un fichier temporaire. Retourne null si échec ou image trop petite. */
-    public static Path downloadToTempFile(String imageUrl) throws Exception {
+    /**
+     * Télécharge une image vers un fichier temporaire. Retourne null si échec ou image trop
+     * petite. Mise en cache façon Picard (un seul cache réseau pour tout, pas seulement
+     * MusicBrainz) — partagée par FanArtClient et PodcastWorker (les deux seuls appelants),
+     * évite de retélécharger la même pochette d'artiste/album ou la même image de podcast à
+     * chaque piste/épisode.
+     */
+    public static Path downloadToTempFile(String imageUrl, MetadataCache cache) throws Exception {
         if (imageUrl == null || imageUrl.isBlank()) return null;
+
+        String cacheKey = "image:" + imageUrl;
+        MetadataCache.CachedImage cached = cache.getCachedImage(cacheKey);
+        if (cached != null) return writeTempFile(cached.bytes(), cached.ext());
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(imageUrl))
                 .header("User-Agent", Config.get().userAgent())
                 .GET()
                 .build();
 
-        HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<byte[]> response = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
         if (response.statusCode() != 200) return null;
 
         // Détecter le type depuis le Content-Type (l'URL peut ne pas finir par .png/.jpg)
         String ct  = response.headers().firstValue("Content-Type").orElse("");
         String ext = ct.contains("png") ? ".png" : ".jpg";
-        Path tmp   = Files.createTempFile("opentagger-cover-", ext);
-        Files.copy(response.body(), tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-        if (Files.size(tmp) < 1000) { Files.deleteIfExists(tmp); return null; }
+        byte[] body = response.body();
+        if (body == null || body.length < 1000) return null;
+
+        cache.putCachedImage(cacheKey, body, ext);
+        return writeTempFile(body, ext);
+    }
+
+    private static Path writeTempFile(byte[] body, String ext) throws Exception {
+        Path tmp = Files.createTempFile("opentagger-cover-", ext);
+        Files.write(tmp, body);
         return tmp;
     }
 }

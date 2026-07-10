@@ -54,8 +54,6 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
     private final AtomicInteger albumsProcessed = new AtomicInteger();
     private final AtomicInteger tracksFixed     = new AtomicInteger();
 
-    private static final int DURATION_TOLERANCE_SEC = 3;
-
     public AlbumClusterWorker(FileTableModel tableModel,
                                Consumer<String> statusCallback, Runnable doneCallback) {
         this.tableModel     = tableModel;
@@ -213,70 +211,24 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
         }
     }
 
+    /**
+     * Apparie une piste candidate — recordingMbid exact d'abord (tier "identifiers", fiable à
+     * 100%), sinon score composite pondéré via {@link com.opentagger.TrackMatcher} (même modèle
+     * que MusicBrainz Picard : titre/artiste/durée/n°piste/n°disque combinés en un seul score,
+     * plus d'ambiguïté disque à gérer à la main puisque toutes les candidates sont comparées
+     * ensemble au lieu d'une cascade de paliers indépendants — voir TrackMatcher pour le détail).
+     */
     private MusicBrainzClient.ReleaseTrack findBestTrack(MusicBrainzClient.ReleaseTracklist tracklist,
                                                           TagInfo result, File audioFile) {
-        // 1. Correspondance par recordingMbid (100% fiable)
         if (!result.recordingMbid.isBlank()) {
             for (var t : tracklist.tracks())
                 if (result.recordingMbid.equals(t.recordingMbid())) return t;
         }
-        String titleLow = result.title.toLowerCase().trim();
 
-        // 2. Correspondance par numéro de piste (+ disque si connu). Sur une release multi-disques,
-        // si le disque n'est pas connu et que plusieurs disques ont ce numéro de piste, NE PAS
-        // deviner — laisser les étapes suivantes (durée, titre) trancher.
-        if (!result.track.isBlank()) {
-            try {
-                int n = Integer.parseInt(result.track.trim());
-                Integer d = result.discNo.isBlank() ? null : Integer.parseInt(result.discNo.trim());
-                List<MusicBrainzClient.ReleaseTrack> sameNumber = new ArrayList<>();
-                for (var t : tracklist.tracks()) {
-                    if (t.trackNo() != n) continue;
-                    if (d != null && t.disc() != 0 && t.disc() != d) continue;
-                    sameNumber.add(t);
-                }
-                if (sameNumber.size() == 1) return sameNumber.get(0);
-            } catch (NumberFormatException ignored) {}
-        }
-
-        // 3. Correspondance par durée du fichier
         int fileDurSec = audioFile != null ? AudioDuration.probeSeconds(audioFile.getAbsolutePath()) : -1;
-        if (fileDurSec > 0) {
-            List<MusicBrainzClient.ReleaseTrack> withinTolerance = new ArrayList<>();
-            for (var t : tracklist.tracks()) {
-                if (t.lengthMs() <= 0) continue;
-                if (Math.abs(t.lengthMs() / 1000 - fileDurSec) <= DURATION_TOLERANCE_SEC) withinTolerance.add(t);
-            }
-            if (withinTolerance.size() == 1) return withinTolerance.get(0);
-            if (withinTolerance.size() > 1 && !titleLow.isBlank()) {
-                MusicBrainzClient.ReleaseTrack best = null;
-                int bestScore = 0;
-                for (var t : withinTolerance) {
-                    int sim = titleSimilarity(titleLow, t.title().toLowerCase().trim());
-                    if (sim > bestScore) { bestScore = sim; best = t; }
-                }
-                if (best != null) return best;
-            }
-        }
+        int fileDurMs  = fileDurSec > 0 ? fileDurSec * 1000 : -1;
 
-        // 4. Correspondance par similarité de titre (dernier recours, toute la tracklist)
-        if (titleLow.isBlank()) return null;
-        MusicBrainzClient.ReleaseTrack best = null;
-        int bestScore = 0;
-        for (var t : tracklist.tracks()) {
-            int sim = titleSimilarity(titleLow, t.title().toLowerCase().trim());
-            if (sim > bestScore && sim >= 70) { bestScore = sim; best = t; }
-        }
-        return best;
-    }
-
-    private static int titleSimilarity(String a, String b) {
-        if (a.equals(b)) return 100;
-        if (a.contains(b) || b.contains(a)) return 90;
-        Set<String> ta = new HashSet<>(Arrays.asList(a.split("\\s+")));
-        Set<String> tb = new HashSet<>(Arrays.asList(b.split("\\s+")));
-        long common = ta.stream().filter(tb::contains).count();
-        int total = ta.size() + tb.size();
-        return total == 0 ? 0 : (int)(common * 2 * 100 / total);
+        return com.opentagger.TrackMatcher.findBestTrack(
+                result, tracklist.tracks(), fileDurMs, Config.get().trackMatchingThreshold());
     }
 }

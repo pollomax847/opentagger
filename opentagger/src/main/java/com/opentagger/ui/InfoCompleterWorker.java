@@ -11,7 +11,6 @@ import org.jaudiotagger.tag.Tag;
 
 import javax.swing.*;
 import java.io.File;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -32,16 +31,21 @@ import java.util.function.Consumer;
  *   - mood           → Last.fm
  *   - BPM            → ffmpeg
  *   - paroles        → LyricsClient
- *   - pochette       → FanArt.tv / Cover Art Archive (si absente du fichier)
+ *   - pochette       → repérée ici (embarquée ou non), résolue seulement à l'Enregistrement
+ *                      (TagEnrichment.saveEntry(), via SaveWorker — façon Picard, voir
+ *                      completeEntry())
+ *
+ * Ne touche plus le disque : un fichier complété repasse en IDENTIFIED (même s'il était déjà
+ * TAGGED) pour attendre un "Enregistrer tout" — voir completeEntry().
  *
  * Parallélisé (un thread-pool, même clé de config "batch.threads" que TaggingWorker/
  * BatchProcessor/AlbumCompletionWorker) — avant ça, cette passe traitait un fichier à la fois
- * malgré exactement le même profil d'appels bloquants (MB, Discogs/Last.fm, BPM ffmpeg, paroles,
- * pochette, écriture) que TaggingWorker avant sa propre parallélisation. MusicBrainzClient et
- * LastFmClient tiennent un état mutable entre appels (même règle déjà établie ailleurs) — instance
- * fraîche par tâche ; Discogs/FanArt/Caa/Lyrics/BpmDetector/TagWriter sont sans état, et
- * TaggerScript/FileRenamer/MetadataCache sont protégés en interne par leurs propres synchronized —
- * tous les quatre restent des champs partagés, comme dans TaggingWorker.
+ * malgré exactement le même profil d'appels bloquants (MB, Discogs/Last.fm, BPM ffmpeg, paroles)
+ * que TaggingWorker avant sa propre parallélisation. MusicBrainzClient et LastFmClient tiennent
+ * un état mutable entre appels (même règle déjà établie ailleurs) — instance fraîche par tâche ;
+ * Discogs/Lyrics/BpmDetector sont sans état, et TaggerScript/MetadataCache sont protégés en
+ * interne par leurs propres synchronized — tous restent des champs partagés, comme dans
+ * TaggingWorker.
  */
 public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
@@ -51,20 +55,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final BiConsumer<Integer,Integer> onCount; // (done, total)
 
     private final DiscogsClient     discogs = new DiscogsClient();
-    private final FanArtClient      fanArt  = new FanArtClient();
-    private final CaaClient         caa     = new CaaClient();
     private final TaggerScript      taggerScript = new TaggerScript();
     private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
-    private final TagWriter         writer  = new TagWriter();
     private final MetadataCache     cache   = new MetadataCache();
-    private final FileRenamer       renamer = new FileRenamer();
-    private final MusicBrainzOAuth  mbOauth = new MusicBrainzOAuth();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
-    private final boolean autoRename   = Config.get().autoRenameEnabled();
-    private final int     autoMaskIdx  = Config.get().defaultRenameMask();
 
     private final AtomicInteger doneCount = new AtomicInteger();
 
@@ -222,12 +219,12 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
         // ── 2. Genre ──────────────────────────────────────────────────────
         String genreBefore = ti.genre;
-        TagEnrichment.enrichGenre(ti, discogs, lastFm);
+        TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
         if (!ti.genre.equals(genreBefore)) { log(I18n.t("  genre=%s", ti.genre)); changed = true; }
 
         // ── 3. Mood ───────────────────────────────────────────────────────
         if (ti.mood.isBlank()) {
-            try { lastFm.enrichMood(ti); if (!ti.mood.isBlank()) { log(I18n.t("  mood←lastfm=%s", ti.mood)); changed = true; } } catch (Exception ignored) {}
+            try { lastFm.enrichMood(ti, cache); if (!ti.mood.isBlank()) { log(I18n.t("  mood←lastfm=%s", ti.mood)); changed = true; } } catch (Exception ignored) {}
         }
 
         // ── 3b. Translittération artiste (si nom non-Latin et option activée) ───
@@ -253,81 +250,40 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             } catch (Exception ignored) {}
         }
 
-        // ── 6. Pochette (vérifier si absente du fichier) ──────────────────
-        Path cover = null;
-        if (!hasCoverInFile(fichier)) {
-            log(I18n.t("  pochette manquante → recherche (CAA/local/fanart)..."));
-            cover = TagEnrichment.resolveCover(ti, fichier, caa, fanArt);
-            log(I18n.t("  cover=%s", cover != null ? cover.getFileName() : "null"));
-            if (cover != null) changed = true;
-        }
+        // ── 6. Pochette : vérifier seulement si une pochette est déjà embarquée (lecture locale,
+        // pas de réseau) — la résolution réelle (CAA/local/fanart) est différée à
+        // l'Enregistrement (TagEnrichment.saveEntry(), via SaveWorker), façon Picard : elle
+        // télécharge dans un fichier temporaire qui ne survivrait pas à un Enregistrer différé
+        // (potentiellement des heures plus tard, voire une autre session). `coverMissing` sert
+        // seulement à décider si ce fichier mérite d'être proposé à l'enregistrement même quand
+        // aucun champ texte n'a changé (avant, une pochette trouvée suffisait à elle seule à
+        // déclencher l'écriture).
+        boolean coverMissing = !hasCoverInFile(fichier);
 
         // ── 7. Script tagger utilisateur (avant le test de changement : un script
         // activé est une modification intentionnelle même si non détectable par diff) ──
         if (taggerScript.apply(ti)) changed = true;
 
-        // ── 8. Écriture si changement ─────────────────────────────────────
-        if (changed || cover != null) {
-            writer.write(fichier, ti, cover);
-            String icKey = !ti.recordingMbid.isBlank()
-                    ? ti.recordingMbid
-                    : MetadataCache.syntheticKey(ti.artist, ti.title);
-            cache.saveTaggingHistory(ti, icKey);
-            // Toutes les autres pipelines (TaggingWorker/BatchProcessor/App/MatchDialog/
-            // AlbumCompletionWorker/PodcastWorker) appellent aussi recordFileTagging — absent
-            // ici jusqu'à présent. Cas concret : recordingMbid était vide et vient d'être rempli
-            // (étape 1 ci-dessus, MB release lookup) sans jamais mettre à jour cette association
-            // fichier→MBID dans le cache.
-            cache.recordFileTagging(fichier.getAbsolutePath(), ti.recordingMbid);
-            // ── 9. Renommage automatique ──────────────────────────────────
-            java.nio.file.Path newPath = null;
-            String renameError = null;
-            if (autoRename) {
-                try {
-                    java.nio.file.Path curPath = entry.currentPath != null
-                            ? entry.currentPath : fichier.toPath();
-                    java.nio.file.Path oldParent = curPath.getParent();
-                    // Même résolution de racine que TaggingWorker : "dossier racine bibliothèque"
-                    // prioritaire s'il est configuré, sinon le dossier scanné (avant : toujours
-                    // scanRoot, ignorant silencieusement ce réglage pour la passe complète).
-                    String libRoot = Config.get().libraryRoot();
-                    java.nio.file.Path root =
-                        (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
-                            ? java.nio.file.Paths.get(libRoot)
-                            : (entry.scanRoot != null ? entry.scanRoot : oldParent);
-                    newPath = renamer.rename(curPath, ti, autoMaskIdx, root);
-                    if (newPath != null) {
-                        if (Config.get().deleteEmptyDirsAfterRename()) {
-                            FileRenamer.deleteEmptyAncestors(oldParent, root);
-                        }
-                        log(I18n.t("  renommé → %s", newPath));
-                    }
-                } catch (Exception ex) {
-                    // Ne plus se contenter d'un log console : sans indication dans l'UI, un
-                    // déplacement qui échoue (permissions, disque cible, etc.) est invisible.
-                    renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-                    log(I18n.t("  renommage échoué: %s", renameError));
-                }
-            }
+        // ── 8. Plus d'écriture ici — façon Picard, l'identification (et cette passe de
+        // complétion, qui en est une variante) ne touche jamais le disque. Un fichier déjà
+        // TAGGED redevient IDENTIFIED (à nouveau "non enregistré") si de nouvelles informations
+        // ont été trouvées, jusqu'à ce qu'un futur "Enregistrer tout" les écrive — cache,
+        // renommage et soumission MB attendent tous TagEnrichment.saveEntry(), appelé plus tard
+        // par SaveWorker.
+        if (changed || coverMissing) {
+            final TagInfo finalTi = ti;
             // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le TableRowSorter
             // en direct depuis l'EDT, et une mutation concurrente pendant un tri casse le
             // contrat de Comparator (déjà vu 697× en 3 jours dans TaggingWorker — même défaut).
-            final java.nio.file.Path finalNewPath = newPath;
-            final String finalRenameError = renameError;
             SwingUtilities.invokeLater(() -> {
-                entry.result = ti;
-                if (finalNewPath != null) entry.currentPath = finalNewPath;
-                if (finalRenameError != null) entry.message = I18n.t("Renommage échoué : %s", finalRenameError);
+                entry.result  = finalTi;
+                entry.status  = FileEntry.Status.IDENTIFIED;
+                entry.message = "";
             });
-            log(I18n.t("  ✔ mis à jour"));
-            submitToMusicBrainz(ti);
+            log(I18n.t("  ✓ complété, en attente d'enregistrement"));
         } else {
             log(I18n.t("  — déjà complet, rien à faire"));
         }
-    }
-
-    private void submitToMusicBrainz(TagInfo info) {
-        TagEnrichment.submitToMusicBrainz(mbOauth, info, msg -> log("  " + msg));
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

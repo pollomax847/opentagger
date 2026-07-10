@@ -30,29 +30,37 @@ public class CaaClient {
      * Essaie d'abord par releaseMbid, puis par releaseGroupMbid.
      * Retourne un fichier temporaire ou null en cas d'échec.
      */
-    public Path downloadFront(TagInfo info) {
-        Path p = downloadFromRelease(info);
-        return p != null ? p : downloadFromReleaseGroup(info);
+    public Path downloadFront(TagInfo info, MetadataCache cache) {
+        Path p = downloadFromRelease(info, cache);
+        return p != null ? p : downloadFromReleaseGroup(info, cache);
     }
 
     /** Pochette liée à l'édition exacte (la plus précise) — un des 2 niveaux CAA séparément activables. */
-    public Path downloadFromRelease(TagInfo info) {
+    public Path downloadFromRelease(TagInfo info, MetadataCache cache) {
         if (info.releaseMbid.isBlank()) return null;
-        Path p = tryDownload("/release/" + info.releaseMbid + "/front-500");
+        Path p = tryDownload("/release/" + info.releaseMbid + "/front-500", cache);
         if (p != null) return p;
-        return tryDownload("/release/" + info.releaseMbid + "/front"); // fallback taille complète
+        return tryDownload("/release/" + info.releaseMbid + "/front", cache); // fallback taille complète
     }
 
     /** Pochette partagée entre toutes les éditions du même album — l'autre niveau CAA. */
-    public Path downloadFromReleaseGroup(TagInfo info) {
+    public Path downloadFromReleaseGroup(TagInfo info, MetadataCache cache) {
         if (info.releaseGroupMbid.isBlank()) return null;
-        Path p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front-500");
+        Path p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front-500", cache);
         if (p != null) return p;
-        return tryDownload("/release-group/" + info.releaseGroupMbid + "/front");
+        return tryDownload("/release-group/" + info.releaseGroupMbid + "/front", cache);
     }
 
-    private Path tryDownload(String path) {
+    /**
+     * Mise en cache façon Picard (un seul cache réseau pour tout, pas seulement MusicBrainz) —
+     * avant ce fix, chaque piste d'un même album retéléchargeait la même pochette CAA.
+     */
+    private Path tryDownload(String path, MetadataCache cache) {
+        String cacheKey = "caa:" + path;
         try {
+            MetadataCache.CachedImage cached = cache.getCachedImage(cacheKey);
+            if (cached != null) return writeTempFile(cached.bytes(), cached.ext());
+
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(CAA_URL + path))
                     .header("User-Agent", Config.get().userAgent())
@@ -67,13 +75,19 @@ public class CaaClient {
             // Vérifier la signature JPEG/PNG pour éviter d'écrire du HTML comme image
             if (!isImageBytes(body)) return null;
 
-            Path tmp = Files.createTempFile("opentagger-caa-", ".jpg");
-            Files.write(tmp, body);
-            tmp.toFile().deleteOnExit();
-            return tmp;
+            String ext = ".jpg";
+            cache.putCachedImage(cacheKey, body, ext);
+            return writeTempFile(body, ext);
         } catch (Exception e) {
             return null; // timeout, 404, réseau — on ignore silencieusement
         }
+    }
+
+    private Path writeTempFile(byte[] body, String ext) throws java.io.IOException {
+        Path tmp = Files.createTempFile("opentagger-caa-", ext);
+        Files.write(tmp, body);
+        tmp.toFile().deleteOnExit();
+        return tmp;
     }
 
     /** Vérifie que les premiers octets correspondent à JPEG (FFD8FF) ou PNG (89504E47). */

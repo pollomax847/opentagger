@@ -1,19 +1,14 @@
 package com.opentagger.ui;
 
-import com.opentagger.CaaClient;
 import com.opentagger.Config;
 import com.opentagger.DiscogsClient;
-import com.opentagger.FanArtClient;
-import com.opentagger.FileRenamer;
 import com.opentagger.I18n;
 import com.opentagger.LastFmClient;
 import com.opentagger.LocalCorrector;
 import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
-import com.opentagger.MusicBrainzOAuth;
 import com.opentagger.TagEnrichment;
 import com.opentagger.TaggerScript;
-import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
@@ -38,15 +33,13 @@ public class MatchDialog extends JDialog {
     private final FileTableModel  tableModel;
     private final Runnable        onApplied;
     private final MusicBrainzClient mb       = new MusicBrainzClient();
-    // Mêmes enrichissements (genre Discogs/Last.fm, pochette CAA/local/FanArt) que les autres
-    // pipelines de taguage — sans ça, une correspondance choisie manuellement ici n'avait NI genre
-    // Discogs/Last.fm NI pochette du tout, contrairement au taguage automatique.
+    // Même enrichissement genre (Discogs/Last.fm) que les autres pipelines de taguage — sans ça,
+    // une correspondance choisie manuellement ici n'avait pas de genre du tout, contrairement au
+    // taguage automatique. La pochette n'est plus résolue ici : différée à l'Enregistrement, voir
+    // applySelected().
     private final DiscogsClient  discogs  = new DiscogsClient();
     private final LastFmClient   lastFm   = new LastFmClient();
-    private final CaaClient      caa      = new CaaClient();
-    private final FanArtClient   fanArt   = new FanArtClient();
     private final TaggerScript   taggerScript = new TaggerScript();
-    private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
 
     private final JTextField     tfArtist;
     private final JTextField     tfTitle;
@@ -212,65 +205,45 @@ public class MatchDialog extends JDialog {
         btnApply.setEnabled(false);
         btnCancel.setEnabled(false);
         resultsTable.setEnabled(false);
-        lblStatus.setText(I18n.t("Enrichissement (genre, pochette) en cours…"));
+        lblStatus.setText(I18n.t("Enrichissement (genre) en cours…"));
 
-        // Genre (Discogs/Last.fm), pochette (CAA/local/FanArt) et renommage disque — tout dans un
-        // SwingWorker, pas directement dans ce listener, sinon ça fige l'EDT le temps des requêtes
-        // réseau et du déplacement de fichier.
-        new SwingWorker<java.nio.file.Path, Void>() {
-            @Override protected java.nio.file.Path doInBackground() throws Exception {
+        // Genre (Discogs/Last.fm) dans un SwingWorker, pas directement dans ce listener, sinon ça
+        // fige l'EDT le temps des requêtes réseau. Plus d'écriture disque ici — façon Picard,
+        // l'identification (même une correspondance choisie manuellement) ne touche jamais le
+        // fichier : pochette, renommage, cache et soumission MB sont différés à l'Enregistrement
+        // (TagEnrichment.saveEntry(), via SaveWorker) — voir son commentaire pour le pourquoi
+        // (notamment la pochette, téléchargée dans un fichier temporaire qui ne survivrait pas à
+        // un Enregistrer différé).
+        new SwingWorker<Void, Void>() {
+            @Override protected Void doInBackground() throws Exception {
                 new LocalCorrector().correct(chosen, path);
                 taggerScript.apply(chosen);
-                TagEnrichment.enrichGenre(chosen, discogs, lastFm);
-                java.nio.file.Path cover = TagEnrichment.resolveCover(chosen, path.toFile(), caa, fanArt);
+                MetadataCache cache = new MetadataCache();
+                try {
+                    TagEnrichment.enrichGenre(chosen, discogs, lastFm, cache);
 
-                // Empreinte AcoustID : calculée systématiquement après toute identification réussie
-                // (TaggingWorker/BatchProcessor/App le font déjà, comme Picard) — une correspondance
-                // confirmée manuellement est une identification tout aussi réussie.
-                if (Config.get().saveAcoustidFingerprints() && chosen.acoustidFingerprint.isBlank()
-                        && com.opentagger.FpcalcInstaller.isAvailable()) {
-                    try {
-                        chosen.acoustidFingerprint = com.opentagger.Fingerprinter.compute(path.toFile()).fingerprint();
-                    } catch (Exception ignored) {}
-                }
-
-                new TagWriter().write(path.toFile(), chosen, cover);
-                TagEnrichment.recordSuccess(new MetadataCache(), path.toFile(), chosen);
-                // Soumission MB (tags genre/mood + rating, si OAuth configuré) — même logique
-                // partagée que TaggingWorker/InfoCompleterWorker/AlbumCompletionWorker, absente
-                // ici jusqu'à présent.
-                TagEnrichment.submitToMusicBrainz(mbOauth, chosen,
-                        msg -> System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg));
-
-                // Renommage automatique — même pattern que TaggingWorker/BatchProcessor/App/
-                // InfoCompleterWorker/AlbumCompletionWorker/PodcastWorker : sans ça, une
-                // correspondance appliquée manuellement était la seule à ne jamais être renommée
-                // même quand "renommage auto" est activé.
-                java.nio.file.Path finalPath = path;
-                if (Config.get().autoRenameEnabled()) {
-                    java.nio.file.Path oldParent = path.getParent();
-                    String libRoot = Config.get().libraryRoot();
-                    java.nio.file.Path root =
-                        (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
-                            ? java.nio.file.Paths.get(libRoot)
-                            : (entry.scanRoot != null ? entry.scanRoot : oldParent);
-                    java.nio.file.Path newPath = new FileRenamer()
-                            .rename(path, chosen, Config.get().defaultRenameMask(), root);
-                    if (newPath != null) {
-                        finalPath = newPath;
-                        if (Config.get().deleteEmptyDirsAfterRename())
-                            FileRenamer.deleteEmptyAncestors(oldParent, root);
+                    // Empreinte AcoustID : calculée systématiquement après toute identification réussie
+                    // (TaggingWorker/BatchProcessor/App le font déjà, comme Picard) — une correspondance
+                    // confirmée manuellement est une identification tout aussi réussie. Reste ici : pur
+                    // calcul local (fpcalc), ne touche pas le disque du fichier lui-même.
+                    if (Config.get().saveAcoustidFingerprints() && chosen.acoustidFingerprint.isBlank()
+                            && com.opentagger.FpcalcInstaller.isAvailable()) {
+                        try {
+                            chosen.acoustidFingerprint = com.opentagger.Fingerprinter.compute(path.toFile()).fingerprint();
+                        } catch (Exception ignored) {}
                     }
+                    chosen.identificationSource = MetadataCache.SOURCE_MBID;
+                } finally {
+                    cache.close();
                 }
-                return finalPath;
+                return null;
             }
 
             @Override protected void done() {
-                java.nio.file.Path finalPath;
                 try {
-                    finalPath = get();
+                    get();
                 } catch (Exception ex) {
-                    JOptionPane.showMessageDialog(MatchDialog.this, I18n.t("Erreur d'écriture : %s", ex.getMessage()),
+                    JOptionPane.showMessageDialog(MatchDialog.this, I18n.t("Erreur : %s", ex.getMessage()),
                             I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
                     btnApply.setEnabled(true);
                     btnCancel.setEnabled(true);
@@ -280,10 +253,9 @@ public class MatchDialog extends JDialog {
                 }
 
                 entry.result      = chosen;
-                entry.status      = FileEntry.Status.TAGGED;
-                entry.message     = I18n.t("Sélectionné manuellement");
+                entry.status      = FileEntry.Status.IDENTIFIED;
+                entry.message     = I18n.t("Sélectionné manuellement, pas encore enregistré");
                 entry.candidates  = null;
-                entry.currentPath = finalPath;
 
                 tableModel.update(entry);
                 if (onApplied != null) onApplied.run();

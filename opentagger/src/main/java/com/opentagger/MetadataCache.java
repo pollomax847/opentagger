@@ -16,7 +16,12 @@ import java.util.logging.Logger;
  *
  * Tables TTL (expiration configurable) :
  *  - recordings(query_hash, json, ts) — réponses MB Recording Search
- *  - lookups(mbid, json, ts)           — réponses MB Recording Lookup
+ *  - lookups(mbid, json, ts)           — réponses MB Recording Lookup, releases ("release:xxx"),
+ *                                         et depuis 2026-07-09 les réponses JSON Discogs/Last.fm/
+ *                                         FanArt.tv (clé générique, pas seulement des MBID malgré
+ *                                         le nom de colonne historique)
+ *  - image_cache(key, ext, bytes, ts)  — pochettes CAA/FanArt.tv/podcasts (2026-07-09, façon
+ *                                         Picard : un seul cache réseau pour tout, pas juste MB)
  *
  * Tables permanentes (historique personnel, jamais purgées) :
  *  - tagging_history(mbid, artist, title, album, year, json, ts)
@@ -123,6 +128,22 @@ public class MetadataCache {
                         json  TEXT    NOT NULL,
                         ts    INTEGER NOT NULL
                     )""");
+                // ── Cache réseau générique (façon Picard : QNetworkDiskCache met en cache TOUT
+                // appel réseau uniformément) — Discogs/Last.fm/FanArt.tv/Cover Art Archive
+                // n'étaient jamais mis en cache jusqu'ici, contrairement à MusicBrainz
+                // (recordings/lookups ci-dessus) : chaque piste d'un même album refaisait un appel
+                // réseau identique pour le même genre/pochette. `lookups` sert déjà de cache
+                // générique clé→JSON (voir les clés "release:xxx" utilisées par les workers
+                // d'albums) — réutilisé tel quel pour les réponses texte de ces 4 fournisseurs
+                // (clés "discogs:"/"lastfm:"/"fanart:"). Les pochettes (binaire) ont besoin d'une
+                // table à part, BLOB au lieu de TEXT.
+                st.execute("""
+                    CREATE TABLE IF NOT EXISTS image_cache (
+                        key   TEXT    PRIMARY KEY,
+                        ext   TEXT    NOT NULL,
+                        bytes BLOB    NOT NULL,
+                        ts    INTEGER NOT NULL
+                    )""");
             }
         } catch (Exception e) {
             LOG.warning("Cache SQLite indisponible : " + e.getMessage());
@@ -176,6 +197,34 @@ public class MetadataCache {
             ps.setString(1, mbid);
             ps.setString(2, json);
             ps.setLong(3, System.currentTimeMillis());
+            ps.executeUpdate();
+        } catch (Exception ignored) {}
+    }
+
+    // ── Cache image binaire (pochettes CAA/FanArt/podcasts) ──────────────────
+
+    public record CachedImage(byte[] bytes, String ext) {}
+
+    public synchronized CachedImage getCachedImage(String key) {
+        if (conn == null) return null;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT bytes,ext FROM image_cache WHERE key=? AND ts>?")) {
+            ps.setString(1, key);
+            ps.setLong(2, System.currentTimeMillis() - ttlMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? new CachedImage(rs.getBytes(1), rs.getString(2)) : null;
+            }
+        } catch (Exception e) { return null; }
+    }
+
+    public synchronized void putCachedImage(String key, byte[] bytes, String ext) {
+        if (conn == null) return;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT OR REPLACE INTO image_cache(key,ext,bytes,ts) VALUES(?,?,?,?)")) {
+            ps.setString(1, key);
+            ps.setString(2, ext);
+            ps.setBytes(3, bytes);
+            ps.setLong(4, System.currentTimeMillis());
             ps.executeUpdate();
         } catch (Exception ignored) {}
     }
@@ -535,9 +584,11 @@ public class MetadataCache {
         if (conn == null) return;
         long cutoff = System.currentTimeMillis() - ttlMs;
         try (PreparedStatement ps1 = conn.prepareStatement("DELETE FROM recordings WHERE ts<?");
-             PreparedStatement ps2 = conn.prepareStatement("DELETE FROM lookups WHERE ts<?")) {
+             PreparedStatement ps2 = conn.prepareStatement("DELETE FROM lookups WHERE ts<?");
+             PreparedStatement ps3 = conn.prepareStatement("DELETE FROM image_cache WHERE ts<?")) {
             ps1.setLong(1, cutoff); ps1.executeUpdate();
             ps2.setLong(1, cutoff); ps2.executeUpdate();
+            ps3.setLong(1, cutoff); ps3.executeUpdate();
         } catch (Exception ignored) {}
     }
 

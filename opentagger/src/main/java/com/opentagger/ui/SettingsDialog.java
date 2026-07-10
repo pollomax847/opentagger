@@ -32,9 +32,11 @@ public class SettingsDialog extends JDialog {
     private JTextField tfLastFmKey;
     private JTextField tfFanArtKey;
     private JCheckBox  chkLastfmEnabled;
+    private JCheckBox  chkLastfmArtistUrls;
 
     // ── Onglet Matching ──────────────────────────────────────────────────────
     private JSpinner   spMinScore;
+    private JSpinner   spTrackMatchThreshold;
     private JCheckBox  chkOnlyOfficial;
     private JCheckBox  chkUseAcoustId;
     // tfPreferredCountry supprimé — remplacé par le sélecteur lstCountriesModel/cmbCountryPicker
@@ -202,6 +204,14 @@ public class SettingsDialog extends JDialog {
     // ─────────────────────────────────────────────────────────────────────────
 
     private final java.util.function.Consumer<java.io.File[]> onLoadFolders;
+    // Rappelée après CHAQUE sauvegarde réussie (OK ou Appliquer — les deux passent par save()),
+    // pas seulement à la fermeture du dialogue : laisse l'appelant (MainFrame) resynchroniser en
+    // direct tout ce qu'il n'a normalement lu qu'une fois à sa construction (barre d'outils
+    // secondaire, masque de renommage par défaut...) sans avoir à redémarrer. Inconditionnelle et
+    // pas diffée ici : c'est à l'appelant de savoir ce qui a effectivement changé et d'agir en
+    // conséquence (idempotent si rien n'a changé). Nullable : les appelants qui n'en ont pas
+    // besoin passent null.
+    private final Runnable onPreferencesSaved;
 
     // ── Recherche de réglages (10 onglets / ~75 réglages — pas de refonte, juste
     //    un accès direct à un champ sans devoir deviner son onglet) ────────────
@@ -211,8 +221,14 @@ public class SettingsDialog extends JDialog {
     private record SearchTarget(int tabIndex, String text, JComponent component) {}
 
     public SettingsDialog(Frame owner, java.util.function.Consumer<java.io.File[]> onLoadFolders) {
+        this(owner, onLoadFolders, null);
+    }
+
+    public SettingsDialog(Frame owner, java.util.function.Consumer<java.io.File[]> onLoadFolders,
+                           Runnable onPreferencesSaved) {
         super(owner, I18n.t("Préférences — OpenTagger"), true);
-        this.onLoadFolders = onLoadFolders;
+        this.onLoadFolders      = onLoadFolders;
+        this.onPreferencesSaved = onPreferencesSaved;
         setMinimumSize(new Dimension(560, 500));
         setResizable(true);
 
@@ -382,6 +398,10 @@ public class SettingsDialog extends JDialog {
         // FanArt.tv est activé/désactivé depuis la liste des fournisseurs de pochette
         // (onglet Tags) — pas de case séparée ici pour éviter deux réglages contradictoires.
         chkLastfmEnabled   = new JCheckBox(I18n.t("Activer l'enrichissement Last.fm"));
+        // Requête Last.fm séparée (artist.getInfo) du genre/mood (track.getTopTags) — un appel
+        // réseau en plus par fichier pour des champs (URL officielle, lien Wikipedia) que tout le
+        // monde ne regarde pas. Décochable indépendamment sans perdre le genre/mood Last.fm.
+        chkLastfmArtistUrls = new JCheckBox(I18n.t("Récupérer aussi l'URL officielle + Wikipedia de l'artiste (requête réseau supplémentaire)"));
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
@@ -437,6 +457,12 @@ public class SettingsDialog extends JDialog {
             enrichInner.add(chkLastfmEnabled, c);
         }
         {
+            GridBagConstraints c = new GridBagConstraints();
+            c.gridx = 0; c.gridy = 1; c.anchor = GridBagConstraints.WEST;
+            c.insets = new Insets(0, 28, 3, 8); c.gridwidth = 3;
+            enrichInner.add(chkLastfmArtistUrls, c);
+        }
+        {
             // Repère explicite pour l'utilisateur — avant, ce lien n'existait que dans un
             // commentaire de code (voir plus haut), pas dans l'UI elle-même : la clé FanArt.tv est
             // ici, mais son activation/priorité est dans un tout autre onglet (Tags), et les
@@ -447,7 +473,7 @@ public class SettingsDialog extends JDialog {
                 + "Matching → Sources de genres.</i></html>"));
             hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
             GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 1; c.anchor = GridBagConstraints.WEST;
+            c.gridx = 0; c.gridy = 2; c.anchor = GridBagConstraints.WEST;
             c.insets = new Insets(2, 10, 4, 8); c.gridwidth = 3;
             enrichInner.add(hint, c);
         }
@@ -482,6 +508,14 @@ public class SettingsDialog extends JDialog {
     @SuppressWarnings("unchecked")
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(85, 0, 100, 5));
+        // Seuil du score composite pondéré fichier↔piste (TrackMatcher, modèle Picard) — distinct
+        // du score MB texte ci-dessus (spMinScore) : celui-ci s'applique quand on choisit la
+        // meilleure piste DANS une tracklist déjà connue (album-first, groupement d'albums).
+        spTrackMatchThreshold = new JSpinner(new SpinnerNumberModel(40, 0, 100, 5));
+        spTrackMatchThreshold.setToolTipText(I18n.t(
+            "Score minimum (titre+artiste+durée+n°piste/disque combinés) pour accepter "
+            + "l'appariement d'un fichier à une piste d'un album déjà identifié. Même valeur par "
+            + "défaut que MusicBrainz Picard (40%)."));
         chkOnlyOfficial  = new JCheckBox(I18n.t("Uniquement les releases officielles"));
         chkUseAcoustId   = new JCheckBox(I18n.t("Activer l'identification par empreinte AcoustID (plus précis, plus lent)"));
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
@@ -556,12 +590,13 @@ public class SettingsDialog extends JDialog {
 
         JPanel matchPanel = form(new String[]{
             "Score minimum (%) :",
+            "Seuil d'appariement piste (%) :",
             "Releases officielles seulement :",
             "",
             "Nb résultats MusicBrainz :",
             "Durée cache (jours) :"
         }, new JComponent[]{
-            spMinScore, chkOnlyOfficial,
+            spMinScore, spTrackMatchThreshold, chkOnlyOfficial,
             chkUseAcoustId,
             spResultsLimit, spCacheDays
         }, "Critères de correspondance MusicBrainz");
@@ -1359,7 +1394,7 @@ public class SettingsDialog extends JDialog {
     private JPanel buildToolbarPanel() {
         JLabel lblDesc = new JLabel(I18n.t(
             "<html>Boutons secondaires affichés dans la barre principale, en plus des boutons fixes<br>" +
-            "(Ouvrir dossier, Rafraîchir, Tout tagger, Tagger la sélection, Annuler).</html>"));
+            "(Ouvrir dossier, Tout tagger, Tagger la sélection, Enregistrer tout, Annuler).</html>"));
         lblDesc.setFont(lblDesc.getFont().deriveFont(11f));
         lblDesc.putClientProperty("FlatLaf.style", "foreground: #888888");
         lblDesc.setBorder(new EmptyBorder(0, 0, 8, 0));
@@ -1563,6 +1598,7 @@ public class SettingsDialog extends JDialog {
         tfFanArtKey     .setText(cfg.str("fanart.api_key",             ""));
 
         spMinScore      .setValue(cfg.num("autocorrector.min_score",   85));
+        spTrackMatchThreshold.setValue((int) Math.round(cfg.trackMatchingThreshold() * 100));
         chkOnlyOfficial .setSelected(cfg.bool("musicbrainz.only_official", true));
         chkUseAcoustId  .setSelected(cfg.useAcoustId());
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
@@ -1593,6 +1629,7 @@ public class SettingsDialog extends JDialog {
         spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
 
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
+        chkLastfmArtistUrls .setSelected(cfg.bool("lastfm.fetch_artist_urls", true));
         chkReplayGainEnabled.setSelected(cfg.replayGainEnabled());
 
         String genreSrc = cfg.str("discogs.genre_source", "style_then_genre");
@@ -1721,6 +1758,7 @@ public class SettingsDialog extends JDialog {
             catch (IOException ignored) {}
         }
 
+
         String newLanguage = cmbLanguage.getSelectedIndex() == 1 ? "en" : "fr";
         p.setProperty("ui.language", newLanguage);
         p.setProperty("update.check_enabled", String.valueOf(chkUpdateCheck.isSelected()));
@@ -1735,6 +1773,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("fanart.api_key",                 tfFanArtKey.getText().trim());
 
         p.setProperty("autocorrector.min_score",       String.valueOf(spMinScore.getValue()));
+        p.setProperty("match.track_matching_threshold",
+            String.valueOf(((Integer) spTrackMatchThreshold.getValue()) / 100.0));
         p.setProperty("musicbrainz.only_official",     String.valueOf(chkOnlyOfficial.isSelected()));
         p.setProperty("acoustid.use_acoustid",         String.valueOf(chkUseAcoustId.isSelected()));
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
@@ -1766,6 +1806,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
 
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
+        p.setProperty("lastfm.fetch_artist_urls", String.valueOf(chkLastfmArtistUrls.isSelected()));
         p.setProperty("replaygain.enabled",     String.valueOf(chkReplayGainEnabled.isSelected()));
 
         String[] genreSources = {"style_then_genre", "genre_then_style", "genre_only"};
@@ -1878,6 +1919,13 @@ public class SettingsDialog extends JDialog {
                     .toArray(java.io.File[]::new);
                 if (newDirs.length > 0) onLoadFolders.accept(newDirs);
             }
+
+            // Laisse MainFrame resynchroniser en direct tout ce qu'il ne relit pas normalement
+            // après sa construction (barre d'outils secondaire, masque de renommage par défaut...)
+            // — voir le commentaire sur onPreferencesSaved. Seul le changement de langue garde un
+            // popup dédié : ça touche des textes déjà rendus dans toute l'appli, pas un champ
+            // unique qu'on peut simplement relire.
+            if (onPreferencesSaved != null) onPreferencesSaved.run();
 
             if (!newLanguage.equals(I18n.lang())) {
                 JOptionPane.showMessageDialog(this,

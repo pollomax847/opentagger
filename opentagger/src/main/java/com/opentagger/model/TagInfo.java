@@ -132,6 +132,15 @@ public class TagInfo {
     public String acoustidId          = "";
     public String acoustidFingerprint = "";
 
+    // Source de l'identification (MetadataCache.SOURCE_SONGREC/ACOUSTID/MBID/TEXT) — bookkeeping
+    // interne, JAMAIS écrit dans le fichier (TagWriter ne mappe que des FieldKey explicites, pas
+    // de réflexion sur TagInfo, donc ce champ est ignoré par l'écriture sans rien à faire de plus).
+    // Existait avant seulement comme TaggingWorker.lastFindTagsSource (ThreadLocal, perdu dès la fin
+    // de l'appel) — persisté ici pour survivre à la séparation Identifier/Enregistrer (potentiellement
+    // des heures, voire une autre session, entre les deux), notamment pour la soumission AcoustID
+    // conditionnelle à la source. Vide = source inconnue/non pertinente (repli sur SOURCE_TEXT).
+    public String identificationSource = "";
+
     // ── Métadonnées release (Jaikoz TXXX) ───────────────────────────────────
     public String script              = "";    // Latin, Cyrillic, CJK…
     public String country             = "";    // code ISO-3166 : US, FR, GB…

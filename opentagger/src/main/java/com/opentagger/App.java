@@ -205,32 +205,38 @@ public class App {
         }
 
         // 7. Enrichir le genre : Discogs → Last.fm (cascade)
+        // Une seule instance de MetadataCache pour toute la suite (au lieu d'une nouvelle jetable
+        // juste pour recordSuccess plus bas) — sert aussi de cache réseau façon Picard pour
+        // Discogs/Last.fm/pochettes, fermée explicitement en fin de méthode.
+        MetadataCache cache = new MetadataCache();
         System.out.println("Recherche du genre (Discogs → Last.fm)...");
         LastFmClient lastFm = new LastFmClient();
-        TagEnrichment.enrichGenre(choisi, new DiscogsClient(), lastFm);
+        TagEnrichment.enrichGenre(choisi, new DiscogsClient(), lastFm, cache);
         if (!choisi.genre.isBlank()) System.out.println("  Genre trouvé : " + choisi.genre);
         // Mood + URLs artiste Last.fm — même gap : absents du CLI jusqu'à présent.
-        if (choisi.mood.isBlank()) { try { lastFm.enrichMood(choisi); } catch (Exception ignored) {} }
-        try { lastFm.enrichArtistUrls(choisi); } catch (Exception ignored) {}
+        if (choisi.mood.isBlank()) { try { lastFm.enrichMood(choisi, cache); } catch (Exception ignored) {} }
+        try { lastFm.enrichArtistUrls(choisi, cache); } catch (Exception ignored) {}
 
         // Paroles — même gap : absentes du CLI jusqu'à présent.
         try { new LyricsClient().enrich(choisi); } catch (Exception ignored) {}
 
         // 8. Pochette : Cover Art Archive → dossier local → FanArt.tv
         System.out.println("Recherche de la pochette (CAA → local → FanArt.tv)...");
-        java.nio.file.Path cover = TagEnrichment.resolveCover(choisi, fichier, new CaaClient(), new FanArtClient());
+        java.nio.file.Path cover = TagEnrichment.resolveCover(choisi, fichier, new CaaClient(), new FanArtClient(), cache);
         System.out.println(cover != null ? "  Pochette trouvée." : "  Aucune pochette trouvée.");
 
         // 9. Écrire les tags + pochette
         try {
             new TagWriter().write(fichier, choisi, cover);
-            TagEnrichment.recordSuccess(new MetadataCache(), fichier, choisi);
+            TagEnrichment.recordSuccess(cache, fichier, choisi);
         } catch (Exception e) {
             System.out.println();
             System.out.println("✗ Erreur lors de l'écriture des tags : " + e.getMessage());
             moveIfConfiguredSkipped(fichier);
+            cache.close();
             return;
         }
+        cache.close();
 
         System.out.println();
         System.out.println("✓ Tags mis à jour !");

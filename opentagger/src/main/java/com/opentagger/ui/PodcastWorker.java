@@ -39,7 +39,7 @@ public class PodcastWorker extends SwingWorker<Void, String> {
         java.nio.file.Path showCover = null;
         if (!feed.artworkUrl().isBlank()) {
             try {
-                showCover = ImageDownloader.downloadToTempFile(feed.artworkUrl());
+                showCover = ImageDownloader.downloadToTempFile(feed.artworkUrl(), cache);
             } catch (Exception ex) {
                 LOG.warning("[Podcast] Pochette du show non téléchargée : " + ex.getMessage());
             }

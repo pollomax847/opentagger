@@ -56,6 +56,18 @@ public class MusicBrainzOAuth {
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
+    // Coupe-circuit par instance : évite de retenter une soumission vouée à l'échec sur CHAQUE
+    // fichier d'un run (TaggingWorker/AlbumCompletionWorker/InfoCompleterWorker/MatchDialog créent
+    // chacun UNE seule instance de MusicBrainzOAuth réutilisée pour tous leurs fichiers, voir leurs
+    // champs `mbOauth`). Trouvé en production : un compte connecté avant l'ajout du rafraîchissement
+    // automatique (mb.oauth.refresh_token vide) fait échouer post()/put() en HTTP 401 sur
+    // ABSOLUMENT CHAQUE fichier, pour toujours — sans ce coupe-circuit, ça gaspille 2 requêtes HTTP
+    // par fichier (POST initial + tentative de rafraîchissement, elle aussi vouée à l'échec) sur
+    // toute une bibliothèque de centaines de milliers de fichiers, pour un résultat qui ne peut
+    // structurellement jamais réussir tant que l'utilisateur ne se reconnecte pas. Se réinitialise
+    // naturellement au prochain run (chaque worker recrée sa propre instance).
+    private volatile boolean submissionBroken = false;
+
     // ── Autorisation OAuth2 ───────────────────────────────────────────────────
 
     /**
@@ -373,24 +385,36 @@ public class MusicBrainzOAuth {
     // ── Helpers HTTP ──────────────────────────────────────────────────────────
 
     private void post(String url, String xmlBody, String token, String desc) throws Exception {
+        if (submissionBroken)
+            throw new Exception(desc + " — désactivé pour ce run (reconnectez MusicBrainz dans Réglages)");
         HttpResponse<String> resp = doPost(url, xmlBody, token);
         if (resp.statusCode() == 401) {
             // Access token expiré (durée de vie 1h côté MB) : tenter un rafraîchissement
             // silencieux via le refresh_token stocké, puis rejouer la requête une seule fois.
             String refreshed = refreshAccessToken();
-            if (refreshed != null)
+            if (refreshed == null) {
+                submissionBroken = true; // pas de refresh_token exploitable → ne peut plus réussir ce run
+            } else {
                 resp = doPost(url, xmlBody, refreshed);
+                if (resp.statusCode() == 401) submissionBroken = true; // token rafraîchi aussi rejeté
+            }
         }
         if (resp.statusCode() >= 400)
             throw new Exception(desc + " — HTTP " + resp.statusCode() + " : " + resp.body());
     }
 
     private void put(String url, String token, String desc) throws Exception {
+        if (submissionBroken)
+            throw new Exception(desc + " — désactivé pour ce run (reconnectez MusicBrainz dans Réglages)");
         HttpResponse<String> resp = doPut(url, token);
         if (resp.statusCode() == 401) {
             String refreshed = refreshAccessToken();
-            if (refreshed != null)
+            if (refreshed == null) {
+                submissionBroken = true;
+            } else {
                 resp = doPut(url, refreshed);
+                if (resp.statusCode() == 401) submissionBroken = true;
+            }
         }
         if (resp.statusCode() >= 400)
             throw new Exception(desc + " — HTTP " + resp.statusCode() + " : " + resp.body());

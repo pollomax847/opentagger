@@ -1,18 +1,14 @@
 package com.opentagger.ui;
 
 import com.opentagger.I18n;
-import com.opentagger.CaaClient;
 import com.opentagger.DiscogsClient;
-import com.opentagger.FanArtClient;
 import com.opentagger.LastFmClient;
 import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
 import com.opentagger.MusicBrainzClient.ReleaseTracklist;
 import com.opentagger.MusicBrainzClient.ReleaseTrack;
-import com.opentagger.MusicBrainzOAuth;
 import com.opentagger.TagEnrichment;
 import com.opentagger.TaggerScript;
-import com.opentagger.TagWriter;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
@@ -27,14 +23,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Complète les albums partiellement tagués.
+ * Complète les albums partiellement tagués (ou identifiés, pas encore enregistrés).
  *
  * Algorithme :
- * 1. Groupe les fichiers TAGGED par releaseMbid.
+ * 1. Groupe les fichiers TAGGED ou IDENTIFIED par releaseMbid (ancres également valables tant
+ *    qu'elles ne viennent pas d'une identification texte, voir plus bas).
  * 2. Pour chaque release, récupère la tracklist complète sur MusicBrainz.
  * 3. Identifie les pistes absentes du groupe.
  * 4. Cherche parmi les fichiers SKIPPED/PENDING ceux dont le titre correspond.
- * 5. Re-tague les fichiers trouvés avec les métadonnées exactes de la piste.
+ * 5. Identifie les fichiers trouvés avec les métadonnées exactes de la piste (statut IDENTIFIED,
+ *    pas encore écrit sur le disque — voir TagEnrichment.saveEntry(), appelé plus tard par
+ *    SaveWorker via "Enregistrer tout", façon Picard).
  *
  * Parallélisé par release (un thread-pool, même clé de config "batch.threads" que
  * TaggingWorker/BatchProcessor) — avant ça, cette passe traitait un fichier à la fois avec un
@@ -44,11 +43,10 @@ import java.util.function.Consumer;
  * des heures (constaté en direct : ~48 min sans terminer, bloquant toute nouvelle session de
  * taguage via la garde mutuelle-exclusion de MainFrame). MusicBrainzClient et LastFmClient tiennent
  * un état mutable entre appels (déjà documenté pour TaggingWorker) — instance fraîche par tâche ;
- * DiscogsClient/CaaClient/FanArtClient/TaggerScript/MusicBrainzOAuth sont sans état, partagés tels
- * quels. candidateIndex est mutable et partagé entre toutes les releases (un même fichier candidat
- * ne doit être réclamé que par UNE piste) — "trouver + retirer" est donc rendu atomique via
- * synchronized sur la map, pour éviter que deux releases traitées en parallèle ne réclament le même
- * fichier.
+ * DiscogsClient/TaggerScript sont sans état, partagés tels quels. candidateIndex est mutable et
+ * partagé entre toutes les releases (un même fichier candidat ne doit être réclamé que par UNE
+ * piste) — "trouver + retirer" est donc rendu atomique via synchronized sur la map, pour éviter
+ * que deux releases traitées en parallèle ne réclament le même fichier.
  */
 public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
@@ -56,15 +54,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private final Consumer<String>  statusCallback;
     private final Runnable          doneCallback;
 
-    // Genre (Discogs/Last.fm) et pochette (CAA/local/FanArt) — la tracklist MB ne fournit ni
-    // l'un ni l'autre, donc "ancre MB fiable" ne dispensait pas de ces enrichissements ; jusqu'ici
-    // absents, les fichiers complétés par ce worker sortaient sans genre ni pochette du tout,
-    // contrairement aux fichiers tagués par TaggingWorker/InfoCompleterWorker/MatchDialog.
+    // Genre (Discogs/Last.fm) — la tracklist MB n'en fournit pas, donc "ancre MB fiable" ne
+    // dispensait pas de cet enrichissement ; jusqu'ici absent, les fichiers complétés par ce
+    // worker sortaient sans genre, contrairement aux fichiers tagués par TaggingWorker/
+    // InfoCompleterWorker/MatchDialog. La pochette est désormais résolue à l'Enregistrement
+    // (TagEnrichment.saveEntry(), via SaveWorker), plus ici — voir processRelease().
     private final DiscogsClient  discogs = new DiscogsClient();
-    private final CaaClient      caa     = new CaaClient();
-    private final FanArtClient   fanArt  = new FanArtClient();
     private final TaggerScript   taggerScript = new TaggerScript();
-    private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
 
     private final AtomicInteger matched  = new AtomicInteger();
     private final AtomicInteger releases = new AtomicInteger();
@@ -93,22 +89,35 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
     @Override
     protected Void doInBackground() throws Exception {
-        // ── 1. Collecter les releases depuis les fichiers TAGGED ─────────────
+        // ── 1. Collecter les releases depuis les fichiers TAGGED ou IDENTIFIED ───
         // releaseMbid → {recordingMbid → FileEntry}
         Map<String, Map<String, FileEntry>> releaseGroups = new LinkedHashMap<>();
 
         List<FileEntry> candidates = new ArrayList<>(); // SKIPPED/PENDING à compléter
 
-        // Ouvrir le cache ici pour vérifier la source d'identification des ancres
+        // Ouvrir le cache ici pour vérifier la source d'identification des ancres TAGGED
         MetadataCache cacheForSrc = new MetadataCache();
         try {
             for (int i = 0; i < tableModel.getRowCount(); i++) {
                 FileEntry e = tableModel.get(i);
-                if (e.status == FileEntry.Status.TAGGED) {
+                // IDENTIFIED accepté comme ancre au même titre que TAGGED : porte déjà les mêmes
+                // données d'identification complètes (releaseMbid/recordingMbid), juste pas
+                // encore écrites sur le disque — inutile d'attendre "Enregistrer tout" pour
+                // pouvoir compléter les albums correspondants en mémoire.
+                if (e.status == FileEntry.Status.TAGGED || e.status == FileEntry.Status.IDENTIFIED) {
                     // N'utiliser comme ancre de release que les fichiers identifiés par source FIABLE.
                     // SOURCE_TEXT = recherche texte = releaseMbid potentiellement faux → faux positifs.
-                    String path   = (e.currentPath != null ? e.currentPath : e.file.toPath()).toString();
-                    String source = cacheForSrc.getFileTaggingSource(path);
+                    // Pour TAGGED, la source vient du cache SQLite (renseigné à l'Enregistrement) ;
+                    // pour IDENTIFIED (jamais passé par cache.recordFileTagging(), qui n'a lieu qu'à
+                    // l'Enregistrement), elle vient directement du TagInfo en mémoire — voir
+                    // TagInfo.identificationSource, persisté par tous les pipelines d'identification.
+                    String source;
+                    if (e.status == FileEntry.Status.TAGGED) {
+                        String path = (e.currentPath != null ? e.currentPath : e.file.toPath()).toString();
+                        source = cacheForSrc.getFileTaggingSource(path);
+                    } else {
+                        source = e.result != null ? e.result.identificationSource : null;
+                    }
                     if (MetadataCache.SOURCE_TEXT.equals(source) || source == null || source.isBlank()) continue;
 
                     TagInfo ref    = e.result != null ? e.result : e.current;
@@ -128,7 +137,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         }
 
         if (releaseGroups.isEmpty()) {
-            publish(I18n.t("Aucun album identifié parmi les fichiers tagués."));
+            publish(I18n.t("Aucun album identifié parmi les fichiers tagués/identifiés."));
             return null;
         }
         if (candidates.isEmpty()) {
@@ -241,74 +250,40 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // App/InfoCompleterWorker.
             taggerScript.apply(ti);
 
-            // Genre (Discogs/Last.fm) et pochette (CAA/local/FanArt) — la tracklist MB
-            // n'en fournit ni l'un ni l'autre, il faut les chercher comme les autres pipelines.
-            TagEnrichment.enrichGenre(ti, discogs, lastFm);
-            java.nio.file.Path cover = TagEnrichment.resolveCover(ti, writePath.toFile(), caa, fanArt);
+            // Genre (Discogs/Last.fm) — la tracklist MB n'en fournit pas, il faut le chercher
+            // comme les autres pipelines. La pochette, elle, n'est plus résolue ici : façon
+            // Picard, l'identification ne touche jamais le disque (ni la pochette — téléchargée
+            // dans un fichier temporaire — ni les tags) ; voir TagEnrichment.saveEntry(), appelé
+            // plus tard par SaveWorker ("Enregistrer tout").
+            TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
 
             // Empreinte AcoustID : calculée systématiquement après toute identification
             // réussie (TaggingWorker/BatchProcessor/App/MatchDialog le font déjà, comme
             // Picard) — un fichier retrouvé via la tracklist d'album est identifié tout
-            // aussi sûrement (score 100 ci-dessus).
+            // aussi sûrement (score 100 ci-dessus). Reste ici : pur calcul local (fpcalc), ne
+            // touche pas le disque du fichier lui-même.
             if (com.opentagger.Config.get().saveAcoustidFingerprints() && ti.acoustidFingerprint.isBlank()
                     && com.opentagger.FpcalcInstaller.isAvailable()) {
                 try {
                     ti.acoustidFingerprint = com.opentagger.Fingerprinter.compute(writePath.toFile()).fingerprint();
                 } catch (Exception ignored) {}
             }
+            ti.identificationSource = MetadataCache.SOURCE_MBID;
 
-            // Écrire les tags
-            try {
-                new TagWriter().write(writePath.toFile(), ti, cover);
-                cache.recordFileTagging(writePath.toString(), track.recordingMbid());
-                cache.saveTaggingHistory(ti);
-                // Soumission MB (tags genre/mood + rating, si OAuth configuré) — même
-                // logique partagée que TaggingWorker/InfoCompleterWorker.
-                TagEnrichment.submitToMusicBrainz(mbOauth, ti, this::publish);
+            // Muter hit/tableModel SUR l'EDT : ce FileEntry est aussi comparé en
+            // direct par le TableRowSorter depuis l'EDT, et une mutation concurrente
+            // pendant un tri casse le contrat de Comparator (déjà vu 697× en 3 jours).
+            final FileEntry hitFinal = hit;
+            SwingUtilities.invokeLater(() -> {
+                hitFinal.result  = ti;
+                hitFinal.status  = FileEntry.Status.IDENTIFIED;
+                hitFinal.message = "";
+                tableModel.update(hitFinal);
+            });
 
-                // Renommage automatique — sans ça, les fichiers tagués par "Compléter les
-                // albums" étaient les seuls à ne jamais passer par FileRenamer même quand
-                // "renommage auto" est activé (même défaut que dans albumFirstPass).
-                java.nio.file.Path finalWritePath = writePath;
-                if (com.opentagger.Config.get().autoRenameEnabled()) {
-                    try {
-                        int maskIdx = com.opentagger.Config.get().defaultRenameMask();
-                        java.nio.file.Path oldParent = writePath.getParent();
-                        String libRoot = com.opentagger.Config.get().libraryRoot();
-                        java.nio.file.Path root =
-                            (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
-                                ? java.nio.file.Paths.get(libRoot)
-                                : (hit.scanRoot != null ? hit.scanRoot : oldParent);
-                        java.nio.file.Path newPath = new com.opentagger.FileRenamer()
-                                .rename(writePath, ti, maskIdx, root);
-                        if (newPath != null) {
-                            finalWritePath = newPath;
-                            if (com.opentagger.Config.get().deleteEmptyDirsAfterRename()) {
-                                com.opentagger.FileRenamer.deleteEmptyAncestors(oldParent, root);
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                // Muter hit/tableModel SUR l'EDT : ce FileEntry est aussi comparé en
-                // direct par le TableRowSorter depuis l'EDT, et une mutation concurrente
-                // pendant un tri casse le contrat de Comparator (déjà vu 697× en 3 jours).
-                final FileEntry hitFinal = hit;
-                final java.nio.file.Path finalPathForEdt = finalWritePath;
-                SwingUtilities.invokeLater(() -> {
-                    hitFinal.result  = ti;
-                    hitFinal.status  = FileEntry.Status.TAGGED;
-                    hitFinal.message = "";
-                    hitFinal.currentPath = finalPathForEdt;
-                    tableModel.update(hitFinal);
-                });
-
-                publish(I18n.t("  ✓ %s → piste %d \"%s\"",
-                        hit.filename(), track.trackNo(), track.title()));
-                matched.incrementAndGet();
-            } catch (Exception ex) {
-                publish(I18n.t("  ✗ %s : %s", hit.filename(), ex.getMessage()));
-            }
+            publish(I18n.t("  ✓ %s → piste %d \"%s\" (identifié, pas encore enregistré)",
+                    hit.filename(), track.trackNo(), track.title()));
+            matched.incrementAndGet();
         }
     }
 

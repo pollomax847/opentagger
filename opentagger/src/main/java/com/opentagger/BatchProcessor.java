@@ -149,15 +149,15 @@ public class BatchProcessor {
                 // Instance LastFmClient fraîche : voir le commentaire de classe sur le
                 // partage inter-threads (cachedTagsKey/cachedTagsList d'instance).
                 LastFmClient lastFm = new LastFmClient();
-                TagEnrichment.enrichGenre(best, discogs, lastFm);
+                TagEnrichment.enrichGenre(best, discogs, lastFm, cache);
                 // Mood + URLs artiste Last.fm — même gap : absents du CLI/batch jusqu'à présent.
-                if (best.mood.isBlank()) { try { lastFm.enrichMood(best); } catch (Exception ignored) {} }
-                try { lastFm.enrichArtistUrls(best); } catch (Exception ignored) {}
+                if (best.mood.isBlank()) { try { lastFm.enrichMood(best, cache); } catch (Exception ignored) {} }
+                try { lastFm.enrichArtistUrls(best, cache); } catch (Exception ignored) {}
 
                 // Paroles — même gap : absentes du CLI/batch jusqu'à présent.
                 try { new LyricsClient().enrich(best); } catch (Exception ignored) {}
 
-                Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt);
+                Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt, cache);
                 writer.write(fichier, best, cover);
                 appliques.incrementAndGet();
 

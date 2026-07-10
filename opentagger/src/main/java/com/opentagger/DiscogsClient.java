@@ -31,16 +31,16 @@ public class DiscogsClient {
      * Enrichit un TagInfo : genres, barcode, catalogue number.
      * Stratégie : artiste + album → artiste + titre → artiste seul.
      */
-    public void enrichGenres(TagInfo info) throws Exception {
+    public void enrichGenres(TagInfo info, MetadataCache cache) throws Exception {
         if (info.artist.isBlank()) return;
         // Sans clé/secret configurés, la requête échouerait de toute façon (401) — éviter l'appel
         // réseau inutile sur chaque fichier, même pattern que lastfmEnabled()/AcoustID pré-vérifié.
         if (Config.get().discogsKey().isBlank() || Config.get().discogsSecret().isBlank()) return;
 
         JsonNode hit = null;
-        if (!info.album.isBlank())  hit = searchBest(info.artist, info.album);
-        if (hit == null && !info.title.isBlank()) hit = searchBest(info.artist, info.title);
-        if (hit == null) hit = searchBest(info.artist, "");
+        if (!info.album.isBlank())  hit = searchBest(info.artist, info.album, cache);
+        if (hit == null && !info.title.isBlank()) hit = searchBest(info.artist, info.title, cache);
+        if (hit == null) hit = searchBest(info.artist, "", cache);
         if (hit == null) return;
 
         // Genres/styles : ordre et limite configurables
@@ -102,7 +102,16 @@ public class DiscogsClient {
         }
     }
 
-    private JsonNode searchBest(String artist, String album) throws Exception {
+    private JsonNode searchBest(String artist, String album, MetadataCache cache) throws Exception {
+        // Mise en cache façon Picard (un seul cache réseau pour tout, pas seulement MusicBrainz) —
+        // avant ce fix, chaque piste d'un même album refaisait cet appel Discogs à l'identique.
+        String cacheKey = "discogs:search:" + MetadataCache.queryHash(artist, album);
+        String cachedJson = cache.getLookup(cacheKey);
+        if (cachedJson != null) {
+            JsonNode results = mapper.readTree(cachedJson).path("results");
+            return (results.isArray() && !results.isEmpty()) ? results.get(0) : null;
+        }
+
         String url = BASE_URL + "/database/search?type=release&per_page=5"
                 + "&artist=" + encode(artist)
                 + (album.isBlank() ? "" : "&release_title=" + encode(album));
@@ -117,6 +126,7 @@ public class DiscogsClient {
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) return null;
 
+        cache.putLookup(cacheKey, response.body());
         JsonNode results = mapper.readTree(response.body()).path("results");
         return (results.isArray() && !results.isEmpty()) ? results.get(0) : null;
     }
