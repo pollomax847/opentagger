@@ -35,6 +35,11 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
     private final Consumer<Progress> onProgress; // appelé sur EDT via process()
     private final Runnable           onDone;
 
+    // Champ plutôt que variable locale de doInBackground() — même raison que TaggingWorker.pool/
+    // AlbumCompletionWorker.pool (voir leurs commentaires) : sans ça, stopNow() n'interromprait
+    // que le thread de doInBackground(), pas les tâches ffmpeg déjà soumises au pool.
+    private volatile ExecutorService pool;
+
     public TranscodeWorker(List<FileEntry>    entries,
                            FileTableModel     tableModel,
                            Consumer<Progress> onProgress,
@@ -43,6 +48,14 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
         this.tableModel = tableModel;
         this.onProgress = onProgress;
         this.onDone     = onDone;
+    }
+
+    /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final) — voir
+     *  TaggingWorker.stopNow(), même raison et même correctif. */
+    public void stopNow() {
+        ExecutorService p = pool;
+        if (p != null) p.shutdownNow();
+        cancel(true);
     }
 
     @Override
@@ -57,7 +70,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
         int total = entries.size();
 
         int threads = Math.max(1, cfg.num("batch.threads", 3));
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
         for (FileEntry e : entries) {

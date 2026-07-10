@@ -666,7 +666,7 @@ public class MainFrame extends JFrame {
                 Config.get().set("tagging.auto_complete_albums", String.valueOf(chkAutoCompleteAlbums.isSelected())));
         m.add(chkAutoCompleteAlbums);
         m.addSeparator();
-        m.add(mitem(I18n.t("Arrêter"),                 null,  e -> cancelTagging()));
+        m.add(mitem(I18n.t("Arrêter"),                 null,  e -> stopAll()));
         m.addSeparator();
         m.add(mitem(I18n.t("Renommer les fichiers tagués"), "Ctrl+R", e -> renameTagged()));
         m.add(mitem(I18n.t("Organiser en dossiers…"),  "Ctrl+G", e -> organizeFiles()));
@@ -773,7 +773,7 @@ public class MainFrame extends JFrame {
         btnTagAll.addActionListener(e -> startTagging(false));
         btnTagSel.addActionListener(e -> startTagging(true));
         btnSaveAll.addActionListener(e -> saveAll());
-        btnCancel.addActionListener(e -> cancelTagging());
+        btnCancel.addActionListener(e -> stopAll());
         btnCancel.setEnabled(false);
 
         JPanel actionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 6));
@@ -2425,8 +2425,25 @@ public class MainFrame extends JFrame {
         worker.execute();
     }
 
-    private void cancelTagging() {
-        if (worker != null) worker.stopNow();
+    /**
+     * Arrête TOUTE opération de fond en cours, pas seulement le taguage — demande explicite :
+     * le bouton/menu "Arrêter" doit aussi stopper une complétion d'albums, une passe complète,
+     * un groupement d'albums, un enregistrement ou un transcodage en cours, pas juste "Tout
+     * tagger"/"Forcer le re-taguage" (qui partagent déjà le même champ `worker`). Chaque worker a
+     * son propre mécanisme d'arrêt : stopNow() (interrompt aussi les tâches déjà soumises à son
+     * pool de threads, pas seulement le thread de doInBackground()) là où un pool existe, cancel()
+     * nu pour les deux qui n'en ont pas (AlbumClusterWorker est séquentiel, ListenBrainzSyncWorker
+     * ne fait qu'un seul appel réseau bloquant — même cancel(false) que syncListenBrainz()).
+     */
+    private void stopAll() {
+        if (worker != null)           worker.stopNow();
+        if (completionWorker != null) completionWorker.stopNow();
+        if (infoCompleter != null)    infoCompleter.stopNow();
+        if (clusterWorker != null)    clusterWorker.cancel(true);
+        if (saveWorker != null)       saveWorker.stopNow();
+        if (transcodeWorker != null)  transcodeWorker.stopNow();
+        if (lbSyncWorker != null)     lbSyncWorker.cancel(false);
+
         // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
