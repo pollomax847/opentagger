@@ -6,7 +6,6 @@ import com.opentagger.model.TagInfo;
 import javax.swing.event.TableModelEvent;
 import javax.swing.event.TableModelListener;
 import javax.swing.table.AbstractTableModel;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
@@ -199,30 +198,11 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
         members.add(idx, e);
     }
 
-    /** Même clé que {@code RenamePreviewDialog.groupKey()} (déjà en prod) — dossier parent en repli
-     *  plutôt qu'un bucket global unique "sans album" : sur un scan de centaines de milliers de
-     *  fichiers, des dizaines de milliers de fichiers fraîchement découverts sans tag album le
-     *  temps d'être identifiés se retrouveraient sinon tous dans UN SEUL groupe géant. */
-    private String groupKeyFor(FileEntry e) {
-        TagInfo tags = e.activeTags();
-        String art = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
-        if (!tags.album.isBlank()) return "album::" + art + "::" + tags.album;
-        Path parent = parentOf(e);
-        return "folder::" + (parent != null ? parent : e.filename());
-    }
+    /** Voir {@link com.opentagger.AlbumGrouping} — logique partagée avec
+     *  {@code RenamePreviewDialog}/{@code CoverFlowDialog}, extraite pour ne plus être dupliquée. */
+    private String groupKeyFor(FileEntry e) { return com.opentagger.AlbumGrouping.key(e); }
 
-    private String groupTitleFor(FileEntry e) {
-        TagInfo tags = e.activeTags();
-        String art = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
-        if (!tags.album.isBlank()) return art.isBlank() ? tags.album : art + " – " + tags.album;
-        Path parent = parentOf(e);
-        return "📁 " + (parent != null ? parent.getFileName() : e.filename());
-    }
-
-    private static Path parentOf(FileEntry e) {
-        Path p = e.currentPath != null ? e.currentPath : (e.file != null ? e.file.toPath() : null);
-        return p != null ? p.getParent() : null;
-    }
+    private String groupTitleFor(FileEntry e) { return com.opentagger.AlbumGrouping.title(e); }
 
     // Tri intra-groupe : disque puis piste (numérique, vide/illisible en DERNIER, pas en premier —
     // un morceau non numéroté ne doit pas usurper la place de la piste 1) puis nom de fichier en
@@ -250,8 +230,10 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
      *  tel quel dès que le filtre est retiré (prochain fireTableDataChanged() de source). */
     private void reflattenAndFire() {
         boolean forceExpand = source.isFiltered();
+        List<Group> ordered = new ArrayList<>(groupsByKey.values());
+        if (groupComparator != null) ordered.sort(groupComparator);
         List<DisplayRow> next = new ArrayList<>();
-        for (Group g : groupsByKey.values()) {
+        for (Group g : ordered) {
             next.add(new DisplayRow(g, null));
             if (!(g.collapsed && !forceExpand))
                 for (FileEntry e : g.members) next.add(new DisplayRow(null, e));
@@ -262,6 +244,39 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
     }
 
     private boolean effectiveCollapsed(Group g) { return g.collapsed && !source.isFiltered(); }
+
+    // ── Tri des groupes (ordre d'affichage des albums, jamais des pistes) ──────
+
+    // null = ordre d'apparition (LinkedHashMap groupsByKey, premier identifié en premier).
+    private Comparator<Group> groupComparator;
+
+    /** Appelé par {@link GroupSortRowSorter} sur clic d'en-tête de colonne — choisit l'ordre
+     *  d'affichage des ALBUMS (quel groupe apparaît en premier), jamais l'ordre des pistes à
+     *  l'intérieur d'un groupe (toujours par disque/piste, voir {@link #TRACK_ORDER}). Colonnes
+     *  sans valeur de groupe représentative (Statut, Piste, case à cocher) : no-op, {@link
+     *  GroupSortRowSorter} ne devrait de toute façon jamais transmettre ces colonnes (voir
+     *  MainFrame.setViewMode(), setSortable() par colonne). */
+    public void setGroupSort(int column, boolean ascending) {
+        Comparator<Group> base = switch (column) {
+            case FileTableModel.COL_FILE ->
+                Comparator.comparing((Group g) -> g.title, String.CASE_INSENSITIVE_ORDER);
+            case FileTableModel.COL_ARTIST, FileTableModel.COL_ALBUM_ARTIST ->
+                Comparator.comparing((Group g) -> representative(g, t -> t.albumArtist.isBlank() ? t.artist : t.albumArtist),
+                        String.CASE_INSENSITIVE_ORDER);
+            case FileTableModel.COL_ALBUM ->
+                Comparator.comparing((Group g) -> representative(g, t -> t.album), String.CASE_INSENSITIVE_ORDER);
+            case FileTableModel.COL_YEAR ->
+                Comparator.comparing((Group g) -> representative(g, t -> t.year));
+            default -> null;
+        };
+        if (base == null) return;
+        groupComparator = ascending ? base : base.reversed();
+        reflattenAndFire();
+    }
+
+    private String representative(Group g, java.util.function.Function<TagInfo, String> f) {
+        return g.members.isEmpty() ? "" : f.apply(g.members.get(0).activeTags());
+    }
 
     // ── Actions utilisateur (plier/déplier) ─────────────────────────────────
 

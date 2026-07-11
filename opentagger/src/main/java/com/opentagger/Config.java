@@ -104,6 +104,11 @@ public class Config {
     // --- Raccourcis pour les cles les plus utilisees ---
 
     public String  uiLanguage()        { return str("ui.language", "fr"); }
+    // Le bouton X minimise la fenêtre au lieu de quitter — le taguage/enregistrement continue en
+    // fond (utile vu qu'un run peut durer des heures sur une grosse bibliothèque). Le menu
+    // "Quitter" (MainFrame.quitApp(), avec sa confirmation si une opération est en cours) reste le
+    // seul vrai moyen de fermer l'appli — inchangé, gate uniquement le bouton X de la fenêtre.
+    public boolean closeMinimizesToTaskbar() { return bool("ui.close_minimizes", true); }
     public boolean updateCheckEnabled() { return bool("update.check_enabled", true); }
     public long    lastUpdateCheckMs()  { try { return Long.parseLong(str("update.last_check_ms", "0")); } catch (Exception e) { return 0; } }
     public void    setLastUpdateCheckMs(long ms) { set("update.last_check_ms", String.valueOf(ms)); }

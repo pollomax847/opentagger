@@ -213,23 +213,11 @@ public class RenamePreviewDialog extends JDialog {
 
     // ── Regroupement par album ───────────────────────────────────────────────
 
-    /** "Artiste album – Album", ou à défaut le dossier parent (clé sur le chemin complet pour ne
-     *  jamais confondre deux dossiers de même nom situés ailleurs dans l'arborescence). */
-    private String groupKey(PreviewRow r) {
-        var tags   = r.entry().activeTags();
-        String art = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
-        if (!tags.album.isBlank()) return "album::" + art + "::" + tags.album;
-        Path parent = r.entry().currentPath != null ? r.entry().currentPath.getParent() : null;
-        return "folder::" + (parent != null ? parent : Path.of(r.oldName()));
-    }
+    /** Voir {@link com.opentagger.AlbumGrouping} — logique partagée avec
+     *  {@code AlbumTreeTableModel}/{@code CoverFlowDialog}, extraite pour ne plus être dupliquée. */
+    private String groupKey(PreviewRow r) { return com.opentagger.AlbumGrouping.key(r.entry()); }
 
-    private String groupTitle(PreviewRow r) {
-        var tags   = r.entry().activeTags();
-        String art = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
-        if (!tags.album.isBlank()) return art.isBlank() ? tags.album : art + " – " + tags.album;
-        Path parent = r.entry().currentPath != null ? r.entry().currentPath.getParent() : null;
-        return "📁 " + (parent != null ? parent.getFileName() : I18n.t("dossier inconnu"));
-    }
+    private String groupTitle(PreviewRow r) { return com.opentagger.AlbumGrouping.title(r.entry()); }
 
     private String groupSummary(Group g) {
         long rename = g.items.stream().filter(x -> x.state() == RowState.WILL_RENAME).count();

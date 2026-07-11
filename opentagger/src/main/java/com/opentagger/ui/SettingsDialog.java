@@ -220,6 +220,7 @@ public class SettingsDialog extends JDialog {
     private DefaultListModel<String> startupFolderModel;
     private JComboBox<String> cmbLanguage;
     private JCheckBox chkUpdateCheck;
+    private JCheckBox chkCloseMinimizes;
 
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -382,10 +383,20 @@ public class SettingsDialog extends JDialog {
                 BorderFactory.createEtchedBorder(), I18n.t("Mises à jour")));
         updatePanel.add(chkUpdateCheck);
 
+        chkCloseMinimizes = new JCheckBox(I18n.t("Le bouton X minimise la fenêtre au lieu de quitter"));
+        chkCloseMinimizes.setToolTipText(I18n.t(
+            "Le taguage/enregistrement en cours continue en fond ; retrouvez la fenêtre dans la "
+            + "barre des tâches. Le menu Édition → Quitter ferme toujours vraiment l'application."));
+        JPanel closePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        closePanel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Fermeture de la fenêtre")));
+        closePanel.add(chkCloseMinimizes);
+
         JPanel topPanels = new JPanel();
         topPanels.setLayout(new BoxLayout(topPanels, BoxLayout.Y_AXIS));
         topPanels.add(langPanel);
         topPanels.add(updatePanel);
+        topPanels.add(closePanel);
 
         JPanel outer = new JPanel(new BorderLayout());
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
@@ -1730,6 +1741,7 @@ public class SettingsDialog extends JDialog {
         Config cfg = Config.get();
         cmbLanguage.setSelectedIndex("en".equals(cfg.uiLanguage()) ? 1 : 0);
         chkUpdateCheck.setSelected(cfg.updateCheckEnabled());
+        chkCloseMinimizes.setSelected(cfg.closeMinimizesToTaskbar());
         tfMbUserAgent      .setText(cfg.str("musicbrainz.user_agent",   "OpenTagger/1.0 (bain.paul24@gmail.com)"));
         tfAcoustIdKey      .setText(cfg.str("acoustid.api_key",         ""));
         tfAcoustIdUserToken.setText(cfg.str("acoustid.user_token",      ""));
@@ -1903,6 +1915,7 @@ public class SettingsDialog extends JDialog {
         String newLanguage = cmbLanguage.getSelectedIndex() == 1 ? "en" : "fr";
         p.setProperty("ui.language", newLanguage);
         p.setProperty("update.check_enabled", String.valueOf(chkUpdateCheck.isSelected()));
+        p.setProperty("ui.close_minimizes",   String.valueOf(chkCloseMinimizes.isSelected()));
         p.setProperty("update.last_check_ms", String.valueOf(Config.get().lastUpdateCheckMs()));
 
         p.setProperty("musicbrainz.user_agent",        tfMbUserAgent.getText().trim());

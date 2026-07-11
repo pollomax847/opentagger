@@ -55,6 +55,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final BiConsumer<Integer,Integer> onCount; // (done, total)
 
     private final DiscogsClient     discogs = new DiscogsClient();
+    private final LocalCorrector    corrector = new LocalCorrector();
     private final TaggerScript      taggerScript = new TaggerScript();
     private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
@@ -243,9 +244,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         if (!ti.genre.equals(genreBefore)) { log(I18n.t("  genre=%s", ti.genre)); changed = true; }
 
         // ── 2b. Opus/Catalogue/Mouvement/Œuvre globale (classique) ─────────
-        String classicalBefore = ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
+        // detectClassical() (remplit ti.isClassical, la case "Musique classique" du panneau) était
+        // absent de ce pipeline — TaggingWorker/BatchProcessor/MatchDialog/App.java l'appellent via
+        // LocalCorrector.correct(), mais InfoCompleterWorker n'a jamais eu de LocalCorrector du
+        // tout. enrichClassicalWork() (juste en dessous) contourne déjà le problème pour les DONNÉES
+        // (basé sur la présence d'un Work MB, pas sur isClassical), mais la case à cocher elle-même
+        // pouvait rester décochée à tort si aucun Work MB n'était trouvé.
+        String classicalBefore = ti.isClassical + "|" + ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
+        corrector.detectClassical(ti);
         TagEnrichment.enrichClassicalWork(ti, mb);
-        String classicalAfter  = ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
+        String classicalAfter  = ti.isClassical + "|" + ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
         if (!classicalAfter.equals(classicalBefore)) { log(I18n.t("  œuvre=%s opus=%s", ti.overallWork, ti.opus)); changed = true; }
 
         // ── 3. Mood ───────────────────────────────────────────────────────

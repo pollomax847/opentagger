@@ -3,6 +3,7 @@ package com.opentagger.ui;
 import com.opentagger.I18n;
 import com.opentagger.DiscogsClient;
 import com.opentagger.LastFmClient;
+import com.opentagger.LocalCorrector;
 import com.opentagger.MetadataCache;
 import com.opentagger.MusicBrainzClient;
 import com.opentagger.MusicBrainzClient.ReleaseTracklist;
@@ -60,6 +61,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     // InfoCompleterWorker/MatchDialog. La pochette est désormais résolue à l'Enregistrement
     // (TagEnrichment.saveEntry(), via SaveWorker), plus ici — voir processRelease().
     private final DiscogsClient  discogs = new DiscogsClient();
+    private final LocalCorrector corrector = new LocalCorrector();
     private final TaggerScript   taggerScript = new TaggerScript();
 
     private final AtomicInteger matched  = new AtomicInteger();
@@ -249,6 +251,15 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // Script tagger utilisateur — même logique partagée que TaggingWorker/BatchProcessor/
             // App/InfoCompleterWorker.
             taggerScript.apply(ti);
+
+            // detectClassical() (remplit ti.isClassical, la case "Musique classique" du panneau)
+            // était absent de ce pipeline — TaggingWorker/BatchProcessor/MatchDialog/App.java
+            // l'appellent via LocalCorrector.correct(), mais AlbumCompletionWorker n'a jamais eu de
+            // LocalCorrector du tout. enrichClassicalWork() (juste en dessous) contourne déjà le
+            // problème pour les DONNÉES (basé sur la présence d'un Work MB, pas sur isClassical),
+            // mais la case à cocher elle-même pouvait rester décochée à tort si aucun Work MB
+            // n'était trouvé.
+            corrector.detectClassical(ti);
 
             // Genre (Discogs/Last.fm) — la tracklist MB n'en fournit pas, il faut le chercher
             // comme les autres pipelines. La pochette, elle, n'est plus résolue ici : façon

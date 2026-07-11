@@ -103,6 +103,7 @@ public class MainFrame extends JFrame {
     private enum ViewMode { FLAT, GROUPED }
     private ViewMode viewMode = ViewMode.FLAT;
     private AlbumTreeTableModel albumTreeModel;
+    private GroupSortRowSorter  groupRowSorter;
     private JComboBox<String>   cbViewMode;
     private JButton             btnExpandAllGroups, btnCollapseAllGroups;
     // Profondeur de "chargement en masse" en cours (voir beginBulkTableUpdate()) — plusieurs
@@ -224,7 +225,20 @@ public class MainFrame extends JFrame {
         restoreWindowGeometry();  // taille/position sauvegardées, ou 85% écran par défaut
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent e) {
-                quitApp();
+                // Bouton X = minimiser (pas quitter) par défaut — un taguage/enregistrement peut
+                // durer des heures sur une grosse bibliothèque, pas de raison de l'interrompre juste
+                // parce que la fenêtre est fermée. Pas de java.awt.SystemTray ici : vérifié en
+                // direct (SystemTray.isSupported() == false) sur Cinnamon/X11 moderne, qui utilise
+                // StatusNotifierItem plutôt que le protocole XEmbed dont dépend cette API — la
+                // fenêtre réduite reste accessible depuis la barre des tâches (grouped-window-list),
+                // qui elle fonctionne indépendamment du support systray. Le menu Édition → Quitter
+                // (quitApp(), avec sa confirmation si une opération est en cours) reste le seul vrai
+                // moyen de fermer l'application, inchangé.
+                if (Config.get().closeMinimizesToTaskbar()) {
+                    setState(Frame.ICONIFIED);
+                } else {
+                    quitApp();
+                }
             }
         });
 
@@ -872,7 +886,8 @@ public class MainFrame extends JFrame {
         new String[]{"syncListenBrainz",   I18n.t("Synchroniser ListenBrainz")},
         new String[]{"podcastDialog",      I18n.t("Tagger comme podcast")},
         new String[]{"detectDuplicates",   I18n.t("Détecter les doublons")},
-        new String[]{"historyDialog",      I18n.t("Historique de taguage")}
+        new String[]{"historyDialog",      I18n.t("Historique de taguage")},
+        new String[]{"coverFlow",          I18n.t("Cover Flow")}
     );
 
     /**
@@ -910,7 +925,16 @@ public class MainFrame extends JFrame {
                 I18n.t("Détecter les fichiers en double"), this::detectDuplicates));
         list.add(new ToolbarAction("historyDialog", I18n.t("Historique de taguage"),
                 I18n.t("Ouvrir l'historique de taguage"), () -> new HistoryDialog(this).setVisible(true)));
+        list.add(new ToolbarAction("coverFlow", I18n.t("Cover Flow"),
+                I18n.t("Parcourir les albums déjà tagués en carrousel de pochettes"), this::openCoverFlowDialog));
         return list;
+    }
+
+    /** Instantané des albums déjà TAGUÉS (voir CoverFlowDialog — pochette garantie déjà embarquée à
+     *  ce stade, aucun coût réseau). Pas de mise à jour en direct : "🔄 Rafraîchir" dans le dialogue
+     *  ré-invoque ce même fournisseur. */
+    private void openCoverFlowDialog() {
+        new CoverFlowDialog(this, () -> tableModel.allEntries()).setVisible(true);
     }
 
     private ToolbarAction findToolbarAction(String id) {
@@ -1378,8 +1402,10 @@ public class MainFrame extends JFrame {
      * ({@code albumTreeModel}, construite paresseusement) — voir AlbumTreeTableModel pour le détail
      * du regroupement. {@code table.setAutoCreateColumnsFromModel(false)} (voir configureTable())
      * garantit que les colonnes/renderers/largeurs déjà configurés survivent au changement de
-     * modèle. Pas de RowSorter en vue arborescence (pas de tri par clic de colonne en v1, voir le
-     * plan) — {@code rowSorter} reste réservé à la vue liste.
+     * modèle. {@code groupRowSorter} (GroupSortRowSorter) n'y trie jamais les LIGNES lui-même — sert
+     * uniquement à choisir l'ordre des GROUPES via clic d'en-tête, voir sa Javadoc ; seules les
+     * colonnes ayant une valeur représentative au niveau d'un album (Fichier/Artiste/Artiste album/
+     * Album/Année) sont rendues triables, Piste/Statut/case à cocher n'ont pas de sens à ce niveau.
      */
     private void setViewMode(ViewMode mode) {
         if (mode == viewMode) { syncViewModeControl(); return; }
@@ -1388,7 +1414,16 @@ public class MainFrame extends JFrame {
         if (mode == ViewMode.GROUPED) {
             if (albumTreeModel == null) albumTreeModel = new AlbumTreeTableModel(tableModel);
             albumTreeModel.attach();
-            table.setRowSorter(null);
+            if (groupRowSorter == null) {
+                groupRowSorter = new GroupSortRowSorter(albumTreeModel);
+                for (int c = 0; c < tableModel.getColumnCount(); c++) {
+                    boolean sortable = c == FileTableModel.COL_FILE || c == FileTableModel.COL_ARTIST
+                            || c == FileTableModel.COL_ALBUM_ARTIST || c == FileTableModel.COL_ALBUM
+                            || c == FileTableModel.COL_YEAR;
+                    groupRowSorter.setSortable(c, sortable);
+                }
+            }
+            table.setRowSorter(groupRowSorter);
             table.setModel(albumTreeModel);
         } else {
             if (albumTreeModel != null) albumTreeModel.detach();
