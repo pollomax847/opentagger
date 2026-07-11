@@ -157,8 +157,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         boolean changed = false;
 
         // ── 1. MusicBrainz : album, année, IDs ────────────────────────────
-        // Condition allégée : déclencher uniquement si données essentielles manquantes
-        boolean needsMb = ti.album.isBlank() || ti.year.isBlank() || ti.artistMbid.isBlank();
+        // Condition allégée : déclencher uniquement si données essentielles manquantes.
+        // recordingMbid inclus : sans lui, un fichier avec artistMbid/album/year déjà remplis
+        // (identifié par SongRec/texte sans jamais avoir été confirmé par une recherche MB) ne
+        // relançait jamais cette recherche, alors que c'est justement recordingMbid.isBlank() qui
+        // déclenche le badge "⚠ MBID d'enregistrement manquant" dans TaggingWorker.buildSuggestions.
+        boolean needsMb = ti.album.isBlank() || ti.year.isBlank()
+                || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank();
         if (needsMb) {
             TagInfo mbr = null;
 

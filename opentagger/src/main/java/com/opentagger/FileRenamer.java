@@ -347,8 +347,15 @@ public class FileRenamer {
             }
             try {
                 long srcSize = Files.size(src);
-                Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING,
-                                     StandardCopyOption.COPY_ATTRIBUTES);
+                // PAS de COPY_ATTRIBUTES : sur un point de montage FUSE (ex. pool mergerfs monté
+                // avec user_id/group_id figés), tenter de préserver dates/permissions/propriétaire
+                // peut échouer avec EPERM ("Opération non permise") même quand la copie des DONNÉES
+                // elle-même réussirait sans problème — confirmé en reproduisant l'appel exact hors
+                // de l'appli sur le pool réel de l'utilisateur (même FileSystemException, même
+                // message, que Files.copy retire COPY_ATTRIBUTES et l'échec disparaît). Ces
+                // attributs filesystem n'ont de toute façon aucune importance pour un déplacement de
+                // bibliothèque : seuls les tags audio (déjà écrits séparément) comptent.
+                Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
                 long dstSize = Files.size(dst);
                 if (dstSize != srcSize) {
                     Files.deleteIfExists(dst);

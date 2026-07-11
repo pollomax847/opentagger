@@ -10,7 +10,9 @@ import javax.swing.table.*;
 import java.awt.*;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.IntConsumer;
 
 /**
@@ -37,8 +39,26 @@ public class RenamePreviewDialog extends JDialog {
         void start(IntConsumer onProgress, Runnable onDone);
     }
 
+    /** Un groupe d'aperçu — un album (artiste album + album) ou, à défaut de tags, un dossier. */
+    private static final class Group {
+        final String title;
+        final List<PreviewRow> items = new ArrayList<>();
+        boolean collapsed;
+        Group(String title) { this.title = title; }
+    }
+
+    /** Une ligne affichée dans le tableau : soit un en-tête de groupe, soit un fichier. */
+    private record DisplayRow(Group group, PreviewRow row) {
+        boolean isHeader() { return group != null; }
+    }
+
     private final List<PreviewRow>  rows;
     private final long              willRenameCount;
+    private final List<Group>       groups       = new ArrayList<>();
+    private final List<DisplayRow>  visibleRows  = new ArrayList<>();
+
+    private JTable            table;
+    private AbstractTableModel tableModel;
 
     // Composants footer
     private JButton      btnApply;
@@ -55,6 +75,7 @@ public class RenamePreviewDialog extends JDialog {
         super(owner, title, false); // non-modal → fermeture libre
         this.rows            = rows;
         this.willRenameCount = rows.stream().filter(r -> r.state() == RowState.WILL_RENAME).count();
+        buildGroups();
 
         setSize(900, 560);
         setMinimumSize(new Dimension(640, 360));
@@ -62,14 +83,18 @@ public class RenamePreviewDialog extends JDialog {
 
         long errors = rows.stream().filter(r -> r.state() == RowState.ERROR).count();
         JLabel lblSummary = new JLabel(buildSummaryText(willRenameCount, errors, rows.size()));
-        lblSummary.setBorder(new EmptyBorder(8, 12, 8, 12));
+        lblSummary.setBorder(new EmptyBorder(8, 12, 4, 12));
 
         JScrollPane scroll = new JScrollPane(buildTable());
         scroll.setBorder(null);
 
+        JPanel north = new JPanel(new BorderLayout());
+        north.add(lblSummary,      BorderLayout.NORTH);
+        north.add(buildGroupBar(), BorderLayout.SOUTH);
+
         getContentPane().setLayout(new BorderLayout());
-        getContentPane().add(lblSummary, BorderLayout.NORTH);
-        getContentPane().add(scroll,     BorderLayout.CENTER);
+        getContentPane().add(north,  BorderLayout.NORTH);
+        getContentPane().add(scroll, BorderLayout.CENTER);
         getContentPane().add(buildFooter(job), BorderLayout.SOUTH);
 
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
@@ -186,25 +211,113 @@ public class RenamePreviewDialog extends JDialog {
         return result;
     }
 
+    // ── Regroupement par album ───────────────────────────────────────────────
+
+    /** "Artiste album – Album", ou à défaut le dossier parent (clé sur le chemin complet pour ne
+     *  jamais confondre deux dossiers de même nom situés ailleurs dans l'arborescence). */
+    private String groupKey(PreviewRow r) {
+        var tags   = r.entry().activeTags();
+        String art = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
+        if (!tags.album.isBlank()) return "album::" + art + "::" + tags.album;
+        Path parent = r.entry().currentPath != null ? r.entry().currentPath.getParent() : null;
+        return "folder::" + (parent != null ? parent : Path.of(r.oldName()));
+    }
+
+    private String groupTitle(PreviewRow r) {
+        var tags   = r.entry().activeTags();
+        String art = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
+        if (!tags.album.isBlank()) return art.isBlank() ? tags.album : art + " – " + tags.album;
+        Path parent = r.entry().currentPath != null ? r.entry().currentPath.getParent() : null;
+        return "📁 " + (parent != null ? parent.getFileName() : I18n.t("dossier inconnu"));
+    }
+
+    private String groupSummary(Group g) {
+        long rename = g.items.stream().filter(x -> x.state() == RowState.WILL_RENAME).count();
+        long errors = g.items.stream().filter(x -> x.state() == RowState.ERROR).count();
+        long ok     = g.items.size() - rename - errors;
+        List<String> parts = new ArrayList<>();
+        if (rename > 0) parts.add(I18n.t("%d à renommer", rename));
+        if (errors > 0) parts.add(I18n.t("%d erreur(s)", errors));
+        if (ok     > 0) parts.add(I18n.t("%d inchangé(s)", ok));
+        return I18n.t("%d fichier(s)", g.items.size()) + " — " + String.join(", ", parts);
+    }
+
+    private void buildGroups() {
+        Map<String, Group> byKey = new LinkedHashMap<>();
+        for (PreviewRow r : rows)
+            byKey.computeIfAbsent(groupKey(r), k -> new Group(groupTitle(r))).items.add(r);
+        // Replié par défaut si tout l'album est déjà en place — rien à vérifier ; déplié dès
+        // qu'il y a au moins un renommage ou une erreur à examiner.
+        for (Group g : byKey.values())
+            g.collapsed = g.items.stream().allMatch(x -> x.state() == RowState.ALREADY_OK);
+        groups.addAll(byKey.values());
+    }
+
+    private void rebuildVisibleRows() {
+        visibleRows.clear();
+        for (Group g : groups) {
+            visibleRows.add(new DisplayRow(g, null));
+            if (!g.collapsed) for (PreviewRow r : g.items) visibleRows.add(new DisplayRow(null, r));
+        }
+    }
+
+    private void refreshTable() {
+        rebuildVisibleRows();
+        tableModel.fireTableDataChanged();
+    }
+
+    private JPanel buildGroupBar() {
+        JButton btnExpandAll   = new JButton(I18n.t("Tout déplier"));
+        JButton btnCollapseAll = new JButton(I18n.t("Tout replier"));
+        btnExpandAll.addActionListener(e -> { groups.forEach(g -> g.collapsed = false); refreshTable(); });
+        btnCollapseAll.addActionListener(e -> { groups.forEach(g -> g.collapsed = true);  refreshTable(); });
+
+        JLabel lblCount = new JLabel(I18n.t("%d album(s)/dossier(s)", groups.size()));
+        lblCount.putClientProperty("FlatLaf.style", "foreground: #aaaaaa; font: 11 $defaultFont");
+
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        bar.setBorder(new EmptyBorder(0, 8, 6, 0));
+        bar.add(btnExpandAll);
+        bar.add(btnCollapseAll);
+        bar.add(lblCount);
+        return bar;
+    }
+
     // ── Tableau prévisualisation ───────────────────────────────────────────────
 
     private JTable buildTable() {
+        rebuildVisibleRows();
         String[] cols = {I18n.t("Statut"), I18n.t("Fichier actuel"), I18n.t("Nouveau nom")};
-        DefaultTableModel model = new DefaultTableModel(cols, 0) {
-            @Override public boolean isCellEditable(int r, int c) { return false; }
+
+        tableModel = new AbstractTableModel() {
+            @Override public int getRowCount()    { return visibleRows.size(); }
+            @Override public int getColumnCount() { return cols.length; }
+            @Override public String getColumnName(int c) { return cols[c]; }
+            @Override public Object getValueAt(int row, int col) {
+                DisplayRow dr = visibleRows.get(row);
+                if (dr.isHeader()) {
+                    Group g = dr.group();
+                    return switch (col) {
+                        case 0  -> g.collapsed ? "▸" : "▾";
+                        case 1  -> g.title;
+                        default -> groupSummary(g);
+                    };
+                }
+                PreviewRow r = dr.row();
+                return switch (col) {
+                    case 0 -> switch (r.state()) {
+                        case WILL_RENAME -> I18n.t("✎ Renommer");
+                        case ALREADY_OK  -> I18n.t("✓ Inchangé");
+                        case ERROR       -> I18n.t("✗ Erreur");
+                    };
+                    case 1  -> "    " + r.oldName();
+                    default -> r.state() == RowState.ERROR ? r.errorMsg() : r.newName();
+                };
+            }
         };
 
-        for (PreviewRow r : rows) {
-            String badge = switch (r.state()) {
-                case WILL_RENAME -> I18n.t("✎ Renommer");
-                case ALREADY_OK  -> I18n.t("✓ Inchangé");
-                case ERROR       -> I18n.t("✗ Erreur");
-            };
-            String newName = r.state() == RowState.ERROR ? r.errorMsg() : r.newName();
-            model.addRow(new Object[]{badge, r.oldName(), newName});
-        }
-
-        JTable t = new JTable(model);
+        JTable t = new JTable(tableModel);
+        table = t;
         t.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
         t.getColumnModel().getColumn(0).setPreferredWidth(90);
         t.getColumnModel().getColumn(0).setMaxWidth(110);
@@ -214,13 +327,25 @@ public class RenamePreviewDialog extends JDialog {
         t.setShowGrid(false);
         t.setIntercellSpacing(new Dimension(0, 1));
 
+        t.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                int row = t.rowAtPoint(e.getPoint());
+                if (row < 0 || row >= visibleRows.size()) return;
+                DisplayRow dr = visibleRows.get(row);
+                if (dr.isHeader()) {
+                    dr.group().collapsed = !dr.group().collapsed;
+                    refreshTable();
+                }
+            }
+        });
+
         t.addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
             @Override public void mouseMoved(java.awt.event.MouseEvent e) {
                 int row = t.rowAtPoint(e.getPoint());
-                if (row >= 0 && row < rows.size()) {
-                    PreviewRow pr = rows.get(row);
-                    t.setToolTipText("<html>" + pr.oldName() + "<br>→ " + pr.newPath() + "</html>");
-                }
+                if (row < 0 || row >= visibleRows.size()) return;
+                DisplayRow dr = visibleRows.get(row);
+                t.setToolTipText(dr.isHeader() ? dr.group().title
+                        : "<html>" + dr.row().oldName() + "<br>→ " + dr.row().newPath() + "</html>");
             }
         });
 
@@ -228,12 +353,24 @@ public class RenamePreviewDialog extends JDialog {
             @Override public Component getTableCellRendererComponent(
                     JTable tbl, Object val, boolean sel, boolean focus, int row, int col) {
                 super.getTableCellRendererComponent(tbl, val, sel, focus, row, col);
-                if (!sel && row < rows.size()) {
-                    setForeground(switch (rows.get(row).state()) {
-                        case WILL_RENAME -> new Color(0x81c784);
-                        case ALREADY_OK  -> UIManager.getColor("Label.disabledForeground");
-                        case ERROR       -> new Color(0xef9a9a);
-                    });
+                if (row < 0 || row >= visibleRows.size()) return this;
+                DisplayRow dr = visibleRows.get(row);
+                if (dr.isHeader()) {
+                    setFont(getFont().deriveFont(Font.BOLD));
+                    if (!sel) {
+                        setBackground(tbl.getBackground().darker());
+                        setForeground(UIManager.getColor("Label.foreground"));
+                    }
+                } else {
+                    setFont(getFont().deriveFont(Font.PLAIN));
+                    if (!sel) {
+                        setBackground(tbl.getBackground());
+                        setForeground(switch (dr.row().state()) {
+                            case WILL_RENAME -> new Color(0x81c784);
+                            case ALREADY_OK  -> UIManager.getColor("Label.disabledForeground");
+                            case ERROR       -> new Color(0xef9a9a);
+                        });
+                    }
                 }
                 return this;
             }

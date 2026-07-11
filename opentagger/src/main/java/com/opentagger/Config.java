@@ -139,6 +139,11 @@ public class Config {
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
     public String  skippedMoveFolder()             { return str ("skipped.move_folder",              ""); }
+    // Récupération vidéo (voir VideoScanner/VideoRecoveryWorker) automatique à chaque scan de
+    // dossier (Ouvrir dossier/Rafraîchir) — activée par défaut à la demande explicite de
+    // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop
+    // pénible à déclencher lui-même à chaque fois.
+    public boolean videoAutoRecover()              { return bool("video.auto_recover",           true); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }
@@ -215,13 +220,18 @@ public class Config {
         String[] actions = v.split(",");
         // Migration : "refreshFolders" n'existait pas comme action secondaire avant que
         // "Rafraîchir" devienne optionnel — toute valeur "toolbar.actions" déjà persistée (installs
-        // existantes) date forcément d'avant, donc son absence n'a jamais pu être un choix
-        // délibéré de l'utilisateur. Sans ça, changer DEFAULT_TOOLBAR_ACTIONS ci-dessus ne profite
-        // qu'aux toutes nouvelles installs (le fichier de settings, une fois écrit une première
-        // fois, fige "toolbar.actions" pour de bon — même piège que app.version/mb.oauth.* déjà
-        // rencontré ce projet). Prépendu une seule fois ; devient permanent dès le prochain
-        // SettingsDialog.save() (relit cette même méthode pour peupler sa liste).
-        if (Arrays.stream(actions).noneMatch("refreshFolders"::equals)) {
+        // existantes) datant d'avant cet ajout doit se voir prépendre "refreshFolders" une bonne
+        // fois. Gardée par `toolbar.refresh_migrated` : SANS ce garde-fou, cette migration
+        // s'exécutait à CHAQUE appel (pas seulement la première fois malgré ce que prétendait ce
+        // commentaire) — retirer "Rafraîchir" dans les Préférences le sauvegardait bien sans lui,
+        // mais le tout prochain appel à toolbarActions() (SettingsDialog.save() → MainFrame.
+        // onPreferencesSaved() → populateSecondaryToolbar(), dans la même seconde) le réinjectait
+        // aussitôt — ce bouton précis ne pouvait donc jamais être retiré, quoi que fasse
+        // l'utilisateur dans l'UI. `toolbar.refresh_migrated` est écrit à chaque
+        // SettingsDialog.save() (voir save()) : dès la première sauvegarde après cette version,
+        // le choix de l'utilisateur (avec ou sans "Rafraîchir") devient définitivement autoritaire.
+        if (!bool("toolbar.refresh_migrated", false)
+                && Arrays.stream(actions).noneMatch("refreshFolders"::equals)) {
             String[] migrated = new String[actions.length + 1];
             migrated[0] = "refreshFolders";
             System.arraycopy(actions, 0, migrated, 1, actions.length);

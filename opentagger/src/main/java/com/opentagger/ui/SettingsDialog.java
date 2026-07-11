@@ -57,6 +57,7 @@ public class SettingsDialog extends JDialog {
     private JTextField tfPodcastLibraryRoot;
     private JCheckBox  chkMoveSkipped;
     private JTextField tfSkippedFolder;
+    private JCheckBox  chkVideoAutoRecover;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JTextField tfFfmpegPath;
@@ -1120,11 +1121,19 @@ public class SettingsDialog extends JDialog {
         skippedFolderPanel.add(tfSkippedFolder,   BorderLayout.CENTER);
         skippedFolderPanel.add(btnBrowseSkipped,  BorderLayout.EAST);
 
+        // ── Récupération vidéo automatique ──────────────────────────────────────
+        chkVideoAutoRecover = new JCheckBox(I18n.t(
+            "Récupérer automatiquement l'audio des vidéos (.webm/.vob/.mpg/.mpeg/.avi/.mkv) à chaque scan de dossier"));
+        chkVideoAutoRecover.setToolTipText(I18n.t(
+            "À chaque Ouvrir dossier/Rafraîchir : cherche ces vidéos, tente de les identifier et de "
+            + "les convertir en MP3 tagué, sans dialogue à ouvrir. Reconnues → sous-dossier \"Convertis\" ; "
+            + "non reconnues → \"Non identifié\". Rien n'est jamais supprimé."));
+
         JPanel p = form(
             new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :"},
+                    "", "", "", "", "Dossier fichiers non tagués :", ""},
             new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
-                    chkFollowLog, chkMoveSkipped, skippedFolderPanel},
+                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkVideoAutoRecover},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -1746,6 +1755,7 @@ public class SettingsDialog extends JDialog {
         cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
         tfSkippedFolder   .setText(cfg.str("skipped.move_folder",           ""));
+        chkVideoAutoRecover.setSelected(cfg.videoAutoRecover());
 
         startupFolderModel.clear();
         for (String f : cfg.startupFolders())
@@ -1919,6 +1929,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());
+        p.setProperty("video.auto_recover",            String.valueOf(chkVideoAutoRecover.isSelected()));
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < startupFolderModel.size(); i++) {
@@ -2026,6 +2037,11 @@ public class SettingsDialog extends JDialog {
         TaggerScript.saveScripts(scriptDefs);
 
         p.setProperty("toolbar.actions", String.join(",", toolbarActionIds));
+        // Marque la migration "refreshFolders" (voir Config.toolbarActions()) comme faite : à
+        // partir d'ici, la liste ci-dessus fait foi telle quelle, même si l'utilisateur vient d'en
+        // retirer "Rafraîchir" — sans ce flag, l'appel suivant à toolbarActions() (juste après, via
+        // onPreferencesSaved()) le réinjectait aussitôt et le bouton ne pouvait jamais disparaître.
+        p.setProperty("toolbar.refresh_migrated", "true");
 
         // ─ Transcodage ─
         String[] fmtIds2 = {"mp3", "flac", "aac", "ogg", "opus"};

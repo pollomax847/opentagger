@@ -7,6 +7,7 @@ import com.opentagger.FileRenamer;
 import com.opentagger.I18n;
 import com.opentagger.MetadataCache;
 import com.opentagger.TagWriter;
+import com.opentagger.VideoScanner;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 import org.jaudiotagger.audio.AudioFile;
@@ -68,6 +69,7 @@ public class MainFrame extends JFrame {
     private AlbumClusterWorker      clusterWorker;
     private CompilationClusterWorker compilationClusterWorker;
     private SaveWorker              saveWorker;
+    private VideoRecoveryWorker     videoRecoveryWorker;
     private int                     currentMask = Config.get().defaultRenameMask();
     // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
     // onPreferencesSaved() d'écraser ce choix par le masque par défaut des Préférences.
@@ -2321,6 +2323,7 @@ public class MainFrame extends JFrame {
                     setStatus(I18n.t("%d fichier(s) — %d déjà tagué(s)", tableModel.getRowCount(), r[1]));
                     refreshStats();
                     completeScanEntry(scanRow, dirName, r[0], r[1], null);
+                    if (Config.get().videoAutoRecover()) autoRecoverVideos(dir);
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
@@ -2450,6 +2453,10 @@ public class MainFrame extends JFrame {
      * pool de threads, pas seulement le thread de doInBackground()) là où un pool existe, cancel()
      * nu pour les deux qui n'en ont pas (AlbumClusterWorker est séquentiel, ListenBrainzSyncWorker
      * ne fait qu'un seul appel réseau bloquant — même cancel(false) que syncListenBrainz()).
+     * videoRecoveryWorker inclus depuis son passage en déclenchement automatique
+     * (autoRecoverVideos()) — avant, seul le dialogue manuel pouvait le lancer, et sa propre
+     * fermeture (VideoRecoveryDialog.onClose()) l'arrêtait déjà ; désormais qu'il peut tourner sans
+     * aucune fenêtre ouverte, il doit apparaître ici comme les autres passes de fond.
      */
     private void stopAll() {
         if (worker != null)           worker.stopNow();
@@ -2459,6 +2466,7 @@ public class MainFrame extends JFrame {
         if (saveWorker != null)       saveWorker.stopNow();
         if (transcodeWorker != null)  transcodeWorker.stopNow();
         if (lbSyncWorker != null)     lbSyncWorker.cancel(false);
+        if (videoRecoveryWorker != null) videoRecoveryWorker.stopNow();
 
         // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan
         for (int i = 0; i < tableModel.getRowCount(); i++) {
@@ -2934,11 +2942,17 @@ public class MainFrame extends JFrame {
             String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
             if (!seenPaths.add(p)) continue;
             TagInfo ti = e.result;
+            // recordingMbid ajouté séparément d'artistMbid : c'est le champ que teste
+            // buildSuggestions() pour le badge "⚠ MBID d'enregistrement manquant" (le plus fréquent
+            // en pratique — tout fichier identifié via SongRec/texte sans confirmation MB exacte),
+            // mais il n'était testé nulle part ici. Un fichier avec artistMbid déjà rempli (identifié
+            // par un autre biais que la recherche MB directe) mais recordingMbid vide n'était donc
+            // jamais mis en file pour cette passe, malgré son ⚠ visible dans le journal.
             boolean incomplete = ti == null
-                || ti.artistMbid.isBlank() || ti.album.isBlank()
-                || ti.year.isBlank()        || ti.genre.isBlank()
-                || ti.mood.isBlank()         || ti.bpm.isBlank()
-                || ti.lyrics.isBlank();
+                || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank()
+                || ti.album.isBlank()        || ti.year.isBlank()
+                || ti.genre.isBlank()        || ti.mood.isBlank()
+                || ti.bpm.isBlank()          || ti.lyrics.isBlank();
             if (incomplete) targets.add(e);
         }
         if (targets.isEmpty()) { onDone.run(); return; }
@@ -3062,7 +3076,6 @@ public class MainFrame extends JFrame {
     private RenamePreviewDialog.RenameJob buildRenameJob(int maskIndex, Path destRoot) {
         return (onProgress, onDone) -> {
             int[] done = {0};
-            List<Path> sourceDirs = new ArrayList<>();
             com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
 
             new SwingWorker<String, FileEntry>() {
@@ -3071,6 +3084,7 @@ public class MainFrame extends JFrame {
                 @Override
                 protected String doInBackground() {
                     FileRenamer renamer = new FileRenamer();
+                    boolean cleanupEmptyDirs = Config.get().deleteEmptyDirsAfterRename();
                     for (int i = 0; i < tableModel.getRowCount(); i++) {
                         FileEntry e = tableModel.get(i);
                         if (e.status != FileEntry.Status.TAGGED) continue;
@@ -3080,7 +3094,14 @@ public class MainFrame extends JFrame {
                         try {
                             Path newPath = renamer.rename(e.currentPath, e.activeTags(), maskIndex, root);
                             if (newPath != null) {
-                                sourceDirs.add(oldPath.getParent());
+                                // Nettoyage immédiat, dans ce thread d'arrière-plan, avec la racine
+                                // qui correspond réellement à ce fichier — jamais sur l'EDT, jamais
+                                // testé contre les racines des AUTRES fichiers (ça forçait
+                                // deleteEmptyAncestors à remonter jusqu'à "/" en listant chaque
+                                // dossier au passage dès que la racine ne correspondait pas, ce qui
+                                // gelait l'appli entière sur une grosse bibliothèque multi-racines).
+                                if (cleanupEmptyDirs)
+                                    try { FileRenamer.deleteEmptyAncestors(oldPath.getParent(), root); } catch (Exception ignore) {}
                                 // e.currentPath est lu par le TableRowSorter sur l'EDT ; on le mute
                                 // là-bas, pas ici (même défaut que le crash déjà vu 697× en 3 jours).
                                 final Path finalNewPath = newPath;
@@ -3113,18 +3134,6 @@ public class MainFrame extends JFrame {
                 @Override
                 protected void done() {
                     cache.close();
-                    // Nettoyer dossiers vides — même réglage que le renommage auto pendant le
-                    // taguage (avant : toujours nettoyé ici, sans tenir compte du réglage).
-                    if (Config.get().deleteEmptyDirsAfterRename()) {
-                        Set<Path> roots = new LinkedHashSet<>();
-                        for (int i = 0; i < tableModel.getRowCount(); i++) {
-                            FileEntry e = tableModel.get(i);
-                            if (e.scanRoot != null) roots.add(e.scanRoot);
-                        }
-                        for (Path src : sourceDirs)
-                            for (Path r : roots)
-                                try { FileRenamer.deleteEmptyAncestors(src, r); } catch (Exception ignore) {}
-                    }
                     try { setStatus(get()); } catch (Exception ignore) {}
                     onDone.run();
                 }
@@ -3757,6 +3766,42 @@ public class MainFrame extends JFrame {
 
     private void openVideoRecoveryDialog() {
         new VideoRecoveryDialog(this).setVisible(true);
+    }
+
+    /**
+     * Version automatique du dialogue ci-dessus — déclenchée après chaque scan de dossier réussi
+     * (Ouvrir dossier ET Rafraîchir, qui passent tous les deux par loadDirectory()) plutôt que
+     * d'obliger l'utilisateur à pointer manuellement le même dossier dans un dialogue séparé à
+     * chaque fois (retour explicite : trop pénible à gérer soi-même). Silencieuse en cas d'absence
+     * de vidéos (cas normal, ne doit pas interrompre le flux) ; sinon tourne en fond, comme
+     * complétionAlbums()/autoCompleteIncomplete(), avec la progression dans la barre de statut.
+     * Un seul passage à la fois : si une passe précédente tourne encore (dossier volumineux, ou
+     * plusieurs dossiers ouverts coup sur coup), on ne la relance pas par-dessus — VideoScanner
+     * exclut déjà "Convertis"/"Non identifié" de sa récursion, donc un prochain scan (rafraîchir,
+     * ou la fin du scan suivant) retrouvera de toute façon tout ce qui reste à traiter.
+     */
+    private void autoRecoverVideos(File dir) {
+        if (videoRecoveryWorker != null && !videoRecoveryWorker.isDone()) return;
+        new SwingWorker<List<File>, Void>() {
+            @Override protected List<File> doInBackground() { return new VideoScanner().scan(dir); }
+            @Override protected void done() {
+                List<File> videos;
+                try { videos = get(); } catch (Exception ex) { return; }
+                if (videos.isEmpty()) return;
+                // onProgress appelé depuis SwingWorker.process(), déjà garanti sur l'EDT — même
+                // motif que VideoRecoveryDialog.onStart().
+                videoRecoveryWorker = new VideoRecoveryWorker(videos, dir.toPath(), MainFrame.this::setStatus);
+                videoRecoveryWorker.addPropertyChangeListener(evt -> {
+                    if ("state".equals(evt.getPropertyName())
+                            && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                        setStatus(I18n.t("Vidéos (%s) — %d converti(s), %d non reconnu(s), %d erreur(s).",
+                                dir.getName(), videoRecoveryWorker.getConverted(),
+                                videoRecoveryWorker.getUnrecognized(), videoRecoveryWorker.getErrors()));
+                    }
+                });
+                videoRecoveryWorker.execute();
+            }
+        }.execute();
     }
 
     // ── Détection de doublons ─────────────────────────────────────────────────
