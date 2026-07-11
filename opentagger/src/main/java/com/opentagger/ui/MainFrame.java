@@ -1602,6 +1602,22 @@ public class MainFrame extends JFrame {
         table.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
             @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
+
+            // Plier/déplier CE groupe précis en cliquant dessus — pas seulement via "Tout
+            // déplier"/"Tout replier" (les seuls déclencheurs qui existaient jusqu'ici :
+            // AlbumTreeTableModel.toggleCollapsed() était déjà écrit mais jamais appelé nulle part,
+            // un vrai oubli de câblage). Exclu sur la colonne case à cocher (COL_SEL) pour ne pas
+            // interférer avec son propre clic-pour-cocher/décocher tout le groupe.
+            @Override public void mouseClicked(MouseEvent e) {
+                if (e.getButton() != MouseEvent.BUTTON1 || e.isPopupTrigger()) return;
+                if (viewMode != ViewMode.GROUPED) return;
+                int row = table.rowAtPoint(e.getPoint());
+                int col = table.columnAtPoint(e.getPoint());
+                if (row < 0 || col == FileTableModel.COL_SEL) return;
+                int modelRow = table.convertRowIndexToModel(row);
+                if (albumTreeModel.isHeaderRow(modelRow)) albumTreeModel.toggleCollapsed(modelRow);
+            }
+
             private void maybeShow(MouseEvent e) {
                 if (!e.isPopupTrigger()) return;
                 int row = table.rowAtPoint(e.getPoint());
