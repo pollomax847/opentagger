@@ -215,6 +215,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 changed |= fillBlank(ti, "releaseMbid",       mbr.releaseMbid);
                 changed |= fillBlank(ti, "releaseGroupMbid",  mbr.releaseGroupMbid);
                 changed |= fillBlank(ti, "recordingMbid",     mbr.recordingMbid);
+                changed |= fillBlank(ti, "work",              mbr.work);
+                changed |= fillBlank(ti, "workMbid",          mbr.workMbid);
                 changed |= fillBlank(ti, "isrc",              mbr.isrc);
                 changed |= fillBlank(ti, "language",          mbr.language);
                 changed |= fillBlank(ti, "script",            mbr.script);
@@ -239,6 +241,12 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         String genreBefore = ti.genre;
         TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
         if (!ti.genre.equals(genreBefore)) { log(I18n.t("  genre=%s", ti.genre)); changed = true; }
+
+        // ── 2b. Opus/Catalogue/Mouvement/Œuvre globale (classique) ─────────
+        String classicalBefore = ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
+        TagEnrichment.enrichClassicalWork(ti, mb);
+        String classicalAfter  = ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
+        if (!classicalAfter.equals(classicalBefore)) { log(I18n.t("  œuvre=%s opus=%s", ti.overallWork, ti.opus)); changed = true; }
 
         // ── 3. Mood ───────────────────────────────────────────────────────
         if (ti.mood.isBlank()) {

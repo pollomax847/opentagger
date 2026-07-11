@@ -97,6 +97,14 @@ public class MainFrame extends JFrame {
     private TableRowSorter<FileTableModel>  rowSorter;
     private JTextField                      tfFilter;
     private JComboBox<String>               cbFilterField;
+
+    // ── Vue arborescence par album (alternative à la liste plate) ─────────────
+    // Voir AlbumTreeTableModel — coût nul tant que viewMode == FLAT (pas de listener enregistré).
+    private enum ViewMode { FLAT, GROUPED }
+    private ViewMode viewMode = ViewMode.FLAT;
+    private AlbumTreeTableModel albumTreeModel;
+    private JComboBox<String>   cbViewMode;
+    private JButton             btnExpandAllGroups, btnCollapseAllGroups;
     // Profondeur de "chargement en masse" en cours (voir beginBulkTableUpdate()) — plusieurs
     // scans de dossiers peuvent tourner en même temps (activeScanWorkers), donc compteur plutôt
     // qu'un simple booléen.
@@ -274,6 +282,10 @@ public class MainFrame extends JFrame {
         table.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) refreshDetail();
         });
+
+        // Vue (liste/arborescence) choisie à la dernière session — après buildMainSplit() (table
+        // doit exister) ; ViewMode.FLAT (déjà la valeur par défaut du champ) si jamais enregistré.
+        if (PREFS.getInt("view.mode", 0) == 1) setViewMode(ViewMode.GROUPED);
 
         // ── Undo/Redo clavier ─────────────────────────────────────────────
         var rootMap   = getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
@@ -1044,6 +1056,26 @@ public class MainFrame extends JFrame {
         p.add(tfFilter);
         p.add(cbFilterField);
         p.add(btnClearFilter);
+
+        // Bascule Liste / Arborescence par album (voir AlbumTreeTableModel/setViewMode()) —
+        // "menu déroulant" explicitement demandé par l'utilisateur plutôt qu'une case à cocher
+        // enfouie dans les Préférences. Construit ici (buildStatsStrip() s'exécute avant
+        // buildMainSplit(), `table` n'existe pas encore) ; l'action réelle n'est déclenchée que
+        // sur interaction utilisateur, donc rien n'est prématurément appelé. setSelectedIndex()
+        // initial fait à la fin de buildUI() une fois `table` construit, voir plus bas.
+        p.add(new JSeparator(JSeparator.VERTICAL));
+        cbViewMode = new JComboBox<>(new String[]{ I18n.t("Liste"), I18n.t("Arborescence par album") });
+        cbViewMode.addActionListener(e -> setViewMode(
+            cbViewMode.getSelectedIndex() == 1 ? ViewMode.GROUPED : ViewMode.FLAT));
+        btnExpandAllGroups = new JButton(I18n.t("Tout déplier"));
+        btnCollapseAllGroups = new JButton(I18n.t("Tout replier"));
+        btnExpandAllGroups.addActionListener(e -> { if (albumTreeModel != null) albumTreeModel.expandAll(); });
+        btnCollapseAllGroups.addActionListener(e -> { if (albumTreeModel != null) albumTreeModel.collapseAll(); });
+        btnExpandAllGroups.setVisible(false);
+        btnCollapseAllGroups.setVisible(false);
+        p.add(cbViewMode);
+        p.add(btnExpandAllGroups);
+        p.add(btnCollapseAllGroups);
         return p;
     }
 
@@ -1087,13 +1119,23 @@ public class MainFrame extends JFrame {
         // intervalle régulier (throttlé) dans toutes les boucles de scan/taguage, point de purge
         // naturel sans bookkeeping de throttle supplémentaire ici.
         tableModel.rebuildVisibleIfDirty();
+        // Même throttle (300ms, ce même point d'appel) pour la vue arborescence — voir
+        // AlbumTreeTableModel : ne fait rien si cette vue n'est pas active ou si rien n'a changé
+        // depuis le dernier appel. fireTableDataChanged() efface la sélection de la JTable, d'où la
+        // sauvegarde/restauration autour de l'appel (le modèle lui-même ne connaît pas la JTable).
+        if (viewMode == ViewMode.GROUPED && albumTreeModel != null && albumTreeModel.isDirty()) {
+            java.util.Set<FileEntry> sel = captureTableSelection();
+            albumTreeModel.flushIfDirty();
+            restoreTableSelection(sel);
+        }
         int total = 0, tagged = 0, identified = 0, skipped = 0, error = 0, pending = 0;
-        // Compter depuis la VUE filtrée (table.getRowCount) plutôt que le modèle
-        // pour que les chips reflètent toujours ce que l'utilisateur voit.
-        int viewRows = (table != null) ? table.getRowCount() : tableModel.getRowCount();
-        for (int viewRow = 0; viewRow < viewRows; viewRow++) {
-            int modelRow = (table != null)
-                    ? table.convertRowIndexToModel(viewRow) : viewRow;
+        // Toujours compter depuis tableModel directement (déjà la vue filtrée, voir
+        // FileTableModel), jamais via table/convertRowIndexToModel : en vue arborescence, les
+        // lignes de VUE incluent des en-têtes de groupe sans équivalent 1:1 dans tableModel — le
+        // nombre de fichiers filtrés reste le même quel que soit le modèle actuellement attaché à
+        // `table` pour l'affichage, donc autant le lire directement à la source.
+        int viewRows = tableModel.getRowCount();
+        for (int modelRow = 0; modelRow < viewRows; modelRow++) {
             total++;
             switch (tableModel.get(modelRow).status) {
                 case TAGGED     -> tagged++;
@@ -1171,6 +1213,13 @@ public class MainFrame extends JFrame {
         table.setShowHorizontalLines(false);
         table.setIntercellSpacing(new Dimension(0, 0));
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        // Sans ça, chaque table.setModel(...) lors d'une bascule liste/arborescence (voir
+        // setViewMode()) reconstruirait les colonnes depuis zéro (JTable.
+        // createDefaultColumnsFromModel()) et perdrait silencieusement le renderer coloré ci-dessous
+        // ainsi que les largeurs restaurées depuis PREFS — les deux modèles exposent le même
+        // contrat de 10 colonnes (FileTableModel.COL_SEL..COL_STATUS), donc les colonnes/renderers/
+        // largeurs déjà configurés ici restent valables tels quels dans les deux sens.
+        table.setAutoCreateColumnsFromModel(false);
         rowSorter = new SafeTableRowSorter<>(tableModel);
         table.setRowSorter(rowSorter);
         table.getTableHeader().setReorderingAllowed(false);
@@ -1204,14 +1253,24 @@ public class MainFrame extends JFrame {
         colWidth(cm, 8, 44,  28,  60);   // Piste
         colWidth(cm, 9, 130, 80,  220);  // Statut
 
-        // Renderer coloré
+        // Renderer coloré — mode-aware : en vue arborescence (viewMode == GROUPED), une ligne
+        // d'en-tête de groupe n'a pas de FileEntry.Status unique (voir AlbumTreeTableModel.
+        // statusOfMemberRow(), qui renvoie null pour ces lignes) — stylée en gras/fond distinct
+        // plutôt que teintée par statut, même technique que RenamePreviewDialog pour ses en-têtes.
         DefaultTableCellRenderer renderer = new DefaultTableCellRenderer() {
             @Override
             public Component getTableCellRendererComponent(JTable t, Object v,
                     boolean sel, boolean foc, int row, int col) {
                 Component c = super.getTableCellRendererComponent(t, v, sel, foc, row, col);
-                if (!sel) {
-                    int mr = t.convertRowIndexToModel(row);
+                int mr = t.convertRowIndexToModel(row);
+                if (viewMode == ViewMode.GROUPED) {
+                    boolean header = albumTreeModel.isHeaderRow(mr);
+                    c.setFont(c.getFont().deriveFont(header ? Font.BOLD : Font.PLAIN));
+                    if (!sel) {
+                        c.setBackground(header ? t.getBackground().darker()
+                                : rowBg(albumTreeModel.statusOfMemberRow(mr), row));
+                    }
+                } else if (!sel) {
                     c.setBackground(rowBg(tableModel.get(mr).status, row));
                 }
                 return c;
@@ -1236,14 +1295,22 @@ public class MainFrame extends JFrame {
      * booléen) car plusieurs scans peuvent tourner en même temps (voir {@code activeScanWorkers})
      * — ne réattacher qu'une fois TOUS terminés, pour un seul tri final au lieu d'un par lot.
      * Doit être appelé sur l'EDT.
+     *
+     * <p>Ne touche le RowSorter que si la vue liste est active : en vue arborescence, {@code table}
+     * n'a de toute façon aucun RowSorter attaché (voir {@link #setViewMode}, pas de tri par clic de
+     * colonne pour cette vue) — le sujet est ici SafeTableRowSorter&lt;FileTableModel&gt;, qui ne
+     * correspond qu'au modèle plat ; le réattacher pendant que {@code table.getModel() ==
+     * albumTreeModel} serait un décalage de type silencieux en plus d'être fonctionnellement faux.
+     * La vue arborescence a son propre mécanisme d'absorption des rafales, voir
+     * AlbumTreeTableModel (dirty + flushIfDirty() throttlé par refreshStats()).
      */
     private void beginBulkTableUpdate() {
-        if (bulkLoadDepth.getAndIncrement() == 0) table.setRowSorter(null);
+        if (bulkLoadDepth.getAndIncrement() == 0 && viewMode == ViewMode.FLAT) table.setRowSorter(null);
     }
 
     /** Contrepartie de {@link #beginBulkTableUpdate()}. Doit être appelé sur l'EDT. */
     private void endBulkTableUpdate() {
-        if (bulkLoadDepth.decrementAndGet() == 0) table.setRowSorter(rowSorter);
+        if (bulkLoadDepth.decrementAndGet() == 0 && viewMode == ViewMode.FLAT) table.setRowSorter(rowSorter);
     }
 
     // Marqueurs publiés par loadDirectory() : START dès que ce scan obtient réellement son permis
@@ -1251,6 +1318,98 @@ public class MainFrame extends JFrame {
     // à process() quand détacher/réattacher le RowSorter, sans compter les scans encore en attente.
     private static final Object PHASE1_START_MARKER = new Object();
     private static final Object PHASE1_DONE_MARKER  = new Object();
+
+    // ── Résolution ligne de vue → FileEntry, indépendante du modèle attaché ───
+    // Centralise la différence entre les deux modèles que `table` peut porter (tableModel en vue
+    // liste, albumTreeModel en vue arborescence — voir setViewMode()) : tout le reste de la classe
+    // (menu contextuel, panneau de détail, followProcessing...) passe par ici plutôt que d'appeler
+    // tableModel.get(...) directement, ce qui donnerait une entrée fausse/une exception dès que la
+    // vue arborescence est active (ses lignes de vue ne correspondent plus 1:1 aux lignes de
+    // tableModel — des lignes d'en-tête de groupe s'intercalent).
+
+    /** Ligne de vue (après tri en liste / groupement en arborescence) → son FileEntry, ou null si
+     *  c'est une ligne d'en-tête de groupe (vue arborescence uniquement). */
+    private FileEntry entryAtViewRow(int viewRow) {
+        if (viewRow < 0) return null;
+        int mr = table.convertRowIndexToModel(viewRow);
+        if (viewMode == ViewMode.GROUPED) return albumTreeModel.fileEntryAt(mr);
+        return mr >= 0 && mr < tableModel.getRowCount() ? tableModel.get(mr) : null;
+    }
+
+    /** Comme {@link #entryAtViewRow}, mais une ligne d'en-tête de groupe résout vers TOUS ses
+     *  membres (édition en lot / actions "tout l'album") plutôt que null. */
+    private List<FileEntry> entriesAtViewRow(int viewRow) {
+        if (viewRow < 0) return List.of();
+        int mr = table.convertRowIndexToModel(viewRow);
+        if (viewMode == ViewMode.GROUPED) return albumTreeModel.membersAt(mr);
+        return mr >= 0 && mr < tableModel.getRowCount() ? List.of(tableModel.get(mr)) : List.of();
+    }
+
+    private boolean isHeaderViewRow(int viewRow) {
+        if (viewMode != ViewMode.GROUPED || viewRow < 0) return false;
+        return albumTreeModel.isHeaderRow(table.convertRowIndexToModel(viewRow));
+    }
+
+    /** Sélection courante par identité de FileEntry — à utiliser autour d'un appel qui reconstruit
+     *  le modèle attaché (fireTableDataChanged(), qui efface la sélection de la JTable), voir
+     *  refreshStats()/setViewMode(). */
+    private java.util.Set<FileEntry> captureTableSelection() {
+        java.util.Set<FileEntry> sel = new java.util.LinkedHashSet<>();
+        for (int r : table.getSelectedRows()) sel.addAll(entriesAtViewRow(r));
+        return sel;
+    }
+
+    private void restoreTableSelection(java.util.Set<FileEntry> sel) {
+        if (sel.isEmpty()) return;
+        List<Integer> viewRows = new ArrayList<>();
+        for (FileEntry e : sel) {
+            int mr = viewMode == ViewMode.GROUPED ? albumTreeModel.viewRowOf(e) : tableModel.indexOf(e);
+            if (mr < 0) continue;
+            int vr = table.convertRowIndexToView(mr);
+            if (vr >= 0) viewRows.add(vr);
+        }
+        if (viewRows.isEmpty()) return;
+        table.clearSelection();
+        for (int vr : viewRows) table.addRowSelectionInterval(vr, vr);
+    }
+
+    /**
+     * Bascule entre la vue liste plate ({@code tableModel}) et la vue arborescence par album
+     * ({@code albumTreeModel}, construite paresseusement) — voir AlbumTreeTableModel pour le détail
+     * du regroupement. {@code table.setAutoCreateColumnsFromModel(false)} (voir configureTable())
+     * garantit que les colonnes/renderers/largeurs déjà configurés survivent au changement de
+     * modèle. Pas de RowSorter en vue arborescence (pas de tri par clic de colonne en v1, voir le
+     * plan) — {@code rowSorter} reste réservé à la vue liste.
+     */
+    private void setViewMode(ViewMode mode) {
+        if (mode == viewMode) { syncViewModeControl(); return; }
+        java.util.Set<FileEntry> sel = captureTableSelection();
+        viewMode = mode;
+        if (mode == ViewMode.GROUPED) {
+            if (albumTreeModel == null) albumTreeModel = new AlbumTreeTableModel(tableModel);
+            albumTreeModel.attach();
+            table.setRowSorter(null);
+            table.setModel(albumTreeModel);
+        } else {
+            if (albumTreeModel != null) albumTreeModel.detach();
+            table.setModel(tableModel);
+            table.setRowSorter(rowSorter);
+        }
+        restoreTableSelection(sel);
+        syncViewModeControl();
+        if (btnExpandAllGroups != null) {
+            btnExpandAllGroups.setVisible(mode == ViewMode.GROUPED);
+            btnCollapseAllGroups.setVisible(mode == ViewMode.GROUPED);
+        }
+        PREFS.putInt("view.mode", mode == ViewMode.GROUPED ? 1 : 0);
+        refreshStats();
+    }
+
+    private void syncViewModeControl() {
+        if (cbViewMode == null) return;
+        int idx = viewMode == ViewMode.GROUPED ? 1 : 0;
+        if (cbViewMode.getSelectedIndex() != idx) cbViewMode.setSelectedIndex(idx);
+    }
 
     private Color rowBg(FileEntry.Status s, int row) {
         boolean alt = (row % 2 == 1);
@@ -1304,7 +1463,8 @@ public class MainFrame extends JFrame {
         miRename.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) return;
-            FileEntry entry = tableModel.get(table.convertRowIndexToModel(row));
+            FileEntry entry = entryAtViewRow(row);
+            if (entry == null) return;
             if (entry.status == FileEntry.Status.TAGGED) {
                 try {
                     // entry.file est le chemin D'ORIGINE au chargement : si le fichier a déjà été
@@ -1335,7 +1495,8 @@ public class MainFrame extends JFrame {
         miReveal.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) return;
-            FileEntry revealEntry = tableModel.get(table.convertRowIndexToModel(row));
+            FileEntry revealEntry = entryAtViewRow(row);
+            if (revealEntry == null) return;
             // entry.file est le chemin D'ORIGINE au chargement (champ final, ne change jamais) ;
             // entry.currentPath suit le fichier après un renommage/déplacement. Utiliser file ici
             // ouvrait l'ANCIEN dossier — potentiellement vide et supprimé depuis — dès qu'un
@@ -1355,12 +1516,14 @@ public class MainFrame extends JFrame {
             }
         });
         miRemove.addActionListener(e -> {
-            int[] rows = table.getSelectedRows();
-            // Supprimer de bas en haut pour garder les indices valides
-            for (int i = rows.length - 1; i >= 0; i--) {
-                int mr = table.convertRowIndexToModel(rows[i]);
-                tableModel.remove(mr);
-            }
+            // Par référence (Set, retrait par identité) plutôt que par index de ligne : en vue
+            // arborescence, les lignes de vue sélectionnées ne correspondent plus 1:1 aux lignes de
+            // tableModel (lignes d'en-tête intercalées) — entriesAtViewRow() gère la traduction,
+            // tableModel.removeEntries() (déjà utilisé pour le rollback d'un scan annulé) fonctionne
+            // identiquement dans les deux vues sans avoir à raisonner sur des indices du tout.
+            java.util.Set<FileEntry> toRemove = new java.util.LinkedHashSet<>();
+            for (int row : table.getSelectedRows()) toRemove.addAll(entriesAtViewRow(row));
+            tableModel.removeEntries(toRemove);
         });
 
         JMenuItem miAcoustId = new JMenuItem("🎵  " + I18n.t("Soumettre fingerprint AcoustID"));
@@ -1388,6 +1551,19 @@ public class MainFrame extends JFrame {
         menu.add(miAcoustId); menu.addSeparator();
         menu.add(miReveal); menu.add(miRemove);
 
+        // Menu réduit pour une ligne d'en-tête de groupe (vue arborescence) — les actions
+        // intrinsèquement mono-fichier ci-dessus (Renommer ce fichier, Correspondance manuelle,
+        // Soumettre AcoustID...) ne sont pas proposées ici : déplier le groupe et clic-droit sur une
+        // piste donne le menu complet ci-dessus, inchangé.
+        JPopupMenu headerMenu = new JPopupMenu();
+        JMenuItem miSelectAlbum   = new JMenuItem(I18n.t("Tout sélectionner (album)"));
+        JMenuItem miDeselectAlbum = new JMenuItem(I18n.t("Tout désélectionner (album)"));
+        JMenuItem miTagAlbum      = new JMenuItem("⚡  " + I18n.t("Tagger cet album"));
+        JMenuItem miRevealAlbum   = new JMenuItem("📁  " + I18n.t("Ouvrir le dossier parent"));
+        headerMenu.add(miSelectAlbum); headerMenu.add(miDeselectAlbum);
+        headerMenu.addSeparator();
+        headerMenu.add(miTagAlbum); headerMenu.add(miRevealAlbum);
+
         table.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
             @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
@@ -1396,7 +1572,59 @@ public class MainFrame extends JFrame {
                 int row = table.rowAtPoint(e.getPoint());
                 if (row >= 0 && !table.isRowSelected(row))
                     table.setRowSelectionInterval(row, row);
-                menu.show(table, e.getX(), e.getY());
+                if (isHeaderViewRow(row)) {
+                    List<FileEntry> members = entriesAtViewRow(row);
+                    // Ré-enregistrer les listeners à chaque clic-droit (au lieu d'un seul, fixé à la
+                    // construction) : `members` dépend du groupe cliqué, différent à chaque fois —
+                    // sans ce nettoyage, les anciens listeners s'empileraient et agiraient sur les
+                    // membres d'un groupe précédent.
+                    for (var l : miSelectAlbum.getActionListeners()) miSelectAlbum.removeActionListener(l);
+                    for (var l : miDeselectAlbum.getActionListeners()) miDeselectAlbum.removeActionListener(l);
+                    for (var l : miTagAlbum.getActionListeners()) miTagAlbum.removeActionListener(l);
+                    for (var l : miRevealAlbum.getActionListeners()) miRevealAlbum.removeActionListener(l);
+                    miSelectAlbum.addActionListener(ev -> {
+                        for (FileEntry m : members) { m.selected = true; tableModel.update(m); }
+                    });
+                    miDeselectAlbum.addActionListener(ev -> {
+                        for (FileEntry m : members) { m.selected = false; tableModel.update(m); }
+                    });
+                    miTagAlbum.addActionListener(ev -> {
+                        for (int r = 0; r < tableModel.getRowCount(); r++) {
+                            FileEntry other = tableModel.get(r);
+                            if (other.selected) { other.selected = false; tableModel.update(other); }
+                        }
+                        for (FileEntry m : members) { m.selected = true; tableModel.update(m); }
+                        startTagging(false);
+                    });
+                    // "Ouvrir le dossier parent" seulement si tous les membres partagent le même
+                    // dossier — un groupe replié sur un dossier (pas de tag album) le fait toujours
+                    // par construction ; un vrai album peut avoir ses pistes réparties (multi-CD,
+                    // branches mergerfs différentes), auquel cas l'action n'a pas de cible unique.
+                    Path commonParent = members.isEmpty() ? null
+                            : (members.get(0).currentPath != null ? members.get(0).currentPath : members.get(0).file.toPath()).getParent();
+                    boolean uniform = commonParent != null && members.stream().allMatch(m -> {
+                        Path p = (m.currentPath != null ? m.currentPath : m.file.toPath()).getParent();
+                        return commonParent.equals(p);
+                    });
+                    miRevealAlbum.setEnabled(uniform);
+                    if (uniform) {
+                        miRevealAlbum.addActionListener(ev -> {
+                            try {
+                                String os = System.getProperty("os.name", "").toLowerCase();
+                                ProcessBuilder pb;
+                                if (os.contains("win"))      pb = new ProcessBuilder("explorer.exe", commonParent.toString());
+                                else if (os.contains("mac")) pb = new ProcessBuilder("open", commonParent.toString());
+                                else                          pb = new ProcessBuilder("xdg-open", commonParent.toString());
+                                pb.start();
+                            } catch (Exception ex) {
+                                showError(I18n.t("Impossible d'ouvrir le dossier : %s", ex.getMessage()));
+                            }
+                        });
+                    }
+                    headerMenu.show(table, e.getX(), e.getY());
+                } else {
+                    menu.show(table, e.getX(), e.getY());
+                }
             }
         });
     }
@@ -1490,9 +1718,22 @@ public class MainFrame extends JFrame {
      * (idempotent).
      */
     private void followProcessing(FileEntry entry) {
-        int modelRow = tableModel.indexOf(entry);
-        if (modelRow < 0) return;
-        int viewRow = table.convertRowIndexToView(modelRow);
+        int viewRow;
+        if (viewMode == ViewMode.GROUPED) {
+            // Ligne de son groupe si déplié, sinon la ligne d'en-tête du groupe — jamais forcé
+            // déplié (voir AlbumTreeTableModel.viewRowOf() et la note de conception : un groupe
+            // replié ne s'ouvre jamais tout seul pendant un taguage en direct). -1 possible si le
+            // dernier flushIfDirty() n'a pas encore rattrapé cette entrée (throttlé à 300ms) — dans
+            // ce cas on renonce à suivre pour ce tick plutôt que de forcer un aplatissement hors
+            // throttle, "suivre" restant une aide visuelle best-effort, pas une garantie stricte.
+            int modelRow = albumTreeModel.viewRowOf(entry);
+            if (modelRow < 0) return;
+            viewRow = table.convertRowIndexToView(modelRow);
+        } else {
+            int modelRow = tableModel.indexOf(entry);
+            if (modelRow < 0) return;
+            viewRow = table.convertRowIndexToView(modelRow);
+        }
         if (viewRow < 0) return;
         table.scrollRectToVisible(table.getCellRect(viewRow, 0, true));
         table.setRowSelectionInterval(viewRow, viewRow);
@@ -1503,9 +1744,17 @@ public class MainFrame extends JFrame {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) { clearDetail(); return; }
 
-        if (rows.length == 1) {
+        // Résolution unifiée liste/arborescence : une ligne normale résout vers elle-même, une
+        // ligne d'en-tête de groupe (vue arborescence) résout vers TOUS ses membres — permet
+        // d'éditer un album entier en lot (populateMulti ci-dessous) juste en sélectionnant son
+        // en-tête, sans avoir à le déplier.
+        List<FileEntry> entries = new ArrayList<>();
+        for (int r : rows) entries.addAll(entriesAtViewRow(r));
+        if (entries.isEmpty()) { clearDetail(); return; }
+
+        if (entries.size() == 1) {
             // Mode fichier unique
-            FileEntry e  = tableModel.get(table.convertRowIndexToModel(rows[0]));
+            FileEntry e  = entries.get(0);
             TagInfo   ti = e.activeTags();
             lblFilePath.setText("  " + (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath());
             detailPanel.populate(ti);
@@ -1515,10 +1764,10 @@ public class MainFrame extends JFrame {
         } else {
             // Mode multi-sélection — édition en lot
             List<TagInfo> tags = new ArrayList<>();
-            for (int r : rows) tags.add(tableModel.get(table.convertRowIndexToModel(r)).activeTags());
-            lblFilePath.setText(I18n.t("  %d fichiers sélectionnés — les champs vides ne seront pas modifiés", rows.length));
+            for (FileEntry e : entries) tags.add(e.activeTags());
+            lblFilePath.setText(I18n.t("  %d fichiers sélectionnés — les champs vides ne seront pas modifiés", entries.size()));
             detailPanel.populateMulti(tags);
-            lblCoverImg.setIcon(null); lblCoverImg.setText(rows.length + "");
+            lblCoverImg.setIcon(null); lblCoverImg.setText(entries.size() + "");
         }
     }
 

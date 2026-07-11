@@ -256,6 +256,10 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // dans un fichier temporaire — ni les tags) ; voir TagEnrichment.saveEntry(), appelé
             // plus tard par SaveWorker ("Enregistrer tout").
             TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
+            // No-op ici en pratique : la tracklist MB (ReleaseTrack) ne porte pas de workMbid,
+            // seulement recordingMbid — ajouté quand même pour cohérence avec les autres pipelines
+            // et pour rester correct si ReleaseTrack gagne un jour ce champ.
+            TagEnrichment.enrichClassicalWork(ti, mb);
 
             // Empreinte AcoustID : calculée systématiquement après toute identification
             // réussie (TaggingWorker/BatchProcessor/App/MatchDialog le font déjà, comme

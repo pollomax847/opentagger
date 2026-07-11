@@ -110,7 +110,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs+artist-rels";
+                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -127,7 +127,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs+artist-rels";
+                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -601,7 +601,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording/" + mbid.trim()
                 + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs"
                 + (mbGenres ? "+genres" : "")
-                + "+artist-rels+recording-rels";
+                + "+artist-rels+recording-rels+work-rels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return null;
@@ -734,8 +734,9 @@ public class MusicBrainzClient {
     }
 
     /**
-     * Parse les relations MB (artist-rels, recording-rels) pour remplir compositeur,
-     * chef d'orchestre, producteur, arrangeur, ingénieur du son, parolier.
+     * Parse les relations MB (artist-rels, recording-rels, work-rels) pour remplir compositeur,
+     * chef d'orchestre, producteur, arrangeur, ingénieur du son, parolier, et l'œuvre liée
+     * (Work MB — titre + MBID, relation "performance").
      * Défensif : ignore tous les champs manquants/inattendus.
      */
     private void extractRelations(JsonNode relations, TagInfo info) {
@@ -743,6 +744,20 @@ public class MusicBrainzClient {
         for (JsonNode rel : relations) {
             String type = rel.path("type").asText("").toLowerCase().trim();
             if (type.isBlank()) continue;
+
+            // "performance" a un nœud "work", pas "artist" — traité à part avant le switch
+            // ci-dessous (qui suppose toujours un nœud "artist" et sinon ignore la relation).
+            if ("performance".equals(type)) {
+                JsonNode workNode = rel.path("work");
+                String wTitle = workNode.path("title").asText("").trim();
+                String wId    = workNode.path("id").asText("").trim();
+                if (info.workMbid.isBlank() && !wTitle.isBlank() && !wId.isBlank()) {
+                    info.work     = wTitle;
+                    info.workMbid = wId;
+                }
+                continue;
+            }
+
             // Les relations artist-rels ont un nœud "artist", les recording-rels ont "recording"
             JsonNode artistNode = rel.path("artist");
             if (artistNode.isMissingNode()) continue;
@@ -767,6 +782,127 @@ public class MusicBrainzClient {
                                                    -> { /* géré par artist-credits */ }
                 default -> {}
             }
+        }
+    }
+
+    private static final java.util.regex.Pattern CLASSICAL_CATALOG_PATTERN = java.util.regex.Pattern.compile(
+        "\\b(BWV|BuxWV|HWV|RV|Wq\\.?|Hob\\.[^,:;\\n]*|K\\.?V?|D\\.)\\s*\\d+[a-zA-Z]?\\b",
+        java.util.regex.Pattern.CASE_INSENSITIVE);
+    private static final java.util.regex.Pattern CLASSICAL_OPUS_PATTERN = java.util.regex.Pattern.compile(
+        "\\bop\\.?\\s*\\d+[a-z]?(?:\\s*,?\\s*n[o°]\\.?\\s*\\d+)?\\b",
+        java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Résout Opus/Catalogue (BWV, K., D....)/Mouvement/Œuvre globale à partir du Work MB déjà lié
+     * à l'enregistrement ({@code info.workMbid}, rempli par {@link #extractRelations} via la
+     * relation "performance" — voir son commentaire). Jusqu'à 2 requêtes MB supplémentaires
+     * (cadencées comme tout le reste, voir {@link #getWithRetry}) : l'œuvre elle-même, puis son
+     * œuvre parente si c'est un mouvement — la plupart des œuvres classiques hors mouvement (une
+     * pièce pour piano seule, par ex.) n'en ont besoin que d'une.
+     * <p>
+     * Confirmé en direct sur l'API MB réelle (Beethoven Symphonie n°5, Brandebourgeois n°1 BWV
+     * 1046) avant d'écrire ce code : la relation recording→work s'appelle "performance" ; un
+     * mouvement pointe vers son œuvre parente via une relation "parts" de direction "backward"
+     * (avec {@code ordering-key} = numéro du mouvement) ; l'œuvre parente liste ses mouvements via
+     * les relations "parts" de direction "forward" (comptées pour le total) ; MusicBrainz n'a
+     * PRESQUE JAMAIS d'attribut structuré "Opus number"/"Catalogue number" dans la pratique (les
+     * deux œuvres testées n'avaient que l'attribut "Key") — l'opus/catalogue est en réalité
+     * quasi-toujours intégré au TITRE de l'œuvre ("Symphony no. 5 in C minor, op. 67",
+     * "Brandenburgisches Konzert Nr. 1 F-Dur, BWV 1046"), d'où l'extraction par regex en repli.
+     * Limite connue : ne couvre que les catalogues les plus courants (BWV/K.V/D./Hob./RV/Wq/HWV/
+     * BuxWV + "op."/"opus" générique) — un catalogue plus rare resterait vide, pas une erreur en
+     * soi juste une couverture partielle assumée. {@code period}/{@code section}/{@code part*} ne
+     * sont délibérément pas renseignés : rien dans le modèle de données MB ne les fournit de façon
+     * fiable (période/époque musicale n'existe pas comme champ MB ; section d'opéra/partie sont un
+     * niveau de granularité que "parts" ne distingue pas assez proprement pour être fiable).
+     */
+    public void resolveClassicalWork(TagInfo info) throws Exception {
+        if (info.workMbid.isBlank()) return;
+        JsonNode work = fetchWork(info.workMbid);
+        if (work == null) return;
+        info.isClassical = "1";
+
+        String catalogSourceTitle = work.path("title").asText("").trim();
+        JsonNode parentRel = findPartsRelation(work.path("relations"), "backward");
+        if (parentRel != null) {
+            JsonNode parent = parentRel.path("work");
+            String parentTitle = parent.path("title").asText("").trim();
+            if (!parentTitle.isBlank()) {
+                if (info.overallWork.isBlank()) info.overallWork = parentTitle;
+                catalogSourceTitle = parentTitle; // opus/catalogue se lit sur l'œuvre globale
+
+                int orderingKey = parentRel.path("ordering-key").asInt(0);
+                if (orderingKey > 0 && info.movementNo.isBlank()) info.movementNo = String.valueOf(orderingKey);
+
+                if (info.titleMovement.isBlank()) {
+                    String own = work.path("title").asText("").trim();
+                    String prefix = parentTitle + ":";
+                    info.titleMovement = own.startsWith(prefix) ? own.substring(prefix.length()).trim() : own;
+                }
+
+                String parentId = parent.path("id").asText("").trim();
+                if (info.movementTotal.isBlank() && !parentId.isBlank()) {
+                    JsonNode parentWork = fetchWork(parentId);
+                    if (parentWork != null) {
+                        int total = countPartsRelations(parentWork.path("relations"), "forward");
+                        if (total > 0) info.movementTotal = String.valueOf(total);
+                    }
+                }
+            }
+        }
+
+        extractOpusCatalog(work.path("attributes"), catalogSourceTitle, info);
+    }
+
+    private JsonNode fetchWork(String workMbid) throws Exception {
+        String url = BASE_URL + "/work/" + workMbid.trim() + "?fmt=json&inc=work-rels";
+        HttpResponse<String> resp = getWithRetry(url);
+        return resp == null ? null : mapper.readTree(resp.body());
+    }
+
+    private JsonNode findPartsRelation(JsonNode relations, String direction) {
+        if (!relations.isArray()) return null;
+        for (JsonNode rel : relations) {
+            if ("parts".equals(rel.path("type").asText(""))
+                    && direction.equals(rel.path("direction").asText(""))) {
+                return rel;
+            }
+        }
+        return null;
+    }
+
+    private int countPartsRelations(JsonNode relations, String direction) {
+        if (!relations.isArray()) return 0;
+        int n = 0;
+        for (JsonNode rel : relations) {
+            if ("parts".equals(rel.path("type").asText(""))
+                    && direction.equals(rel.path("direction").asText(""))) n++;
+        }
+        return n;
+    }
+
+    /** Attribut structuré MB si présent (rare en pratique), sinon extraction par regex du titre —
+     *  voir le commentaire de {@link #resolveClassicalWork}. */
+    private void extractOpusCatalog(JsonNode attributes, String title, TagInfo info) {
+        if (attributes.isArray()) {
+            for (JsonNode attr : attributes) {
+                String type  = attr.path("type").asText("");
+                String value = attr.path("value").asText("").trim();
+                if (value.isBlank()) continue;
+                if (info.classicalCatalog.isBlank() && "Catalogue number".equalsIgnoreCase(type))
+                    info.classicalCatalog = value;
+                if (info.opus.isBlank() && "Opus number".equalsIgnoreCase(type))
+                    info.opus = value;
+            }
+        }
+        if (title == null || title.isBlank()) return;
+        if (info.classicalCatalog.isBlank()) {
+            var m = CLASSICAL_CATALOG_PATTERN.matcher(title);
+            if (m.find()) info.classicalCatalog = m.group().trim();
+        }
+        if (info.opus.isBlank()) {
+            var m = CLASSICAL_OPUS_PATTERN.matcher(title);
+            if (m.find()) info.opus = m.group().trim();
         }
     }
 

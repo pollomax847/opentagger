@@ -212,6 +212,7 @@ public class App {
         System.out.println("Recherche du genre (Discogs → Last.fm)...");
         LastFmClient lastFm = new LastFmClient();
         TagEnrichment.enrichGenre(choisi, new DiscogsClient(), lastFm, cache);
+        TagEnrichment.enrichClassicalWork(choisi, new MusicBrainzClient());
         if (!choisi.genre.isBlank()) System.out.println("  Genre trouvé : " + choisi.genre);
         // Mood + URLs artiste Last.fm — même gap : absents du CLI jusqu'à présent.
         if (choisi.mood.isBlank()) { try { lastFm.enrichMood(choisi, cache); } catch (Exception ignored) {} }

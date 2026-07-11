@@ -202,8 +202,32 @@ print('✓ JSON valide — PlexAmp devrait fonctionner')
 
 ## Prévention dans OpenTagger
 
-Lors du taggage de fichiers MP3, toujours forcer l'encodage UTF-8 (encoding=3) sur tous
-les frames ID3, pas seulement les nouveaux. Exemple avec mutagen :
+**✅ Implémenté** — `App.java:32-42` (le seul point d'entrée `main()` du projet, déclaré
+`Main-Class` dans `pom.xml`, donc exécuté avant tout chemin d'écriture : GUI, CLI, batch) configure
+le singleton global jaudiotagger `TagOptionSingleton` :
+
+```java
+org.jaudiotagger.tag.TagOptionSingleton opts = org.jaudiotagger.tag.TagOptionSingleton.getInstance();
+opts.setId3v23DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_16);
+opts.setId3v24DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_8);
+opts.setResetTextEncodingForExistingFrames(true);
+```
+
+Plus fin que "forcer UTF-8 partout" (l'exemple mutagen ci-dessous, gardé pour référence, est en fait
+techniquement imprécis) : **ID3v2.3 n'accepte pas UTF-8 comme encodage valide** dans sa spec — seuls
+Latin-1 et UTF-16 le sont — donc forcer `encoding=3` (UTF-8) sur un frame v2.3 produirait un tag
+non conforme que d'autres lecteurs pourraient mal interpréter. OpenTagger force UTF-16 pour v2.3 et
+UTF-8 pour v2.4, la combinaison réellement valide dans les deux cas. `setResetTextEncodingForExistingFrames(true)`
+couvre bien "pas seulement les nouveaux frames", comme demandé plus haut.
+
+Étant un singleton global configuré une seule fois au vrai point d'entrée du process (pas une
+option par appelant), ce réglage s'applique automatiquement à TOUS les pipelines d'écriture
+(`TaggingWorker`, `SaveWorker`, `BatchProcessor`, `InfoCompleterWorker`...) sans qu'aucun d'eux
+n'ait besoin de le répéter — pas de risque du problème de divergence "un pipeline a le correctif,
+pas ses voisins" habituellement rencontré sur ce projet.
+
+Exemple mutagen d'origine (Python, hors du code Java réel — gardé pour référence externe/debug
+Plex) :
 
 ```python
 from mutagen.id3 import ID3, Encoding
@@ -211,7 +235,7 @@ from mutagen.id3 import ID3, Encoding
 tags = ID3(path)
 for frame in tags.values():
     if hasattr(frame, 'encoding'):
-        frame.encoding = Encoding.UTF8  # = 3
+        frame.encoding = Encoding.UTF8  # = 3 — imprécis pour v2.3, voir note ci-dessus
 tags.save(v2_version=3)
 ```
 

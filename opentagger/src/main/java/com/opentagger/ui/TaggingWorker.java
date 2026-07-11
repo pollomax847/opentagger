@@ -403,6 +403,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 // TagEnrichment.translateArtist() se désactivait silencieusement pour tous).
                 taggerScript.apply(ti);
                 TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
+                TagEnrichment.enrichClassicalWork(ti, mb);
                 if (ti.mood.isBlank()) { try { lastFm.enrichMood(ti, cache); } catch (Exception ignored) {} }
                 try { lastFm.enrichArtistUrls(ti, cache); } catch (Exception ignored) {}
                 if (bpmEnabled && ti.bpm.isBlank()) {
@@ -714,6 +715,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             step.accept(I18n.t("genres…"));
             log(I18n.t("  genres..."));
             TagEnrichment.enrichGenre(best, discogs, lastFm, cache);
+            TagEnrichment.enrichClassicalWork(best, mb);
             log(I18n.t("  genre=%s", best.genre));
 
             if (best.mood.isBlank()) {
@@ -950,6 +952,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // si TagEnrichment.enrichGenre change) — de toute façon re-noopée sans risque à
                     // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
                     TagEnrichment.enrichGenre(sr, discogs, lastFm, cache);
+                    TagEnrichment.enrichClassicalWork(sr, mb);
                     lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                     return List.of(sr);
                 } else {

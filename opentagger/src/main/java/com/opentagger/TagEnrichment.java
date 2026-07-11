@@ -35,6 +35,21 @@ public final class TagEnrichment {
     }
 
     /**
+     * Opus/Catalogue/Mouvement/Œuvre globale pour une piste classique, via le Work MB déjà lié à
+     * l'enregistrement (voir {@link MusicBrainzClient#resolveClassicalWork}). Gate sur
+     * {@code ti.workMbid} non vide plutôt que sur {@code ti.isClassical} : ce dernier vient d'une
+     * heuristique locale (liste de noms de compositeurs, {@link LocalCorrector#detectClassical})
+     * qui n'est pas câblée dans tous les pipelines (InfoCompleterWorker/AlbumCompletionWorker
+     * notamment — même divergence que d'habitude) — un Work MB lié est un signal structurel fiable
+     * qui ne dépend d'aucune heuristique ni de son câblage. Ne fait jamais planter l'appelant
+     * (réseau, comme enrichGenre ci-dessus).
+     */
+    public static void enrichClassicalWork(TagInfo ti, MusicBrainzClient mb) {
+        if (ti.workMbid.isBlank()) return;
+        try { mb.resolveClassicalWork(ti); } catch (Exception ignored) {}
+    }
+
+    /**
      * Cascade de pochette : essaie chaque fournisseur activé, dans l'ordre configuré
      * ({@code cover.provider_order} — façon Picard, liste de fournisseurs
      * activables/réordonnables), jusqu'au premier succès. Fournisseurs connus :
