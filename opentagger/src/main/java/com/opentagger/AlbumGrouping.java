@@ -7,7 +7,7 @@ import java.nio.file.Path;
 
 /**
  * Clé/titre de regroupement par album — partagés entre {@code ui.RenamePreviewDialog},
- * {@code ui.AlbumTreeTableModel} et {@code ui.CoverFlowDialog}, qui avaient (les deux premiers)
+ * {@code ui.AlbumTreeTableModel} et {@code ui.MainFrame} (Cover Flow), qui avaient (les deux premiers)
  * chacun leur propre copie quasi identique de cette logique avant cette extraction. Priorité à
  * {@code albumArtist} sur {@code artist} ; à défaut de tag album, repli sur le dossier parent —
  * jamais un bucket global unique "sans album" : sur un scan de centaines de milliers de fichiers,

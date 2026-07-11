@@ -199,7 +199,7 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
     }
 
     /** Voir {@link com.opentagger.AlbumGrouping} — logique partagée avec
-     *  {@code RenamePreviewDialog}/{@code CoverFlowDialog}, extraite pour ne plus être dupliquée. */
+     *  {@code RenamePreviewDialog}/{@code MainFrame} (Cover Flow), extraite pour ne plus être dupliquée. */
     private String groupKeyFor(FileEntry e) { return com.opentagger.AlbumGrouping.key(e); }
 
     private String groupTitleFor(FileEntry e) { return com.opentagger.AlbumGrouping.title(e); }

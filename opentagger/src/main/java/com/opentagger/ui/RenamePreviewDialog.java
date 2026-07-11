@@ -214,7 +214,7 @@ public class RenamePreviewDialog extends JDialog {
     // ── Regroupement par album ───────────────────────────────────────────────
 
     /** Voir {@link com.opentagger.AlbumGrouping} — logique partagée avec
-     *  {@code AlbumTreeTableModel}/{@code CoverFlowDialog}, extraite pour ne plus être dupliquée. */
+     *  {@code AlbumTreeTableModel}/{@code MainFrame} (Cover Flow), extraite pour ne plus être dupliquée. */
     private String groupKey(PreviewRow r) { return com.opentagger.AlbumGrouping.key(r.entry()); }
 
     private String groupTitle(PreviewRow r) { return com.opentagger.AlbumGrouping.title(r.entry()); }

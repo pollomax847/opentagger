@@ -1,6 +1,7 @@
 package com.opentagger.ui;
 
 import com.formdev.flatlaf.FlatDarkLaf;
+import com.opentagger.AlbumGrouping;
 import com.opentagger.AudioScanner;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
@@ -98,14 +99,22 @@ public class MainFrame extends JFrame {
     private JTextField                      tfFilter;
     private JComboBox<String>               cbFilterField;
 
-    // ── Vue arborescence par album (alternative à la liste plate) ─────────────
+    // ── Vue arborescence par album / Cover Flow (alternatives à la liste plate) ───────────────
     // Voir AlbumTreeTableModel — coût nul tant que viewMode == FLAT (pas de listener enregistré).
-    private enum ViewMode { FLAT, GROUPED }
+    private enum ViewMode { FLAT, GROUPED, COVER_FLOW }
     private ViewMode viewMode = ViewMode.FLAT;
     private AlbumTreeTableModel albumTreeModel;
     private GroupSortRowSorter  groupRowSorter;
-    private JComboBox<String>   cbViewMode;
-    private JButton             btnExpandAllGroups, btnCollapseAllGroups;
+    // Menu "Affichage" (pas sur l'écran principal, voir buildMenuAffichage()) — retour utilisateur.
+    private JRadioButtonMenuItem rbViewFlat, rbViewGrouped, rbViewCoverFlow;
+    private JMenuItem            miExpandAllGroups, miCollapseAllGroups;
+    // Cover Flow intégré à la place du tableau (CardLayout, voir buildMainSplit()) — pas une
+    // fenêtre séparée : retour utilisateur explicite, la première version (CoverFlowDialog,
+    // supprimée) dupliquait inutilement le panneau de détail déjà visible à droite.
+    private CoverFlowPanel coverFlowPanel;
+    private JPanel          leftCards;
+    private CardLayout      leftCardLayout;
+    private final java.util.Map<String, FileEntry> coverFlowRepresentative = new java.util.HashMap<>();
     // Profondeur de "chargement en masse" en cours (voir beginBulkTableUpdate()) — plusieurs
     // scans de dossiers peuvent tourner en même temps (activeScanWorkers), donc compteur plutôt
     // qu'un simple booléen.
@@ -297,9 +306,12 @@ public class MainFrame extends JFrame {
             if (!e.getValueIsAdjusting()) refreshDetail();
         });
 
-        // Vue (liste/arborescence) choisie à la dernière session — après buildMainSplit() (table
-        // doit exister) ; ViewMode.FLAT (déjà la valeur par défaut du champ) si jamais enregistré.
-        if (PREFS.getInt("view.mode", 0) == 1) setViewMode(ViewMode.GROUPED);
+        // Vue (liste/arborescence/Cover Flow) choisie à la dernière session — après
+        // buildMainSplit() (table/coverFlowPanel doivent exister) ; ViewMode.FLAT (déjà la valeur
+        // par défaut du champ) si jamais enregistré.
+        int savedViewMode = PREFS.getInt("view.mode", 0);
+        if (savedViewMode == 1) setViewMode(ViewMode.GROUPED);
+        else if (savedViewMode == 2) setViewMode(ViewMode.COVER_FLOW);
 
         // ── Undo/Redo clavier ─────────────────────────────────────────────
         var rootMap   = getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
@@ -408,6 +420,7 @@ public class MainFrame extends JFrame {
         mb.add(buildMenuFichier());
         mb.add(buildMenuEdition());
         mb.add(buildMenuTagger());
+        mb.add(buildMenuAffichage());
         mb.add(buildMenuOutils());
         return mb;
     }
@@ -724,6 +737,41 @@ public class MainFrame extends JFrame {
     }
 
     /**
+     * Mode d'affichage de la bibliothèque (Liste/Arborescence par album/Cover Flow) — retour
+     * utilisateur explicite : pas de combo/boutons sur l'écran principal, regroupé ici à la place.
+     * rbViewFlat/rbViewGrouped/miExpandAllGroups/miCollapseAllGroups sont synchronisés depuis
+     * setViewMode() (voir syncViewModeControl()), donc restent corrects même si la vue change par
+     * un autre chemin que ce menu (aucun aujourd'hui, mais évite une divergence future).
+     */
+    private JMenu buildMenuAffichage() {
+        JMenu m = new JMenu(I18n.t("Affichage"));
+        m.setMnemonic('A');
+
+        ButtonGroup grp = new ButtonGroup();
+        rbViewFlat      = new JRadioButtonMenuItem(I18n.t("Liste"), viewMode == ViewMode.FLAT);
+        rbViewGrouped   = new JRadioButtonMenuItem(I18n.t("Arborescence par album"), viewMode == ViewMode.GROUPED);
+        rbViewCoverFlow = new JRadioButtonMenuItem(I18n.t("Cover Flow"), viewMode == ViewMode.COVER_FLOW);
+        grp.add(rbViewFlat);
+        grp.add(rbViewGrouped);
+        grp.add(rbViewCoverFlow);
+        rbViewFlat.addActionListener(e -> setViewMode(ViewMode.FLAT));
+        rbViewGrouped.addActionListener(e -> setViewMode(ViewMode.GROUPED));
+        rbViewCoverFlow.addActionListener(e -> setViewMode(ViewMode.COVER_FLOW));
+        m.add(rbViewFlat);
+        m.add(rbViewGrouped);
+        m.add(rbViewCoverFlow);
+        m.addSeparator();
+
+        miExpandAllGroups   = mitem(I18n.t("Tout déplier"),  null, e -> { if (albumTreeModel != null) albumTreeModel.expandAll(); });
+        miCollapseAllGroups = mitem(I18n.t("Tout replier"),  null, e -> { if (albumTreeModel != null) albumTreeModel.collapseAll(); });
+        miExpandAllGroups.setEnabled(viewMode == ViewMode.GROUPED);
+        miCollapseAllGroups.setEnabled(viewMode == ViewMode.GROUPED);
+        m.add(miExpandAllGroups);
+        m.add(miCollapseAllGroups);
+        return m;
+    }
+
+    /**
      * Regroupé en sous-menus (au lieu de 12 entrées à plat) — retour utilisateur : trop d'actions
      * visibles d'un coup dans "Outils". Aucune action supprimée/renommée, juste réorganisée par
      * thème : correction manuelle, re-traitement, bibliothèque, MusicBrainz.
@@ -886,8 +934,7 @@ public class MainFrame extends JFrame {
         new String[]{"syncListenBrainz",   I18n.t("Synchroniser ListenBrainz")},
         new String[]{"podcastDialog",      I18n.t("Tagger comme podcast")},
         new String[]{"detectDuplicates",   I18n.t("Détecter les doublons")},
-        new String[]{"historyDialog",      I18n.t("Historique de taguage")},
-        new String[]{"coverFlow",          I18n.t("Cover Flow")}
+        new String[]{"historyDialog",      I18n.t("Historique de taguage")}
     );
 
     /**
@@ -925,16 +972,49 @@ public class MainFrame extends JFrame {
                 I18n.t("Détecter les fichiers en double"), this::detectDuplicates));
         list.add(new ToolbarAction("historyDialog", I18n.t("Historique de taguage"),
                 I18n.t("Ouvrir l'historique de taguage"), () -> new HistoryDialog(this).setVisible(true)));
-        list.add(new ToolbarAction("coverFlow", I18n.t("Cover Flow"),
-                I18n.t("Parcourir les albums déjà tagués en carrousel de pochettes"), this::openCoverFlowDialog));
         return list;
     }
 
-    /** Instantané des albums déjà TAGUÉS (voir CoverFlowDialog — pochette garantie déjà embarquée à
-     *  ce stade, aucun coût réseau). Pas de mise à jour en direct : "🔄 Rafraîchir" dans le dialogue
-     *  ré-invoque ce même fournisseur. */
-    private void openCoverFlowDialog() {
-        new CoverFlowDialog(this, () -> tableModel.allEntries()).setVisible(true);
+    /**
+     * Instantané des albums déjà TAGUÉS (pochette garantie déjà embarquée à ce stade, voir
+     * TagEnrichment.saveEntry() — aucun coût réseau). Pas de mise à jour en direct pendant un
+     * taguage en cours — reconstruit à chaque passage en mode Cover Flow (setViewMode()), et sur
+     * demande via le bouton "🔄 Rafraîchir" du panneau lui-même.
+     * <p>Un seul FileEntry représentant par album (le premier rencontré — la pochette est
+     * identique sur toutes les pistes d'un même album) ; {@code coverFlowRepresentative} garde le
+     * lien groupKey → FileEntry pour alimenter le panneau de détail à droite quand la sélection
+     * change dans le carrousel (voir onCoverFlowSelectionChanged()), exactement comme une ligne de
+     * la table normale le ferait.
+     */
+    private void refreshCoverFlowAlbums() {
+        java.util.LinkedHashMap<String, CoverFlowPanel.AlbumTile> byKey = new java.util.LinkedHashMap<>();
+        coverFlowRepresentative.clear();
+        for (FileEntry e : tableModel.allEntries()) {
+            if (e.status != FileEntry.Status.TAGGED) continue;
+            String key = AlbumGrouping.key(e);
+            if (byKey.containsKey(key)) continue;
+            TagInfo tags = e.activeTags();
+            String artist = !tags.albumArtist.isBlank() ? tags.albumArtist : tags.artist;
+            File file = e.currentPath != null ? e.currentPath.toFile() : e.file;
+            byKey.put(key, new CoverFlowPanel.AlbumTile(key, AlbumGrouping.title(e), artist, file));
+            coverFlowRepresentative.put(key, e);
+        }
+        List<CoverFlowPanel.AlbumTile> tiles = new ArrayList<>(byKey.values());
+        tiles.sort(java.util.Comparator.comparing(CoverFlowPanel.AlbumTile::title, String.CASE_INSENSITIVE_ORDER));
+        coverFlowPanel.setAlbums(tiles);
+    }
+
+    /** Fait suivre le panneau de détail (droite) à l'album actuellement centré dans le carrousel —
+     *  même principe que la sélection d'une ligne dans la table normale. */
+    private void onCoverFlowSelectionChanged(CoverFlowPanel.AlbumTile tile, int index, int total) {
+        if (tile == null) { clearDetail(); return; }
+        FileEntry e = coverFlowRepresentative.get(tile.groupKey());
+        if (e == null) { clearDetail(); return; }
+        TagInfo ti = e.activeTags();
+        lblFilePath.setText("  " + (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath());
+        detailPanel.populate(ti);
+        loadCoverThumb(e.currentPath != null ? e.currentPath.toFile() : e.file);
+        setStatus(I18n.t("Cover Flow — %d / %d — %s", index + 1, total, tile.title()));
     }
 
     private ToolbarAction findToolbarAction(String id) {
@@ -1080,26 +1160,9 @@ public class MainFrame extends JFrame {
         p.add(tfFilter);
         p.add(cbFilterField);
         p.add(btnClearFilter);
-
-        // Bascule Liste / Arborescence par album (voir AlbumTreeTableModel/setViewMode()) —
-        // "menu déroulant" explicitement demandé par l'utilisateur plutôt qu'une case à cocher
-        // enfouie dans les Préférences. Construit ici (buildStatsStrip() s'exécute avant
-        // buildMainSplit(), `table` n'existe pas encore) ; l'action réelle n'est déclenchée que
-        // sur interaction utilisateur, donc rien n'est prématurément appelé. setSelectedIndex()
-        // initial fait à la fin de buildUI() une fois `table` construit, voir plus bas.
-        p.add(new JSeparator(JSeparator.VERTICAL));
-        cbViewMode = new JComboBox<>(new String[]{ I18n.t("Liste"), I18n.t("Arborescence par album") });
-        cbViewMode.addActionListener(e -> setViewMode(
-            cbViewMode.getSelectedIndex() == 1 ? ViewMode.GROUPED : ViewMode.FLAT));
-        btnExpandAllGroups = new JButton(I18n.t("Tout déplier"));
-        btnCollapseAllGroups = new JButton(I18n.t("Tout replier"));
-        btnExpandAllGroups.addActionListener(e -> { if (albumTreeModel != null) albumTreeModel.expandAll(); });
-        btnCollapseAllGroups.addActionListener(e -> { if (albumTreeModel != null) albumTreeModel.collapseAll(); });
-        btnExpandAllGroups.setVisible(false);
-        btnCollapseAllGroups.setVisible(false);
-        p.add(cbViewMode);
-        p.add(btnExpandAllGroups);
-        p.add(btnCollapseAllGroups);
+        // Bascule de vue (Liste/Arborescence/Cover Flow) déplacée dans le menu "Affichage" —
+        // retour utilisateur explicite : pas sur l'écran principal au milieu des chips/filtre,
+        // voir buildMenuAffichage().
         return p;
     }
 
@@ -1212,12 +1275,22 @@ public class MainFrame extends JFrame {
         scroll.setBorder(null);
         scroll.setMinimumSize(new Dimension(200, 0)); // filet de sécurité : jamais écrasée à ~0px
 
+        // ── Cover Flow (alternative à la table, même emplacement) ────────────
+        coverFlowPanel = new CoverFlowPanel();
+        coverFlowPanel.setSelectionListener(this::onCoverFlowSelectionChanged);
+
+        leftCardLayout = new CardLayout();
+        leftCards = new JPanel(leftCardLayout);
+        leftCards.setMinimumSize(new Dimension(200, 0));
+        leftCards.add(scroll,         "table");
+        leftCards.add(coverFlowPanel, "coverflow");
+
         // ── Panneau détail (droite) ───────────────────────────────────────────
         JPanel detail = buildDetailPanel();
         detail.setPreferredSize(new Dimension(360, 0));
         detail.setMinimumSize(new Dimension(280, 0));
 
-        JSplitPane sp = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, scroll, detail);
+        JSplitPane sp = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftCards, detail);
         sp.setResizeWeight(0.68);
         sp.setDividerSize(4);
         sp.setBorder(null);
@@ -1409,41 +1482,61 @@ public class MainFrame extends JFrame {
      */
     private void setViewMode(ViewMode mode) {
         if (mode == viewMode) { syncViewModeControl(); return; }
-        java.util.Set<FileEntry> sel = captureTableSelection();
+        ViewMode previous = viewMode;
+        // Pas de sélection à sauvegarder/restaurer côté table si on vient de Cover Flow (elle
+        // n'a pas bougé pendant qu'elle était cachée derrière le CardLayout).
+        java.util.Set<FileEntry> sel = previous != ViewMode.COVER_FLOW ? captureTableSelection() : java.util.Set.of();
         viewMode = mode;
-        if (mode == ViewMode.GROUPED) {
-            if (albumTreeModel == null) albumTreeModel = new AlbumTreeTableModel(tableModel);
-            albumTreeModel.attach();
-            if (groupRowSorter == null) {
-                groupRowSorter = new GroupSortRowSorter(albumTreeModel);
-                for (int c = 0; c < tableModel.getColumnCount(); c++) {
-                    boolean sortable = c == FileTableModel.COL_FILE || c == FileTableModel.COL_ARTIST
-                            || c == FileTableModel.COL_ALBUM_ARTIST || c == FileTableModel.COL_ALBUM
-                            || c == FileTableModel.COL_YEAR;
-                    groupRowSorter.setSortable(c, sortable);
-                }
-            }
-            table.setRowSorter(groupRowSorter);
-            table.setModel(albumTreeModel);
+
+        // Détache toujours la vue arborescence quand on la quitte, Cover Flow y compris — coût nul
+        // hors mode GROUPED (voir AlbumTreeTableModel, aucun listener enregistré si non attaché).
+        if (previous == ViewMode.GROUPED && mode != ViewMode.GROUPED && albumTreeModel != null) {
+            albumTreeModel.detach();
+        }
+
+        if (mode == ViewMode.COVER_FLOW) {
+            refreshCoverFlowAlbums();
+            leftCardLayout.show(leftCards, "coverflow");
         } else {
-            if (albumTreeModel != null) albumTreeModel.detach();
-            table.setModel(tableModel);
-            table.setRowSorter(rowSorter);
+            if (mode == ViewMode.GROUPED) {
+                if (albumTreeModel == null) albumTreeModel = new AlbumTreeTableModel(tableModel);
+                albumTreeModel.attach();
+                if (groupRowSorter == null) {
+                    groupRowSorter = new GroupSortRowSorter(albumTreeModel);
+                    for (int c = 0; c < tableModel.getColumnCount(); c++) {
+                        boolean sortable = c == FileTableModel.COL_FILE || c == FileTableModel.COL_ARTIST
+                                || c == FileTableModel.COL_ALBUM_ARTIST || c == FileTableModel.COL_ALBUM
+                                || c == FileTableModel.COL_YEAR;
+                        groupRowSorter.setSortable(c, sortable);
+                    }
+                }
+                table.setRowSorter(groupRowSorter);
+                table.setModel(albumTreeModel);
+            } else {
+                table.setModel(tableModel);
+                table.setRowSorter(rowSorter);
+            }
+            leftCardLayout.show(leftCards, "table");
+            restoreTableSelection(sel);
         }
-        restoreTableSelection(sel);
+
         syncViewModeControl();
-        if (btnExpandAllGroups != null) {
-            btnExpandAllGroups.setVisible(mode == ViewMode.GROUPED);
-            btnCollapseAllGroups.setVisible(mode == ViewMode.GROUPED);
+        if (miExpandAllGroups != null) {
+            miExpandAllGroups.setEnabled(mode == ViewMode.GROUPED);
+            miCollapseAllGroups.setEnabled(mode == ViewMode.GROUPED);
         }
-        PREFS.putInt("view.mode", mode == ViewMode.GROUPED ? 1 : 0);
+        PREFS.putInt("view.mode", switch (mode) { case GROUPED -> 1; case COVER_FLOW -> 2; default -> 0; });
         refreshStats();
     }
 
     private void syncViewModeControl() {
-        if (cbViewMode == null) return;
-        int idx = viewMode == ViewMode.GROUPED ? 1 : 0;
-        if (cbViewMode.getSelectedIndex() != idx) cbViewMode.setSelectedIndex(idx);
+        if (rbViewFlat == null) return;
+        JRadioButtonMenuItem target = switch (viewMode) {
+            case GROUPED    -> rbViewGrouped;
+            case COVER_FLOW -> rbViewCoverFlow;
+            default         -> rbViewFlat;
+        };
+        target.setSelected(true);
     }
 
     private Color rowBg(FileEntry.Status s, int row) {
@@ -4415,6 +4508,9 @@ public class MainFrame extends JFrame {
         saveWindowGeometry();
         saveColumnWidths();
         if (folderWatcher != null) try { folderWatcher.close(); } catch (Exception ignored) {}
+        // Arrête le pool de décodage de vignettes de Cover Flow (threads démons — le JVM les
+        // tuerait de toute façon à System.exit(), mais un arrêt propre reste plus correct).
+        if (coverFlowPanel != null) coverFlowPanel.dispose();
         System.exit(0);
     }
 

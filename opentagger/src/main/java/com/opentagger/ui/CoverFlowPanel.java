@@ -45,7 +45,6 @@ public class CoverFlowPanel extends JComponent {
     private final CoverFlowThumbnailCache cache = new CoverFlowThumbnailCache();
     private final Timer animTimer = new Timer(30, this::onTick);
 
-    private List<AlbumTile> allTiles = List.of();
     private List<AlbumTile> visible  = List.of();
     private int    targetIndex     = 0;
     private double displayPosition = 0;
@@ -66,42 +65,10 @@ public class CoverFlowPanel extends JComponent {
     // ── Données ──────────────────────────────────────────────────────────────
 
     public void setAlbums(List<AlbumTile> tiles) {
-        allTiles = new ArrayList<>(tiles);
-        visible  = new ArrayList<>(allTiles);
+        visible  = new ArrayList<>(tiles);
         targetIndex = 0;
         displayPosition = 0;
         lastWindowAnchor = null;
-        updateCacheWindowIfNeeded();
-        fireSelectionChanged();
-        repaint();
-    }
-
-    /** Filtre texte insensible à la casse sur artiste/album — préserve l'album actuellement centré
-     *  s'il correspond toujours, sinon saute au premier résultat. */
-    public void filter(String text) {
-        String needle = text == null ? "" : text.trim().toLowerCase();
-        String currentKey = (!visible.isEmpty() && targetIndex < visible.size())
-                ? visible.get(targetIndex).groupKey() : null;
-
-        List<AlbumTile> next = new ArrayList<>();
-        for (AlbumTile t : allTiles) {
-            if (needle.isEmpty()
-                    || t.title().toLowerCase().contains(needle)
-                    || t.artist().toLowerCase().contains(needle)) {
-                next.add(t);
-            }
-        }
-        visible = next;
-        lastWindowAnchor = null;
-
-        int newIndex = 0;
-        if (currentKey != null) {
-            for (int i = 0; i < visible.size(); i++) {
-                if (visible.get(i).groupKey().equals(currentKey)) { newIndex = i; break; }
-            }
-        }
-        targetIndex = visible.isEmpty() ? 0 : Math.min(newIndex, visible.size() - 1);
-        displayPosition = targetIndex; // pas d'animation sur un changement de filtre — saut direct
         updateCacheWindowIfNeeded();
         fireSelectionChanged();
         repaint();
