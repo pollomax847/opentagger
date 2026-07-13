@@ -56,6 +56,22 @@ public class TagWriter {
         Config.silenceJaudiotaggerLogging();
         long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
 
+        // Opus/AAC brut : jaudiotagger 3.0.1 n'a aucun lecteur pour ces formats (vérifié en
+        // décompilant le jar, voir FfmpegTagIO) — inutile de tenter AudioFileIO.read()/writeNative()
+        // en sachant qu'ils vont échouer, on part directement sur le contournement ffmpeg. Pas de
+        // fusion avec les tags existants ici (juste info.copy()) : cohérent avec le comportement
+        // déjà en place juste en dessous quand AudioFileIO.read() échoue pour toute autre raison.
+        if (FfmpegTagIO.handles(fichier)) {
+            TagInfo copy = info.copy();
+            if (!Config.get().saveAcoustidFingerprints()) {
+                copy.acoustidId          = "";
+                copy.acoustidFingerprint = "";
+            }
+            FfmpegTagIO.write(fichier, copy);
+            if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+            return copy;
+        }
+
         // M4A : réparation si nécessaire avant lecture/écriture
         repairM4aIfNeeded(fichier);
 
@@ -210,11 +226,26 @@ public class TagWriter {
     private static Exception translateKnownJaudiotaggerBug(File fichier, Exception e) {
         if (e instanceof NullPointerException && e.getMessage() != null
                 && e.getMessage().contains("IOException.getMessage()")) {
-            return new IOException(
-                "Écriture impossible : nom de fichier probablement trop long pour le système de"
-              + " fichiers (\"" + fichier.getName() + "\", " + fichier.getName().length()
-              + " caractères) — bug connu de jaudiotagger lors de la création d'un fichier"
-              + " temporaire. Raccourcissez le nom du fichier ou son chemin.", e);
+            String name = fichier.getName();
+            // La cause réelle est perdue par jaudiotagger AVANT même d'atteindre ce code (voir
+            // Javadoc ci-dessus) — "trop long" n'est qu'une hypothèse parmi d'autres, plausible
+            // seulement si le nom approche vraiment une limite de système de fichiers (même seuil
+            // que FileRenamer.MAX_SEGMENT_LENGTH). En dessous, l'affirmer était trompeur : constaté
+            // en pratique sur des noms de 40-60 caractères, où la vraie cause est plus probablement
+            // un montage FUSE (mergerfs...) qui a routé le fichier temporaire de jaudiotagger (créé
+            // à côté de l'original, même dossier) vers une autre partition/branche que l'original —
+            // une politique "most free space" (category.create=mfs) peut le faire à tout moment.
+            String hint = name.length() > FileRenamer.MAX_SEGMENT_LENGTH
+                ? "nom de fichier probablement trop long pour le système de fichiers (\"" + name
+                    + "\", " + name.length() + " caractères) — bug connu de jaudiotagger lors de la"
+                    + " création d'un fichier temporaire. Raccourcissez le nom du fichier ou son chemin."
+                : "cause réelle perdue par un bug connu de jaudiotagger lors de la création de son"
+                    + " fichier temporaire (\"" + name + "\", " + name.length() + " caractères — la"
+                    + " longueur n'est probablement pas en cause ici). Observé notamment sur des"
+                    + " montages réseau/FUSE (mergerfs...) quand le fichier temporaire est placé sur"
+                    + " une autre partition que l'original. Réessayez ; si ça persiste sur ce fichier"
+                    + " précis, vérifiez l'espace disque et les permissions du dossier.";
+            return new IOException("Écriture impossible : " + hint, e);
         }
         return e;
     }
@@ -492,16 +523,19 @@ public class TagWriter {
             String dsk = i.discTotal.isBlank() ? i.discNo : i.discNo + "/" + i.discTotal;
             apField(cmd, "--disk", dsk);
         }
-        if (!i.bpm.isBlank()) apField(cmd, "--BPM", i.bpm);
+        if (!i.bpm.isBlank()) apField(cmd, "--bpm", i.bpm);
         if (i.isCompilation.equals("1"))
             apField(cmd, "--compilation", "true");
 
-        // Sort fields
-        apField(cmd, "--sortTitle",       i.titleSort);
-        apField(cmd, "--sortArtist",      i.artistSort);
-        apField(cmd, "--sortAlbum",       i.albumSort);
-        apField(cmd, "--sortAlbumArtist", i.albumArtistSort);
-        apField(cmd, "--sortComposer",    i.composerSort);
+        // Sort fields — AtomicParsley n'a PAS de flag dédié par champ (--sortTitle/--sortArtist/…
+        // n'existent pas, confirmé via --longhelp : "unrecognized option" sur exit=1, cause du
+        // fallback 2 systématiquement en échec dès qu'un champ de tri était renseigné). Un seul
+        // flag --sortOrder <type> <valeur> ; le type pour le titre est "name", pas "title".
+        apSortOrder(cmd, "name",        i.titleSort);
+        apSortOrder(cmd, "artist",      i.artistSort);
+        apSortOrder(cmd, "album",       i.albumSort);
+        apSortOrder(cmd, "albumartist", i.albumArtistSort);
+        apSortOrder(cmd, "composer",    i.composerSort);
 
         // Pochette
         if (coverImage != null && coverImage.toFile().exists())
@@ -558,11 +592,35 @@ public class TagWriter {
         }
     }
 
+    private static void apSortOrder(List<String> cmd, String type, String value) {
+        if (value != null && !value.isBlank()) {
+            cmd.add("--sortOrder"); cmd.add(type); cmd.add(sanitizeArg(value));
+        }
+    }
+
+    /**
+     * Atome reverseDNS ("----", même mécanisme que les champs libres MusicBrainz/ReplayGain de
+     * jaudiotagger côté M4A natif) — {@code --freeForm}/{@code --freeFormMeaning}/
+     * {@code --freeFormValue} qu'utilisait ce code n'existe PAS du tout dans le build
+     * AtomicParsley installé ici (paquet Debian, un fork/réécriture différent de l'AtomicParsley
+     * "classique" qui avait ce trio de flags) — confirmé en vidant tout {@code --longhelp}, seule
+     * la syntaxe {@code --rDNSatom valeur name=NOM domain=com.apple.iTunes} existe. Contrainte non
+     * documentée de CE mécanisme, vérifiée en direct : {@code name=} n'accepte AUCUN espace (rejet
+     * silencieux avec juste un avertissement "non-conforming", pas un échec de toute la commande —
+     * contrairement à un flag carrément inconnu). Or jaudiotagger lui-même écrit littéralement
+     * "MusicBrainz Track Id" (avec espaces, vérifié en décompilant Mp4FieldKey.class) — cette
+     * convention à espaces est donc irréconciliable avec cette contrainte pour les 4 champs
+     * MusicBrainz : les écrire quand même sous une forme différente (underscores) produirait un
+     * atome que jaudiotagger/Picard ne reconnaîtraient jamais en relecture — pire que ne rien
+     * écrire (donnée fantôme). Les 13 AUTRES champs custom de cette classe (REPLAYGAIN_*,
+     * IS_INSTRUMENTAL, DISCOGS_RELEASE_ID...) sont déjà en SCREAMING_SNAKE_CASE sans espace :
+     * ceux-là fonctionnent avec ce mécanisme, contrairement à avant où le flag inexistant faisait
+     * échouer TOUTE la commande AtomicParsley dès le premier champ custom rencontré.
+     */
     private static void apFreeform(List<String> cmd, String name, String value) {
         if (value == null || value.isBlank()) return;
-        cmd.add("--freeForm"); cmd.add(name);
-        cmd.add("--freeFormMeaning"); cmd.add("com.apple.iTunes");
-        cmd.add("--freeFormValue"); cmd.add(sanitizeArg(value));
+        cmd.add("--rDNSatom"); cmd.add(sanitizeArg(value));
+        cmd.add("name=" + name); cmd.add("domain=com.apple.iTunes");
     }
 
     // ── Fallback M4A via ffmpeg ───────────────────────────────────────────────

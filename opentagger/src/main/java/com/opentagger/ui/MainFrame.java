@@ -750,7 +750,7 @@ public class MainFrame extends JFrame {
         ButtonGroup grp = new ButtonGroup();
         rbViewFlat      = new JRadioButtonMenuItem(I18n.t("Liste"), viewMode == ViewMode.FLAT);
         rbViewGrouped   = new JRadioButtonMenuItem(I18n.t("Arborescence par album"), viewMode == ViewMode.GROUPED);
-        rbViewCoverFlow = new JRadioButtonMenuItem(I18n.t("Cover Flow"), viewMode == ViewMode.COVER_FLOW);
+        rbViewCoverFlow = new JRadioButtonMenuItem(I18n.t("Cover Flow (bêta)"), viewMode == ViewMode.COVER_FLOW);
         grp.add(rbViewFlat);
         grp.add(rbViewGrouped);
         grp.add(rbViewCoverFlow);
@@ -1215,16 +1215,19 @@ public class MainFrame extends JFrame {
             albumTreeModel.flushIfDirty();
             restoreTableSelection(sel);
         }
-        int total = 0, tagged = 0, identified = 0, skipped = 0, error = 0, pending = 0;
-        // Toujours compter depuis tableModel directement (déjà la vue filtrée, voir
-        // FileTableModel), jamais via table/convertRowIndexToModel : en vue arborescence, les
-        // lignes de VUE incluent des en-têtes de groupe sans équivalent 1:1 dans tableModel — le
-        // nombre de fichiers filtrés reste le même quel que soit le modèle actuellement attaché à
-        // `table` pour l'affichage, donc autant le lire directement à la source.
-        int viewRows = tableModel.getRowCount();
-        for (int modelRow = 0; modelRow < viewRows; modelRow++) {
-            total++;
-            switch (tableModel.get(modelRow).status) {
+        int tagged = 0, identified = 0, skipped = 0, error = 0, pending = 0;
+        // Chips de statut (hors "Total") : TOUJOURS le vrai compte global par statut, sur
+        // tableModel.allEntries() (jamais affecté par le filtre, contrairement à getRowCount()/
+        // get() qui portent sur la vue déjà filtrée) — sinon activer un filtre sur UN statut fait
+        // mécaniquement tomber TOUS LES AUTRES chips à 0 par construction (retour utilisateur :
+        // contre-intuitif, "pourquoi ça n'affiche pas les 102 tagués juste parce que je suis
+        // filtré sur Identifiés ?" — pas un bug de comptage, un choix d'affichage qui ne
+        // correspondait pas à l'attendu). Coût O(n) identique à avant (déjà throttlé à 300ms),
+        // et plus simple : allEntries() est une liste plate, aucun souci d'en-têtes de groupe
+        // contrairement à l'ancien commentaire sur la vue arborescence. Seuls le TABLEAU et le
+        // second nombre du chip "Total" ci-dessous continuent de refléter le filtre actif.
+        for (FileEntry e : tableModel.allEntries()) {
+            switch (e.status) {
                 case TAGGED     -> tagged++;
                 case IDENTIFIED -> identified++;
                 case SKIPPED    -> skipped++;
@@ -1232,9 +1235,9 @@ public class MainFrame extends JFrame {
                 default         -> pending++;
             }
         }
-        // Si un filtre est actif, afficher "N / total_modèle" (total VRAI, filtre ignoré —
-        // tableModel.getRowCount() ne renvoie plus que la vue filtrée depuis le passage au
-        // filtrage niveau modèle, voir FileTableModel).
+        // "Total" reste lié au filtre actif (lignes visibles / total réel) — c'est le seul chip
+        // dont le rôle est justement de montrer l'effet du filtre.
+        int total = tableModel.getRowCount();
         int modelTotal = tableModel.totalCount();
         String totalText = (tableModel.isFiltered() && total != modelTotal)
                 ? total + " / " + modelTotal : String.valueOf(total);
@@ -3838,6 +3841,9 @@ public class MainFrame extends JFrame {
 
     /** Lit les 90+ champs d'un fichier audio — même couverture que TagWriter. */
     private TagInfo readTags(File f) {
+        // Opus/AAC brut : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO) — inutile
+        // de tenter AudioFileIO.read() en sachant qu'il va échouer.
+        if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
         TagInfo ti = new TagInfo();
         try {
             AudioFile af = AudioFileIO.read(f);

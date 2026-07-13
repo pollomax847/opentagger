@@ -166,8 +166,13 @@ public class DuplicatesDialog extends JDialog {
     private JPanel buildFooter() {
         JButton btnSmart  = new JButton(I18n.t("Sélection intelligente"));
         JButton btnNone   = new JButton(I18n.t("Tout décocher"));
-        JButton btnDelete = new JButton(I18n.t("Déplacer dans la corbeille…"));
-        JButton btnClose  = new JButton(I18n.t("Fermer"));
+        // Alternative non-destructive à la corbeille, même principe que VideoRecoveryWorker
+        // (dossier "Convertis/" à côté de l'original) — retour utilisateur : garder le doublon
+        // visible/parcourable dans un sous-dossier "Doublons/" plutôt que planqué dans la
+        // corbeille système, sans jamais rien supprimer.
+        JButton btnMoveDup = new JButton(I18n.t("Déplacer vers Doublons/…"));
+        JButton btnDelete  = new JButton(I18n.t("Déplacer dans la corbeille…"));
+        JButton btnClose   = new JButton(I18n.t("Fermer"));
         btnDelete.putClientProperty("FlatLaf.style", "background: #8b1a1a");
 
         chkCleanDirs = new JCheckBox(I18n.t("Supprimer les dossiers vides après"));
@@ -175,10 +180,11 @@ public class DuplicatesDialog extends JDialog {
         chkCleanDirs.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
 
         btnSmart.setToolTipText(I18n.t("Coche automatiquement les fichiers de moindre qualité dans chaque groupe"));
-        btnSmart .addActionListener(e -> smartSelect());
-        btnNone  .addActionListener(e -> allBoxes.forEach(cb -> cb.setSelected(false)));
-        btnDelete.addActionListener(e -> deleteSelected());
-        btnClose .addActionListener(e -> dispose());
+        btnSmart  .addActionListener(e -> smartSelect());
+        btnNone   .addActionListener(e -> allBoxes.forEach(cb -> cb.setSelected(false)));
+        btnMoveDup.addActionListener(e -> moveToDoublonsSelected());
+        btnDelete .addActionListener(e -> deleteSelected());
+        btnClose  .addActionListener(e -> dispose());
 
         JPanel p = new JPanel(new BorderLayout(0, 0));
         p.setBorder(new CompoundBorder(
@@ -203,6 +209,7 @@ public class DuplicatesDialog extends JDialog {
         right.add(btnNone);
         right.add(Box.createHorizontalStrut(12));
         right.add(btnClose);
+        right.add(btnMoveDup);
         right.add(btnDelete);
         p.add(left,  BorderLayout.WEST);
         p.add(right, BorderLayout.EAST);
@@ -308,6 +315,99 @@ public class DuplicatesDialog extends JDialog {
                 setCursor(java.awt.Cursor.getDefaultCursor());
                 String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
                 String msg = I18n.t("%d fichier(s) %s", deleted, where)
+                    + (dirsRemoved > 0 ? I18n.t(", %d dossier(s) vide(s) supprimé(s)", dirsRemoved) : "")
+                    + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "") + ".";
+                LOG.info("[Doublons] " + msg);
+                JOptionPane.showMessageDialog(DuplicatesDialog.this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
+                dispose();
+            }
+        }.execute();
+    }
+
+    /**
+     * Déplace les fichiers cochés dans un sous-dossier "Doublons" à côté de CHAQUE fichier
+     * d'origine (pas un dossier global unique) — même principe que
+     * {@code VideoRecoveryWorker.moveToSubfolder()} ("Convertis/") : un groupe de doublons peut
+     * avoir ses exemplaires dispersés dans des dossiers sans rapport (ex. "Wolves" trouvé à la
+     * fois dans "Selena Gomez/Unknown Album/" et dans une compilation), donc un unique dossier
+     * "Doublons" à la racine mélangerait des albums entiers sans contexte. Jamais de suppression :
+     * alternative non-destructive à "Déplacer dans la corbeille…", retour utilisateur explicite.
+     */
+    private void moveToDoublonsSelected() {
+        List<FileEntry> toMove = new ArrayList<>();
+        for (int i = 0; i < allBoxes.size(); i++) {
+            if (allBoxes.get(i).isSelected()) toMove.add(allEntries.get(i));
+        }
+
+        if (toMove.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Aucun fichier coché.\nUtilisez \"Sélection intelligente\" ou cochez manuellement."),
+                I18n.t("Info"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder(
+            I18n.t("<html>Déplacer <b>%d fichier(s)</b> vers un sous-dossier \"Doublons\" (à côté de chacun) ?<br><br>", toMove.size()));
+        int shown = Math.min(toMove.size(), 6);
+        for (int i = 0; i < shown; i++) {
+            File f = toMove.get(i).currentPath != null
+                ? toMove.get(i).currentPath.toFile() : toMove.get(i).file;
+            sb.append("&nbsp;• ").append(f.getName()).append("<br>");
+        }
+        if (toMove.size() > shown)
+            sb.append("&nbsp;").append(I18n.t("… et %d autre(s)", toMove.size() - shown));
+        sb.append("</html>");
+
+        int ok = JOptionPane.showConfirmDialog(this, sb.toString(),
+            I18n.t("Confirmer le déplacement"), JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        // Même raison qu'en suppression (deleteSelected()) : déplacements potentiellement lents
+        // (NAS/réseau, beaucoup de fichiers) — poussé en SwingWorker, tableModel muté seulement
+        // via publish/process sur l'EDT.
+        setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR));
+        new SwingWorker<Void, FileEntry>() {
+            int moved = 0, errors = 0, dirsRemoved = 0;
+
+            @Override protected Void doInBackground() {
+                List<File> oldParents = new ArrayList<>();
+                for (FileEntry e : toMove) {
+                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    try {
+                        java.nio.file.Path srcPath = f.toPath();
+                        java.nio.file.Path targetDir = srcPath.getParent().resolve("Doublons");
+                        java.nio.file.Files.createDirectories(targetDir);
+                        String name = f.getName();
+                        java.nio.file.Path dest = targetDir.resolve(name);
+                        String stem = name.contains(".") ? name.substring(0, name.lastIndexOf('.')) : name;
+                        String ext  = name.contains(".") ? name.substring(name.lastIndexOf('.')) : "";
+                        for (int i = 1; java.nio.file.Files.exists(dest); i++)
+                            dest = targetDir.resolve(stem + "_" + i + ext);
+                        java.nio.file.Files.move(srcPath, dest);
+                        e.currentPath = dest;
+                        publish(e);
+                        if (chkCleanDirs.isSelected() && f.getParentFile() != null)
+                            oldParents.add(f.getParentFile());
+                        moved++;
+                    } catch (Exception ex) {
+                        errors++;
+                    }
+                }
+                if (chkCleanDirs.isSelected())
+                    for (File dir : oldParents) dirsRemoved += cleanEmptyAncestors(dir);
+                return null;
+            }
+
+            @Override protected void process(List<FileEntry> chunks) {
+                for (FileEntry e : chunks) {
+                    int modelIdx = tableModel.indexOf(e);
+                    if (modelIdx >= 0) tableModel.remove(modelIdx);
+                }
+            }
+
+            @Override protected void done() {
+                setCursor(java.awt.Cursor.getDefaultCursor());
+                String msg = I18n.t("%d fichier(s) déplacé(s) vers Doublons/", moved)
                     + (dirsRemoved > 0 ? I18n.t(", %d dossier(s) vide(s) supprimé(s)", dirsRemoved) : "")
                     + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "") + ".";
                 LOG.info("[Doublons] " + msg);

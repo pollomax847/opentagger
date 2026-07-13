@@ -219,7 +219,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // réclamer le même fichier candidat.
             FileEntry hit;
             synchronized (candidateIndex) {
-                hit = findCandidate(candidateIndex, track.title());
+                hit = findCandidate(candidateIndex, track.title(), track.artist());
                 if (hit == null) continue;
                 candidateIndex.values().remove(hit);
             }
@@ -304,7 +304,21 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
     @Override
     protected void process(List<String> chunks) {
+        // Chaque message publish() (résumé d'album, piste retrouvée, erreur tracklist...) doit
+        // rester visible dans le Journal, pas seulement flasher dans la barre de statut — avant ce
+        // correctif, SEUL le dernier message de chaque lot batché par SwingWorker atteignait
+        // statusCallback (la barre de statut, écrasée en continu) ; tout le reste du lot était
+        // perdu sans laisser de trace. Aggravé ici par le traitement en parallèle par release (un
+        // thread par album, voir la Javadoc de la classe), qui produit des lots de plusieurs
+        // messages à la fois bien plus souvent qu'un traitement séquentiel — retour utilisateur :
+        // "pas d'info dans le journal ce que l'application trouve".
+        for (String s : chunks) log(s);
         if (!chunks.isEmpty()) statusCallback.accept(chunks.get(chunks.size() - 1));
+    }
+
+    private static void log(String msg) {
+        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg);
+        System.out.flush();
     }
 
     @Override
@@ -340,7 +354,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     }
 
     /** Doit être appelé avec le verrou sur candidateIndex déjà tenu par l'appelant. */
-    private FileEntry findCandidate(Map<String, FileEntry> index, String trackTitle) {
+    private FileEntry findCandidate(Map<String, FileEntry> index, String trackTitle, String trackArtist) {
         String norm = normalize(trackTitle);
         if (norm.isBlank()) return null;
         // Piste MB au titre générique ("Unknown", "Track 5"...) : rare sur une vraie release
@@ -351,12 +365,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
         // 1. Correspondance exacte
         FileEntry hit = index.get(norm);
-        if (hit != null) return hit;
+        if (hit != null && artistCompatible(hit, trackArtist)) return hit;
 
         // 2. Inclusion (le candidat contient le titre de la piste ou l'inverse)
         // Garde de longueur minimale : évite les faux positifs avec des mots très courts
         for (Map.Entry<String, FileEntry> e : index.entrySet()) {
             String k = e.getKey();
+            if (!artistCompatible(e.getValue(), trackArtist)) continue;
             if ((k.contains(norm) && norm.length() >= 12) ||
                 (norm.contains(k) && k.length() >= 12)) return e.getValue();
         }
@@ -367,6 +382,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         int best = 0;
         FileEntry bestEntry = null;
         for (Map.Entry<String, FileEntry> e : index.entrySet()) {
+            if (!artistCompatible(e.getValue(), trackArtist)) continue;
             int shared = countSharedWords(trackWords, e.getKey().split("\\s+"));
             if (shared > best) { best = shared; bestEntry = e.getValue(); }
         }
@@ -374,6 +390,26 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             return bestEntry;
         }
         return null;
+    }
+
+    /**
+     * Garde-fou ajouté après un cas réel trouvé en testant l'appariement sur une vraie
+     * compilation ("110 Hits Été 2018") : une piste titrée juste "Mercy" existe à la fois chez
+     * Madame Monsieur (sur cette compilation) et chez Shawn Mendes (ailleurs dans la
+     * bibliothèque) — sans cette vérification, un candidat SKIPPED/PENDING nommé "Mercy" par un
+     * artiste QUELCONQUE aurait pu être réclamé pour la piste de Madame Monsieur, lui collant un
+     * artiste/album/MBID complètement faux. Permissif par construction (comme le matching de
+     * titre ci-dessus) : si le candidat n'a AUCUN artiste connu (nom de fichier seul, cas
+     * fréquent pour un vrai fichier égaré), on ne peut rien vérifier — on fait alors confiance au
+     * seul titre, comme avant ce correctif. Le rejet ne s'applique que si le candidat A un
+     * artiste renseigné ET qu'il ne ressemble à rien à l'artiste attendu.
+     */
+    private boolean artistCompatible(FileEntry candidate, String expectedArtist) {
+        String candArtist = (candidate.current != null && candidate.current.artist != null)
+                ? candidate.current.artist.trim() : "";
+        if (candArtist.isBlank() || expectedArtist == null || expectedArtist.isBlank()) return true;
+        String a = normalize(candArtist), b = normalize(expectedArtist);
+        return a.equals(b) || a.contains(b) || b.contains(a);
     }
 
     private int countSharedWords(String[] a, String[] b) {

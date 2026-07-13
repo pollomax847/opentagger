@@ -189,7 +189,20 @@ public class MusicBrainzClient {
                     .GET()
                     .build();
             mbRateLimit();
-            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response;
+            try {
+                response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            } catch (java.io.IOException ioe) {
+                // Échec au niveau connexion/TLS (ex. "Remote host terminated the handshake") — pas
+                // une réponse HTTP, donc jamais couvert par le contrôle status==503/429 ci-dessous ;
+                // sans ce catch, un simple accroc réseau transitoire (constaté en direct : la même
+                // requête réussit parfois quelques secondes plus tard) faisait échouer la recherche
+                // MB définitivement dès le premier essai, sans jamais utiliser le backoff déjà prévu
+                // ici pour 503/429. InterruptedException volontairement PAS attrapée ici : une
+                // annulation utilisateur en cours de requête ne doit jamais déclencher de retry.
+                System.out.println("  MB " + ioe.getClass().getSimpleName() + " (retry) : " + ioe.getMessage());
+                continue;
+            }
             int status = response.statusCode();
             if (status == 200) return response;
             if (status == 503 || status == 429) continue; // retry

@@ -11,6 +11,7 @@ import org.jaudiotagger.tag.Tag;
 
 import javax.swing.*;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -204,28 +205,33 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
             if (mbr != null) {
                 log(I18n.t("  MB trouvé: %s – %s [%s %s]", mbr.artist, mbr.title, mbr.album, mbr.year));
-                changed |= fillBlank(ti, "album",             mbr.album);
-                changed |= fillBlank(ti, "year",              mbr.year);
-                changed |= fillBlank(ti, "track",             mbr.track);
-                changed |= fillBlank(ti, "trackTotal",        mbr.trackTotal);
-                changed |= fillBlank(ti, "discNo",            mbr.discNo);
-                changed |= fillBlank(ti, "albumArtist",       mbr.albumArtist);
-                changed |= fillBlank(ti, "albumArtistSort",   mbr.albumArtistSort);
-                changed |= fillBlank(ti, "artistSort",        mbr.artistSort);
-                changed |= fillBlank(ti, "artistMbid",        mbr.artistMbid);
-                changed |= fillBlank(ti, "releaseMbid",       mbr.releaseMbid);
-                changed |= fillBlank(ti, "releaseGroupMbid",  mbr.releaseGroupMbid);
-                changed |= fillBlank(ti, "recordingMbid",     mbr.recordingMbid);
-                changed |= fillBlank(ti, "work",              mbr.work);
-                changed |= fillBlank(ti, "workMbid",          mbr.workMbid);
-                changed |= fillBlank(ti, "isrc",              mbr.isrc);
-                changed |= fillBlank(ti, "language",          mbr.language);
-                changed |= fillBlank(ti, "script",            mbr.script);
-                changed |= fillBlank(ti, "country",           mbr.country);
-                changed |= fillBlank(ti, "releaseType",       mbr.releaseType);
-                changed |= fillBlank(ti, "originalYear",      mbr.originalYear);
-                changed |= fillBlank(ti, "artists",           mbr.artists);
-                changed |= fillBlank(ti, "artistsSort",       mbr.artistsSort);
+                // Un seul résumé listant les champs réellement remplis plutôt que 20 fillBlank()
+                // muets — sans ça, un fichier qui repassait "✓ complété" ne disait jamais QUOI
+                // avait été trouvé, seulement l'enregistrement MB apparié (retour utilisateur).
+                List<String> filled = new ArrayList<>();
+                if (fillBlank(ti, "album",             mbr.album))            filled.add("album");
+                if (fillBlank(ti, "year",              mbr.year))             filled.add("year");
+                if (fillBlank(ti, "track",             mbr.track))            filled.add("track");
+                if (fillBlank(ti, "trackTotal",        mbr.trackTotal))       filled.add("trackTotal");
+                if (fillBlank(ti, "discNo",            mbr.discNo))           filled.add("discNo");
+                if (fillBlank(ti, "albumArtist",       mbr.albumArtist))      filled.add("albumArtist");
+                if (fillBlank(ti, "albumArtistSort",   mbr.albumArtistSort))  filled.add("albumArtistSort");
+                if (fillBlank(ti, "artistSort",        mbr.artistSort))       filled.add("artistSort");
+                if (fillBlank(ti, "artistMbid",        mbr.artistMbid))       filled.add("artistMbid");
+                if (fillBlank(ti, "releaseMbid",       mbr.releaseMbid))      filled.add("releaseMbid");
+                if (fillBlank(ti, "releaseGroupMbid",  mbr.releaseGroupMbid)) filled.add("releaseGroupMbid");
+                if (fillBlank(ti, "recordingMbid",     mbr.recordingMbid))    filled.add("recordingMbid");
+                if (fillBlank(ti, "work",              mbr.work))             filled.add("work");
+                if (fillBlank(ti, "workMbid",          mbr.workMbid))         filled.add("workMbid");
+                if (fillBlank(ti, "isrc",              mbr.isrc))             filled.add("isrc");
+                if (fillBlank(ti, "language",          mbr.language))        filled.add("language");
+                if (fillBlank(ti, "script",            mbr.script))           filled.add("script");
+                if (fillBlank(ti, "country",           mbr.country))          filled.add("country");
+                if (fillBlank(ti, "releaseType",       mbr.releaseType))      filled.add("releaseType");
+                if (fillBlank(ti, "originalYear",      mbr.originalYear))     filled.add("originalYear");
+                if (fillBlank(ti, "artists",           mbr.artists))          filled.add("artists");
+                if (fillBlank(ti, "artistsSort",       mbr.artistsSort))      filled.add("artistsSort");
+                if (!filled.isEmpty()) { log(I18n.t("  ✎ rempli: %s", String.join(", ", filled))); changed = true; }
             } else if (ti.artistMbid.isBlank()) {
                 // Fallback minimal : artistMbid pour la pochette
                 log(I18n.t("  MB artist search: '%s'", ti.artist));
@@ -314,7 +320,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 entry.status  = FileEntry.Status.IDENTIFIED;
                 entry.message = "";
             });
-            log(I18n.t("  ✓ complété, en attente d'enregistrement"));
+            // Distingue le cas où RIEN de textuel n'a été trouvé mais coverMissing a quand même
+            // déclenché le passage en IDENTIFIED — "✓ complété" y était trompeur (rien n'a été
+            // rempli, voir retour utilisateur), le fichier attend juste une pochette potentielle
+            // à l'Enregistrement (voir commentaire de coverMissing ci-dessus).
+            log(changed
+                ? I18n.t("  ✓ complété, en attente d'enregistrement")
+                : I18n.t("  ○ pochette manquante (recherchée à l'enregistrement) — rien d'autre à compléter"));
         } else {
             log(I18n.t("  — déjà complet, rien à faire"));
         }
@@ -362,6 +374,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
     /** Lit les tags essentiels depuis le fichier (artist, title, album, year, mbids…). */
     private TagInfo readTagsFromFile(File f) {
+        // Opus/AAC brut : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO).
+        if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
         try {
             AudioFile af = AudioFileIO.read(f);
             Tag tag = af.getTag();

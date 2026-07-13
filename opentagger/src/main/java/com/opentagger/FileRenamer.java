@@ -276,7 +276,7 @@ public class FileRenamer {
     // lieu de son repli prévu (voir TagWriter.translateKnownJaudiotaggerBug() pour le détail du bug
     // tiers) — un titre/artiste/album réel dépasse très rarement 180 caractères, donc tronquer ici
     // n'affecte en pratique que les cas déjà à risque.
-    private static final int MAX_SEGMENT_LENGTH = 180;
+    static final int MAX_SEGMENT_LENGTH = 180; // package-privé : réutilisé par TagWriter.translateKnownJaudiotaggerBug()
 
     private String sanitize(String s) {
         if (s == null || s.isBlank()) return "";

@@ -133,6 +133,21 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
                 }
             }
             case TableModelEvent.UPDATE -> {
+                // Regroupement/retri sautés si la colonne modifiée ne peut influencer ni la clé de
+                // groupe (AlbumGrouping.key : albumArtist/artist/album) ni l'ordre intra-groupe
+                // (TRACK_ORDER : discNo/track/filename) — sinon "Tout cocher"/"Tout décocher"
+                // (MainFrame.setAllSelected(), colonne COL_SEL) déclenchait un retri complet du
+                // groupe entier PAR LIGNE COCHÉE, potentiellement des centaines de milliers de fois
+                // de suite sur l'EDT : gel de plusieurs minutes constaté en direct, aggravé par un
+                // gros groupe "dossier non identifié" (voir AlbumGrouping). COL_STATUS/COL_YEAR/
+                // COL_GENRE sont pareillement sans effet ; à revoir si TRACK_ORDER/AlbumGrouping.key
+                // se mettent un jour à dépendre d'une de ces colonnes.
+                int col = e.getColumn();
+                boolean canAffectGroupingOrOrder = col == TableModelEvent.ALL_COLUMNS
+                        || col == FileTableModel.COL_FILE || col == FileTableModel.COL_ARTIST
+                        || col == FileTableModel.COL_ALBUM_ARTIST || col == FileTableModel.COL_ALBUM
+                        || col == FileTableModel.COL_TRACK;
+                if (!canAffectGroupingOrOrder) break;
                 for (int row = first; row <= last && row < source.getRowCount(); row++) {
                     FileEntry entry = source.get(row);
                     String oldKey = keyOf.get(entry);
