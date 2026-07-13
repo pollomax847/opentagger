@@ -13,7 +13,8 @@ public class FileTableModel extends AbstractTableModel {
 
     private static final String[] COLS = {
         "☑", I18n.t("Fichier"), I18n.t("Artiste"), I18n.t("Artiste Album"), I18n.t("Titre"),
-        I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste"), I18n.t("Statut")
+        I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste"), I18n.t("Statut"),
+        I18n.t("Durée")
     };
     public static final int COL_SEL          = 0;
     public static final int COL_FILE         = 1;
@@ -25,6 +26,12 @@ public class FileTableModel extends AbstractTableModel {
     public static final int COL_GENRE        = 7;
     public static final int COL_TRACK        = 8;
     public static final int COL_STATUS       = 9;
+    // Ajoutée APRÈS COL_STATUS plutôt qu'insérée entre COL_TRACK et COL_STATUS (position plus
+    // naturelle pour une durée) : renuméroter aurait risqué de casser un endroit du code qui
+    // suppose encore "10 colonnes, COL_SEL..COL_STATUS" (voir le commentaire historique sur ce
+    // contrat dans AlbumTreeTableModel) sans que je puisse garantir avoir trouvé tous ces
+    // endroits. Coût nul : une 11e colonne en bout de tableau reste sûre par construction.
+    public static final int COL_DURATION     = 10;
 
     // `entries` = TOUS les fichiers ; `visible` = la vue filtrée actuelle, c'est elle que JTable
     // voit (getRowCount()/getValueAt() portent sur `visible`, jamais `entries` directement).
@@ -203,8 +210,19 @@ public class FileTableModel extends AbstractTableModel {
             case COL_GENRE        -> ti.genre;
             case COL_TRACK        -> ti.track;
             case COL_STATUS       -> statusLabel(e.status, e.message, e.suggestions);
+            case COL_DURATION     -> formatDuration(ti.durationSec);
             default               -> "";
         };
+    }
+
+    /** "0:00" pour un fichier vide/corrompu/pas encore lu (durationSec == 0) — pas une chaîne
+     *  vide : visible d'un coup d'œil dans la colonne plutôt que de se confondre avec "pas encore
+     *  scanné", et trie correctement en premier/dernier selon l'ordre plutôt qu'en dernier
+     *  toujours (une chaîne vide triée comme texte se comporte de façon incohérente). */
+    static String formatDuration(int seconds) {
+        if (seconds <= 0) return "0:00";
+        int m = seconds / 60, s = seconds % 60;
+        return m + ":" + (s < 10 ? "0" + s : String.valueOf(s));
     }
 
     @Override
@@ -233,6 +251,7 @@ public class FileTableModel extends AbstractTableModel {
             TagInfo src = e.current != null ? e.current : new TagInfo();
             TagInfo t = new TagInfo();
             t.score = src.score;
+            t.durationSec = src.durationSec;
             for (java.lang.reflect.Field f : TagInfo.class.getDeclaredFields()) {
                 if (f.getType() != String.class) continue;
                 try { f.setAccessible(true); f.set(t, f.get(src)); } catch (Exception ignored) {}

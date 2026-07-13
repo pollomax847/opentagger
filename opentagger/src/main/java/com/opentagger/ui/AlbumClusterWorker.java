@@ -17,9 +17,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Regroupe les pistes d'un même album (par releaseMbid) pour corriger les numéros de piste/disque
- * et calculer un ReplayGain d'ALBUM cohérent — extrait de l'ancien {@code TaggingWorker.
- * clusterAlbums()} (2026-07-07), qui tournait automatiquement à la fin de CHAQUE passe de taguage,
+ * Regroupe les pistes d'un même album (par releaseMbid) pour corriger les numéros de piste/disque,
+ * l'année et le genre, et calculer un ReplayGain d'ALBUM cohérent — extrait de l'ancien
+ * {@code TaggingWorker.clusterAlbums()} (2026-07-07), qui tournait automatiquement à la fin de
+ * CHAQUE passe de taguage,
  * mais seulement sur les fichiers TAGUÉS PAR CETTE PASSE précise (le paramètre {@code entries} de
  * {@code TaggingWorker.doInBackground()}, pas la bibliothèque entière).
  *
@@ -101,6 +102,14 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
             int maxDisc = tracklist.tracks().stream()
                     .mapToInt(MusicBrainzClient.ReleaseTrack::disc).max().orElse(0);
 
+            // Genre majoritaire du groupe — MusicBrainz n'en fournit pas dans la tracklist (à
+            // la différence de l'année ci-dessous, tirée de tracklist.year()) : contrairement à
+            // AlbumCompletionWorker, aucune source externe faisant autorité ici, seulement les
+            // valeurs déjà présentes sur les pistes du groupe. Ne comble jamais un genre VIDE
+            // (rôle déjà couvert par TagEnrichment.enrichGenre()/InfoCompleterWorker) — seulement
+            // les vrais conflits, où deux pistes du même album ont des genres différents.
+            String majorityGenre = majorityGenre(albumFiles);
+
             for (FileEntry entry : albumFiles) {
                 if (isCancelled()) break;
                 TagInfo current = entry.result;
@@ -128,6 +137,19 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                 if (!tracklist.albumArtist().isBlank())     updated.albumArtist     = tracklist.albumArtist();
                 if (!tracklist.albumArtistSort().isBlank()) updated.albumArtistSort = tracklist.albumArtistSort();
                 if (tracklist.isCompilation())              updated.isCompilation   = "1";
+
+                // Année : MusicBrainz fait autorité (comme albumArtist ci-dessus) — corrige une
+                // piste dont l'année divergerait du reste de l'album (import en plusieurs fois,
+                // source différente par piste...).
+                if (!tracklist.year().isBlank() && !tracklist.year().equals(updated.year)) {
+                    updated.year = tracklist.year(); changed = true;
+                }
+                // Genre : voir le commentaire sur majorityGenre() plus haut — jamais pour combler
+                // un vide, seulement pour aligner une piste minoritaire sur le reste du groupe.
+                if (!majorityGenre.isEmpty() && !updated.genre.isBlank()
+                        && !majorityGenre.equals(updated.genre)) {
+                    updated.genre = majorityGenre; changed = true;
+                }
 
                 if (!changed) continue;
 
@@ -183,6 +205,24 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                 albumsProcessed.get(), tracksFixed.get()));
         }
         if (doneCallback != null) doneCallback.run();
+    }
+
+    /** Genre le plus fréquent parmi les pistes du groupe (valeurs vides ignorées) — chaîne vide
+     *  si aucune piste n'a de genre renseigné. Égalité : premier rencontré, l'ordre exact importe
+     *  peu ici (juste choisir UNE valeur cohérente pour tout le groupe). */
+    private String majorityGenre(List<FileEntry> albumFiles) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (FileEntry e : albumFiles) {
+            String g = e.result != null ? e.result.genre : null;
+            if (g == null || g.isBlank()) continue;
+            counts.merge(g, 1, Integer::sum);
+        }
+        String best = "";
+        int bestCount = 0;
+        for (Map.Entry<String, Integer> e : counts.entrySet()) {
+            if (e.getValue() > bestCount) { best = e.getKey(); bestCount = e.getValue(); }
+        }
+        return best;
     }
 
     // ── Helpers (repris de l'ancien TaggingWorker.clusterAlbums()) ────────────────────────

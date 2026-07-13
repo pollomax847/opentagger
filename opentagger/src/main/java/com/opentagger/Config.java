@@ -201,6 +201,9 @@ public class Config {
     public boolean coverOverwriteFile(){ return bool("cover.overwrite_file", false); }
     public String  coverFilename()     { return str ("cover.filename",       "cover"); }
 
+    // --- Paroles synchronisées (.lrc) --- même esprit opt-in que la pochette fichier ci-dessus.
+    public boolean saveLrcFile()       { return bool("lyrics.save_lrc",      false); }
+
     // --- Tags préservés ---
     public String  preservedTags()     { return str ("tags.preserved_tags",  ""); }
 

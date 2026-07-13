@@ -56,7 +56,7 @@ public class TagWriter {
         Config.silenceJaudiotaggerLogging();
         long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
 
-        // Opus/AAC brut : jaudiotagger 3.0.1 n'a aucun lecteur pour ces formats (vérifié en
+        // Opus/AAC/WV/APE : jaudiotagger 3.0.1 n'a aucun lecteur pour ces formats (vérifié en
         // décompilant le jar, voir FfmpegTagIO) — inutile de tenter AudioFileIO.read()/writeNative()
         // en sachant qu'ils vont échouer, on part directement sur le contournement ffmpeg. Pas de
         // fusion avec les tags existants ici (juste info.copy()) : cohérent avec le comportement
@@ -246,6 +246,18 @@ public class TagWriter {
                     + " une autre partition que l'original. Réessayez ; si ça persiste sur ce fichier"
                     + " précis, vérifiez l'espace disque et les permissions du dossier.";
             return new IOException("Écriture impossible : " + hint, e);
+        }
+        // "No audio header found" (CannotReadException jaudiotagger) : trouvé deux fois en une
+        // session sur des fichiers dont le contenu réel (M4A/AAC + tag ID3v2 collé devant) ne
+        // correspondait pas du tout à l'extension .mp3 — cause réelle jamais mentionnée par le
+        // message jaudiotagger tel quel. ffprobe (opportuniste, seulement ici, pas sur le chemin
+        // chaud) donne le vrai format ; si RIEN ne cloche entre extension et contenu, on laisse
+        // passer le message d'origine tel quel plutôt que d'affirmer une hypothèse non confirmée.
+        if (e.getMessage() != null && e.getMessage().contains("No audio header found")) {
+            String mismatch = AudioFormatCheck.describeMismatch(fichier);
+            if (mismatch != null) {
+                return new IOException("Écriture impossible : " + mismatch, e);
+            }
         }
         return e;
     }

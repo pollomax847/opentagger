@@ -403,6 +403,8 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
             case FileTableModel.COL_ALBUM        -> first != null ? first.album : "";
             case FileTableModel.COL_YEAR         -> first != null ? first.year : "";
             case FileTableModel.COL_STATUS       -> statusSummary(g);
+            case FileTableModel.COL_DURATION     -> FileTableModel.formatDuration(
+                    g.members.stream().mapToInt(e -> e.activeTags().durationSec).sum());
             default -> "";
         };
     }

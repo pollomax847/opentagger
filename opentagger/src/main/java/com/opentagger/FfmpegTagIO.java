@@ -24,8 +24,8 @@ import java.util.concurrent.TimeUnit;
  * {@code TagWriter.writeM4aViaFfmpeg()} (fichier temporaire + remplacement, timeout, drain du
  * flux en parallèle du {@code waitFor}).
  *
- * <p>Deux comportements différents selon le conteneur, vérifiés en direct sur de vrais fichiers
- * avant d'écrire ce code (voir le plan de cette tâche) :
+ * <p>Comportement différent selon le conteneur, vérifié en direct sur de vrais fichiers avant
+ * d'écrire ce code (voir le plan de cette tâche) :
  * <ul>
  *   <li><b>Opus</b> (conteneur Ogg) : les tags sont des commentaires Vorbis, exposés par ffprobe
  *       au niveau du FLUX ({@code streams[0].tags}), pas du format — contrairement à MP3/M4A. Une
@@ -36,6 +36,14 @@ import java.util.concurrent.TimeUnit;
  *       {@code -write_id3v2 1} (option du muxer ADTS) pour qu'un vrai tag ID3v2 soit écrit en
  *       tête de fichier ; côté lecture, il ressort alors normalement dans {@code format.tags},
  *       comme pour un MP3.</li>
+ *   <li><b>WavPack</b> (.wv) : tags au niveau du format comme MP3/M4A, aucun flag spécial requis
+ *       — vérifié en écriture ET relecture avec un vrai fichier généré par ffmpeg.</li>
+ *   <li><b>Monkey's Audio</b> (.ape) : LECTURE SEULE — {@code ffmpeg -encoders}/{@code -muxers} ne
+ *       liste aucun encodeur ni muxer APE (seulement un démuxeur, donc lecture possible), contrairement
+ *       à tous les autres formats ici. {@link #write} refuse ce format explicitement plutôt que de
+ *       laisser échouer une commande ffmpeg vouée à l'échec avec un message confus. Non vérifié
+ *       avec un vrai fichier .ape (aucun disponible dans la bibliothèque au moment d'écrire ce
+ *       code) — repose sur la lecture d'API ffmpeg (démuxeur présent) seule.</li>
  * </ul>
  *
  * <p>Pas de pochette ici (ni lecture ni écriture) — même choix assumé que
@@ -53,7 +61,7 @@ public final class FfmpegTagIO {
 
     public static boolean handles(File f) {
         String n = f.getName().toLowerCase();
-        return n.endsWith(".opus") || n.endsWith(".aac");
+        return n.endsWith(".opus") || n.endsWith(".aac") || n.endsWith(".wv") || n.endsWith(".ape");
     }
 
     private static String ffmpegPath()  { return Config.get().str("audio.ffmpeg_path",  "ffmpeg");  }
@@ -130,8 +138,16 @@ public final class FfmpegTagIO {
     // ── Écriture ─────────────────────────────────────────────────────────────
 
     public static void write(File fichier, TagInfo i) throws Exception {
-        boolean isAac = fichier.getName().toLowerCase().endsWith(".aac");
-        String ext = isAac ? ".aac" : ".opus";
+        String lower = fichier.getName().toLowerCase();
+        if (lower.endsWith(".ape")) {
+            // Pas un échec ffmpeg à traduire : aucun encodeur/muxer APE n'existe dans ffmpeg,
+            // inutile de tenter quoi que ce soit (voir Javadoc de la classe). Message clair plutôt
+            // que de laisser filer une erreur ffmpeg confuse sur un flux qu'il ne sait pas écrire.
+            throw new Exception("Écriture .ape impossible : ffmpeg ne sait pas encoder/écrire ce"
+                + " format (lecture seule). Aucun outil disponible ici pour le faire.");
+        }
+        boolean isAac = lower.endsWith(".aac");
+        String ext = lower.endsWith(".wv") ? ".wv" : isAac ? ".aac" : ".opus";
         File tmp = File.createTempFile("ot_ffio_", ext, fichier.getParentFile());
         tmp.delete(); // ffmpeg crée le fichier lui-même
 

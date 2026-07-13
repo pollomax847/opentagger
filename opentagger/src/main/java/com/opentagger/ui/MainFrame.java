@@ -115,6 +115,13 @@ public class MainFrame extends JFrame {
     private JPanel          leftCards;
     private CardLayout      leftCardLayout;
     private final java.util.Map<String, FileEntry> coverFlowRepresentative = new java.util.HashMap<>();
+    // Liste des pistes de l'album actuellement centré, sous le carrousel — retour utilisateur :
+    // Cover Flow n'affichait que la pochette + le détail d'UNE piste représentative, sans jamais
+    // montrer les autres pistes de l'album. DefaultTableModel simple (pas FileTableModel) : lecture
+    // seule, quelques lignes, aucun besoin du filtrage/tri/sélection-checkbox de la table complète.
+    private JTable                 coverFlowTrackTable;
+    private DefaultTableModel      coverFlowTrackModel;
+    private List<FileEntry>        coverFlowTrackEntries = new ArrayList<>();
     // Profondeur de "chargement en masse" en cours (voir beginBulkTableUpdate()) — plusieurs
     // scans de dossiers peuvent tourner en même temps (activeScanWorkers), donc compteur plutôt
     // qu'un simple booléen.
@@ -990,7 +997,7 @@ public class MainFrame extends JFrame {
         java.util.LinkedHashMap<String, CoverFlowPanel.AlbumTile> byKey = new java.util.LinkedHashMap<>();
         coverFlowRepresentative.clear();
         for (FileEntry e : tableModel.allEntries()) {
-            if (e.status != FileEntry.Status.TAGGED) continue;
+            if (!isCoverFlowEligible(e.status)) continue;
             String key = AlbumGrouping.key(e);
             if (byKey.containsKey(key)) continue;
             TagInfo tags = e.activeTags();
@@ -1007,6 +1014,7 @@ public class MainFrame extends JFrame {
     /** Fait suivre le panneau de détail (droite) à l'album actuellement centré dans le carrousel —
      *  même principe que la sélection d'une ligne dans la table normale. */
     private void onCoverFlowSelectionChanged(CoverFlowPanel.AlbumTile tile, int index, int total) {
+        refreshCoverFlowTrackList(tile);
         if (tile == null) { clearDetail(); return; }
         FileEntry e = coverFlowRepresentative.get(tile.groupKey());
         if (e == null) { clearDetail(); return; }
@@ -1282,11 +1290,13 @@ public class MainFrame extends JFrame {
         coverFlowPanel = new CoverFlowPanel();
         coverFlowPanel.setSelectionListener(this::onCoverFlowSelectionChanged);
 
+        JPanel coverFlowWithTracks = buildCoverFlowWithTrackList();
+
         leftCardLayout = new CardLayout();
         leftCards = new JPanel(leftCardLayout);
         leftCards.setMinimumSize(new Dimension(200, 0));
-        leftCards.add(scroll,         "table");
-        leftCards.add(coverFlowPanel, "coverflow");
+        leftCards.add(scroll,             "table");
+        leftCards.add(coverFlowWithTracks, "coverflow");
 
         // ── Panneau détail (droite) ───────────────────────────────────────────
         JPanel detail = buildDetailPanel();
@@ -1306,6 +1316,108 @@ public class MainFrame extends JFrame {
         return sp;
     }
 
+    /** Carrousel Cover Flow + liste des pistes de l'album centré, sous le carrousel — même
+     *  principe que le Cover Flow original d'iTunes. Voir refreshCoverFlowTrackList(). */
+    private JPanel buildCoverFlowWithTrackList() {
+        coverFlowTrackModel = new DefaultTableModel(
+                new Object[]{I18n.t("Piste"), I18n.t("Titre"), I18n.t("Artiste"), I18n.t("Statut"), I18n.t("Durée")}, 0) {
+            @Override public boolean isCellEditable(int r, int c) { return false; }
+        };
+        coverFlowTrackTable = new JTable(coverFlowTrackModel);
+        coverFlowTrackTable.setRowHeight(22);
+        coverFlowTrackTable.setShowHorizontalLines(false);
+        coverFlowTrackTable.setIntercellSpacing(new Dimension(0, 0));
+        coverFlowTrackTable.getTableHeader().setReorderingAllowed(false);
+        coverFlowTrackTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        TableColumnModel cm = coverFlowTrackTable.getColumnModel();
+        cm.getColumn(0).setMaxWidth(50);
+        cm.getColumn(0).setMinWidth(40);
+        cm.getColumn(4).setMaxWidth(56);
+        cm.getColumn(4).setMinWidth(48);
+        cm.getColumn(2).setPreferredWidth(160);
+        cm.getColumn(3).setMaxWidth(90);
+        cm.getColumn(3).setMinWidth(90);
+
+        // Double-clic = quitter Cover Flow pour révéler cette piste dans la vue liste, comme le
+        // reste de l'appli (aucune raison de dupliquer ici les actions d'édition/contexte déjà
+        // disponibles sur la table principale — cette liste ne sert qu'à naviguer).
+        coverFlowTrackTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() != 2) return;
+                int row = coverFlowTrackTable.rowAtPoint(e.getPoint());
+                if (row < 0 || row >= coverFlowTrackEntries.size()) return;
+                FileEntry entry = coverFlowTrackEntries.get(row);
+                setViewMode(ViewMode.FLAT);
+                followProcessing(entry);
+            }
+        });
+
+        JScrollPane trackScroll = new JScrollPane(coverFlowTrackTable);
+        trackScroll.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
+        // Hauteur fixe raisonnable (≈8 lignes visibles) : le carrousel doit rester l'élément
+        // dominant de cette vue, la liste n'est qu'un complément de navigation en dessous.
+        trackScroll.setPreferredSize(new Dimension(0, 190));
+
+        JPanel p = new JPanel(new BorderLayout());
+        p.add(coverFlowPanel, BorderLayout.CENTER);
+        p.add(trackScroll,    BorderLayout.SOUTH);
+        return p;
+    }
+
+    /** Repeuple la liste des pistes sous le carrousel pour l'album {@code tile} — appelé depuis
+     *  onCoverFlowSelectionChanged() à chaque changement d'album centré. Triées comme la vue
+     *  arborescence (disque puis piste), pas comme MusicBrainz peut les avoir renvoyées. */
+    private void refreshCoverFlowTrackList(CoverFlowPanel.AlbumTile tile) {
+        coverFlowTrackModel.setRowCount(0);
+        coverFlowTrackEntries = new ArrayList<>();
+        if (tile == null) return;
+        List<FileEntry> members = new ArrayList<>();
+        for (FileEntry e : tableModel.allEntries()) {
+            if (!isCoverFlowEligible(e.status)) continue;
+            if (AlbumGrouping.key(e).equals(tile.groupKey())) members.add(e);
+        }
+        members.sort(java.util.Comparator
+                .<FileEntry>comparingInt(e -> leadingIntOrDefault(e.activeTags().discNo, 1))
+                .thenComparingInt(e -> leadingIntOrDefault(e.activeTags().track, Integer.MAX_VALUE))
+                .thenComparing(FileEntry::filename, String.CASE_INSENSITIVE_ORDER));
+        for (FileEntry e : members) {
+            TagInfo ti = e.activeTags();
+            coverFlowTrackModel.addRow(new Object[]{ti.track, ti.title, ti.artist, statusLabel(e.status),
+                    FileTableModel.formatDuration(ti.durationSec)});
+            coverFlowTrackEntries.add(e);
+        }
+    }
+
+    /** Même logique que AlbumTreeTableModel.leadingInt() (privée là-bas) — piste/disque non
+     *  numérique ou vide en dernier, pas en premier. */
+    private static int leadingIntOrDefault(String s, int fallback) {
+        if (s == null || s.isBlank()) return fallback;
+        int i = 0;
+        while (i < s.length() && Character.isDigit(s.charAt(i))) i++;
+        if (i == 0) return fallback;
+        try { return Integer.parseInt(s.substring(0, i)); } catch (NumberFormatException ex) { return fallback; }
+    }
+
+    /** Statuts affichables dans Cover Flow (carrousel + liste des pistes) — retour utilisateur :
+     *  élargi de "Tagué" seul à aussi "Identifié"/"En attente". Volontairement PAS "Non identifié"
+     *  ni "Erreur" : ces deux-là n'ont structurellement pas de pochette/album exploitable (voir
+     *  applyFilter(), qui bascule automatiquement vers la vue Liste quand l'un des deux devient le
+     *  filtre actif pendant que Cover Flow est affiché — rester dessus n'y montrerait jamais rien). */
+    private static boolean isCoverFlowEligible(FileEntry.Status s) {
+        return s == FileEntry.Status.TAGGED || s == FileEntry.Status.IDENTIFIED
+            || s == FileEntry.Status.PENDING || s == FileEntry.Status.PROCESSING;
+    }
+
+    private static String statusLabel(FileEntry.Status s) {
+        return switch (s) {
+            case TAGGED     -> I18n.t("Tagué");
+            case IDENTIFIED -> I18n.t("Identifié");
+            case SKIPPED    -> I18n.t("Non identifié");
+            case ERROR      -> I18n.t("Erreur");
+            default         -> I18n.t("En attente");
+        };
+    }
+
     // ── Configuration de la table ─────────────────────────────────────────────
 
     private void configureTable() {
@@ -1317,7 +1429,7 @@ public class MainFrame extends JFrame {
         // setViewMode()) reconstruirait les colonnes depuis zéro (JTable.
         // createDefaultColumnsFromModel()) et perdrait silencieusement le renderer coloré ci-dessous
         // ainsi que les largeurs restaurées depuis PREFS — les deux modèles exposent le même
-        // contrat de 10 colonnes (FileTableModel.COL_SEL..COL_STATUS), donc les colonnes/renderers/
+        // contrat de colonnes (FileTableModel.COL_SEL..COL_DURATION), donc les colonnes/renderers/
         // largeurs déjà configurés ici restent valables tels quels dans les deux sens.
         table.setAutoCreateColumnsFromModel(false);
         rowSorter = new SafeTableRowSorter<>(tableModel);
@@ -1335,6 +1447,13 @@ public class MainFrame extends JFrame {
         java.util.Comparator<String> fastTextCompare = (a, b) ->
             (a != null ? a : "").compareToIgnoreCase(b != null ? b : "");
         for (int col = 1; col <= 9; col++) rowSorter.setComparator(col, fastTextCompare);
+        // Colonne Durée : PAS fastTextCompare (compare le texte affiché "m:ss" tel quel — "10:00"
+        // se retrouverait AVANT "9:00", '1' < '9' en comparaison de caractères) ni le Collator par
+        // défaut (même gel documenté juste au-dessus). Reparse la valeur affichée en secondes pour
+        // un tri numériquement correct, aussi rapide que fastTextCompare (pas de Collator).
+        java.util.Comparator<String> durationCompare = (a, b) ->
+            Integer.compare(parseDurationString(a), parseDurationString(b));
+        rowSorter.setComparator(FileTableModel.COL_DURATION, durationCompare);
 
         // Largeurs par défaut élargies (colonnes 1-5) — les valeurs d'origine tronquaient
         // fréquemment "Artiste Album" ("Various Artists"…) et "Album" (titres de compilation
@@ -1352,6 +1471,7 @@ public class MainFrame extends JFrame {
         colWidth(cm, 7, 120, 50,  220);  // Genre
         colWidth(cm, 8, 44,  28,  60);   // Piste
         colWidth(cm, 9, 130, 80,  220);  // Statut
+        colWidth(cm, 10, 56,  40,  90);  // Durée
 
         // Renderer coloré — mode-aware : en vue arborescence (viewMode == GROUPED), une ligne
         // d'en-tête de groupe n'a pas de FileEntry.Status unique (voir AlbumTreeTableModel.
@@ -1509,7 +1629,7 @@ public class MainFrame extends JFrame {
                     for (int c = 0; c < tableModel.getColumnCount(); c++) {
                         boolean sortable = c == FileTableModel.COL_FILE || c == FileTableModel.COL_ARTIST
                                 || c == FileTableModel.COL_ALBUM_ARTIST || c == FileTableModel.COL_ALBUM
-                                || c == FileTableModel.COL_YEAR;
+                                || c == FileTableModel.COL_YEAR || c == FileTableModel.COL_DURATION;
                         groupRowSorter.setSortable(c, sortable);
                     }
                 }
@@ -1571,6 +1691,19 @@ public class MainFrame extends JFrame {
         int saved = PREFS.getInt("col." + i + ".w", p);
         c.setMinWidth(mn); c.setMaxWidth(mx);
         c.setPreferredWidth(Math.max(mn, Math.min(mx, saved)));
+    }
+
+    /** "3:32" → 212 (secondes) — pour trier numériquement la colonne Durée. "" ou illisible → 0,
+     *  jamais d'exception (comparateur de tri, ne doit jamais planter au clic sur l'en-tête). */
+    private static int parseDurationString(String s) {
+        if (s == null || s.isBlank()) return 0;
+        int i = s.indexOf(':');
+        if (i < 0) return 0;
+        try {
+            int m = Integer.parseInt(s.substring(0, i));
+            int sec = Integer.parseInt(s.substring(i + 1));
+            return m * 60 + sec;
+        } catch (NumberFormatException e) { return 0; }
     }
 
     /** Mémorise la largeur courante de chaque colonne (appelé à la fermeture, comme la géométrie fenêtre). */
@@ -3841,12 +3974,17 @@ public class MainFrame extends JFrame {
 
     /** Lit les 90+ champs d'un fichier audio — même couverture que TagWriter. */
     private TagInfo readTags(File f) {
-        // Opus/AAC brut : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO) — inutile
+        // Opus/AAC/WV/APE : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO) — inutile
         // de tenter AudioFileIO.read() en sachant qu'il va échouer.
         if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
         TagInfo ti = new TagInfo();
         try {
             AudioFile af = AudioFileIO.read(f);
+            // Avant le "tag == null" ci-dessous : l'en-tête audio (durée, débit...) est
+            // indépendant du tag lui-même, un fichier sans AUCUN tag a quand même une durée.
+            try {
+                if (af.getAudioHeader() != null) ti.durationSec = af.getAudioHeader().getTrackLength();
+            } catch (Exception ignored) {}
             Tag tag = af.getTag();
             if (tag == null) return ti;
 
@@ -3976,6 +4114,15 @@ public class MainFrame extends JFrame {
     // ── Filtrage rapide (recherche + chips de statut cliquables dans buildStatsStrip()) ──────
 
     private void applyFilter() {
+        // Cover Flow ne montre jamais les statuts Non identifié/Erreur (voir isCoverFlowEligible())
+        // — y rester filtré dessus n'afficherait jamais rien d'utile, juste un carrousel vide.
+        // Retour utilisateur : bascule automatiquement vers la vue Liste dans ce cas précis, où le
+        // filtre reste au moins exploitable (lignes réelles, pas un écran noir).
+        if (viewMode == ViewMode.COVER_FLOW
+                && (activeStatusFilter == FILTER_SKIPPED || activeStatusFilter == FILTER_ERROR)) {
+            setViewMode(ViewMode.FLAT);
+        }
+
         String text   = tfFilter.getText().trim();
         int statusSel = activeStatusFilter; // 0=tous,1=pending,2=tagged,3=skipped,4=error
         int fieldSel  = cbFilterField.getSelectedIndex(); // 0=tous les champs, 1..7=colonne précise
@@ -4239,16 +4386,26 @@ public class MainFrame extends JFrame {
         // à retirer du tableau. On sépare donc ce cas des vraies erreurs de lecture/format, pour
         // ne pas dire "ces fichiers sont corrompus" à propos de fichiers qui n'ont jamais existé
         // sous ce statut, et pour ne pas proposer une suppression disque qui n'a pas de sens ici.
-        List<FileEntry> missing = new ArrayList<>();
-        List<FileEntry> corrupt = new ArrayList<>();
+        //
+        // 3e catégorie "mislabeled" ajoutée après un vrai cas trouvé en vérifiant : "Belsunce
+        // Breakdown.mp3"/"Sexy Love.mp3" etc. ne sont PAS corrompus, juste étiquetées avec la
+        // mauvaise extension (contenu M4A/AAC réel sous ".mp3", voir AudioFormatCheck) — sans
+        // cette distinction, ce bouton les aurait supprimées DÉFINITIVEMENT alors qu'il suffit de
+        // les renommer. Détectées via le marqueur de message posé par
+        // TagWriter.translateKnownJaudiotaggerBug() plutôt que de rappeler AudioFormatCheck ici
+        // (déjà exécuté une fois pour produire ce message, pas la peine de relancer ffprobe).
+        List<FileEntry> missing    = new ArrayList<>();
+        List<FileEntry> mislabeled = new ArrayList<>();
+        List<FileEntry> corrupt    = new ArrayList<>();
         for (int i = 0; i < tableModel.getRowCount(); i++) {
             FileEntry e = tableModel.get(i);
             if (e.status != FileEntry.Status.ERROR) continue;
             if ("Fichier introuvable".equals(e.message)) missing.add(e);
+            else if (e.message != null && e.message.contains("ne correspond pas à l'extension")) mislabeled.add(e);
             else corrupt.add(e);
         }
 
-        if (missing.isEmpty() && corrupt.isEmpty()) {
+        if (missing.isEmpty() && mislabeled.isEmpty() && corrupt.isEmpty()) {
             JOptionPane.showMessageDialog(this,
                 I18n.t("Aucun fichier illisible dans la liste."),
                 I18n.t("Fichiers illisibles"), JOptionPane.INFORMATION_MESSAGE);
@@ -4269,11 +4426,28 @@ public class MainFrame extends JFrame {
             }
         }
 
+        if (!mislabeled.isEmpty()) {
+            StringBuilder mb = new StringBuilder(I18n.t(
+                "<html><b>%d fichier(s) écarté(s) de la suppression</b> — pas corrompus, juste "
+                + "une mauvaise extension (contenu réel différent du nom de fichier) :<br><br>", mislabeled.size()));
+            int shownM = Math.min(mislabeled.size(), 8);
+            for (int i = 0; i < shownM; i++) {
+                File f = mislabeled.get(i).currentPath != null
+                    ? mislabeled.get(i).currentPath.toFile() : mislabeled.get(i).file;
+                mb.append("&nbsp;• ").append(f.getName()).append("<br>");
+            }
+            if (mislabeled.size() > shownM)
+                mb.append(I18n.t("&nbsp;… et %d autre(s)<br>", mislabeled.size() - shownM));
+            mb.append(I18n.t("<br><i>À renommer manuellement avec la bonne extension, pas à supprimer.</i></html>"));
+            JOptionPane.showMessageDialog(this, mb.toString(),
+                I18n.t("Fichiers mal étiquetés (non supprimés)"), JOptionPane.INFORMATION_MESSAGE);
+        }
+
         if (corrupt.isEmpty()) return;
 
         // Construire le message de confirmation (uniquement les vraies erreurs de lecture/format)
         StringBuilder sb = new StringBuilder(
-                I18n.t("<html>Supprimer définitivement <b>%d fichier(s) illisible(s)</b> du disque ?<br><br>", corrupt.size()));
+                I18n.t("<html>Déplacer <b>%d fichier(s) illisible(s)</b> dans la corbeille ?<br><br>", corrupt.size()));
         int shown = Math.min(corrupt.size(), 8);
         for (int i = 0; i < shown; i++) {
             FileEntry e = corrupt.get(i);
@@ -4291,18 +4465,25 @@ public class MainFrame extends JFrame {
             I18n.t("Supprimer les fichiers illisibles"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (ok != JOptionPane.YES_OPTION) return;
 
+        // Corbeille système plutôt que File.delete() définitif (même changement que DuplicatesDialog
+        // avant elle, même raison : un faux positif dans "corrupt" — ex. un futur format non encore
+        // couvert par AudioFormatCheck — ne doit jamais être irrécupérable en un clic).
+        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
         int deleted = 0, failDel = 0;
         for (FileEntry e : corrupt) {
             File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
             int idx = tableModel.indexOf(e);
-            if (f.delete()) {
+            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+            if (moved) {
                 if (idx >= 0) tableModel.remove(idx);
                 deleted++;
             } else {
                 failDel++;
             }
         }
-        String msg = I18n.t("%d fichier(s) illisible(s) supprimé(s)", deleted);
+        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
+        String msg = I18n.t("%d fichier(s) illisible(s) %s", deleted, where);
         if (failDel > 0) msg += I18n.t(", %d échec(s) (permission refusée ?)", failDel);
         setStatus(msg);
         JOptionPane.showMessageDialog(this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);

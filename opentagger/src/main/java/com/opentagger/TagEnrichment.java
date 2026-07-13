@@ -233,6 +233,21 @@ public final class TagEnrichment {
             } catch (Exception ignored) {}
         }
 
+        // Paroles synchronisées (.lrc à côté de l'audio, même basename) — même logique/opt-in que
+        // la pochette fichier juste au-dessus. Sidecar plutôt qu'un tag embarqué : voir la Javadoc
+        // de TagInfo.syncedLyrics pour le pourquoi (support lecteur bien plus large, notamment
+        // Plexamp). Écrase sans condition d'"overwrite" séparée (contrairement à la pochette) :
+        // un .lrc existant vient forcément d'un enregistrement précédent de CE MÊME fichier, pas
+        // d'une source externe à préserver.
+        if (!written.syncedLyrics.isBlank() && Config.get().saveLrcFile()) {
+            try {
+                String name = fichier.getName();
+                String stem = name.contains(".") ? name.substring(0, name.lastIndexOf('.')) : name;
+                Path lrcPath = fichier.toPath().resolveSibling(stem + ".lrc");
+                java.nio.file.Files.writeString(lrcPath, written.syncedLyrics);
+            } catch (Exception ignored) {}
+        }
+
         String cacheKey = !written.recordingMbid.isBlank()
                 ? written.recordingMbid : MetadataCache.syntheticKey(written.artist, written.title);
         String source = written.identificationSource.isBlank()

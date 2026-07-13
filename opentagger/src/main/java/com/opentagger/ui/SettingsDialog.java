@@ -63,6 +63,7 @@ public class SettingsDialog extends JDialog {
     private JTextField tfFfmpegPath;
     private JTextField tfEssentiaPath;
     private JCheckBox  chkLyricsEnabled;
+    private JCheckBox  chkSaveLrc;
 
     // ── Onglet Audio (complémentaire) ─────────────────────────────────────────
     private JTextField tfFpcalcPath;
@@ -1157,6 +1158,7 @@ public class SettingsDialog extends JDialog {
         tfEssentiaPath      = tf();
         tfFpcalcPath        = tf();
         chkLyricsEnabled    = new JCheckBox(I18n.t("Activer la récupération des paroles"));
+        chkSaveLrc          = new JCheckBox(I18n.t("Écrire un fichier .lrc (paroles synchronisées, si trouvées sur lrclib.net)"));
         chkReplayGainEnabled= new JCheckBox(I18n.t("Calculer et écrire le ReplayGain (via ffmpeg, lent)"));
         lblFpcalcStatus     = new JLabel();
 
@@ -1178,6 +1180,7 @@ public class SettingsDialog extends JDialog {
             { "Chemin Essentia :",       tfEssentiaPath,     null                                             },
             { "Chemin fpcalc :",         fpcalcRow,          "https://acoustid.org/chromaprint"              },
             { "Paroles (LyricsOvh) :",  chkLyricsEnabled,   "https://lyricsovh.docs.apiary.io/"             },
+            { "",                       chkSaveLrc,         "https://lrclib.net"                            },
             { "ReplayGain :",           chkReplayGainEnabled, null                                           },
         };
         for (int i = 0; i < rows.length; i++) {
@@ -1777,6 +1780,7 @@ public class SettingsDialog extends JDialog {
         tfEssentiaPath  .setText(cfg.str("audio.essentia_path",        "essentia_streaming_extractor_music"));
         tfFpcalcPath    .setText(cfg.str("audio.fpcalc_path",          ""));
         chkLyricsEnabled.setSelected(cfg.bool("lyrics.enabled",        true));
+        chkSaveLrc      .setSelected(cfg.saveLrcFile());
         tfRapidApiKey.setText(cfg.str("rapidapi.key",    ""));
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
         tfListenBrainzUsername .setText(cfg.listenbrainzUsername());
@@ -1955,6 +1959,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("audio.essentia_path",           tfEssentiaPath.getText().trim());
         p.setProperty("audio.fpcalc_path",             tfFpcalcPath.getText().trim());
         p.setProperty("lyrics.enabled",                String.valueOf(chkLyricsEnabled.isSelected()));
+        p.setProperty("lyrics.save_lrc",               String.valueOf(chkSaveLrc.isSelected()));
         p.setProperty("rapidapi.key",   tfRapidApiKey.getText().trim());
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
         p.setProperty("listenbrainz.username",   tfListenBrainzUsername.getText().trim());

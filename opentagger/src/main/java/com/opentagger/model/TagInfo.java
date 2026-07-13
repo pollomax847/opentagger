@@ -9,6 +9,15 @@ public class TagInfo {
     // ── Score de correspondance ──────────────────────────────────────────────
     public int    score               = 0;
 
+    // ── Durée réelle (secondes) ────────────────────────────────────────────
+    // PAS un tag — lue depuis AudioHeader.getTrackLength() (jaudiotagger), déjà disponible sans
+    // coût I/O supplémentaire puisque AudioFileIO.read() est de toute façon appelé au scan pour
+    // lire les tags (voir MainFrame.readTags()). 0 = inconnue/pas encore lue. Sert notamment à
+    // repérer d'un coup d'œil les fichiers vides/corrompus (0:00) sans attendre un échec
+    // d'écriture — trouvé en pratique un fichier .m4a de 322 octets, zéro flux audio, qui serait
+    // resté invisible dans le tableau sans cette colonne.
+    public int    durationSec         = 0;
+
     // ── Standard ────────────────────────────────────────────────────────────
     public String title               = "";
     public String artist              = "";
@@ -95,6 +104,14 @@ public class TagInfo {
     // ── Paroles ──────────────────────────────────────────────────────────────
     public String lyrics              = "";
     public String lyricsUrl           = "";
+    // Paroles synchronisées brutes, format LRC ("[mm:ss.xx] ligne") — écrites en fichier .lrc à
+    // côté de l'audio (TagEnrichment.saveEntry()), pas dans un tag embarqué : Plexamp et la
+    // plupart des lecteurs lisent le sidecar .lrc, pas une frame ID3 SYLT (mal supportée partout,
+    // contrairement au .lrc qui est un standard de facto). lrclib.net (voir LyricsClient) renvoie
+    // déjà ces données mais elles étaient jusqu'ici jetées (timestamps retirés pour ne garder que
+    // le texte brut dans `lyrics` ci-dessus) — ce champ les préserve en plus, sans rien changer au
+    // comportement existant de `lyrics`.
+    public String syncedLyrics        = "";
 
     // ── Rating & tags ────────────────────────────────────────────────────────
     public String rating              = "";    // 0-255 (ID3v2) ou 1-5
@@ -170,6 +187,7 @@ public class TagInfo {
         try {
             TagInfo c = new TagInfo();
             c.score = this.score;
+            c.durationSec = this.durationSec;
             for (java.lang.reflect.Field f : TagInfo.class.getFields()) {
                 if (f.getType() == String.class) f.set(c, f.get(this));
             }

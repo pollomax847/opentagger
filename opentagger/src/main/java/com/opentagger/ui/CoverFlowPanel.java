@@ -157,8 +157,19 @@ public class CoverFlowPanel extends JComponent {
         // dessinée en dernier, donc au-dessus.
         order.sort((a, b) -> Double.compare(dist(b), dist(a)));
 
+        // Facteur d'échelle globale par rapport à la taille "dialogue" d'origine de ce composant
+        // (setPreferredSize(760, 420) au constructeur, avant son intégration dans le CardLayout de
+        // MainFrame cette même session) — sans lui, les vignettes restaient plafonnées à leur
+        // taille de cache fixe (TILE_SIZE=220, jamais dépassée : tileScale() ne monte jamais au-
+        // dessus de 1.0) quelle que soit la taille réelle du panneau. Embarqué en pleine fenêtre
+        // principale (bien plus grand qu'un dialogue 760×420), ça donnait un petit carrousel perdu
+        // dans un immense espace noir vide (retour utilisateur direct, capture d'écran à l'appui).
+        // Borné à 2.2× : au-delà, l'agrandissement d'un bitmap de 220px en cache devient visible
+        // (flou), même avec l'interpolation bilinéaire déjà activée plus haut.
+        double panelScale = Math.max(1.0, Math.min(2.2, h / 420.0));
+
         int centerX = w / 2;
-        int baseY   = h / 2 + CoverFlowThumbnailCache.TILE_SIZE / 5;
+        int baseY   = h / 2 + (int) Math.round(CoverFlowThumbnailCache.TILE_SIZE * panelScale / 5);
 
         for (int idx : order) {
             double d  = idx - displayPosition;
@@ -167,8 +178,8 @@ public class CoverFlowPanel extends JComponent {
             if (alpha <= 0.02f) continue;
 
             BufferedImage composite = cache.compositeFor(visible.get(idx).groupKey());
-            double scale = tileScale(ad);
-            double x     = tileX(d, centerX);
+            double scale = tileScale(ad) * panelScale;
+            double x     = tileX(d, centerX, panelScale);
             double shear = tileShear(d);
 
             AffineTransform t = new AffineTransform();
@@ -198,10 +209,10 @@ public class CoverFlowPanel extends JComponent {
         return EDGE_SCALE * Math.pow(0.94, ad - 1);
     }
 
-    private double tileX(double d, int centerX) {
+    private double tileX(double d, int centerX, double panelScale) {
         double ad = Math.abs(d), side = Math.signum(d);
-        if (ad <= 1) return centerX + d * BASE_OFFSET_PX;
-        return centerX + side * (BASE_OFFSET_PX + (ad - 1) * STEP_PX);
+        if (ad <= 1) return centerX + d * BASE_OFFSET_PX * panelScale;
+        return centerX + side * (BASE_OFFSET_PX + (ad - 1) * STEP_PX) * panelScale;
     }
 
     private double tileShear(double d) {

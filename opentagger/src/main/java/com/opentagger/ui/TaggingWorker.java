@@ -990,7 +990,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
             if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
                 List<TagInfo> r = acoustId.identify(fichier);
-                if (!r.isEmpty()) {
+                if (!r.isEmpty() && acoustIdResultPlausible(fichier, r.get(0), forceReidentify)) {
                     lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
                     return r;
                 }
@@ -1237,6 +1237,42 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             String v = tag != null ? tag.getFirst(key) : "";
             return v != null ? v.trim() : "";
         } catch (Exception e) { return ""; }
+    }
+
+    /**
+     * Garde-fou avant d'accepter un résultat AcoustID — trouvé en vérifiant en direct que
+     * l'intégration AcoustID fonctionnait bien : sur "Daft Punk – One More Time" (sans ambiguïté
+     * possible), AcoustID a renvoyé "Walt Ribeiro" avec une confiance MusicBrainz de 100. Pas un
+     * bug de câblage : Chromaprint fait de la correspondance FLOUE sur une base communautaire
+     * énorme, et un morceau massivement soumis (des milliers de rips légèrement différents)
+     * accumule des empreintes quasi-identiques parfois attachées au mauvais enregistrement.
+     * Si le fichier a déjà un artiste renseigné et que l'artiste proposé par AcoustID n'a
+     * AUCUN rapport avec (similarité Picard sous 0.3), on se méfie plutôt que d'écraser
+     * aveuglément — la cascade continue vers la recherche texte au lieu de renvoyer ce match
+     * isolé. Jamais appliqué en réidentification forcée (forceReidentify) : ce mode ignore déjà
+     * volontairement les tags existants (voir plus bas dans findTags()), les comparer ici irait
+     * à l'encontre de son but.
+     *
+     * <p>Vérifié en direct sur le cas réel qui a révélé le problème : le TITRE seul n'est PAS un
+     * signal fiable ici — l'enregistrement mal attribué à "Walt Ribeiro" avait pour titre
+     * littéral {@code Daft Punk 'One More Time' [Volume 2]} (une référence entre guillemets au
+     * vrai titre, fréquent dans les compilations/DJ sets), donnant une similarité de titre
+     * élevée (~0.65) malgré un artiste totalement faux (~0.18) — un ET sur les deux aurait laissé
+     * passer ce cas précis. L'ARTISTE, plus court et moins sujet à ce genre de faux positif par
+     * inclusion, est le signal qui compte ici ; le titre n'est plus utilisé du tout dans ce test.
+     */
+    private boolean acoustIdResultPlausible(File fichier, TagInfo candidate, boolean forceReidentify) {
+        if (forceReidentify) return true;
+        String existingArtist = readTag(fichier, FieldKey.ARTIST);
+        if (existingArtist.isBlank()) return true; // rien à comparer
+
+        double artistSim = TrackMatcher.titleSimilarity(existingArtist.toLowerCase(), candidate.artist.toLowerCase());
+        if (artistSim < 0.3) {
+            log(I18n.t("  AcoustID SUSPECT (artiste existant \"%s\" sans rapport avec \"%s\") → \"%s – %s\", ignoré",
+                    existingArtist, candidate.artist, candidate.artist, candidate.title));
+            return false;
+        }
+        return true;
     }
 
     /** Retourne true si le tag est générique/inutile pour une recherche. */

@@ -374,7 +374,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
     /** Lit les tags essentiels depuis le fichier (artist, title, album, year, mbids…). */
     private TagInfo readTagsFromFile(File f) {
-        // Opus/AAC brut : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO).
+        // Opus/AAC/WV/APE : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO).
         if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
         try {
             AudioFile af = AudioFileIO.read(f);
