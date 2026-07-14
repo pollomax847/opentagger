@@ -446,8 +446,9 @@ public class TagWriter {
         sf(tag, FieldKey.ACOUSTID_FINGERPRINT, i.acoustidFingerprint);
         sf(tag, FieldKey.ROONALBUMTAG,       i.roonAlbumTag);
         sf(tag, FieldKey.ROONTRACKTAG,       i.roonTrackTag);
-        // discogsId → pas de FieldKey numérique → champ custom
+        // discogsId/appleMusicId → pas de FieldKey numérique → champs custom
         setCustomField(tag, "DISCOGS_RELEASE_ID", i.discogsId);
+        setCustomField(tag, "APPLE_MUSIC_ID",     i.appleMusicId);
 
         // ── Métadonnées release ───────────────────────────────────────────────
         sf(tag, FieldKey.SCRIPT,             i.script);
@@ -568,6 +569,7 @@ public class TagWriter {
         // Custom
         apFreeform(cmd, "IS_INSTRUMENTAL",    i.isInstrumental);
         apFreeform(cmd, "DISCOGS_RELEASE_ID", i.discogsId);
+        apFreeform(cmd, "APPLE_MUSIC_ID",     i.appleMusicId);
         apFreeform(cmd, "ACOUSTID_ID",        i.acoustidId);
 
         // Podcast

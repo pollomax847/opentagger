@@ -53,7 +53,9 @@ public final class TagEnrichment {
      * Cascade de pochette : essaie chaque fournisseur activé, dans l'ordre configuré
      * ({@code cover.provider_order} — façon Picard, liste de fournisseurs
      * activables/réordonnables), jusqu'au premier succès. Fournisseurs connus :
-     * {@code caa_release}, {@code caa_release_group}, {@code local}, {@code fanart},
+     * {@code caa_release}, {@code caa_release_group}, {@code shazam} (URL déjà renvoyée par
+     * SongRec au moment de l'identification, voir TagInfo.shazamCoverUrl — aucune recherche
+     * supplémentaire, juste un téléchargement), {@code local}, {@code fanart},
      * {@code deezer} (dernier recours texte artiste+album, aucun MBID requis — voir DeezerClient,
      * utile notamment pour les fichiers identifiés par SongRec/AudD/texte sans confirmation
      * MusicBrainz, pour lesquels CAA/FanArt ne peuvent structurellement rien renvoyer).
@@ -79,6 +81,10 @@ public final class TagEnrichment {
                 case "caa_release_group":
                     if (Config.get().caaReleaseGroupEnabled() && !ti.releaseGroupMbid.isBlank())
                         return caa.downloadFromReleaseGroup(ti, cache);
+                    return null;
+                case "shazam":
+                    if (Config.get().shazamCoverEnabled() && !ti.shazamCoverUrl.isBlank())
+                        return ImageDownloader.downloadToTempFile(ti.shazamCoverUrl, cache);
                     return null;
                 case "local":
                     if (Config.get().coverSearchLocal())

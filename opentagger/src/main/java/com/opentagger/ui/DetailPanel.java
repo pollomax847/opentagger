@@ -122,6 +122,7 @@ public class DetailPanel extends JPanel {
     private final JTextField tfArtistMbid          = tf(36);
     private final JTextField tfAcoustidId          = tf(36);
     private final JTextField tfDiscogsId           = tf(20);
+    private final JTextField tfAppleMusicId        = tf(20);
     private final JTextField tfRoonAlbumTag        = tf(20);
     private final JTextField tfRoonTrackTag        = tf(20);
 
@@ -264,6 +265,7 @@ public class DetailPanel extends JPanel {
         set(tfArtistMbid,          t.artistMbid);
         set(tfAcoustidId,          t.acoustidId);
         set(tfDiscogsId,           t.discogsId);
+        set(tfAppleMusicId,        t.appleMusicId);
         set(tfRoonAlbumTag,        t.roonAlbumTag);
         set(tfRoonTrackTag,        t.roonTrackTag);
     }
@@ -342,7 +344,7 @@ public class DetailPanel extends JPanel {
             tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid,
-            tfAcoustidId, tfDiscogsId, tfRoonAlbumTag, tfRoonTrackTag}) {
+            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag}) {
             tf.setText("");
         }
     }
@@ -514,6 +516,7 @@ public class DetailPanel extends JPanel {
         t.releaseWikipediaUrl = g(tfReleaseWikipediaUrl);
         t.releaseDiscogsUrl   = g(tfReleaseDiscogsUrl);
         t.discogsId           = g(tfDiscogsId);
+        t.appleMusicId        = g(tfAppleMusicId);
         t.roonAlbumTag        = g(tfRoonAlbumTag);
         t.roonTrackTag        = g(tfRoonTrackTag);
         // MB IDs et AcoustID : lecture seule, non modifiés
@@ -712,6 +715,7 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("─── Autres IDs ───"),       sep());
         fields.put(I18n.t("AcoustID :"),               tfAcoustidId);
         fields.put(I18n.t("Discogs ID :"),             tfDiscogsId);
+        fields.put(I18n.t("Apple Music ID :"),         tfAppleMusicId);
         fields.put(I18n.t("Roon Album Tag :"),         tfRoonAlbumTag);
         fields.put(I18n.t("Roon Track Tag :"),         tfRoonTrackTag);
         return scroll(formPanel(fields));
@@ -953,7 +957,7 @@ public class DetailPanel extends JPanel {
             tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid,
-            tfAcoustidId, tfDiscogsId, tfRoonAlbumTag, tfRoonTrackTag
+            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag
         };
     }
 }

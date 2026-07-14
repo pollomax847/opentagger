@@ -874,9 +874,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
 
         // 0.5. Tags MB existants complets (Picard, MusicBrainz Tagger, session précédente).
-        // Si le fichier a déjà releaseMbid + artist + title + album valides → confiance totale.
-        // On ne ré-identifie pas ce que Picard a déjà fait : on garde l'album de compilation
-        // tel quel, on évite deux allers-retours MB inutiles, et le taguage est instantané.
+        // Si le fichier a déjà releaseMbid + artist + title + album valides → confiance totale,
+        // SOUS RÉSERVE qu'un passage SongRec rapide (gratuit, ~qq secondes, pas de clé API) ne
+        // les contredise pas. Sans cette vérification, un fichier arrivé d'ailleurs avec un
+        // releaseMbid fabriqué (rip YouTube mal identifié à l'origine — vu en direct : tags
+        // "Studieo – Adios" alors que l'audio réel était "Bengous – Tié la famille !") passait
+        // avec un score 100 sans jamais être comparé à l'audio. Une fois confirmé ici, le fichier
+        // entre dans l'historique local (étape 0 ci-dessus) : le prochain scan redevient
+        // instantané, donc ce coût SongRec n'est payé qu'une fois par fichier, pas à chaque passe.
         if (!forceReidentify && Config.get().trustExistingMbTags() && existingTags != null
                 && !existingTags.releaseMbid.isBlank()
                 && !existingTags.artist.isBlank()
@@ -884,13 +889,36 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 && !existingTags.album.isBlank()
                 && !isGenericTag(existingTags.artist)
                 && !isGenericTag(existingTags.title)) {
-            TagInfo t = existingTags.copy();
-            t.score = 100;
-            lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
-            log(I18n.t("  tags MB existants ✓ [releaseMbid=%s…] %s – %s [%s] → skip identification",
-                existingTags.releaseMbid.substring(0, Math.min(8, existingTags.releaseMbid.length())),
-                existingTags.artist, existingTags.title, existingTags.album));
-            return List.of(t);
+            boolean confirmed = true;
+            if (SongRecClient.isAvailable()) {
+                try {
+                    TagInfo sr = songRec.recognize(fichier);
+                    if (sr != null && !sr.artist.isBlank() && !sr.title.isBlank()) {
+                        confirmed = TrackMatcher.titleSimilarity(
+                                sr.artist.toLowerCase(), existingTags.artist.toLowerCase())
+                                >= Config.get().trackMatchingThreshold();
+                        if (!confirmed) {
+                            log(I18n.t("  tags MB existants ⚠ contredits par SongRec (%s – %s) → identification complète",
+                                    sr.artist, sr.title));
+                        }
+                    }
+                    // sr == null (rien reconnu par SongRec) : ne contredit pas, tags existants gardés.
+                } catch (Exception e) {
+                    // SongRec cassé/indisponible ponctuellement : ne pas bloquer sur une panne
+                    // d'infra — comportement identique à avant ce correctif dans ce cas précis.
+                }
+            }
+            if (confirmed) {
+                TagInfo t = existingTags.copy();
+                t.score = 100;
+                lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
+                log(I18n.t("  tags MB existants ✓ [releaseMbid=%s…] %s – %s [%s] → skip identification",
+                    existingTags.releaseMbid.substring(0, Math.min(8, existingTags.releaseMbid.length())),
+                    existingTags.artist, existingTags.title, existingTags.album));
+                return List.of(t);
+            }
+            // sinon : tombe dans l'étape 1 (SongRec/MB) ci-dessous, qui refait l'identification
+            // complète — le résultat SongRec qu'on vient de calculer y sera juste recalculé.
         }
 
         // 1. SongRec (Shazam) — empreinte audio, identifie la musique commerciale même avec

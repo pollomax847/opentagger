@@ -138,12 +138,17 @@ public class TagInfo {
     public String releaseOfficialUrl  = "";
     public String releaseWikipediaUrl = "";
     public String releaseDiscogsUrl   = "";
+    // Pochette renvoyée directement par Shazam (SongRecClient) — l'identification a déjà trouvé
+    // cette image, inutile de la re-chercher à l'aveugle via TagEnrichment.resolveCover() (voir
+    // son fournisseur "shazam").
+    public String shazamCoverUrl      = "";
 
     // ── IDs & identifiants ───────────────────────────────────────────────────
     public String comment             = "";    // MB disambiguation
     public String isrc                = "";
     public String amazonId            = "";
     public String discogsId           = "";
+    public String appleMusicId        = "";    // adamid album (Shazam/SongRec) — pas de FieldKey dédié
     public String roonAlbumTag        = "";
     public String roonTrackTag        = "";
     public String acoustidId          = "";

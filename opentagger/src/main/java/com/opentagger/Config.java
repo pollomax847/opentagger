@@ -254,10 +254,23 @@ public class Config {
     // Aucune clé requise (API publique Deezer) — activé par défaut, dernier recours texte
     // (artiste+album) pour les fichiers sans MBID exploitable, voir DeezerClient.
     public boolean deezerEnabled()          { return bool("deezer.enabled",                  true); }
-    public static final String DEFAULT_COVER_PROVIDER_ORDER = "caa_release,caa_release_group,local,fanart,deezer";
+    // Pochette déjà renvoyée par SongRec/Shazam au moment de l'identification (TagInfo.
+    // shazamCoverUrl) — aucune requête réseau supplémentaire ici, juste télécharger l'URL déjà
+    // en main ; utile notamment pour les fichiers identifiés par SongRec sans confirmation
+    // MusicBrainz, pour lesquels CAA/FanArt ne peuvent structurellement rien renvoyer.
+    public boolean shazamCoverEnabled()     { return bool("shazam.download_cover",           true); }
+    public static final String DEFAULT_COVER_PROVIDER_ORDER = "caa_release,caa_release_group,shazam,local,fanart,deezer";
     public String[] coverProviderOrder() {
         String v = str("cover.provider_order", DEFAULT_COVER_PROVIDER_ORDER);
-        return v.isBlank() ? DEFAULT_COVER_PROVIDER_ORDER.split(",") : v.split(",");
+        java.util.List<String> order = new java.util.ArrayList<>(java.util.Arrays.asList(
+                v.isBlank() ? DEFAULT_COVER_PROVIDER_ORDER.split(",") : v.split(",")));
+        // Rattrape tout fournisseur connu absent d'une valeur persistée plus ancienne (ex. un
+        // cover.provider_order sauvegardé avant l'ajout de "shazam") — sinon un nouveau fournisseur
+        // par défaut n'est jamais essayé pour un utilisateur existant tant qu'il ne rouvre pas les
+        // Préférences (même logique déjà utilisée par SettingsDialog.loadSettings()).
+        for (String id : DEFAULT_COVER_PROVIDER_ORDER.split(","))
+            if (!order.contains(id)) order.add(id);
+        return order.toArray(new String[0]);
     }
 
     // --- MB genres max ---

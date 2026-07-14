@@ -138,6 +138,24 @@ public class SongRecClient {
             if (!g.isBlank()) ti.genre = g;
         }
 
+        String isrc = track.path("isrc").asText("").trim();
+        if (!isrc.isBlank()) ti.isrc = isrc;
+
+        // ID Apple Music (adamid album) — référence précise, contrairement aux liens Spotify/
+        // Deezer/YouTube Music de la réponse Shazam qui ne sont que des requêtes de recherche
+        // texte ("spotify:search:...", "...deezer.com/play?query=..."), pas de vrais identifiants
+        // de piste : les stocker n'apporterait aucune précision réelle, donc pas repris ici.
+        String appleId = track.path("albumadamid").asText("").trim();
+        if (!appleId.isBlank()) ti.appleMusicId = appleId;
+
+        // Pochette HD si disponible, sinon la version standard — voir TagEnrichment (fournisseur
+        // "shazam") pour l'utilisation : évite de re-chercher une pochette à l'aveugle alors que
+        // l'identification vient déjà d'en trouver une.
+        JsonNode images = track.path("images");
+        String coverUrl = images.path("coverarthq").asText("").trim();
+        if (coverUrl.isBlank()) coverUrl = images.path("coverart").asText("").trim();
+        if (!coverUrl.isBlank()) ti.shazamCoverUrl = coverUrl;
+
         for (JsonNode section : track.path("sections")) {
             for (JsonNode meta : section.path("metadata")) {
                 String name = meta.path("title").asText("").trim();

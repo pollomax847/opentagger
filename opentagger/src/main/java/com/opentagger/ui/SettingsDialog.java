@@ -101,9 +101,10 @@ public class SettingsDialog extends JDialog {
     private JTextField tfCoverFilename;
 
     // ── Fournisseurs de pochette — activables/réordonnables (façon Picard) ──────────
-    private static final String[] COVER_PROVIDER_IDS = {"caa_release", "caa_release_group", "local", "fanart", "deezer"};
+    private static final String[] COVER_PROVIDER_IDS = {"caa_release", "caa_release_group", "shazam", "local", "fanart", "deezer"};
     private static final String[] COVER_PROVIDER_LABELS = {
         "Cover Art Archive : parution", "Cover Art Archive : groupe de parution",
+        "Shazam (déjà renvoyée par SongRec à l'identification, sans recherche supplémentaire)",
         "Dossier local (folder.jpg / cover.jpg)", "FanArt.tv", "Deezer (recherche texte, sans clé API)"
     };
     private DefaultListModel<String>     lstCoverProvidersModel = new DefaultListModel<>();
@@ -1861,6 +1862,7 @@ public class SettingsDialog extends JDialog {
         coverProviderEnabled.clear();
         coverProviderEnabled.put("caa_release",       cfg.caaReleaseEnabled());
         coverProviderEnabled.put("caa_release_group", cfg.caaReleaseGroupEnabled());
+        coverProviderEnabled.put("shazam", cfg.shazamCoverEnabled());
         coverProviderEnabled.put("local",  cfg.coverSearchLocal());
         coverProviderEnabled.put("fanart", cfg.fanartEnabled());
         coverProviderEnabled.put("deezer", cfg.deezerEnabled());
@@ -2032,6 +2034,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("cover.provider_order",             String.join(",", coverProviderOrder));
         p.setProperty("cover.caa_release_enabled",        String.valueOf(coverProviderEnabled.getOrDefault("caa_release", true)));
         p.setProperty("cover.caa_release_group_enabled",  String.valueOf(coverProviderEnabled.getOrDefault("caa_release_group", true)));
+        p.setProperty("shazam.download_cover",            String.valueOf(coverProviderEnabled.getOrDefault("shazam", true)));
         p.setProperty("cover.search_local",               String.valueOf(coverProviderEnabled.getOrDefault("local", true)));
         p.setProperty("fanart.download_cover",            String.valueOf(coverProviderEnabled.getOrDefault("fanart", true)));
         p.setProperty("deezer.enabled",                   String.valueOf(coverProviderEnabled.getOrDefault("deezer", true)));
