@@ -8,7 +8,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 
 /**
  * Télécharge les pochettes depuis le Cover Art Archive (CAA) de MusicBrainz.
@@ -20,10 +19,7 @@ public class CaaClient {
 
     private static final String CAA_URL = "https://coverartarchive.org";
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.ALWAYS)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
 
     /**
      * Tente de télécharger la pochette avant (front) pour le TagInfo donné.
@@ -64,7 +60,7 @@ public class CaaClient {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(CAA_URL + path))
                     .header("User-Agent", Config.get().userAgent())
-                    .timeout(Duration.ofSeconds(20))
+                    .timeout(HttpTimeouts.apiCall())
                     .GET()
                     .build();
             HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());

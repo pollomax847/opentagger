@@ -33,7 +33,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
     private final List<FileEntry>    entries;
     private final FileTableModel     tableModel;
     private final Consumer<Progress> onProgress; // appelé sur EDT via process()
-    private final Runnable           onDone;
+    private final Consumer<String>   onDone;      // reçoit le résumé — voir done() ci-dessous
 
     // Champ plutôt que variable locale de doInBackground() — même raison que TaggingWorker.pool/
     // AlbumCompletionWorker.pool (voir leurs commentaires) : sans ça, stopNow() n'interromprait
@@ -43,7 +43,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
     public TranscodeWorker(List<FileEntry>    entries,
                            FileTableModel     tableModel,
                            Consumer<Progress> onProgress,
-                           Runnable           onDone) {
+                           Consumer<String>   onDone) {
         this.entries    = entries;
         this.tableModel = tableModel;
         this.onProgress = onProgress;
@@ -117,6 +117,12 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
 
     @Override
     protected void done() {
-        if (onDone != null) onDone.run();
+        if (onDone == null) return;
+        // get() ici (jamais bloquant : doInBackground() est déjà terminé quand done() est appelé)
+        // plutôt que de forcer l'appelant à s'auto-référencer pour récupérer le résumé — voir
+        // MainFrame.transcodeFiles(), qui n'a plus besoin de connaître son propre worker.
+        String summary;
+        try { summary = get(); } catch (Exception ex) { summary = I18n.t("Transcodage terminé"); }
+        onDone.accept(summary);
     }
 }

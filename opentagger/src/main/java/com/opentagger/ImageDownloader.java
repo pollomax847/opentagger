@@ -6,7 +6,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 
 /**
  * Téléchargement d'image générique vers un fichier temporaire — extrait de
@@ -16,10 +15,7 @@ public final class ImageDownloader {
 
     private ImageDownloader() {}
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .followRedirects(HttpClient.Redirect.ALWAYS)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
 
     /**
      * Télécharge une image vers un fichier temporaire. Retourne null si échec ou image trop
@@ -38,6 +34,7 @@ public final class ImageDownloader {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(imageUrl))
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.binaryDownload())
                 .GET()
                 .build();
 

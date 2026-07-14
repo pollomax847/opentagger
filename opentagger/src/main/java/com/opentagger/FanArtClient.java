@@ -10,16 +10,12 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 
 public class FanArtClient {
 
     private static final String BASE_URL  = "https://webservice.fanart.tv/v3/music";
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .followRedirects(HttpClient.Redirect.ALWAYS)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     /**
@@ -71,6 +67,7 @@ public class FanArtClient {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .GET()
                 .build();
 

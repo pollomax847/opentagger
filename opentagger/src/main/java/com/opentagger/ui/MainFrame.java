@@ -32,6 +32,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -63,14 +64,6 @@ public class MainFrame extends JFrame {
 
     // ── État ─────────────────────────────────────────────────────────────────
     private final FileTableModel tableModel = new FileTableModel();
-    private TaggingWorker           worker;
-    private AlbumCompletionWorker   completionWorker;
-    private InfoCompleterWorker     infoCompleter;
-    private ListenBrainzSyncWorker  lbSyncWorker;
-    private AlbumClusterWorker      clusterWorker;
-    private CompilationClusterWorker compilationClusterWorker;
-    private SaveWorker              saveWorker;
-    private VideoRecoveryWorker     videoRecoveryWorker;
     private int                     currentMask = Config.get().defaultRenameMask();
     // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
     // onPreferencesSaved() d'écraser ce choix par le masque par défaut des Préférences.
@@ -171,6 +164,14 @@ public class MainFrame extends JFrame {
     private boolean scanDetailsExpanded = false;
     // Workers de scan actifs — permettent l'annulation
     private final java.util.List<SwingWorker<?,?>> activeScanWorkers = new java.util.ArrayList<>();
+
+    // Budget PARTAGÉ (tous scans confondus, tout le lancement) de relectures forcées pour rattraper
+    // les entrées scan_cache sans durée (voir la boucle de scan) — évite qu'une bibliothèque de
+    // 150k+ fichiers dont le cache entier précède la colonne Durée transforme un rescan normalement
+    // rapide (cache-hit) en relecture complète de tout le disque d'un coup. Se reconstitue à chaque
+    // relance de l'appli (pas persisté) ; le reste du cache converge sur plusieurs sessions.
+    private final java.util.concurrent.atomic.AtomicInteger durationBackfillBudget =
+            new java.util.concurrent.atomic.AtomicInteger(4000);
 
     // Pool PARTAGÉ pour la lecture de tags pendant un scan de dossier (phase 2) — un par scan
     // (16 threads, cores*2) causait un vrai blocage constaté en direct : plusieurs dossiers
@@ -504,6 +505,7 @@ public class MainFrame extends JFrame {
         new SwingWorker<Void, com.opentagger.model.FileEntry>() {
             final com.opentagger.CaaClient         caa      = new com.opentagger.CaaClient();
             final com.opentagger.FanArtClient      fanArt   = new com.opentagger.FanArtClient();
+            final com.opentagger.DeezerClient      deezer   = new com.opentagger.DeezerClient();
             final com.opentagger.TagWriter         writer   = new com.opentagger.TagWriter();
             // Partagée entre tous les threads du pool ci-dessous : MetadataCache est déjà
             // synchronized (sauf close()/purgeExpired(), pas appelés ici pendant le traitement),
@@ -576,8 +578,10 @@ public class MainFrame extends JFrame {
                         forCover.releaseMbid      = releaseMbidForCaa;
                         forCover.releaseGroupMbid = releaseGroupMbidForCaa;
                         forCover.artistMbid       = current.artistMbid;
+                        forCover.artist           = current.artist;
+                        forCover.album            = current.album;
                         java.nio.file.Path img = com.opentagger.TagEnrichment.resolveCover(
-                                forCover, e.file, caa, fanArt, cache);
+                                forCover, e.file, caa, fanArt, deezer, cache);
                         if (img != null) {
                             writer.writeCoverOnly(e.file, img);
                             java.nio.file.Files.deleteIfExists(img);
@@ -2305,6 +2309,7 @@ public class MainFrame extends JFrame {
                     Color fg = switch (e.status()) {
                         case ERROR   -> new Color(230, 90, 90);
                         case SKIPPED -> new Color(210, 160, 40);
+                        case TAGGED  -> new Color(100, 200, 130);
                         default      -> UIManager.getColor("List.foreground");
                     };
                     c.setForeground(fg);
@@ -2766,7 +2771,25 @@ public class MainFrame extends JFrame {
                         if (cached != null && cached.mtime() == mtime && cached.size() == size) {
                             // Inchangé depuis le dernier scan (même mtime + taille) : on réutilise
                             // les tags déjà lus plutôt que de rouvrir le fichier.
-                            ti = cached.tagInfo();
+                            //
+                            // Exception étroite : durationSec manquant (entrées scan_cache écrites
+                            // avant l'ajout de la colonne Durée, 2026-07-13) déclenche une relecture
+                            // complète, MAIS throttlée (durationBackfillBudget) — une tentative
+                            // sans throttle sur une bibliothèque de 150k+ fichiers a fait grimper le
+                            // tas à ~5 Go quasi instantanément (quasiment TOUT le cache existant
+                            // précède cette colonne, donc quasiment tout devenait un "cache miss"
+                            // d'un coup, seul FfmpegTagIO/readTags() étant déjà corrigés). Limité à
+                            // un nombre fixe de rattrapages par scan pour lisser le coût sur
+                            // plusieurs sessions plutôt qu'une seule rafale ; les fichiers non
+                            // rattrapés cette fois-ci le seront aux scans suivants, jusqu'à ce que
+                            // le cache entier ait convergé.
+                            if (cached.tagInfo().durationSec <= 0 && durationBackfillBudget.getAndDecrement() > 0) {
+                                try { ti = readTags(f); }
+                                catch (Exception e) { ti = cached.tagInfo(); }
+                                cache.putScanCache(f.getAbsolutePath(), mtime, size, ti);
+                            } else {
+                                ti = cached.tagInfo();
+                            }
                         } else {
                             try { ti = readTags(f); }
                             catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
@@ -2876,39 +2899,24 @@ public class MainFrame extends JFrame {
     }
 
     private void startTagging(boolean selOnly) {
-        if (worker != null && !worker.isDone()) {
-            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
-            return;
-        }
-        // Symétrique de la garde de completeAlbums()/autoCompleteIncomplete() : lancer un taguage
-        // pendant qu'un de ces deux workers tourne encore provoque la même course (connexions
-        // MetadataCache concurrentes + FileEntry/TagInfo mutés par deux threads en parallèle).
-        if (completionWorker != null && !completionWorker.isDone()) {
-            setStatus(I18n.t("Complétion des albums en cours — attendez la fin avant de taguer."));
-            return;
-        }
-        if (infoCompleter != null && !infoCompleter.isDone()) {
-            setStatus(I18n.t("Passe complète en cours — attendez la fin avant de taguer."));
-            return;
-        }
-        // Même raisonnement : un transcodage en cours réécrit/supprime des fichiers sur lesquels
-        // ce taguage pourrait écrire en même temps (course confirmée en direct via jstack : les
-        // deux tournaient simultanément faute de cette garde, aucune des deux méthodes ne
-        // vérifiant l'autre).
-        if (transcodeWorker != null && !transcodeWorker.isDone()) {
-            setStatus(I18n.t("Transcodage en cours — attendez la fin avant de taguer."));
-            return;
-        }
-        if (clusterWorker != null && !clusterWorker.isDone()) {
-            setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de taguer."));
-            return;
-        }
-        // Pas de garde sur saveWorker : voir le commentaire de saveAll() — Tagger et Enregistrer
-        // touchent des ensembles de fichiers disjoints par construction (Tagger exclut déjà
-        // IDENTIFIED/TAGGED de sa cible, Enregistrer ne prend que les IDENTIFIED et ne les
+        // blockerLabels(TAGGING) couvre d'un coup complétion/passe complète/transcodage/groupement
+        // (course jstack confirmée entre Taguage et Transcodage/Complétion, d'où ces gardes à
+        // l'origine) — voir WorkerHub.conflictsWith(). Pas de garde sur l'Enregistrement : Tagger
+        // et Enregistrer touchent des ensembles de fichiers disjoints par
+        // construction (Tagger exclut déjà IDENTIFIED/TAGGED de sa cible, Enregistrer ne prend que
+        // les IDENTIFIED et ne les
         // revisite jamais après), donc sûrs de tourner en même temps. Important sur une
         // bibliothèque dont le taguage dure des heures/jours : sans ça, impossible d'enregistrer
         // quoi que ce soit avant la toute fin du run.
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de taguer.", String.join(", ", blockers)));
+            return;
+        }
         List<FileEntry> toTag = new ArrayList<>();
         if (selOnly) {
             for (int r : table.getSelectedRows())
@@ -2942,7 +2950,7 @@ public class MainFrame extends JFrame {
         boolean useAcoustId = chkForceAcoustId.isSelected() || Config.get().useAcoustId();
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Taguage"), totalFiles);
-        worker = new TaggingWorker(toTag, useAcoustId,
+        TaggingWorker w = new TaggingWorker(toTag, useAcoustId,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
@@ -2957,7 +2965,7 @@ public class MainFrame extends JFrame {
                 }
             }
         );
-        worker.addPropertyChangeListener(evt -> {
+        w.addPropertyChangeListener(evt -> {
             if ("progress".equals(evt.getPropertyName())) {
                 int pct = (Integer) evt.getNewValue();
                 progress.setValue(pct);
@@ -2970,32 +2978,18 @@ public class MainFrame extends JFrame {
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
                 onTaggingDone(toTag);
         });
-        worker.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Taguage"), w, w::stopNow);
     }
 
     /**
      * Arrête TOUTE opération de fond en cours, pas seulement le taguage — demande explicite :
      * le bouton/menu "Arrêter" doit aussi stopper une complétion d'albums, une passe complète,
-     * un groupement d'albums, un enregistrement ou un transcodage en cours, pas juste "Tout
-     * tagger"/"Forcer le re-taguage" (qui partagent déjà le même champ `worker`). Chaque worker a
-     * son propre mécanisme d'arrêt : stopNow() (interrompt aussi les tâches déjà soumises à son
-     * pool de threads, pas seulement le thread de doInBackground()) là où un pool existe, cancel()
-     * nu pour les deux qui n'en ont pas (AlbumClusterWorker est séquentiel, ListenBrainzSyncWorker
-     * ne fait qu'un seul appel réseau bloquant — même cancel(false) que syncListenBrainz()).
-     * videoRecoveryWorker inclus depuis son passage en déclenchement automatique
-     * (autoRecoverVideos()) — avant, seul le dialogue manuel pouvait le lancer, et sa propre
-     * fermeture (VideoRecoveryDialog.onClose()) l'arrêtait déjà ; désormais qu'il peut tourner sans
-     * aucune fenêtre ouverte, il doit apparaître ici comme les autres passes de fond.
+     * un groupement d'albums, un enregistrement ou un transcodage en cours. Chaque worker garde
+     * son propre mécanisme d'arrêt (stopNow()/cancel(), voir WorkerHub.TaskHandle.cancel()) ;
+     * WorkerHub.cancelAll() les appelle tous d'un coup, plus besoin d'énumérer les champs ici.
      */
     private void stopAll() {
-        if (worker != null)           worker.stopNow();
-        if (completionWorker != null) completionWorker.stopNow();
-        if (infoCompleter != null)    infoCompleter.stopNow();
-        if (clusterWorker != null)    clusterWorker.cancel(true);
-        if (saveWorker != null)       saveWorker.stopNow();
-        if (transcodeWorker != null)  transcodeWorker.stopNow();
-        if (lbSyncWorker != null)     lbSyncWorker.cancel(false);
-        if (videoRecoveryWorker != null) videoRecoveryWorker.stopNow();
+        WorkerHub.get().cancelAll();
 
         // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan
         for (int i = 0; i < tableModel.getRowCount(); i++) {
@@ -3023,33 +3017,28 @@ public class MainFrame extends JFrame {
      * Même bascule annuler/lancer qu'completeAlbums() : recliquer pendant que ça tourne annule.
      */
     private void saveAll() {
-        if (saveWorker != null && !saveWorker.isDone()) {
-            saveWorker.stopNow();
+        Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.SAVE);
+        if (running.isPresent()) {
+            running.get().cancel();
             setStatus(I18n.t("Enregistrement annulé."));
             return;
         }
-        // PAS de garde sur `worker` (TaggingWorker) ici, volontairement — voir startTagging()/
-        // forceRetag() pour le miroir de ce choix : Tagger et Enregistrer touchent des ensembles
-        // de fichiers disjoints par construction (Tagger exclut déjà IDENTIFIED/TAGGED de sa
-        // cible ; Enregistrer ne prend que les IDENTIFIED et ne les revisite jamais après avoir
-        // été identifiés) — sûrs de tourner en même temps, y compris pendant un taguage qui dure
-        // des heures/jours (bibliothèque volumineuse) où bloquer Enregistrer jusqu'à la fin du run
-        // ferait courir un vrai risque de tout perdre (rien n'est sur le disque tant que non
-        // enregistré) en cas de plantage/fermeture prématurée. MetadataCache (SQLite) est déjà
-        // configuré pour l'accès concurrent multi-connexions (WAL + busy_timeout).
-        //
-        // Les AUTRES workers restent bloquants : AlbumCompletionWorker/InfoCompleterWorker
-        // touchent eux aussi des fichiers IDENTIFIED (depuis leur extension récente au même
-        // statut) et pourraient donc muter la même FileEntry qu'un Enregistrement en cours ;
-        // TranscodeWorker/AlbumClusterWorker déplacent/réécrivent des fichiers sur lesquels une
-        // écriture de tags pourrait être en train de se faire.
-        List<String> ops = new ArrayList<>();
-        if (completionWorker != null && !completionWorker.isDone()) ops.add(I18n.t("Complétion des albums"));
-        if (infoCompleter != null && !infoCompleter.isDone())       ops.add(I18n.t("Passe complète"));
-        if (transcodeWorker != null && !transcodeWorker.isDone())   ops.add(I18n.t("Transcodage"));
-        if (clusterWorker != null && !clusterWorker.isDone())       ops.add(I18n.t("Groupement des albums"));
-        if (!ops.isEmpty()) {
-            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'enregistrer.", String.join(", ", ops)));
+        // PAS de garde sur TAGGING ici, volontairement — voir startTagging()/forceRetag() pour le
+        // miroir de ce choix : Tagger et Enregistrer touchent des ensembles de fichiers disjoints
+        // par construction (Tagger exclut déjà IDENTIFIED/TAGGED de sa cible ; Enregistrer ne
+        // prend que les IDENTIFIED et ne les revisite jamais après avoir été identifiés) — sûrs de
+        // tourner en même temps, y compris pendant un taguage qui dure des heures/jours
+        // (bibliothèque volumineuse) où bloquer Enregistrer jusqu'à la fin du run ferait courir un
+        // vrai risque de tout perdre (rien n'est sur le disque tant que non enregistré) en cas de
+        // plantage/fermeture prématurée. MetadataCache (SQLite) est déjà configuré pour l'accès
+        // concurrent multi-connexions (WAL + busy_timeout). C'est exactement l'exception encodée
+        // dans WorkerHub.conflictsWith() pour SAVE — les AUTRES tâches LIBRARY_WRITE restent
+        // bloquantes (AlbumCompletionWorker/InfoCompleterWorker touchent aussi des fichiers
+        // IDENTIFIED ; Transcodage/regroupements déplacent/réécrivent des fichiers en cours
+        // d'enregistrement).
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.SAVE);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'enregistrer.", String.join(", ", blockers)));
             return;
         }
 
@@ -3069,7 +3058,7 @@ public class MainFrame extends JFrame {
         logRunStart(I18n.t("Enregistrement"), toSave.size());
         setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
 
-        saveWorker = new SaveWorker(toSave, maskIndex,
+        SaveWorker w = new SaveWorker(toSave, maskIndex,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> SwingUtilities.invokeLater(() -> {
                 tableModel.update(entry);
@@ -3082,7 +3071,7 @@ public class MainFrame extends JFrame {
                 progress.setString(doneCount + "/" + total + etaText(doneCount, total));
             })
         );
-        saveWorker.addPropertyChangeListener(evt -> {
+        w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
@@ -3097,7 +3086,9 @@ public class MainFrame extends JFrame {
                 });
             }
         });
-        saveWorker.execute();
+        // SAVE est le seul TaskKind volontairement compatible avec TAGGING en parallèle (voir
+        // WorkerHub.conflictsWith).
+        WorkerHub.get().submit(WorkerHub.TaskKind.SAVE, I18n.t("Enregistrement"), w, w::stopNow);
     }
 
     /**
@@ -3235,12 +3226,13 @@ public class MainFrame extends JFrame {
      * actions ci-dessus qui font un appel par fichier. Action manuelle uniquement.
      */
     private void syncListenBrainz() {
-        if (lbSyncWorker != null && !lbSyncWorker.isDone()) {
-            lbSyncWorker.cancel(false);
+        Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.LISTENBRAINZ_SYNC);
+        if (running.isPresent()) {
+            running.get().cancel();
             setStatus(I18n.t("Synchronisation ListenBrainz annulée."));
             return;
         }
-        if (worker != null && !worker.isDone()) {
+        if (!WorkerHub.get().blockers(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isEmpty()) {
             setStatus(I18n.t("Taguage en cours — attendez la fin avant de synchroniser ListenBrainz."));
             return;
         }
@@ -3269,12 +3261,12 @@ public class MainFrame extends JFrame {
         progress.setIndeterminate(true);
         setStatus(I18n.t("Synchronisation ListenBrainz…"));
 
-        lbSyncWorker = new ListenBrainzSyncWorker(
+        ListenBrainzSyncWorker w = new ListenBrainzSyncWorker(
             targets,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); refreshStats(); })
         );
-        lbSyncWorker.addPropertyChangeListener(evt -> {
+        w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
@@ -3284,34 +3276,25 @@ public class MainFrame extends JFrame {
                 });
             }
         });
-        lbSyncWorker.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.LISTENBRAINZ_SYNC,
+                I18n.t("Synchronisation ListenBrainz"), w, () -> w.cancel(false));
     }
 
     private void forceRetag() {
         // Cette action lance elle aussi un TaggingWorker (via launchForcedTagging) — même garde
-        // que startTagging()/autoCompleteIncomplete()/completeAlbums(), sinon un worker déjà actif
-        // est silencieusement remplacé dans le champ `worker` alors qu'il continue de tourner.
-        if (worker != null && !worker.isDone()) {
+        // que startTagging()/autoCompleteIncomplete()/completeAlbums(), sinon un taguage déjà actif
+        // continuerait de tourner pendant qu'un second démarre par-dessus.
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
         }
-        if (completionWorker != null && !completionWorker.isDone()) {
-            setStatus(I18n.t("Complétion des albums en cours — attendez la fin avant de forcer le re-taguage."));
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de forcer le re-taguage.",
+                    String.join(", ", blockers)));
             return;
         }
-        if (infoCompleter != null && !infoCompleter.isDone()) {
-            setStatus(I18n.t("Passe complète en cours — attendez la fin avant de forcer le re-taguage."));
-            return;
-        }
-        if (transcodeWorker != null && !transcodeWorker.isDone()) {
-            setStatus(I18n.t("Transcodage en cours — attendez la fin avant de forcer le re-taguage."));
-            return;
-        }
-        if (clusterWorker != null && !clusterWorker.isDone()) {
-            setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de forcer le re-taguage."));
-            return;
-        }
-        // Pas de garde sur saveWorker : voir le commentaire de saveAll() — forceRetag() ne cible
+        // Pas de garde sur SAVE : voir le commentaire de saveAll() — forceRetag() ne cible
         // que des fichiers déjà TAGGED, jamais touchés par un Enregistrement en cours (qui ne
         // prend que les IDENTIFIED) — ensembles disjoints, sûr de tourner en même temps.
         // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
@@ -3398,7 +3381,7 @@ public class MainFrame extends JFrame {
         final int forcedTotal = forcedTargets.size();
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Re-taguage forcé"), forcedTotal);
-        worker = new TaggingWorker(forcedTargets, useAcoustId,
+        TaggingWorker w = new TaggingWorker(forcedTargets, useAcoustId,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
                 tableModel.update(entry);
@@ -3406,7 +3389,7 @@ public class MainFrame extends JFrame {
                 followProcessing(entry);
                 if (entry.status != FileEntry.Status.PROCESSING) appendLog(entry);
             });
-        worker.addPropertyChangeListener(evt -> {
+        w.addPropertyChangeListener(evt -> {
             if ("progress".equals(evt.getPropertyName())) {
                 int pct = (Integer) evt.getNewValue();
                 progress.setValue(pct);
@@ -3420,7 +3403,7 @@ public class MainFrame extends JFrame {
         btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setVisible(true);
-        worker.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Re-taguage forcé"), w, w::stopNow);
     }
 
     private void onTaggingDone(List<FileEntry> done) {
@@ -3493,7 +3476,7 @@ public class MainFrame extends JFrame {
         logRunStart(I18n.t("Passe complète"), targets.size());
         setStatus(I18n.t("Complétion de %d fichier(s) incomplet(s)…", targets.size()));
 
-        infoCompleter = new InfoCompleterWorker(
+        InfoCompleterWorker w = new InfoCompleterWorker(
             targets,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> SwingUtilities.invokeLater(() -> {
@@ -3507,7 +3490,7 @@ public class MainFrame extends JFrame {
                 progress.setString(doneCount + "/" + total + etaText(doneCount, total));
             })
         );
-        infoCompleter.addPropertyChangeListener(evt -> {
+        w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
@@ -3517,7 +3500,7 @@ public class MainFrame extends JFrame {
                 });
             }
         });
-        infoCompleter.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.INFO_COMPLETER, I18n.t("Passe complète"), w, w::stopNow);
     }
 
     /**
@@ -3672,28 +3655,20 @@ public class MainFrame extends JFrame {
 
     // ── Transcodage audio ─────────────────────────────────────────────────────
 
-    private TranscodeWorker transcodeWorker;
-
     private void transcodeFiles(boolean selectionOnly) {
-        if (transcodeWorker != null && !transcodeWorker.isDone()) {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TRANSCODE).isPresent()) {
             JOptionPane.showMessageDialog(this, I18n.t("Un transcodage est déjà en cours."),
                     I18n.t("En cours"), JOptionPane.WARNING_MESSAGE);
             return;
         }
-        // Garde manquante trouvée en direct (jstack a montré TranscodeWorker et
-        // AlbumCompletionWorker tourner EN MÊME TEMPS, sans protection) : le transcodage
-        // remplace/supprime des fichiers sur lesquels un taguage/complétion en cours pourrait
-        // écrire au même moment — même risque que startTagging()/completeAlbums(), gardé
-        // symétriquement ici.
-        String blocking = null;
-        if (worker != null && !worker.isDone())                     blocking = I18n.t("Taguage en cours");
-        else if (completionWorker != null && !completionWorker.isDone()) blocking = I18n.t("Complétion des albums en cours");
-        else if (infoCompleter != null && !infoCompleter.isDone())  blocking = I18n.t("Passe complète en cours");
-        else if (clusterWorker != null && !clusterWorker.isDone())  blocking = I18n.t("Groupement des albums en cours");
-        else if (saveWorker != null && !saveWorker.isDone())        blocking = I18n.t("Enregistrement en cours");
-        if (blocking != null) {
+        // Garde trouvée en direct (jstack a montré TranscodeWorker et AlbumCompletionWorker
+        // tourner EN MÊME TEMPS, sans protection) : le transcodage remplace/supprime des fichiers
+        // sur lesquels un taguage/complétion/enregistrement en cours pourrait écrire au même
+        // moment — voir WorkerHub.conflictsWith() (TRANSCODE fait partie de LIBRARY_WRITE).
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TRANSCODE);
+        if (!blockers.isEmpty()) {
             JOptionPane.showMessageDialog(this,
-                    I18n.t("%s — attendez la fin avant de transcoder.", blocking),
+                    I18n.t("%s — attendez la fin avant de transcoder.", String.join(", ", blockers)),
                     I18n.t("En cours"), JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -3737,63 +3712,50 @@ public class MainFrame extends JFrame {
         if (btnTranscode != null) btnTranscode.setEnabled(false);
         setStatus("⏳ " + I18n.t("Transcodage… 0 / %d", toTranscode.size()));
 
-        transcodeWorker = new TranscodeWorker(toTranscode, tableModel,
+        TranscodeWorker w = new TranscodeWorker(toTranscode, tableModel,
             pr -> setStatus("⏳ " + I18n.t("Transcodage %d / %d", pr.done(), pr.total())),
-            () -> {
-                String summary;
-                try { summary = transcodeWorker.get(); } catch (Exception ex) { summary = I18n.t("Transcodage terminé"); }
+            summary -> {
                 setStatus(summary);
                 if (btnTranscode != null) btnTranscode.setEnabled(true);
             }
         );
-        transcodeWorker.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.TRANSCODE, I18n.t("Transcodage"), w, w::stopNow);
     }
 
     // ── Compléter les albums ──────────────────────────────────────────────────
 
     private void completeAlbums() {
-        if (completionWorker != null && !completionWorker.isDone()) {
-            completionWorker.stopNow();
+        Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.ALBUM_COMPLETION);
+        if (running.isPresent()) {
+            running.get().cancel();
             setStatus(I18n.t("Complétion annulée."));
             return;
         }
         // Même garde que startTagging()/autoCompleteIncomplete() : sans elle, ce worker et un
         // TaggingWorker/InfoCompleterWorker en cours écrivent en même temps dans MetadataCache (connexions
         // SQLite distinctes) et mutent les mêmes FileEntry/TagInfo affichés par le tableau.
-        if (worker != null && !worker.isDone()) {
-            setStatus(I18n.t("Taguage en cours — attendez la fin avant de compléter les albums."));
-            return;
-        }
-        if (infoCompleter != null && !infoCompleter.isDone()) {
-            setStatus(I18n.t("Passe complète en cours — attendez la fin avant de compléter les albums."));
-            return;
-        }
-        if (transcodeWorker != null && !transcodeWorker.isDone()) {
-            setStatus(I18n.t("Transcodage en cours — attendez la fin avant de compléter les albums."));
-            return;
-        }
-        if (clusterWorker != null && !clusterWorker.isDone()) {
-            setStatus(I18n.t("Groupement des albums en cours — attendez la fin avant de compléter les albums."));
-            return;
-        }
-        if (saveWorker != null && !saveWorker.isDone()) {
-            setStatus(I18n.t("Enregistrement en cours — attendez la fin avant de compléter les albums."));
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.ALBUM_COMPLETION);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de compléter les albums.",
+                    String.join(", ", blockers)));
             return;
         }
         setStatus(I18n.t("Complétion des albums en cours…"));
-        completionWorker = new AlbumCompletionWorker(
+        AlbumCompletionWorker w = new AlbumCompletionWorker(
             tableModel,
             this::setStatus,
             () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Complétion albums terminée.")))
         );
-        completionWorker.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.ALBUM_COMPLETION,
+                I18n.t("Complétion des albums"), w, w::stopNow);
     }
 
     // ── Groupement des albums (ReplayGain d'album, n° piste/disque) ────────────
 
     private void clusterAlbums() {
-        if (clusterWorker != null && !clusterWorker.isDone()) {
-            clusterWorker.cancel(true);
+        Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.ALBUM_CLUSTER);
+        if (running.isPresent()) {
+            running.get().cancel();
             setStatus(I18n.t("Groupement annulé."));
             return;
         }
@@ -3815,19 +3777,21 @@ public class MainFrame extends JFrame {
             return;
         }
         setStatus(I18n.t("Groupement des albums en cours…"));
-        clusterWorker = new AlbumClusterWorker(
+        AlbumClusterWorker w = new AlbumClusterWorker(
             tableModel,
             this::setStatus,
             () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Groupement des albums terminé.")))
         );
-        clusterWorker.execute();
+        WorkerHub.get().submit(WorkerHub.TaskKind.ALBUM_CLUSTER,
+                I18n.t("Groupement des albums"), w, () -> w.cancel(true));
     }
 
     // ── Grouper par compilations (Stars 80, NRJ, Fun Radio, RFM…) ─────────────
 
     private void groupByCompilations() {
-        if (compilationClusterWorker != null && !compilationClusterWorker.isDone()) {
-            compilationClusterWorker.cancel(true);
+        Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.COMPILATION_CLUSTER);
+        if (running.isPresent()) {
+            running.get().cancel();
             setStatus(I18n.t("Groupement par compilations annulé."));
             return;
         }
@@ -3846,7 +3810,7 @@ public class MainFrame extends JFrame {
             return;
         }
         setStatus(I18n.t("Recherche de correspondances de compilations…"));
-        compilationClusterWorker = new CompilationClusterWorker(
+        CompilationClusterWorker w = new CompilationClusterWorker(
             tableModel,
             this::setStatus,
             matches -> SwingUtilities.invokeLater(() -> {
@@ -3857,7 +3821,10 @@ public class MainFrame extends JFrame {
                 }
             })
         );
-        compilationClusterWorker.execute();
+        // Cette migration comble au passage le seul vrai trou de comportement qui existait ici :
+        // stopAll()/confirmQuit() ignoraient cette passe jusqu'ici — voir WorkerHub, LIBRARY_WRITE.
+        WorkerHub.get().submit(WorkerHub.TaskKind.COMPILATION_CLUSTER,
+                I18n.t("Groupement par compilations"), w, () -> w.cancel(true));
     }
 
     // ── Organiser en dossiers ─────────────────────────────────────────────────
@@ -4327,25 +4294,33 @@ public class MainFrame extends JFrame {
      * ou la fin du scan suivant) retrouvera de toute façon tout ce qui reste à traiter.
      */
     private void autoRecoverVideos(File dir) {
-        if (videoRecoveryWorker != null && !videoRecoveryWorker.isDone()) return;
+        if (WorkerHub.get().current(WorkerHub.TaskKind.VIDEO_RECOVERY).isPresent()) return;
         new SwingWorker<List<File>, Void>() {
             @Override protected List<File> doInBackground() { return new VideoScanner().scan(dir); }
             @Override protected void done() {
                 List<File> videos;
                 try { videos = get(); } catch (Exception ex) { return; }
                 if (videos.isEmpty()) return;
+                // Le scan ci-dessus prend du temps : revérifier juste avant de soumettre, au cas
+                // où une récupération aurait démarré entre-temps (dialogue manuel, ou un autre
+                // dossier ouvert coup sur coup) — sinon submit() lèverait IllegalStateException.
+                if (WorkerHub.get().current(WorkerHub.TaskKind.VIDEO_RECOVERY).isPresent()) return;
                 // onProgress appelé depuis SwingWorker.process(), déjà garanti sur l'EDT — même
                 // motif que VideoRecoveryDialog.onStart().
-                videoRecoveryWorker = new VideoRecoveryWorker(videos, dir.toPath(), MainFrame.this::setStatus);
-                videoRecoveryWorker.addPropertyChangeListener(evt -> {
+                VideoRecoveryWorker w = new VideoRecoveryWorker(videos, dir.toPath(), MainFrame.this::setStatus);
+                w.addPropertyChangeListener(evt -> {
                     if ("state".equals(evt.getPropertyName())
                             && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                         setStatus(I18n.t("Vidéos (%s) — %d converti(s), %d non reconnu(s), %d erreur(s).",
-                                dir.getName(), videoRecoveryWorker.getConverted(),
-                                videoRecoveryWorker.getUnrecognized(), videoRecoveryWorker.getErrors()));
+                                dir.getName(), w.getConverted(), w.getUnrecognized(), w.getErrors()));
                     }
                 });
-                videoRecoveryWorker.execute();
+                // Même TaskKind que VideoRecoveryDialog.onStart() : les deux points de lancement
+                // (auto ici, manuel via le dialogue) partagent désormais un seul suivi — avant,
+                // deux champs indépendants permettaient à une double instance de tourner en même
+                // temps (dialogue fermé sans attendre + nouveau dossier ouvert aussitôt).
+                WorkerHub.get().submit(WorkerHub.TaskKind.VIDEO_RECOVERY,
+                        I18n.t("Récupération vidéo : %s", dir.getName()), w, w::stopNow);
             }
         }.execute();
     }
@@ -4658,15 +4633,8 @@ public class MainFrame extends JFrame {
      *  dans cette classe (voir startTagging()/completeAlbums()/transcodeFiles()) — les mêmes
      *  champs, donc aucun risque de diverger de ce que ces gardes considèrent déjà "en cours". */
     private java.util.List<String> activeOperations() {
-        java.util.List<String> ops = new java.util.ArrayList<>();
-        if (worker != null && !worker.isDone())                     ops.add(I18n.t("Taguage"));
-        if (completionWorker != null && !completionWorker.isDone()) ops.add(I18n.t("Complétion des albums"));
-        if (infoCompleter != null && !infoCompleter.isDone())       ops.add(I18n.t("Passe complète"));
-        if (transcodeWorker != null && !transcodeWorker.isDone())   ops.add(I18n.t("Transcodage"));
-        if (lbSyncWorker != null && !lbSyncWorker.isDone())         ops.add(I18n.t("Synchronisation ListenBrainz"));
-        if (clusterWorker != null && !clusterWorker.isDone())       ops.add(I18n.t("Groupement des albums"));
-        if (saveWorker != null && !saveWorker.isDone())             ops.add(I18n.t("Enregistrement"));
-        if (!activeScanWorkers.isEmpty())                           ops.add(I18n.t("Scan de dossier"));
+        java.util.List<String> ops = new java.util.ArrayList<>(WorkerHub.get().activeLabels());
+        if (!activeScanWorkers.isEmpty()) ops.add(I18n.t("Scan de dossier"));
         return ops;
     }
 

@@ -10,7 +10,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -20,9 +19,7 @@ public class MusicBrainzClient {
     private static final String BASE_URL    = "https://musicbrainz.org/ws/2";
     private static final int    MAX_RETRIES = 3;
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     // Rate-limit MB centralisé ici — seul point de passage réel (getWithRetry, juste en dessous)
@@ -186,6 +183,7 @@ public class MusicBrainzClient {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
                     .GET()
                     .build();
             mbRateLimit();

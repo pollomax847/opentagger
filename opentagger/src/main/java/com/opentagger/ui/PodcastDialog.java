@@ -326,7 +326,8 @@ public class PodcastDialog extends JDialog {
         btnTag.setEnabled(false);
         setBusy(true, I18n.t("Taguage en cours…"));
 
-        PodcastWorker worker = new PodcastWorker(currentMatches, currentFeed, tableModel);
+        PodcastWorker worker = new PodcastWorker(currentMatches, currentFeed, tableModel,
+                msg -> lblFeedStatus.setText(msg));
         worker.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
@@ -341,7 +342,11 @@ public class PodcastDialog extends JDialog {
                 dispose();
             }
         });
-        worker.execute();
+        // Ce dialogue n'a pas son propre champ worker : jusqu'ici MainFrame (stopAll()/
+        // confirmQuit()) n'avait donc aucune visibilité sur un taguage podcast en cours. Passer
+        // par le hub partagé règle ça sans que MainFrame ait besoin de connaître PodcastDialog.
+        WorkerHub.get().submit(WorkerHub.TaskKind.PODCAST_TAG,
+                I18n.t("Taguage podcast : %s", currentFeed.showTitle()), worker, () -> worker.cancel(true));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

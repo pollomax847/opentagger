@@ -43,8 +43,6 @@ public class PodcastRssClient {
         String guid            // identifiant unique RSS — plus fiable que le titre pour dédupliquer
     ) {}
 
-    private static final int TIMEOUT_SEC = 30;
-
     public static PodcastFeed fetch(String feedUrl) throws Exception {
         String xml = downloadXml(feedUrl);
         return parseXml(xml, feedUrl);
@@ -53,13 +51,11 @@ public class PodcastRssClient {
     // ── Download ─────────────────────────────────────────────────────────────
 
     private static String downloadXml(String url) throws Exception {
-        HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(TIMEOUT_SEC))
-                .followRedirects(HttpClient.Redirect.ALWAYS)
-                .build();
+        HttpClient client = HttpTimeouts.client();
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.largeDownload())
                 .GET().build();
         HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200)

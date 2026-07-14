@@ -80,6 +80,12 @@ public final class FfmpegTagIO {
             // Fusionne format.tags (AAC/ID3v2) ET streams[0].tags (Opus/Vorbis comments) — les
             // deux ne sont jamais renseignés en même temps pour un même fichier (voir Javadoc de
             // la classe), donc pas de risque de collision entre les deux sources.
+            // format.duration est toujours présent dans la réponse -show_format, indépendamment
+            // des tags eux-mêmes (un fichier sans AUCUN tag a quand même une durée) — donc lu
+            // avant le "tags.isEmpty()" ci-dessous, même raisonnement que MainFrame.readTags().
+            double durationSeconds = root.path("format").path("duration").asDouble(0);
+            if (durationSeconds > 0) ti.durationSec = (int) Math.round(durationSeconds);
+
             Map<String, String> tags = new HashMap<>();
             collectTags(root.path("format").path("tags"), tags);
             for (JsonNode s : root.path("streams")) collectTags(s.path("tags"), tags);

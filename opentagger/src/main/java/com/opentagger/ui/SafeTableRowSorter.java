@@ -29,8 +29,16 @@ import java.util.List;
  * Cette exception est une sœur d'`IllegalArgumentException` (pas une sous-classe) : elle passait
  * donc tout droit à travers l'ancien filtre, plantait l'EDT à chaque occurrence malgré le
  * commentaire de classe promettant de couvrir "tout autre [cas] non prévu". Élargi à
- * `RuntimeException` — filet de sécurité d'affichage déjà scopé à 4 méthodes qui ne font que
+ * `RuntimeException` — filet de sécurité d'affichage déjà scopé à des méthodes qui ne font que
  * déléguer au sorter Swing, donc élargir n'y cache aucune vraie erreur de logique métier ailleurs.
+ *
+ * 2026-07-14 : `rowsInserted()` n'était PAS dans ce filet — trouvé via 154 occurrences du même
+ * `IndexOutOfBoundsException("Invalid range")` sur `AWT-EventQueue-0` dans un log de production de
+ * 19h+ (`DefaultRowSorter.checkAgainstModel` → `rowsInserted` → `JTable.notifySorter`, jamais
+ * `rowsUpdated`/`sort`). Cause identique aux deux premières : `FileTableModel.add()`/`update()`
+ * insèrent des lignes pendant qu'un run de taguage tourne, même course que celle déjà documentée
+ * ci-dessus. Ajouté `rowsInserted`/`rowsDeleted` (sœur symétrique, même risque non encore observé
+ * en prod mais même mécanisme) au filet.
  */
 public class SafeTableRowSorter<M extends TableModel> extends TableRowSorter<M> {
 
@@ -45,6 +53,20 @@ public class SafeTableRowSorter<M extends TableModel> extends TableRowSorter<M> 
         } catch (RuntimeException ignored) {
             // Comparateur/rang temporairement incohérent — pas fatal, on retente au prochain événement.
         }
+    }
+
+    @Override
+    public void rowsInserted(int firstRow, int endRow) {
+        try {
+            super.rowsInserted(firstRow, endRow);
+        } catch (RuntimeException ignored) {}
+    }
+
+    @Override
+    public void rowsDeleted(int firstRow, int endRow) {
+        try {
+            super.rowsDeleted(firstRow, endRow);
+        } catch (RuntimeException ignored) {}
     }
 
     @Override

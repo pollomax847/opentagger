@@ -7,7 +7,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -28,9 +27,7 @@ public class ListenBrainzClient {
     // count est plafonné à 1000 par page, quelle que soit la valeur demandée au-delà.
     private static final int PAGE_SIZE = 1000;
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     /**
@@ -54,6 +51,7 @@ public class ListenBrainzClient {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
                     .GET()
                     .build();
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());

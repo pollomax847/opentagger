@@ -38,7 +38,12 @@ public class VideoRecoveryDialog extends JDialog {
     private final JButton      btnStart    = new JButton(I18n.t("Lancer"));
     private final JButton      btnClose    = new JButton(I18n.t("Fermer"));
 
-    private VideoRecoveryWorker worker;
+    // TaskHandle plutôt qu'un champ VideoRecoveryWorker direct : ce dialogue et
+    // MainFrame.autoRecoverVideos() partagent le même TaskKind.VIDEO_RECOVERY sur WorkerHub — avant
+    // ce correctif, chacun avait son propre champ indépendant, si bien qu'une récupération lancée
+    // depuis ce dialogue puis "laissée tourner" (fermeture sans attendre, cf. doc de classe) pouvait
+    // tourner en même temps qu'une seconde déclenchée automatiquement sur un autre dossier.
+    private WorkerHub.TaskHandle recoveryHandle;
 
     public VideoRecoveryDialog(Frame owner) {
         super(owner, I18n.t("Récupérer l'audio des vidéos non reconnues"), true);
@@ -198,6 +203,13 @@ public class VideoRecoveryDialog extends JDialog {
 
     private void onStart() {
         if (lstModel.isEmpty()) return;
+        if (WorkerHub.get().current(WorkerHub.TaskKind.VIDEO_RECOVERY).isPresent()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Une récupération vidéo est déjà en cours (déclenchée automatiquement ou "
+                     + "depuis une autre fenêtre)."),
+                I18n.t("Récupération vidéo"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
 
         java.util.List<File> videos = java.util.Collections.list(lstModel.elements());
         int ok = JOptionPane.showConfirmDialog(this,
@@ -216,23 +228,26 @@ public class VideoRecoveryDialog extends JDialog {
         Path scanRoot = java.nio.file.Paths.get(tfFolder.getText().trim());
         // onProgress est appelé depuis SwingWorker.process(), déjà garanti sur l'EDT — pas besoin
         // d'un invokeLater supplémentaire ici.
-        worker = new VideoRecoveryWorker(videos, scanRoot, msg -> taLog.append(msg + "\n"));
-        worker.addPropertyChangeListener(evt -> {
+        VideoRecoveryWorker w = new VideoRecoveryWorker(videos, scanRoot, msg -> taLog.append(msg + "\n"));
+        w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 progress.setIndeterminate(false);
                 progress.setVisible(false);
                 btnScan.setEnabled(true);
                 lblStatus.setText(I18n.t("Terminé — %d converti(s), %d non reconnu(s), %d erreur(s).",
-                        worker.getConverted(), worker.getUnrecognized(), worker.getErrors()));
+                        w.getConverted(), w.getUnrecognized(), w.getErrors()));
                 onScan();
             }
         });
-        worker.execute();
+        recoveryHandle = WorkerHub.get().submit(WorkerHub.TaskKind.VIDEO_RECOVERY,
+                I18n.t("Récupération vidéo : %s", scanRoot.getFileName()), w, w::stopNow);
     }
 
     private void onClose() {
-        if (worker != null && !worker.isDone()) worker.stopNow();
+        // Seulement SI c'est bien l'instance lancée PAR ce dialogue qui tourne encore — pas une
+        // récupération sans rapport déclenchée automatiquement ailleurs entre-temps.
+        if (recoveryHandle != null && recoveryHandle.isRunning()) recoveryHandle.cancel();
         dispose();
     }
 }

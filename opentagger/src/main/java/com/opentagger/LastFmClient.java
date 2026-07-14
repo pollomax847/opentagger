@@ -10,7 +10,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -36,9 +35,7 @@ public class LastFmClient {
         "Romantic", "Party", "Dark", "Acoustic", "Instrumental"
     };
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     private String                       cachedTagsKey  = null;
@@ -193,6 +190,7 @@ public class LastFmClient {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .GET()
                 .build();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());

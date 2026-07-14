@@ -12,7 +12,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.time.Duration;
 import java.util.Locale;
 
 /**
@@ -29,10 +28,7 @@ public class UpdateChecker {
 
     // GitHub redirige (302) les URLs d'assets de release vers un CDN signé — sans suivre les
     // redirections, le téléchargement échoue systématiquement avec "HTTP 302" au lieu du contenu.
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     public record UpdateInfo(String version, String downloadUrl, String releaseNotes) {}
@@ -43,6 +39,7 @@ public class UpdateChecker {
                 .uri(URI.create(LATEST_URL))
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .GET().build();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() == 404) return null; // pas encore de release publiée
@@ -93,6 +90,7 @@ public class UpdateChecker {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.largeDownload())
                 .GET().build();
         HttpResponse<Path> response = http.send(request, HttpResponse.BodyHandlers.ofFile(temp));
         if (response.statusCode() != 200) {

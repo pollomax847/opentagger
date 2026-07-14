@@ -251,7 +251,10 @@ public class Config {
     // --- Fournisseurs de pochette : activation individuelle + ordre (façon Picard) ---
     public boolean caaReleaseEnabled()      { return bool("cover.caa_release_enabled",       true); }
     public boolean caaReleaseGroupEnabled() { return bool("cover.caa_release_group_enabled", true); }
-    public static final String DEFAULT_COVER_PROVIDER_ORDER = "caa_release,caa_release_group,local,fanart";
+    // Aucune clé requise (API publique Deezer) — activé par défaut, dernier recours texte
+    // (artiste+album) pour les fichiers sans MBID exploitable, voir DeezerClient.
+    public boolean deezerEnabled()          { return bool("deezer.enabled",                  true); }
+    public static final String DEFAULT_COVER_PROVIDER_ORDER = "caa_release,caa_release_group,local,fanart,deezer";
     public String[] coverProviderOrder() {
         String v = str("cover.provider_order", DEFAULT_COVER_PROVIDER_ORDER);
         return v.isBlank() ? DEFAULT_COVER_PROVIDER_ORDER.split(",") : v.split(",");

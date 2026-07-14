@@ -101,10 +101,10 @@ public class SettingsDialog extends JDialog {
     private JTextField tfCoverFilename;
 
     // ── Fournisseurs de pochette — activables/réordonnables (façon Picard) ──────────
-    private static final String[] COVER_PROVIDER_IDS = {"caa_release", "caa_release_group", "local", "fanart"};
+    private static final String[] COVER_PROVIDER_IDS = {"caa_release", "caa_release_group", "local", "fanart", "deezer"};
     private static final String[] COVER_PROVIDER_LABELS = {
         "Cover Art Archive : parution", "Cover Art Archive : groupe de parution",
-        "Dossier local (folder.jpg / cover.jpg)", "FanArt.tv"
+        "Dossier local (folder.jpg / cover.jpg)", "FanArt.tv", "Deezer (recherche texte, sans clé API)"
     };
     private DefaultListModel<String>     lstCoverProvidersModel = new DefaultListModel<>();
     private JList<String>                lstCoverProviders;
@@ -1863,6 +1863,7 @@ public class SettingsDialog extends JDialog {
         coverProviderEnabled.put("caa_release_group", cfg.caaReleaseGroupEnabled());
         coverProviderEnabled.put("local",  cfg.coverSearchLocal());
         coverProviderEnabled.put("fanart", cfg.fanartEnabled());
+        coverProviderEnabled.put("deezer", cfg.deezerEnabled());
         refreshCoverProvidersList();
 
         chkCorrectPunctuation.setSelected(cfg.correctPunctuation());
@@ -2033,6 +2034,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("cover.caa_release_group_enabled",  String.valueOf(coverProviderEnabled.getOrDefault("caa_release_group", true)));
         p.setProperty("cover.search_local",               String.valueOf(coverProviderEnabled.getOrDefault("local", true)));
         p.setProperty("fanart.download_cover",            String.valueOf(coverProviderEnabled.getOrDefault("fanart", true)));
+        p.setProperty("deezer.enabled",                   String.valueOf(coverProviderEnabled.getOrDefault("deezer", true)));
 
         p.setProperty("cover.save_to_file",        String.valueOf(chkCoverSaveToFile.isSelected()));
         p.setProperty("cover.overwrite_file",      String.valueOf(chkCoverOverwriteFile.isSelected()));

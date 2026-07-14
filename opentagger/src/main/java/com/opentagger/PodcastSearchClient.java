@@ -7,7 +7,6 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.*;
 
 /**
@@ -38,10 +37,7 @@ public class PodcastSearchClient {
      */
     public static List<PodcastResult> search(String query) throws Exception {
         String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(15))
-                .followRedirects(HttpClient.Redirect.ALWAYS)
-                .build();
+        HttpClient client = HttpTimeouts.client();
 
         // Passe 1 : sans restriction de pays (résultats globaux avec feedUrl)
         List<PodcastResult> results = doSearch(client, SEARCH_BASE + encoded);
@@ -57,6 +53,7 @@ public class PodcastSearchClient {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .GET().build();
         HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200)

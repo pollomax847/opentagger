@@ -50,6 +50,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final AudDClient       audd     = new AudDClient();
     private final CaaClient        caa      = new CaaClient();
     private final FanArtClient     fanArt   = new FanArtClient();
+    private final DeezerClient     deezer   = new DeezerClient();
     private final TagWriter        writer   = new TagWriter();
     private final FileRenamer      renamer  = new FileRenamer();
     private final MetadataCache    cache    = new MetadataCache();
@@ -139,7 +140,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
             }
 
             TagEnrichment.SaveResult res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
-                    writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+                    deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
 
             Path movedTo = moveToSubfolder(video, VideoScanner.CONVERTED_FOLDER);
             converted.incrementAndGet();

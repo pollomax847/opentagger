@@ -221,9 +221,9 @@ public class App {
         // Paroles — même gap : absentes du CLI jusqu'à présent.
         try { new LyricsClient().enrich(choisi); } catch (Exception ignored) {}
 
-        // 8. Pochette : Cover Art Archive → dossier local → FanArt.tv
-        System.out.println("Recherche de la pochette (CAA → local → FanArt.tv)...");
-        java.nio.file.Path cover = TagEnrichment.resolveCover(choisi, fichier, new CaaClient(), new FanArtClient(), cache);
+        // 8. Pochette : Cover Art Archive → dossier local → FanArt.tv → Deezer
+        System.out.println("Recherche de la pochette (CAA → local → FanArt.tv → Deezer)...");
+        java.nio.file.Path cover = TagEnrichment.resolveCover(choisi, fichier, new CaaClient(), new FanArtClient(), new DeezerClient(), cache);
         System.out.println(cover != null ? "  Pochette trouvée." : "  Aucune pochette trouvée.");
 
         // 9. Écrire les tags + pochette

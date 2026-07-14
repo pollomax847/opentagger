@@ -11,7 +11,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.*;
-import java.time.Duration;
 import java.util.UUID;
 
 /**
@@ -28,10 +27,7 @@ public class AudDClient {
     private static final String API_URL = "https://api.audd.io/";
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .followRedirects(HttpClient.Redirect.ALWAYS)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
 
     // ── Reconnaissance ────────────────────────────────────────────────────────
 
@@ -55,7 +51,7 @@ public class AudDClient {
                 .uri(URI.create(API_URL))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .header("User-Agent", Config.get().userAgent())
-                .timeout(Duration.ofSeconds(60))
+                .timeout(HttpTimeouts.largeDownload())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
 

@@ -11,7 +11,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -19,9 +18,7 @@ public class AcoustIdClient {
 
     private static final String LOOKUP_URL = "https://api.acoustid.org/v2/lookup";
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
     private final MusicBrainzClient mbClient = new MusicBrainzClient();
 
@@ -58,6 +55,7 @@ public class AcoustIdClient {
                 .uri(URI.create(LOOKUP_URL))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 

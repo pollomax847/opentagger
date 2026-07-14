@@ -805,8 +805,15 @@ public class TagWriter {
      *  ajoutée en cas d'échec au lieu d'être jetée — sinon un échec complet de la chaîne de
      *  secours ne laissait aucune trace exploitable dans les logs. */
     private static boolean runFfmpegRepair(File f, StringBuilder diag) {
+        // `tmp` déclaré AVANT le try (pas comme sa première ligne) : trouvé en vérifiant des
+        // fichiers "ot_fix_*.m4a" orphelins laissés dans la bibliothèque réelle — toute exception
+        // survenant après File.createTempFile() mais avant un des tmp.delete() explicites
+        // ci-dessous (ex. pb.start() qui échoue, ou p.waitFor() interrompu par "Arrêter" —
+        // ClosedByInterruptException, observé le même soir sur un autre fichier) tombait dans le
+        // catch générique, qui n'avait pas accès à `tmp` (hors de sa portée) pour le nettoyer.
+        File tmp = null;
         try {
-            File tmp = File.createTempFile("ot_fix_", ".m4a", f.getParentFile());
+            tmp = File.createTempFile("ot_fix_", ".m4a", f.getParentFile());
             ProcessBuilder pb = new ProcessBuilder(
                 "ffmpeg", "-y", "-i", f.getAbsolutePath(),
                 "-c", "copy", "-movflags", "+faststart", tmp.getAbsolutePath());
@@ -834,6 +841,7 @@ public class TagWriter {
                 .append(" ").append(tailOf(out.toString(java.nio.charset.StandardCharsets.UTF_8), 400));
             return false;
         } catch (Exception ex) {
+            if (tmp != null) tmp.delete();
             if (diag != null) diag.append(" | ffmpeg repair: ").append(ex.getMessage());
             return false;
         }

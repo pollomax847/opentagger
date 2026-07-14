@@ -354,6 +354,7 @@ public class DetailPanel extends JPanel {
         for (TagInfo t : tags) vals.add(getter.apply(t));
         if (vals.size() == 1) {
             tf.setText(vals.iterator().next());
+            tf.putClientProperty("JTextField.placeholderText", null);
         } else {
             tf.setText("");
             tf.putClientProperty("JTextField.placeholderText", I18n.t("— valeurs multiples —"));
@@ -789,7 +790,14 @@ public class DetailPanel extends JPanel {
         return p;
     }
 
-    private void set(JTextField tf, String val) { tf.setText(val != null ? val : ""); }
+    private void set(JTextField tf, String val) {
+        tf.setText(val != null ? val : "");
+        // Efface le placeholder "— valeurs multiples —" laissé par un setM() précédent (mode
+        // multi-sélection) — sinon il reste accroché au composant et refait surface dès qu'un
+        // fichier suivant, affiché seul, a ce même champ vide (vu en prod : "Disque"/"Total
+        // disques" affichant "— valeurs multiples —" pour un fichier unique après un lot édité).
+        tf.putClientProperty("JTextField.placeholderText", null);
+    }
     private String g(JTextField tf) { return tf.getText().trim(); }
 
     // ── Preview couleur avant / après tagger ─────────────────────────────────

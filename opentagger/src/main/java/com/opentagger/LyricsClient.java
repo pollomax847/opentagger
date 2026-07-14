@@ -23,10 +23,7 @@ public class LyricsClient {
     private static final String LYRICSOVH = "https://api.lyrics.ovh/v1/";
     private static final String LRCLIB    = "https://lrclib.net/api/get";
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(6))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     public void enrich(TagInfo info) {

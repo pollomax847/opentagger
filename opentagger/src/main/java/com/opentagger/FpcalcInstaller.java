@@ -7,7 +7,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.*;
-import java.time.Duration;
 import java.util.function.Consumer;
 
 /**
@@ -66,12 +65,10 @@ public class FpcalcInstaller {
 
         // Télécharger l'archive
         progress.accept("Connexion à GitHub…");
-        HttpClient http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(30))
-                .followRedirects(HttpClient.Redirect.ALWAYS)
-                .build();
+        HttpClient http = HttpTimeouts.client();
         HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url))
-                .header("User-Agent", Config.get().userAgent()).GET().build();
+                .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.largeDownload()).GET().build();
         HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
         if (resp.statusCode() != 200)
             throw new IOException("HTTP " + resp.statusCode() + " pour " + url);

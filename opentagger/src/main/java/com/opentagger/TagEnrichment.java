@@ -53,19 +53,23 @@ public final class TagEnrichment {
      * Cascade de pochette : essaie chaque fournisseur activé, dans l'ordre configuré
      * ({@code cover.provider_order} — façon Picard, liste de fournisseurs
      * activables/réordonnables), jusqu'au premier succès. Fournisseurs connus :
-     * {@code caa_release}, {@code caa_release_group}, {@code local}, {@code fanart}.
+     * {@code caa_release}, {@code caa_release_group}, {@code local}, {@code fanart},
+     * {@code deezer} (dernier recours texte artiste+album, aucun MBID requis — voir DeezerClient,
+     * utile notamment pour les fichiers identifiés par SongRec/AudD/texte sans confirmation
+     * MusicBrainz, pour lesquels CAA/FanArt ne peuvent structurellement rien renvoyer).
      */
     public static Path resolveCover(TagInfo ti, File audioFile, CaaClient caa, FanArtClient fanArt,
-                                     MetadataCache cache) {
+                                     DeezerClient deezer, MetadataCache cache) {
         for (String provider : Config.get().coverProviderOrder()) {
-            Path cover = tryProvider(provider.trim(), ti, audioFile, caa, fanArt, cache);
+            Path cover = tryProvider(provider.trim(), ti, audioFile, caa, fanArt, deezer, cache);
             if (cover != null) return cover;
         }
         return null;
     }
 
     private static Path tryProvider(String provider, TagInfo ti, File audioFile,
-                                     CaaClient caa, FanArtClient fanArt, MetadataCache cache) {
+                                     CaaClient caa, FanArtClient fanArt, DeezerClient deezer,
+                                     MetadataCache cache) {
         try {
             switch (provider) {
                 case "caa_release":
@@ -83,6 +87,10 @@ public final class TagEnrichment {
                 case "fanart":
                     if (Config.get().fanartEnabled() && !ti.artistMbid.isBlank())
                         return fanArt.downloadCover(ti, cache);
+                    return null;
+                case "deezer":
+                    if (Config.get().deezerEnabled() && !ti.artist.isBlank() && !ti.album.isBlank())
+                        return deezer.downloadCover(ti, cache);
                     return null;
                 default:
                     return null;
@@ -214,10 +222,10 @@ public final class TagEnrichment {
      * @param log        callback optionnel pour les messages de soumission MusicBrainz (peut être null)
      */
     public static SaveResult saveEntry(File fichier, TagInfo ti, CaaClient caa, FanArtClient fanArt,
-                                        TagWriter writer, FileRenamer renamer, MetadataCache cache,
-                                        MusicBrainzOAuth mbOauth, Path scanRoot, int maskIndex,
-                                        java.util.function.Consumer<String> log) throws Exception {
-        Path cover = resolveCover(ti, fichier, caa, fanArt, cache);
+                                        DeezerClient deezer, TagWriter writer, FileRenamer renamer,
+                                        MetadataCache cache, MusicBrainzOAuth mbOauth, Path scanRoot,
+                                        int maskIndex, java.util.function.Consumer<String> log) throws Exception {
+        Path cover = resolveCover(ti, fichier, caa, fanArt, deezer, cache);
         TagInfo written = writer.write(fichier, ti, cover);
 
         // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique

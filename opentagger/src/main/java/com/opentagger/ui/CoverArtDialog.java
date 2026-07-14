@@ -189,6 +189,7 @@ public class CoverArtDialog extends JDialog {
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(URI.create(url))
                         .header("User-Agent", Config.get().userAgent())
+                        .timeout(Duration.ofSeconds(40))
                         .GET().build();
                 HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
                 if (resp.statusCode() != 200)

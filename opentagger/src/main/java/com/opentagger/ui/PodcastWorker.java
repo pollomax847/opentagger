@@ -8,6 +8,7 @@ import com.opentagger.model.*;
 import javax.swing.*;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 /**
@@ -20,14 +21,17 @@ public class PodcastWorker extends SwingWorker<Void, String> {
     private final List<MatchResult> matches;
     private final PodcastFeed       feed;
     private final FileTableModel    tableModel;
+    private final Consumer<String>  onProgress;
     private final MetadataCache     cache = new MetadataCache();
 
     private int tagged = 0, errors = 0;
 
-    public PodcastWorker(List<MatchResult> matches, PodcastFeed feed, FileTableModel tableModel) {
+    public PodcastWorker(List<MatchResult> matches, PodcastFeed feed, FileTableModel tableModel,
+                          Consumer<String> onProgress) {
         this.matches    = matches;
         this.feed       = feed;
         this.tableModel = tableModel;
+        this.onProgress = onProgress;
     }
 
     @Override
@@ -154,7 +158,11 @@ public class PodcastWorker extends SwingWorker<Void, String> {
 
     @Override
     protected void process(List<String> chunks) {
-        // les logs sont consommés par le dialog via addPropertyChangeListener
+        // Correctif : cette méthode était un no-op avec un commentaire affirmant à tort que le
+        // dialogue consommait la progression via addPropertyChangeListener — ce listener ne
+        // regardait que "state"==DONE, jamais les chunks. La progression par fichier était donc
+        // silencieusement perdue (même schéma que AlbumClusterWorker.process()).
+        if (!chunks.isEmpty()) onProgress.accept(chunks.get(chunks.size() - 1));
     }
 
     public int getTagged() { return tagged; }

@@ -12,7 +12,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -50,10 +49,7 @@ public class MusicBrainzOAuth {
     private static final String TAG_URL   = "https://musicbrainz.org/ws/2/tag?client=OpenTagger-" + APP_VER;
     private static final String RATE_URL  = "https://musicbrainz.org/ws/2/rating?client=OpenTagger-" + APP_VER;
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     // Coupe-circuit par instance : évite de retenter une soumission vouée à l'échec sur CHAQUE
@@ -303,6 +299,7 @@ public class MusicBrainzOAuth {
                     .uri(URI.create(TOKEN_URL))
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -327,6 +324,7 @@ public class MusicBrainzOAuth {
                 .uri(URI.create(USER_URL))
                 .header("Authorization", "Bearer " + token)
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .GET().build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200)
@@ -425,6 +423,7 @@ public class MusicBrainzOAuth {
                 .uri(URI.create(url))
                 .header("Authorization", "Bearer " + token)
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .PUT(HttpRequest.BodyPublishers.noBody())
                 .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -436,6 +435,7 @@ public class MusicBrainzOAuth {
                 .header("Authorization", "Bearer " + token)
                 .header("Content-Type", "application/xml; charset=UTF-8")
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .POST(HttpRequest.BodyPublishers.ofString(xmlBody, StandardCharsets.UTF_8))
                 .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -458,6 +458,7 @@ public class MusicBrainzOAuth {
                 .uri(URI.create(TOKEN_URL))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.apiCall())
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());

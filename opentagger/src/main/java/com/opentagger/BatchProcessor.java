@@ -30,6 +30,7 @@ public class BatchProcessor {
     private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
     private final DiscogsClient     discogs      = new DiscogsClient();
     private final FanArtClient      fanArt       = new FanArtClient();
+    private final DeezerClient      deezer       = new DeezerClient();
     private final LocalCorrector    corrector    = new LocalCorrector();
     private final TaggerScript      taggerScript = new TaggerScript();
     private final TagWriter         writer       = new TagWriter();
@@ -158,7 +159,7 @@ public class BatchProcessor {
                 // Paroles — même gap : absentes du CLI/batch jusqu'à présent.
                 try { new LyricsClient().enrich(best); } catch (Exception ignored) {}
 
-                Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt, cache);
+                Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt, deezer, cache);
                 writer.write(fichier, best, cover);
                 appliques.incrementAndGet();
 

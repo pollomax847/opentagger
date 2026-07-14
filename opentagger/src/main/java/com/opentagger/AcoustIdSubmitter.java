@@ -11,7 +11,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -45,9 +44,7 @@ public class AcoustIdSubmitter {
     private static final int    MAX_PAYLOAD                 = 1_000_000;
     private static final double BATCH_SIZE_REDUCTION_FACTOR  = 0.7;
 
-    private static final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .build();
+    private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
     public record SubmissionResult(File file, boolean accepted, String message) {}
@@ -170,6 +167,7 @@ public class AcoustIdSubmitter {
                 .uri(URI.create(SUBMIT_URL))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("User-Agent", Config.get().userAgent())
+                .timeout(HttpTimeouts.binaryDownload())
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                 .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
