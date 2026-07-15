@@ -387,16 +387,20 @@ public class FileRenamer {
 
     /** Vrai si {@code p} est un résidu que le taguage peut avoir laissé derrière lui une fois
      *  toutes les pistes déplacées — pochette locale (folder.jpg, cover.jpg…, y compris le nom
-     *  configuré via cover.filename) ou journal de session ({@code opentagger_*.log}, voir
-     *  CorrectionLog) — jamais un sous-dossier ni un fichier inconnu, pour ne jamais supprimer un
-     *  dossier qui contient encore quelque chose de réel. */
+     *  configuré via cover.filename), journal de session ({@code opentagger_*.log}, voir
+     *  CorrectionLog), ou résidu AppleDouble macOS ({@code ._nomdufichier}, un doublon de métadonnées
+     *  Finder sans rapport avec l'audio réel — laissé derrière par AudioScanner, qui ignore déjà
+     *  tout fichier commençant par un point, donc jamais déplacé avec la piste d'origine) — jamais
+     *  un sous-dossier ni un fichier réellement inconnu, pour ne jamais supprimer un dossier qui
+     *  contient encore quelque chose de réel. */
     private static boolean isDeletableLeftover(Path p) {
         if (Files.isDirectory(p)) return false;
         String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
         if (TagEnrichment.LOCAL_COVER_FILENAMES.contains(name)) return true;
         String coverBase = Config.get().str("cover.filename", "cover").toLowerCase(Locale.ROOT);
         if (name.equals(coverBase + ".jpg") || name.equals(coverBase + ".png")) return true;
-        return name.startsWith("opentagger_") && name.endsWith(".log");
+        if (name.startsWith("opentagger_") && name.endsWith(".log")) return true;
+        return name.startsWith("._");
     }
 
     // ── CLI ───────────────────────────────────────────────────────────────────
