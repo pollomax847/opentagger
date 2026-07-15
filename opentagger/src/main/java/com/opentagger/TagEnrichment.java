@@ -297,6 +297,15 @@ public final class TagEnrichment {
                 Path newPath = renamer.rename(curPath, written, maskIndex, root);
                 if (newPath != null) {
                     finalPath = newPath;
+                    // Re-classer l'historique sous le nouveau chemin — sinon le prochain scan/
+                    // redémarrage ne reconnaît plus ce fichier comme déjà tagué (loadTaggedPaths()
+                    // cherche le chemin ACTUEL) et son statut retombe à PENDING malgré un fichier
+                    // parfaitement tagué sur disque. cache.deleteFileHistory() existait déjà pour
+                    // ça mais n'était appelée nulle part ; MainFrame.buildRenameJob() (renommage en
+                    // masse) le fait correctement, ce pipeline (Enregistrer/BatchProcessor/App CLI)
+                    // ne le faisait pas.
+                    cache.deleteFileHistory(curPath.toFile().getAbsolutePath());
+                    cache.recordFileTagging(newPath.toFile().getAbsolutePath(), cacheKey, source);
                     if (Config.get().deleteEmptyDirsAfterRename()) {
                         FileRenamer.deleteEmptyAncestors(oldParent, root);
                     }

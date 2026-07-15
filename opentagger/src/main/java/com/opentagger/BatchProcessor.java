@@ -182,6 +182,11 @@ public class BatchProcessor {
                         if (nouveau != null) {
                             renommes.incrementAndGet();
                             renomme = nouveau.getFileName().toString();
+                            // Re-classer l'historique sous le nouveau chemin — sinon le prochain
+                            // scan ne reconnaît plus ce fichier comme déjà tagué (même correctif
+                            // que TagEnrichment.saveEntry(), voir sa doc pour le pourquoi).
+                            cache.deleteFileHistory(fichier.getAbsolutePath());
+                            TagEnrichment.recordSuccess(cache, nouveau.toFile(), best);
                             if (Config.get().deleteEmptyDirsAfterRename()) {
                                 FileRenamer.deleteEmptyAncestors(oldParent, root);
                             }

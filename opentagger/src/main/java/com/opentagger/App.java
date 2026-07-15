@@ -237,7 +237,6 @@ public class App {
             cache.close();
             return;
         }
-        cache.close();
 
         System.out.println();
         System.out.println("✓ Tags mis à jour !");
@@ -266,12 +265,18 @@ public class App {
             try {
                 int maskChoisi = Integer.parseInt(ligne);
                 java.nio.file.Path nouveauChemin = renamer.rename(fichier.toPath(), choisi, maskChoisi);
-                if (nouveauChemin != null)
+                if (nouveauChemin != null) {
                     System.out.println("✓ Fichier déplacé : " + nouveauChemin);
+                    // Re-classer l'historique sous le nouveau chemin — même correctif que
+                    // TagEnrichment.saveEntry()/BatchProcessor, voir sa doc pour le pourquoi.
+                    cache.deleteFileHistory(fichier.getAbsolutePath());
+                    TagEnrichment.recordSuccess(cache, nouveauChemin.toFile(), choisi);
+                }
             } catch (NumberFormatException e) {
                 System.out.println("Masque invalide, renommage ignoré.");
             }
         }
+        cache.close();
     }
 
     /** Déplace un fichier non tagué (aucun résultat / erreur d'écriture) vers le dossier dédié
