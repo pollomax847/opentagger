@@ -200,11 +200,16 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
         if (g.members.isEmpty()) groupsByKey.remove(key);
     }
 
+    /** Correctif de performance : vidait le groupe et réinsérait chaque membre un par un via
+     *  {@link #insertSorted}, un scan linéaire par insertion — O(N²) pour re-trier un groupe de N
+     *  membres, appelé à CHAQUE ligne mise à jour. Sur un gros scan (groupe de plusieurs centaines
+     *  de pistes, ex. compilation/mixtape), la complexité cumulée sur tout le scan explosait et
+     *  bloquait l'EDT pendant des heures (jstack en direct : {@code AWT-EventQueue-0} coincé ici,
+     *  9000s+ de CPU cumulé sur un process de 13h). Un simple tri en place est O(N log N), et
+     *  correct ici : rien n'exploite le "presque trié" que visait insertSorted un par un. */
     private void resortGroup(Group g) {
         if (g == null) return;
-        List<FileEntry> copy = new ArrayList<>(g.members);
-        g.members.clear();
-        for (FileEntry e : copy) insertSorted(g.members, e);
+        g.members.sort(TRACK_ORDER);
     }
 
     private void insertSorted(List<FileEntry> members, FileEntry e) {
