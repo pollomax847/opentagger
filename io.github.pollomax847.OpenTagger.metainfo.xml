@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.pollomax847.OpenTagger</id>
+  <name>OpenTagger</name>
+  <summary>Tagueur audio automatique open-source</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.pollomax847">
+    <name>pollomax847</name>
+  </developer>
+  <description>
+    <p>
+      OpenTagger identifie et complète automatiquement les métadonnées de vos fichiers audio
+      (MP3, FLAC, M4A, OGG) via une chaîne de reconnaissance audio (AcoustID, SongRec, AudD),
+      enrichie par MusicBrainz, Discogs et Last.fm — une alternative libre à Jaikoz.
+    </p>
+    <p>Fonctionnalités principales :</p>
+    <ul>
+      <li>Identification par empreinte audio et renommage par masques configurables</li>
+      <li>Détection de doublons et complétion automatique des albums incomplets</li>
+      <li>Taguage de podcasts via flux RSS</li>
+      <li>Transcodage audio et scripts de correction personnalisés</li>
+    </ul>
+  </description>
+  <!-- opentagger-OpenTagger.desktop : nom généré par jpackage (pas rDNS), volontairement laissé
+       tel quel — AppStream n'exige pas que <id> corresponde au nom du .desktop dès qu'un
+       <launchable> explicite est fourni. -->
+  <launchable type="desktop-id">opentagger-OpenTagger.desktop</launchable>
+  <icon type="stock">opentagger</icon>
+  <url type="homepage">https://github.com/pollomax847/opentagger</url>
+  <url type="bugtracker">https://github.com/pollomax847/opentagger/issues</url>
+  <categories>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.9.8" date="2026-07-10" />
+    <release version="0.9.7" date="2026-07-10" />
+    <release version="0.9.6" date="2026-07-09" />
+    <release version="0.9.5" date="2026-07-07" />
+  </releases>
+</component>

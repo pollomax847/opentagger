@@ -24,3 +24,5 @@ Thumbs.db
 
 # Secrets
 config.properties
+docs/screenshots/main_table.png
+.gitignore
