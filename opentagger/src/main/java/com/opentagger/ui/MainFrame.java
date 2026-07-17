@@ -129,7 +129,7 @@ public class MainFrame extends JFrame {
     // ── Undo / Redo ───────────────────────────────────────────────────────────
     private final com.opentagger.UndoManager undoManager = new com.opentagger.UndoManager();
     private JButton btnUndo, btnRedo;
-    private JCheckBoxMenuItem chkForceAcoustId, chkCompleteIncomplete, chkAutoCompleteAlbums;
+    private JCheckBoxMenuItem chkForceAcoustId;
     private JCheckBoxMenuItem chkAutoGroupCompilations;
 
     // ── Barre de statut ───────────────────────────────────────────────────────
@@ -706,19 +706,29 @@ public class MainFrame extends JFrame {
             }
         });
         m.add(chkForceAcoustId);
-        chkCompleteIncomplete = new JCheckBoxMenuItem(I18n.t("Compléter aussi les fichiers tagués mais incomplets"));
-        chkCompleteIncomplete.setSelected(Config.get().bool("tagging.auto_complete_incomplete", false));
-        chkCompleteIncomplete.addActionListener(e ->
-                Config.get().set("tagging.auto_complete_incomplete", String.valueOf(chkCompleteIncomplete.isSelected())));
-        m.add(chkCompleteIncomplete);
-        // Retour utilisateur : "Compléter les albums" se relançait automatiquement après CHAQUE
-        // taguage sans aucun moyen de le désactiver — surprenant sur un run non attendu. Devenu
-        // opt-in, off par défaut (symétrique de chkCompleteIncomplete ci-dessus).
-        chkAutoCompleteAlbums = new JCheckBoxMenuItem(I18n.t("Compléter les albums automatiquement après le taguage"));
-        chkAutoCompleteAlbums.setSelected(Config.get().bool("tagging.auto_complete_albums", false));
-        chkAutoCompleteAlbums.addActionListener(e ->
-                Config.get().set("tagging.auto_complete_albums", String.valueOf(chkAutoCompleteAlbums.isSelected())));
-        m.add(chkAutoCompleteAlbums);
+        // Fusion 2026-07-16 des anciennes cases "Compléter aussi les fichiers tagués mais
+        // incomplets" et "Compléter les albums automatiquement après le taguage" — elles
+        // s'enchaînaient déjà l'une après l'autre (voir onTaggingDone()), mais deux cases séparées
+        // au nom proche pour une seule intention ("finir le taguage automatiquement") créaient de
+        // la confusion. Un seul réglage à 3 états (Config.PostTagCompletion), qui migre une fois
+        // depuis les deux anciennes clés pour ne pas changer silencieusement un choix déjà fait.
+        JMenu completionMenu = new JMenu(I18n.t("Après le taguage"));
+        ButtonGroup completionGroup = new ButtonGroup();
+        Config.PostTagCompletion current = Config.get().postTagCompletion();
+        JRadioButtonMenuItem rbNone = new JRadioButtonMenuItem(I18n.t("Ne rien compléter automatiquement"));
+        JRadioButtonMenuItem rbFields = new JRadioButtonMenuItem(I18n.t("Compléter les champs manquants"));
+        JRadioButtonMenuItem rbFieldsAlbums = new JRadioButtonMenuItem(I18n.t("Compléter les champs + rechercher les pistes d'album manquantes"));
+        rbNone.setSelected(current == Config.PostTagCompletion.NONE);
+        rbFields.setSelected(current == Config.PostTagCompletion.FIELDS);
+        rbFieldsAlbums.setSelected(current == Config.PostTagCompletion.FIELDS_AND_ALBUMS);
+        rbNone.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.NONE));
+        rbFields.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.FIELDS));
+        rbFieldsAlbums.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.FIELDS_AND_ALBUMS));
+        for (JRadioButtonMenuItem rb : new JRadioButtonMenuItem[]{rbNone, rbFields, rbFieldsAlbums}) {
+            completionGroup.add(rb);
+            completionMenu.add(rb);
+        }
+        m.add(completionMenu);
         // Demandé le 2026-07-10, juste après avoir choisi le mode "proactif" (revue manuelle) pour
         // "Grouper par compilations…" plutôt qu'une réécriture automatique — l'utilisateur voulait
         // aussi pouvoir déclencher la RECHERCHE toute seule, sans pour autant perdre la revue avant
@@ -2932,7 +2942,7 @@ public class MainFrame extends JFrame {
             }
         }
         if (toTag.isEmpty()) {
-            if (chkCompleteIncomplete.isSelected()) {
+            if (Config.get().postTagCompletion() != Config.PostTagCompletion.NONE) {
                 setStatus(I18n.t("Aucun nouveau fichier à taguer — recherche des fichiers incomplets…"));
                 autoCompleteIncomplete(() -> setStatus(I18n.t("Complétion terminée.")));
             } else {
@@ -3422,16 +3432,24 @@ public class MainFrame extends JFrame {
         // fichiers déjà enregistrés lors d'une session précédente. Le déclenchement reste ici
         // (comportement historique, inchangé) plutôt que déplacé après Enregistrer : au-delà du
         // périmètre de la séparation Identifier/Enregistrer demandée.
-        boolean autoAlbums      = chkAutoCompleteAlbums.isSelected();
-        boolean autoIncomplete  = chkCompleteIncomplete.isSelected();
+        Config.PostTagCompletion mode = Config.get().postTagCompletion();
+        boolean autoAlbums      = mode == Config.PostTagCompletion.FIELDS_AND_ALBUMS;
+        boolean autoIncomplete  = mode != Config.PostTagCompletion.NONE;
         String suffix = autoIncomplete
                 ? I18n.t("  — complétion des fichiers incomplets…")
                 : (autoAlbums ? I18n.t("  — complétion albums…") : "");
         setStatus(I18n.t("Terminé — ✓ %d identifié(s) (pas encore enregistré)  ⚠ %d ignoré(s)  ✗ %d erreur(s)", ok, skip, err) + suffix);
+        // invokeLater : on est encore dans le property-change listener DONE du TaggingWorker qui
+        // vient de finir, appelé AVANT celui de WorkerHub.submit() (posé après, dans submit() lui-
+        // même) — WorkerHub n'a donc pas encore retiré TAGGING de active(). Un submit() immédiat
+        // ici verrait systématiquement TAGGING comme son propre blocker et lèverait
+        // IllegalStateException (déjà vu en pratique : "Passe complète" ne se lançait jamais après
+        // un taguage, sans aucun message). Différer d'un tour d'EDT laisse ce firePropertyChange se
+        // terminer (tous les listeners, dont celui de WorkerHub) avant de retenter.
         if (autoIncomplete) {
-            autoCompleteIncomplete(autoAlbums ? this::completeAlbums : () -> {});
+            SwingUtilities.invokeLater(() -> autoCompleteIncomplete(autoAlbums ? this::completeAlbums : () -> {}));
         } else if (autoAlbums) {
-            completeAlbums();
+            SwingUtilities.invokeLater(this::completeAlbums);
         }
     }
 
@@ -3468,6 +3486,18 @@ public class MainFrame extends JFrame {
             if (incomplete) targets.add(e);
         }
         if (targets.isEmpty()) { onDone.run(); return; }
+
+        // Même garde que completeAlbums()/startTagging() : sans elle, submit() lève
+        // IllegalStateException dès qu'un Enregistrement (ou tout autre LIBRARY_WRITE) tourne
+        // encore au moment du déclenchement automatique — silencieusement, sans dialogue (voir
+        // WorkerHub.submit()). Ici on saute juste cette passe, sans forcer, comme les autres.
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.INFO_COMPLETER);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — complétion des fichiers incomplets sautée cette fois-ci.",
+                    String.join(", ", blockers)));
+            onDone.run();
+            return;
+        }
 
         progress.setVisible(true);
         progress.setMaximum(targets.size());

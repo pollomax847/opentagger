@@ -153,6 +153,27 @@ public class Config {
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }
     public int     albumFirstPassMinFiles()        { return num ("albums.album_first_pass_min",    2);    }
+
+    /** 3 états au lieu de 2 cases à cocher séparées ("Compléter aussi les fichiers incomplets" +
+     * "Compléter les albums automatiquement après le taguage") — fusionnées le 2026-07-16 à la
+     * demande de l'utilisateur, qui trouvait qu'il y avait trop d'options au nom proche faisant
+     * presque la même chose. Migre une fois depuis les deux anciennes clés booléennes pour ne pas
+     * changer silencieusement un réglage déjà choisi. */
+    public enum PostTagCompletion { NONE, FIELDS, FIELDS_AND_ALBUMS }
+
+    public PostTagCompletion postTagCompletion() {
+        String v = str("tagging.post_tag_completion", "");
+        if (v.isBlank()) {
+            boolean fields = bool("tagging.auto_complete_incomplete", false);
+            boolean albums = bool("tagging.auto_complete_albums", false);
+            PostTagCompletion migrated = !fields ? PostTagCompletion.NONE
+                    : (albums ? PostTagCompletion.FIELDS_AND_ALBUMS : PostTagCompletion.FIELDS);
+            set("tagging.post_tag_completion", migrated.name());
+            return migrated;
+        }
+        try { return PostTagCompletion.valueOf(v); } catch (Exception e) { return PostTagCompletion.NONE; }
+    }
+    public void setPostTagCompletion(PostTagCompletion mode) { set("tagging.post_tag_completion", mode.name()); }
     public String[] startupFolders()   {
         String v = str("startup.folders");
         return v.isBlank() ? new String[0] : v.split("\\|");
