@@ -22,16 +22,18 @@ public class PodcastWorker extends SwingWorker<Void, String> {
     private final PodcastFeed       feed;
     private final FileTableModel    tableModel;
     private final Consumer<String>  onProgress;
+    private final Consumer<FileEntry> onUpdate;
     private final MetadataCache     cache = new MetadataCache();
 
     private int tagged = 0, errors = 0;
 
     public PodcastWorker(List<MatchResult> matches, PodcastFeed feed, FileTableModel tableModel,
-                          Consumer<String> onProgress) {
+                          Consumer<String> onProgress, Consumer<FileEntry> onUpdate) {
         this.matches    = matches;
         this.feed       = feed;
         this.tableModel = tableModel;
         this.onProgress = onProgress;
+        this.onUpdate   = onUpdate;
     }
 
     @Override
@@ -112,6 +114,10 @@ public class PodcastWorker extends SwingWorker<Void, String> {
                         ef.message = "";
                         ef.currentPath = finalPathForEdt;
                         tableModel.update(ef);
+                        // Manquait au Journal (même trou que AlbumCompletionWorker/AlbumClusterWorker
+                        // avant correctif) : ce worker publie du texte (publish(String), voir
+                        // process() plus bas) qui n'atteignait jamais MainFrame.appendLog().
+                        if (onUpdate != null) onUpdate.accept(ef);
                     });
                     LOG.info("[Podcast] Tagué : " + entry.filename() + " → " + ep.title());
                     tagged++;

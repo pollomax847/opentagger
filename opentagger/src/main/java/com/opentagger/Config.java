@@ -151,6 +151,15 @@ public class Config {
     public boolean videoAutoRecover()              { return bool("video.auto_recover",           true); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
+    // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source
+    // principale de TaggingWorker.findTags() par design (identifie même avec des tags/dossiers
+    // pourris — voir le commentaire de classe) mais coûte plusieurs secondes par fichier. Off par
+    // défaut : ne change rien tant que l'utilisateur ne l'active pas explicitement. Une fois activé,
+    // un fichier avec artiste+titre exploitables dans ses tags (pas génériques, pas venant du nom de
+    // dossier) tente une recherche MB texte rapide AVANT SongRec ; si le score dépasse ce seuil, le
+    // résultat est gardé tel quel et SongRec est sauté pour ce fichier.
+    public boolean skipSongRecOnConfidentMb()      { return bool("tagging.skip_songrec_on_confident_mb", false); }
+    public int     skipSongRecMinScore()           { return num ("tagging.skip_songrec_min_score",  90);    }
     public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }
     public int     albumFirstPassMinFiles()        { return num ("albums.album_first_pass_min",    2);    }
 

@@ -73,7 +73,14 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
                 writer.write(fichier, ti);
 
                 final FileEntry ef = entry;
-                SwingUtilities.invokeLater(() -> { ef.result = ti; onUpdate.accept(ef); });
+                // message : sans lui, la ligne Journal ("✓ Tagué : ...") ne dirait pas pourquoi le
+                // fichier a été réécrit — appendLog() l'affiche en suffixe, voir MainFrame.
+                final int countFinal = count;
+                SwingUtilities.invokeLater(() -> {
+                    ef.result  = ti;
+                    ef.message = I18n.t("ListenBrainz : %d écoute(s)", countFinal);
+                    onUpdate.accept(ef);
+                });
                 updated++;
             } catch (Exception ex) {
                 onProgress.accept("  ✗ " + entry.filename() + " : " + ex.getMessage());

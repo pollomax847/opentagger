@@ -33,6 +33,7 @@ public class PodcastDialog extends JDialog {
 
     private final List<FileEntry> files;
     private final FileTableModel  tableModel;
+    private final MainFrame       mainFrame;
 
     // ── Widgets ───────────────────────────────────────────────────────────────
     private final JTextField      tfSearch   = new JTextField(35);
@@ -57,10 +58,11 @@ public class PodcastDialog extends JDialog {
     private static final String[] COLS = {
         I18n.t("Fichier"), I18n.t("Épisode associé"), I18n.t("Durée"), I18n.t("Saison·Ep")};
 
-    public PodcastDialog(Frame owner, List<FileEntry> files, FileTableModel tableModel) {
+    public PodcastDialog(MainFrame owner, List<FileEntry> files, FileTableModel tableModel) {
         super(owner, I18n.t("Tagger comme podcast"), true);
         this.files      = files;
         this.tableModel = tableModel;
+        this.mainFrame  = owner;
 
         matchModel = new DefaultTableModel(COLS, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
@@ -327,7 +329,7 @@ public class PodcastDialog extends JDialog {
         setBusy(true, I18n.t("Taguage en cours…"));
 
         PodcastWorker worker = new PodcastWorker(currentMatches, currentFeed, tableModel,
-                msg -> lblFeedStatus.setText(msg));
+                msg -> lblFeedStatus.setText(msg), mainFrame::appendLog);
         worker.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {

@@ -47,6 +47,7 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
 
     private final FileTableModel   tableModel;
     private final Consumer<String> statusCallback;
+    private final Consumer<FileEntry> onUpdate;
     private final Runnable         doneCallback;
 
     private final TagWriter writer = new TagWriter();
@@ -56,9 +57,11 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
     private final AtomicInteger tracksFixed     = new AtomicInteger();
 
     public AlbumClusterWorker(FileTableModel tableModel,
-                               Consumer<String> statusCallback, Runnable doneCallback) {
+                               Consumer<String> statusCallback, Consumer<FileEntry> onUpdate,
+                               Runnable doneCallback) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
+        this.onUpdate       = onUpdate;
         this.doneCallback   = doneCallback;
     }
 
@@ -169,6 +172,10 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                 SwingUtilities.invokeLater(() -> {
                     entryFinal.result = writtenFinal;
                     tableModel.update(entryFinal);
+                    // Même trou que AlbumCompletionWorker avant correctif : ces pistes sont
+                    // réellement réécrites sur disque (writer.write() ci-dessus, pas différé à
+                    // "Enregistrer tout") mais n'apparaissaient jamais dans le Journal.
+                    if (onUpdate != null) onUpdate.accept(entryFinal);
                 });
             }
 

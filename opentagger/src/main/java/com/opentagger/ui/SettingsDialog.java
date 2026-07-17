@@ -58,6 +58,8 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkMoveSkipped;
     private JTextField tfSkippedFolder;
     private JCheckBox  chkVideoAutoRecover;
+    private JCheckBox  chkSkipSongRecOnConfidentMb;
+    private JSpinner   spnSkipSongRecMinScore;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JTextField tfFfmpegPath;
@@ -1142,11 +1144,28 @@ public class SettingsDialog extends JDialog {
             + "les convertir en MP3 tagué, sans dialogue à ouvrir. Reconnues → sous-dossier \"Convertis\" ; "
             + "non reconnues → \"Non identifié\". Rien n'est jamais supprimé."));
 
+        // ── Compromis vitesse : sauter SongRec quand MB texte est déjà confiant ────
+        chkSkipSongRecOnConfidentMb = new JCheckBox(I18n.t(
+            "Éviter SongRec quand MusicBrainz (recherche texte) est déjà confiant"));
+        chkSkipSongRecOnConfidentMb.setToolTipText(I18n.t(
+            "SongRec (empreinte audio) reste la source principale par défaut — plus lent mais fiable "
+            + "même avec des tags faux. En activant ceci : si le fichier a un artiste+titre exploitables "
+            + "dans ses tags (pas génériques, pas déduits du nom de dossier), une recherche MusicBrainz "
+            + "texte rapide est tentée D'ABORD ; si son score dépasse le seuil ci-dessous, SongRec est "
+            + "sauté pour ce fichier. Accélère les bibliothèques déjà bien taguées, au prix d'un peu moins "
+            + "de vérification audio sur ces fichiers-là."));
+        spnSkipSongRecMinScore = new JSpinner(new SpinnerNumberModel(90, 50, 100, 1));
+        JPanel skipSongRecScorePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        skipSongRecScorePanel.add(new JLabel(I18n.t("Score MB minimum pour sauter SongRec :")));
+        skipSongRecScorePanel.add(spnSkipSongRecMinScore);
+        skipSongRecScorePanel.add(new JLabel("%"));
+
         JPanel p = form(
             new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :", ""},
+                    "", "", "", "", "Dossier fichiers non tagués :", "", "", ""},
             new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
-                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkVideoAutoRecover},
+                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkVideoAutoRecover,
+                    chkSkipSongRecOnConfidentMb, skipSongRecScorePanel},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -1772,6 +1791,8 @@ public class SettingsDialog extends JDialog {
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
         tfSkippedFolder   .setText(cfg.str("skipped.move_folder",           ""));
         chkVideoAutoRecover.setSelected(cfg.videoAutoRecover());
+        chkSkipSongRecOnConfidentMb.setSelected(cfg.skipSongRecOnConfidentMb());
+        spnSkipSongRecMinScore.setValue(cfg.skipSongRecMinScore());
 
         startupFolderModel.clear();
         for (String f : cfg.startupFolders())
@@ -1950,6 +1971,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());
         p.setProperty("video.auto_recover",            String.valueOf(chkVideoAutoRecover.isSelected()));
+        p.setProperty("tagging.skip_songrec_on_confident_mb", String.valueOf(chkSkipSongRecOnConfidentMb.isSelected()));
+        p.setProperty("tagging.skip_songrec_min_score",       String.valueOf(spnSkipSongRecMinScore.getValue()));
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < startupFolderModel.size(); i++) {

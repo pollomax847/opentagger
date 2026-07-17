@@ -322,6 +322,24 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         if (albumName.isBlank()) albumName = folderName;
         if (albumName.isBlank()) return;
 
+        // Garde anti-dossier-fourre-tout : un nom d'album générique ("Musique", "Music"…, voir
+        // isGenericTag) est trop peu fiable pour piloter tout un dossier vers UNE SEULE release MB.
+        // Bug réel constaté en production (2026-07-17) : un dossier "Musique" mélangeant des artistes
+        // sans rapport contenait UN fichier Theatre of Tragedy, dont l'indice d'artiste a orienté la
+        // recherche vers l'album "Musique" du même groupe (['mju:zɪk], AFM Records 2019 — existe
+        // vraiment sur MusicBrainz, coïncidence de nom). Score MB à 100%, donc la garde "score < 70"
+        // plus bas ne protège pas de ce cas — matchFileToTrack() a ensuite associé des fichiers
+        // totalement étrangers (ex. "andreas johnson - CRUSH.flac") à des pistes de cet album. Un nom
+        // de dossier/album générique fait maintenant sauter la passe album-first pour CE dossier —
+        // les fichiers repassent par la boucle piste-par-piste normale (plus lente, mais chaque
+        // fichier est vérifié individuellement plutôt que rattaché en bloc à une release aléatoire).
+        if (isGenericTag(albumName)) {
+            onProgress.accept(I18n.t(
+                    "[album-first] \"%s\" — nom générique (dossier fourre-tout) → fallback piste/piste",
+                    albumName));
+            return;
+        }
+
         onProgress.accept(I18n.t("[album-first] \"%s\" (%d fichiers) — recherche MB…",
                 albumName, files.size()));
 
@@ -921,6 +939,39 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // complète — le résultat SongRec qu'on vient de calculer y sera juste recalculé.
         }
 
+        // 0.7. Compromis vitesse optionnel (skipSongRecOnConfidentMb, off par défaut) : si le
+        // fichier a un artiste+titre exploitables dans ses tags, tenter une recherche MB texte
+        // rapide AVANT SongRec — pas besoin de payer le fingerprint audio si le texte suffit déjà.
+        // Ignoré en reidentification forcée (même logique que tagAlbum/artist/title plus haut : on
+        // ne fait pas confiance aux tags existants dans ce mode) et si artiste/titre sont vides,
+        // génériques ou non-Latin — trop peu fiables pour sauter la vérification audio, on laisse
+        // tomber jusqu'à SongRec comme avant. L'indice de dossier ("Musique", etc.) n'entre PAS en
+        // jeu ici (seuls les vrais tags du fichier comptent), justement pour éviter le faux-positif
+        // que SongRec-en-premier est censé prévenir.
+        if (!forceReidentify && Config.get().skipSongRecOnConfidentMb()) {
+            String qaArtist = cleanSearchTerm(readTag(fichier, FieldKey.ARTIST));
+            String qaTitle  = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+            if (!qaArtist.isBlank() && !qaTitle.isBlank()
+                    && !isGenericTag(qaArtist) && !isGenericTag(qaTitle)
+                    && !TagEnrichment.hasNonLatinChars(qaArtist) && !TagEnrichment.hasNonLatinChars(qaTitle)) {
+                try {
+                    String qaHash   = MetadataCache.queryHash(qaArtist, qaTitle);
+                    String qaCached = cache.getRecordingSearch(qaHash);
+                    List<TagInfo> qaResults = qaCached != null
+                            ? mb.parseFromCache(qaCached)
+                            : mb.searchRecording(qaArtist, qaTitle);
+                    if (qaCached == null && !qaResults.isEmpty()) cache.putRecordingSearch(qaHash, mb.lastRawJson());
+                    if (!qaResults.isEmpty() && qaResults.get(0).score >= Config.get().skipSongRecMinScore()) {
+                        log(I18n.t("  MB texte rapide (confiant, score=%s) → SongRec sauté : %s – %s",
+                                qaResults.get(0).score, qaResults.get(0).artist, qaResults.get(0).title));
+                        return qaResults;
+                    }
+                } catch (Exception e) {
+                    log(I18n.t("  MB texte rapide WARN: %s", e.getMessage()));
+                }
+            }
+        }
+
         // 1. SongRec (Shazam) — empreinte audio, identifie la musique commerciale même avec
         //    de faux tags existants. Placé AVANT AcoustID pour être la source principale.
         if (SongRecClient.isAvailable()) {
@@ -1314,7 +1365,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         if (s == null || s.isBlank()) return true;
         String low = s.trim().toLowerCase();
         // Tags par défaut des encodeurs/téléchargeurs
-        if (low.matches("unknown artist|unknown|artist|artiste|musique|music|inconnu|"
+        if (low.matches("unknown artist|unknown|artist|artiste|musique|musiques|music|inconnu|"
                        + "various|various artists|no artist|piste \\d+|track \\d+|"
                        + "titre|title|untitled|inconnu - -.*")) return true;
         // Patterns "Unknown Artist_NNN", "Unknown_42", "Musique Ii"

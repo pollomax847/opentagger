@@ -53,6 +53,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
     private final FileTableModel  tableModel;
     private final Consumer<String>  statusCallback;
+    private final Consumer<FileEntry> onUpdate;
     private final Runnable          doneCallback;
 
     // Genre (Discogs/Last.fm) — la tracklist MB n'en fournit pas, donc "ancre MB fiable" ne
@@ -75,9 +76,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private volatile ExecutorService pool;
 
     public AlbumCompletionWorker(FileTableModel tableModel,
-                                 Consumer<String> statusCallback, Runnable doneCallback) {
+                                 Consumer<String> statusCallback, Consumer<FileEntry> onUpdate,
+                                 Runnable doneCallback) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
+        this.onUpdate       = onUpdate;
         this.doneCallback   = doneCallback;
     }
 
@@ -294,6 +297,12 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                 hitFinal.status  = FileEntry.Status.IDENTIFIED;
                 hitFinal.message = "";
                 tableModel.update(hitFinal);
+                // Manquait entièrement au Journal jusqu'ici : ce worker ne publiait que du texte
+                // (publish(String), voir process() plus bas) — aucun FileEntry n'était jamais
+                // transmis à MainFrame.appendLog(), contrairement à TaggingWorker/InfoCompleterWorker.
+                // Résultat : les pistes retrouvées par complétion d'album étaient invisibles dans le
+                // Journal (juste un message dans la barre de statut, écrasé aussitôt).
+                if (onUpdate != null) onUpdate.accept(hitFinal);
             });
 
             publish(I18n.t("  ✓ %s → piste %d \"%s\" (identifié, pas encore enregistré)",

@@ -19,11 +19,30 @@ public class PodcastMatcher {
     private static final int DURATION_TOLERANCE_SEC = 5;
 
     public static List<MatchResult> match(List<FileEntry> files, List<PodcastEpisode> episodes) {
-        // Préparer les durées des fichiers via ffprobe
-        Map<FileEntry, Integer> fileDurations = new LinkedHashMap<>();
-        for (FileEntry f : files) {
-            String path = (f.currentPath != null ? f.currentPath : f.file.toPath()).toString();
-            fileDurations.put(f, AudioDuration.probeSeconds(path));
+        // Préparer les durées des fichiers via ffprobe — PARALLÉLISÉ (même clé "batch.threads" que
+        // le reste de l'appli). Avant : séquentiel, un sous-processus ffprobe par fichier (jusqu'à
+        // 10s de timeout CHACUN, voir AudioDuration.probeSeconds) — sur les PENDING/SKIPPED d'une
+        // grosse bibliothèque (des dizaines de milliers chez certains utilisateurs), "Matching en
+        // cours…" pouvait tourner des heures sans le moindre retour de progression (bug réel
+        // signalé, "cela tourné à l'infini"). Le filtre PENDING/SKIPPED (voir MainFrame.
+        // openPodcastDialog()) réduit déjà l'ensemble, mais un ensemble encore large reste possible
+        // (scan en cours sur 2 To) — la parallélisation reste nécessaire dans tous les cas.
+        Map<FileEntry, Integer> fileDurations = new java.util.concurrent.ConcurrentHashMap<>();
+        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        try {
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+            for (FileEntry f : files) {
+                futures.add(pool.submit(() -> {
+                    String path = (f.currentPath != null ? f.currentPath : f.file.toPath()).toString();
+                    fileDurations.put(f, AudioDuration.probeSeconds(path));
+                }));
+            }
+            for (var fut : futures) {
+                try { fut.get(); } catch (Exception ignored) {}
+            }
+        } finally {
+            pool.shutdown();
         }
 
         Set<PodcastEpisode> used = new HashSet<>();

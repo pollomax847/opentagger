@@ -1,7 +1,7 @@
 #!/bin/bash
 java \
   -Xms256m \
-  -Xmx5g \
+  -Xmx8g \
   -XX:+UseG1GC \
   -XX:MaxGCPauseMillis=200 \
   -XX:SoftRefLRUPolicyMSPerMB=1 \

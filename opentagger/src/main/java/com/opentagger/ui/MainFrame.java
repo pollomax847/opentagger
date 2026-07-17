@@ -2317,10 +2317,11 @@ public class MainFrame extends JFrame {
                 c.setText("[" + e.time() + "] " + e.text());
                 if (!sel) {
                     Color fg = switch (e.status()) {
-                        case ERROR   -> new Color(230, 90, 90);
-                        case SKIPPED -> new Color(210, 160, 40);
-                        case TAGGED  -> new Color(100, 200, 130);
-                        default      -> UIManager.getColor("List.foreground");
+                        case ERROR      -> new Color(230, 90, 90);
+                        case SKIPPED    -> new Color(210, 160, 40);
+                        case TAGGED     -> new Color(100, 200, 130);
+                        case IDENTIFIED -> new Color(85, 153, 255);
+                        default         -> UIManager.getColor("List.foreground");
                     };
                     c.setForeground(fg);
                 }
@@ -2389,16 +2390,67 @@ public class MainFrame extends JFrame {
     }
 
     /** Ajoute le résultat final d'un fichier (ignore les mises à jour PROCESSING transitoires). */
-    private void appendLog(FileEntry entry) {
+    /** Libellé lisible d'une source d'identification (TagInfo.identificationSource / MetadataCache.SOURCE_*). */
+    private static String sourceLabel(String src) {
+        if (src == null || src.isBlank()) return "";
+        return switch (src) {
+            case MetadataCache.SOURCE_SONGREC  -> "SongRec";
+            case MetadataCache.SOURCE_ACOUSTID -> "AcoustID";
+            case MetadataCache.SOURCE_MBID     -> "MusicBrainz";
+            case MetadataCache.SOURCE_TEXT     -> I18n.t("texte");
+            default -> src;
+        };
+    }
+
+    /** Résumé lisible d'une identification pour le journal, ex. "Artiste – Titre [Album] (score=90, SongRec)".
+     *  Chaîne vide si aucune donnée exploitable (ex. SKIPPED/ERROR sans résultat). */
+    private static String identificationSummary(FileEntry entry) {
+        TagInfo t = entry.activeTags();
+        if (t == null) return "";
+        StringBuilder sb = new StringBuilder();
+        if (!t.artist.isBlank() || !t.title.isBlank()) {
+            sb.append(t.artist.isBlank() ? "?" : t.artist)
+              .append(" – ")
+              .append(t.title.isBlank() ? "?" : t.title);
+        }
+        if (!t.album.isBlank()) sb.append(" [").append(t.album).append("]");
+        java.util.List<String> extras = new java.util.ArrayList<>();
+        if (t.score > 0) extras.add("score=" + t.score);
+        String src = sourceLabel(t.identificationSource);
+        if (!src.isBlank()) extras.add(src);
+        if (!extras.isEmpty()) sb.append(" (").append(String.join(", ", extras)).append(")");
+        return sb.toString();
+    }
+
+    // Package-private (pas private) : PodcastDialog est une fenêtre séparée (pas dans MainFrame)
+    // qui a besoin d'écrire dans CE journal partagé plutôt que d'en avoir un second — voir son
+    // constructeur/onTag().
+    void appendLog(FileEntry entry) {
         if (entry.status == FileEntry.Status.PROCESSING) return;
         String statusText = switch (entry.status) {
-            case TAGGED  -> "✓ " + I18n.t("Tagué");
-            case SKIPPED -> "⚠ " + I18n.t("Ignoré");
-            case ERROR   -> "✗ " + I18n.t("Erreur");
-            default      -> entry.status.toString();
+            case TAGGED     -> "✓ " + I18n.t("Tagué");
+            case IDENTIFIED -> "🔍 " + I18n.t("Identifié");
+            case SKIPPED    -> "⚠ " + I18n.t("Ignoré");
+            case ERROR      -> "✗ " + I18n.t("Erreur");
+            default         -> entry.status.toString();
         };
+        // Détail artiste/titre/album/score/source — le principal manque signalé sur ce journal
+        // ("IDENTIFIED" tout court ne dit rien) ; ajouté pour TAGGED/IDENTIFIED où un résultat
+        // existe réellement (SKIPPED/ERROR n'ont normalement rien à résumer, message suffit).
+        if (entry.status == FileEntry.Status.TAGGED || entry.status == FileEntry.Status.IDENTIFIED) {
+            String summary = identificationSummary(entry);
+            if (!summary.isBlank()) statusText += " : " + summary;
+        }
         if (entry.message != null && !entry.message.isBlank()) statusText += " — " + entry.message;
-        LogEntry e = new LogEntry(nowHms(), entry.filename() + " — " + statusText, entry.status, entry);
+        appendLogLine(entry.filename() + " — " + statusText, entry.status, entry);
+    }
+
+    /** Bas niveau, pour les pipelines sans FileEntry.Status naturel (transcodage, récupération
+     *  vidéo…) — mêmes garanties que appendLog() (couleur, purge, filtre "Erreurs seulement",
+     *  localisation par double-clic si entry non-null) sans imposer le vocabulaire TAGGED/
+     *  IDENTIFIED/SKIPPED/ERROR de l'identification musicale. */
+    private void appendLogLine(String text, FileEntry.Status status, FileEntry entry) {
+        LogEntry e = new LogEntry(nowHms(), text, status, entry);
         logHistory.add(e);
         if (trimLogHistoryIfNeeded()) return;
         if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
@@ -2434,9 +2486,21 @@ public class MainFrame extends JFrame {
         long elapsedMs = System.currentTimeMillis() - runStartMillis;
         if (elapsedMs <= 0) return "";
         long remainingMs = elapsedMs * (totalCount - doneCount) / doneCount;
-        long remainingSec = remainingMs / 1000;
-        if (remainingSec < 60) return I18n.t(" · ~%d s restantes", Math.max(1, remainingSec));
-        return I18n.t(" · ~%d min restantes", (remainingSec / 60 + 1));
+        return I18n.t(" · ~%s restantes", formatDuration(remainingMs / 1000));
+    }
+
+    /** Durée lisible en s/min/h/j — avant : toujours en minutes, illisible sur un run de
+     *  plusieurs heures/jours (ex. "8674 min restantes" au lieu de "6j 0h"). */
+    private static String formatDuration(long totalSec) {
+        totalSec = Math.max(1, totalSec);
+        long days    = totalSec / 86400;
+        long hours   = (totalSec % 86400) / 3600;
+        long minutes = (totalSec % 3600) / 60;
+        long seconds = totalSec % 60;
+        if (days > 0)    return I18n.t("%dj %dh",   days, hours);
+        if (hours > 0)   return I18n.t("%dh %dmin", hours, minutes);
+        if (minutes > 0) return I18n.t("%dmin",     minutes);
+        return I18n.t("%ds", seconds);
     }
 
     // ── Bandeau de scan dossiers (Jaikoz-style) ──────────────────────────────
@@ -2953,7 +3017,7 @@ public class MainFrame extends JFrame {
 
         btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
         btnCancel.setEnabled(true);
-        progress.setValue(0); progress.setVisible(true);
+        progress.setValue(0); progress.setString(""); progress.setVisible(true);
 
         lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
         final int totalFiles = toTag.size();
@@ -3063,7 +3127,7 @@ public class MainFrame extends JFrame {
         }
 
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
-        progress.setValue(0); progress.setVisible(true);
+        progress.setValue(0); progress.setString(""); progress.setVisible(true);
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Enregistrement"), toSave.size());
         setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
@@ -3274,7 +3338,7 @@ public class MainFrame extends JFrame {
         ListenBrainzSyncWorker w = new ListenBrainzSyncWorker(
             targets,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
-            entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); refreshStats(); })
+            entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); appendLog(entry); refreshStats(); })
         );
         w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
@@ -3412,7 +3476,7 @@ public class MainFrame extends JFrame {
         });
         btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
         btnCancel.setEnabled(true);
-        progress.setValue(0); progress.setVisible(true);
+        progress.setValue(0); progress.setString(""); progress.setVisible(true);
         WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Re-taguage forcé"), w, w::stopNow);
     }
 
@@ -3502,6 +3566,7 @@ public class MainFrame extends JFrame {
         progress.setVisible(true);
         progress.setMaximum(targets.size());
         progress.setValue(0);
+        progress.setString("");
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Passe complète"), targets.size());
         setStatus(I18n.t("Complétion de %d fichier(s) incomplet(s)…", targets.size()));
@@ -3743,7 +3808,23 @@ public class MainFrame extends JFrame {
         setStatus("⏳ " + I18n.t("Transcodage… 0 / %d", toTranscode.size()));
 
         TranscodeWorker w = new TranscodeWorker(toTranscode, tableModel,
-            pr -> setStatus("⏳ " + I18n.t("Transcodage %d / %d", pr.done(), pr.total())),
+            pr -> {
+                setStatus("⏳ " + I18n.t("Transcodage %d / %d", pr.done(), pr.total()));
+                // Absent du Journal jusqu'ici — même trou que les autres pipelines audités
+                // aujourd'hui : le résultat par fichier (converti/déjà bon format/erreur)
+                // n'existait qu'un instant dans la barre de statut, écrasé au fichier suivant.
+                String fname = pr.entry() != null ? pr.entry().filename() : "?";
+                if (pr.error() != null) {
+                    appendLogLine("✗ " + I18n.t("Erreur transcodage") + " : " + fname + " — " + pr.error(),
+                            FileEntry.Status.ERROR, pr.entry());
+                } else if (pr.newPath() != null) {
+                    appendLogLine("✓ " + I18n.t("Transcodé") + " : " + fname + " → " + pr.newPath().getFileName(),
+                            FileEntry.Status.TAGGED, pr.entry());
+                } else {
+                    appendLogLine("⚠ " + I18n.t("Déjà au bon format") + " : " + fname,
+                            FileEntry.Status.SKIPPED, pr.entry());
+                }
+            },
             summary -> {
                 setStatus(summary);
                 if (btnTranscode != null) btnTranscode.setEnabled(true);
@@ -3774,6 +3855,7 @@ public class MainFrame extends JFrame {
         AlbumCompletionWorker w = new AlbumCompletionWorker(
             tableModel,
             this::setStatus,
+            this::appendLog,
             () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Complétion albums terminée.")))
         );
         WorkerHub.get().submit(WorkerHub.TaskKind.ALBUM_COMPLETION,
@@ -3810,6 +3892,7 @@ public class MainFrame extends JFrame {
         AlbumClusterWorker w = new AlbumClusterWorker(
             tableModel,
             this::setStatus,
+            this::appendLog,
             () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Groupement des albums terminé.")))
         );
         WorkerHub.get().submit(WorkerHub.TaskKind.ALBUM_CLUSTER,
@@ -4299,9 +4382,24 @@ public class MainFrame extends JFrame {
 
     private void openPodcastDialog() {
         if (tableModel.getRowCount() == 0) { setStatus(I18n.t("Chargez d'abord les fichiers audio à tagger.")); return; }
-        List<com.opentagger.model.FileEntry> all = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
-        new PodcastDialog(this, all, tableModel).setVisible(true);
+        // Bug réel signalé par l'utilisateur : passer TOUTE la table (TAGGED/IDENTIFIED compris)
+        // fait sonder la durée ffprobe (un sous-processus, jusqu'à 10s de timeout CHACUN — voir
+        // AudioDuration.probeSeconds) de CHAQUE fichier dans PodcastMatcher.match(), avant même de
+        // commencer le matching — sur une bibliothèque de 100k+ fichiers, "Matching en cours…"
+        // tournait des heures sans jamais rien afficher (aucun retour de progression). Un épisode
+        // de podcast ne peut de toute façon correspondre qu'à un fichier PAS DÉJÀ identifié comme
+        // vraie musique — restreindre aux PENDING/SKIPPED (même filtre que AlbumCompletionWorker
+        // pour ses candidats) réduit l'ensemble à sonder à ce qui est réellement pertinent.
+        List<com.opentagger.model.FileEntry> candidates = new ArrayList<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            FileEntry e = tableModel.get(i);
+            if (e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.SKIPPED) candidates.add(e);
+        }
+        if (candidates.isEmpty()) {
+            setStatus(I18n.t("Aucun fichier non identifié (PENDING/SKIPPED) à proposer pour un podcast."));
+            return;
+        }
+        new PodcastDialog(this, candidates, tableModel).setVisible(true);
         refreshStats();
     }
 
@@ -4336,8 +4434,19 @@ public class MainFrame extends JFrame {
                 // dossier ouvert coup sur coup) — sinon submit() lèverait IllegalStateException.
                 if (WorkerHub.get().current(WorkerHub.TaskKind.VIDEO_RECOVERY).isPresent()) return;
                 // onProgress appelé depuis SwingWorker.process(), déjà garanti sur l'EDT — même
-                // motif que VideoRecoveryDialog.onStart().
-                VideoRecoveryWorker w = new VideoRecoveryWorker(videos, dir.toPath(), MainFrame.this::setStatus);
+                // motif que VideoRecoveryDialog.onStart(). Contrairement au dialogue manuel (qui a
+                // son propre JTextArea toujours visible), ce chemin AUTOMATIQUE (déclenché après
+                // chaque scan de dossier, sans fenêtre ouverte) ne laissait aucune trace du
+                // résultat au-delà de la barre de statut, écrasée au message suivant — ajouté au
+                // Journal en plus, avec une couleur déduite du contenu du message.
+                VideoRecoveryWorker w = new VideoRecoveryWorker(videos, dir.toPath(), msg -> {
+                    setStatus(msg);
+                    FileEntry.Status st = msg.contains("✔") ? FileEntry.Status.TAGGED
+                            : msg.contains("✗") ? FileEntry.Status.ERROR
+                            : msg.contains("non reconnu") ? FileEntry.Status.SKIPPED
+                            : null;
+                    if (st != null) appendLogLine(msg.strip(), st, null);
+                });
                 w.addPropertyChangeListener(evt -> {
                     if ("state".equals(evt.getPropertyName())
                             && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
