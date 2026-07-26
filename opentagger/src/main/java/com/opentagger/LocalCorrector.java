@@ -140,7 +140,12 @@ public class LocalCorrector {
             if (sb.length() > 0) sb.append(' ');
             // Premier mot toujours en majuscule, articles/prép en minuscule sinon
             if (i == 0 || !LOWER_WORDS.contains(w.toLowerCase())) {
-                sb.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1));
+                // Le reste du mot n'était jusqu'ici jamais remis en minuscule — un nom de fichier
+                // ripé tout en MAJUSCULES ("METALLICA - ENTER SANDMAN") ressortait tel quel
+                // (seule la 1re lettre changeait), alors que la branche LOWER_WORDS juste en
+                // dessous fait bien .toLowerCase() sur tout le mot : incohérence entre les deux
+                // branches, pas un choix voulu.
+                sb.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1).toLowerCase());
             } else {
                 sb.append(w.toLowerCase());
             }

@@ -977,7 +977,12 @@ public class SettingsDialog extends JDialog {
             int sel = lstCoverProviders.getSelectedIndex();
             if (sel < 0) return;
             String id = coverProviderOrder.get(sel);
-            coverProviderEnabled.put(id, !coverProviderEnabled.get(id));
+            // coverProviderOrder() n'expurge jamais un id inconnu déjà présent dans un
+            // settings.properties édité à la main/corrompu/d'une autre version d'OpenTagger — .get()
+            // renvoyait alors null pour un tel id, et !null levait une NullPointerException à
+            // l'unboxing. getOrDefault(true) est déjà le pattern utilisé partout ailleurs dans ce
+            // fichier pour lire cette même map (voir juste en dessous et save()).
+            coverProviderEnabled.put(id, !coverProviderEnabled.getOrDefault(id, true));
             refreshCoverProvidersList();
             lstCoverProviders.setSelectedIndex(sel);
         });
@@ -1813,6 +1818,11 @@ public class SettingsDialog extends JDialog {
         lbl.setText(connected ? username : I18n.t("(non connecté)"));
         lbl.putClientProperty("FlatLaf.style", connected ? "foreground: #1db954" : "foreground: #888888");
         btnAction.setEnabled(true);
+        // Après un échec OAuth (identifiants refusés, délai dépassé...), le texte restait bloqué
+        // sur "Ouverture du navigateur…" indéfiniment — parfaitement cliquable à nouveau (ligne du
+        // dessus) mais visuellement figé sur l'état "en cours", jusqu'à fermer/rouvrir les
+        // Préférences. Restauré ici à chaque passage en état non-connecté.
+        if (!connected) btnAction.setText("🔑  " + I18n.t("Se connecter à MusicBrainz"));
         btnAction.setVisible(!connected);
         btnLogout.setVisible(connected);
     }
@@ -2282,15 +2292,42 @@ public class SettingsDialog extends JDialog {
         });
     }
 
+    // Un seul flash actif à la fois (voir flashComponent()) — onSettingsSearch() se déclenche à
+    // chaque frappe (pas de debounce) ; sans cet état partagé, taper "enreg" puis "enregi" puis
+    // "enregis..." qui matchent tous le même réglage en moins de 1200ms capturait le JAUNE du
+    // flash en cours comme "couleur d'origine" à restaurer, laissant le composant bloqué en jaune
+    // indéfiniment une fois le minuteur du second appel écoulé.
+    private JComponent flashingComponent;
+    private Color      flashingOriginalBg;
+    private boolean    flashingOriginalOpaque;
+    private Timer      flashingTimer;
+
     /** Flash temporaire du fond du composant trouvé, pour le repérer visuellement dans l'onglet. */
     private void flashComponent(JComponent c) {
-        Color original = c.getBackground();
-        boolean wasOpaque = c.isOpaque();
+        if (flashingTimer != null) flashingTimer.stop();
+        if (flashingComponent != null && flashingComponent != c) {
+            // Un autre composant flashait encore : le restaurer immédiatement avant de basculer.
+            flashingComponent.setBackground(flashingOriginalBg);
+            flashingComponent.setOpaque(flashingOriginalOpaque);
+            flashingComponent.repaint();
+        }
+        if (flashingComponent != c) {
+            // Nouvelle cible : capturer sa VRAIE couleur d'origine, pas un jaune de flash en cours.
+            flashingOriginalBg     = c.getBackground();
+            flashingOriginalOpaque = c.isOpaque();
+            flashingComponent      = c;
+        }
         c.setOpaque(true);
         c.setBackground(new Color(255, 213, 79));
-        Timer t = new Timer(1200, e -> { c.setBackground(original); c.setOpaque(wasOpaque); c.repaint(); });
-        t.setRepeats(false);
-        t.start();
+        flashingTimer = new Timer(1200, e -> {
+            c.setBackground(flashingOriginalBg);
+            c.setOpaque(flashingOriginalOpaque);
+            c.repaint();
+            flashingComponent = null;
+            flashingTimer = null;
+        });
+        flashingTimer.setRepeats(false);
+        flashingTimer.start();
     }
 
     private JScrollPane scrollWrap(JPanel panel) {

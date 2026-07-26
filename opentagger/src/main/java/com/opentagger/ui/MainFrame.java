@@ -338,15 +338,16 @@ public class MainFrame extends JFrame {
         try {
             folderWatcher = new com.opentagger.FolderWatcher(p -> SwingUtilities.invokeLater(() -> {
                 java.io.File f = p.toFile();
-                // Vérifier que ce fichier n'est pas déjà dans la table
-                for (int i = 0; i < tableModel.getRowCount(); i++) {
-                    if (tableModel.get(i).file.equals(f)) return;
+                // Vérifier que ce fichier n'est pas déjà dans la table — allEntries() (ici et pour
+                // la résolution du scanRoot juste en dessous) : sinon un fichier déjà présent mais
+                // masqué par un filtre actif pouvait être réajouté en double.
+                for (com.opentagger.model.FileEntry fe : tableModel.allEntries()) {
+                    if (fe.file.equals(f)) return;
                 }
                 com.opentagger.model.FileEntry e = new com.opentagger.model.FileEntry(f, new com.opentagger.model.TagInfo());
                 // Déterminer la racine : trouver le scanRoot du dossier parent
                 Path parent = p.getParent();
-                for (int i = 0; i < tableModel.getRowCount(); i++) {
-                    com.opentagger.model.FileEntry ex = tableModel.get(i);
+                for (com.opentagger.model.FileEntry ex : tableModel.allEntries()) {
                     if (ex.scanRoot != null && parent.startsWith(ex.scanRoot)) { e.scanRoot = ex.scanRoot; break; }
                 }
                 tableModel.add(e);
@@ -682,9 +683,9 @@ public class MainFrame extends JFrame {
 
     private void refreshFolders() {
         // Collecter les racines uniques de tous les fichiers chargés
+        // allEntries() : sinon "Rafraîchir" ne redécouvre que les dossiers des fichiers visibles.
         java.util.LinkedHashSet<File> roots = new java.util.LinkedHashSet<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            com.opentagger.model.FileEntry e = tableModel.get(i);
+        for (com.opentagger.model.FileEntry e : tableModel.allEntries()) {
             if (e.scanRoot != null) roots.add(e.scanRoot.toFile());
             else if (e.file != null) roots.add(e.file.getParentFile());
         }
@@ -2015,8 +2016,10 @@ public class MainFrame extends JFrame {
                         for (FileEntry m : members) { m.selected = false; tableModel.update(m); }
                     });
                     miTagAlbum.addActionListener(ev -> {
-                        for (int r = 0; r < tableModel.getRowCount(); r++) {
-                            FileEntry other = tableModel.get(r);
+                        // allEntries() : sinon un fichier coché mais masqué par un filtre actif
+                        // restait coché et se faisait tagger EN PLUS de l'album ciblé (startTagging
+                        // parcourt maintenant toute la bibliothèque pour ses candidats .selected).
+                        for (FileEntry other : tableModel.allEntries()) {
                             if (other.selected) { other.selected = false; tableModel.update(other); }
                         }
                         for (FileEntry m : members) { m.selected = true; tableModel.update(m); }
@@ -2876,9 +2879,10 @@ public class MainFrame extends JFrame {
     private void loadSingleFile(File f) {
         if (f == null || !f.isFile()) return;
         Path filePath = f.toPath().toAbsolutePath();
-        // Ignorer si déjà dans la table
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry fe = tableModel.get(i);
+        // Ignorer si déjà dans la table — allEntries() : un fichier déjà chargé mais masqué par un
+        // filtre actif se faisait sinon réajouter en double (getRowCount()/get(i) ne portent que
+        // sur la vue filtrée).
+        for (FileEntry fe : tableModel.allEntries()) {
             if (filePath.equals((fe.currentPath != null ? fe.currentPath : fe.file.toPath()).toAbsolutePath())) return;
         }
         FileEntry entry = new FileEntry(f, new com.opentagger.model.TagInfo());
@@ -2924,10 +2928,11 @@ public class MainFrame extends JFrame {
         // les 2 premiers ne doit pas empêcher le RowSorter de se rattacher pour autant — seul un
         // scan qui a VRAIMENT commencé sa phase 1 doit compter (voir PHASE1_START_MARKER).
 
-        // Snapshot des chemins déjà dans la table (sur EDT, avant démarrage du worker)
+        // Snapshot des chemins déjà dans la table (sur EDT, avant démarrage du worker) — allEntries()
+        // : sinon un fichier déjà chargé mais masqué par un filtre actif se faisait réajouter en
+        // double lors d'un rescan du même dossier.
         final Set<Path> alreadyInTable = new java.util.HashSet<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry fe = tableModel.get(i);
+        for (FileEntry fe : tableModel.allEntries()) {
             alreadyInTable.add((fe.currentPath != null ? fe.currentPath : fe.file.toPath()).toAbsolutePath());
         }
 
@@ -3187,8 +3192,11 @@ public class MainFrame extends JFrame {
             for (int r : table.getSelectedRows())
                 toTag.add(tableModel.get(table.convertRowIndexToModel(r)));
         } else {
-            for (int i = 0; i < tableModel.getRowCount(); i++) {
-                FileEntry e = tableModel.get(i);
+            // allEntries() : "Tout tagger" doit couvrir toute la bibliothèque chargée, pas
+            // seulement la vue déjà filtrée (recherche, chip de statut cliqué) — un filtre resté
+            // actif sans rapport avec le taguage masquait sinon silencieusement une partie des
+            // fichiers cochés, sans le moindre avertissement.
+            for (FileEntry e : tableModel.allEntries()) {
                 // IDENTIFIED exclu comme TAGGED : déjà identifié avec succès, juste pas encore
                 // enregistré — le re-identifier ici referait le même travail réseau pour rien
                 // (voir FileEntry.Status.IDENTIFIED). Utilisez "Enregistrer tout" pour ces fichiers.
@@ -3256,9 +3264,10 @@ public class MainFrame extends JFrame {
     private void stopAll() {
         WorkerHub.get().cancelAll();
 
-        // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        // Reset immédiat sur l'EDT — même si le thread tourne encore en arrière-plan.
+        // allEntries() : un fichier PROCESSING masqué par un filtre actif restait sinon bloqué
+        // dans cet état indéfiniment après "Arrêter", même si le worker sous-jacent est bien annulé.
+        for (FileEntry e : tableModel.allEntries()) {
             if (e.status == FileEntry.Status.PROCESSING) {
                 e.status  = FileEntry.Status.PENDING;
                 e.message = "";
@@ -3307,9 +3316,10 @@ public class MainFrame extends JFrame {
             return;
         }
 
+        // allEntries() : les fichiers identifiés mais masqués par un filtre actif n'étaient sinon
+        // jamais écrits sur le disque, sans le moindre avertissement.
         List<FileEntry> toSave = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        for (FileEntry e : tableModel.allEntries()) {
             if (e.selected && e.status == FileEntry.Status.IDENTIFIED) toSave.add(e);
         }
         if (toSave.isEmpty()) {
@@ -3322,6 +3332,19 @@ public class MainFrame extends JFrame {
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Enregistrement"), toSave.size());
         setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
+
+        // Contrairement à btnTagAll/btnTagSel (désactivés par startTagging(), réactivés par
+        // resetBtns()), ce bouton ne changeait jusqu'ici JAMAIS d'apparence pendant tout
+        // l'enregistrement (vérifié : aucun "btnSaveAll.set" ailleurs dans ce fichier avant ce
+        // correctif) — il restait affiché "Enregistrer tout", parfaitement cliquable. Or un second
+        // clic sur ce bouton ANNULE l'enregistrement en cours (voir le bloc `running.isPresent()`
+        // tout en haut de cette méthode) : un utilisateur qui re-cliquait — parce que rien ne
+        // semblait se passer visuellement, ou pour lancer "un second enregistrement" — annulait sans
+        // le savoir celui en cours, ne laissant sur le disque que la portion déjà traitée à ce
+        // moment précis. Vu de l'extérieur, ça ressemble exactement à un enregistrement "au hasard"/
+        // incomplet d'une fois sur l'autre selon le moment exact du clic.
+        btnSaveAll.setText(I18n.t("Annuler l'enregistrement"));
+        btnSaveAll.setToolTipText(I18n.t("Un enregistrement est en cours — cliquer l'annule"));
 
         SaveWorker w = new SaveWorker(toSave, maskIndex,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
@@ -3342,6 +3365,8 @@ public class MainFrame extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     progress.setVisible(false);
                     refreshStats();
+                    btnSaveAll.setText(I18n.t("Enregistrer tout"));
+                    btnSaveAll.setToolTipText(I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"));
                     // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
                     // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
                     // qu'à l'Enregistrement. groupByCompilations() garde ses propres gardes
@@ -3509,10 +3534,10 @@ public class MainFrame extends JFrame {
             return;
         }
 
+        // allEntries() : sinon synchronisation incomplète si un filtre est actif.
         List<FileEntry> targets = new ArrayList<>();
         java.util.Set<String> seenPaths = new java.util.HashSet<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        for (FileEntry e : tableModel.allEntries()) {
             if (e.status != FileEntry.Status.TAGGED) continue;
             String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
             if (seenPaths.add(p)) targets.add(e);
@@ -3568,8 +3593,9 @@ public class MainFrame extends JFrame {
         if (sel.length > 0) {
             for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
         } else {
-            for (int i = 0; i < tableModel.getRowCount(); i++) {
-                FileEntry e = tableModel.get(i);
+            // allEntries() : "de tout" doit couvrir toute la bibliothèque, pas juste la vue
+            // filtrée du moment — sinon un re-taguage "de tout" limité aux fichiers visibles.
+            for (FileEntry e : tableModel.allEntries()) {
                 if (e.status == FileEntry.Status.TAGGED) targets.add(e);
             }
         }
@@ -3718,8 +3744,9 @@ public class MainFrame extends JFrame {
     private void autoCompleteIncomplete(Runnable onDone) {
         List<FileEntry> targets = new ArrayList<>();
         java.util.Set<String> seenPaths = new java.util.HashSet<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        // allEntries() : complétion limitée aux fichiers visibles sinon un filtre actif sans
+        // rapport (recherche, chip de statut) ferait ignorer silencieusement le reste.
+        for (FileEntry e : tableModel.allEntries()) {
             // IDENTIFIED inclus comme TAGGED : porte déjà les mêmes données d'identification
             // complètes (juste pas encore écrites sur le disque) — inutile d'attendre un
             // "Enregistrer tout" pour pouvoir compléter les champs manquants en mémoire.
@@ -3797,9 +3824,10 @@ public class MainFrame extends JFrame {
      */
     private void detectLocalCompilations() {
         // Grouper par (dossier parent, nom d'album normalisé)
+        // allEntries() : sinon détection faussée si des pistes de l'album sont masquées par un
+        // filtre actif (compte de pistes/artistes distincts sous-évalué).
         java.util.Map<String, List<FileEntry>> byAlbum = new java.util.LinkedHashMap<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        for (FileEntry e : tableModel.allEntries()) {
             if (e.current == null) continue;
             java.nio.file.Path dir = (e.currentPath != null ? e.currentPath : e.file.toPath()).getParent();
             String album = e.current.album.trim().toLowerCase();
@@ -3858,9 +3886,12 @@ public class MainFrame extends JFrame {
 
     private void renameTagged() {
         // ── 1. Calculer l'aperçu (aucun fichier déplacé ici) ─────────────────
+        // allEntries() : sinon un filtre actif masquant tous les fichiers tagués visibles
+        // faisait croire à tort qu'il n'y en avait aucun dans toute la bibliothèque, alors
+        // que compute()/buildRenameJob() (même correctif) les renomment bel et bien.
         long tagged = 0;
-        for (int i = 0; i < tableModel.getRowCount(); i++)
-            if (tableModel.get(i).status == FileEntry.Status.TAGGED) tagged++;
+        for (FileEntry e : tableModel.allEntries())
+            if (e.status == FileEntry.Status.TAGGED) tagged++;
         if (tagged == 0) { setStatus(I18n.t("Aucun fichier tagué à renommer.")); return; }
 
         List<RenamePreviewDialog.PreviewRow> preview = RenamePreviewDialog.compute(tableModel, currentMask);
@@ -3883,13 +3914,15 @@ public class MainFrame extends JFrame {
                 protected String doInBackground() {
                     FileRenamer renamer = new FileRenamer();
                     boolean cleanupEmptyDirs = Config.get().deleteEmptyDirsAfterRename();
-                    for (int i = 0; i < tableModel.getRowCount(); i++) {
+                    // allEntries() : sinon un fichier tagué masqué par un filtre actif au moment du
+                    // clic n'était jamais renommé sur le disque, alors que l'aperçu (voir
+                    // RenamePreviewDialog.compute(), même correctif) prétend maintenant l'inclure.
+                    for (FileEntry e : tableModel.allEntries()) {
                         // Vérifié à chaque itération (pas seulement avant la boucle) : c'est le
                         // point d'annulation coopératif utilisé par RenamePreviewDialog (bouton
                         // Annuler / fermeture pendant un renommage) — cancel(false) plutôt que
                         // cancel(true) pour ne jamais interrompre un Files.move en plein vol.
                         if (isCancelled()) break;
-                        FileEntry e = tableModel.get(i);
                         if (e.status != FileEntry.Status.TAGGED) continue;
                         Path oldPath = e.currentPath;
                         Path root = destRoot != null ? destRoot
@@ -3910,9 +3943,18 @@ public class MainFrame extends JFrame {
                                 final Path finalNewPath = newPath;
                                 SwingUtilities.invokeLater(() -> e.currentPath = finalNewPath);
                                 renamed++;
-                                String mbid = cache.getFileTagging(oldPath.toFile().getAbsolutePath());
-                                if (mbid != null)
+                                // deleteFileHistory(oldAbs) manquait ici (déjà fait dans
+                                // TagEnrichment.saveEntry()/BatchProcessor/App.java) : sans lui,
+                                // l'ancienne entrée chemin→mbid restait vivante en plus de la
+                                // nouvelle — si ce même chemin absolu est un jour réutilisé par un
+                                // fichier totalement différent (re-rip vers un nom générique...),
+                                // findTags() lui ferait confiance à 100% sans revérifier l'audio.
+                                String oldAbs = oldPath.toFile().getAbsolutePath();
+                                String mbid = cache.getFileTagging(oldAbs);
+                                if (mbid != null) {
+                                    cache.deleteFileHistory(oldAbs);
                                     cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
+                                }
                             } else {
                                 skipped++;
                             }
@@ -3975,8 +4017,9 @@ public class MainFrame extends JFrame {
                 if (e.currentPath != null) toTranscode.add(e);
             }
         } else {
-            for (int i = 0; i < tableModel.getRowCount(); i++) {
-                FileEntry e = tableModel.get(i);
+            // allEntries() : "de tout" doit couvrir toute la bibliothèque, pas juste la vue
+            // filtrée du moment — sinon un transcodage "de tout" limité aux fichiers visibles.
+            for (FileEntry e : tableModel.allEntries()) {
                 if (e.selected && e.currentPath != null) toTranscode.add(e);
             }
         }
@@ -4151,9 +4194,11 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'organiser les fichiers.", String.join(", ", ops)));
             return;
         }
+        // allEntries() : même correctif que renameTagged() — sinon un filtre actif masquant
+        // tous les fichiers tagués visibles faisait croire à tort qu'il n'y en avait aucun.
         long tagged = 0;
-        for (int i = 0; i < tableModel.getRowCount(); i++)
-            if (tableModel.get(i).status == FileEntry.Status.TAGGED) tagged++;
+        for (FileEntry e : tableModel.allEntries())
+            if (e.status == FileEntry.Status.TAGGED) tagged++;
         if (tagged == 0) { setStatus(I18n.t("Aucun fichier tagué à organiser.")); return; }
 
         // 1. Choisir le dossier de destination
@@ -4242,8 +4287,14 @@ public class MainFrame extends JFrame {
     }
 
     private void setAllSelected(boolean val) {
-        for (int i = 0; i < tableModel.getRowCount(); i++)
-            tableModel.setValueAt(val, i, 0);
+        // allEntries() : les cases des fichiers masqués par un filtre actif restaient sinon dans
+        // leur état précédent malgré le nom "Tout" — setValueAt(row,...) est indexé sur la vue
+        // filtrée (FileTableModel.visible), donc muté directement puis rafraîchi via update(),
+        // même idiome que partout ailleurs dans ce fichier pour une mutation hors setValueAt.
+        for (FileEntry e : tableModel.allEntries()) {
+            e.selected = val;
+            tableModel.update(e);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4509,7 +4560,10 @@ public class MainFrame extends JFrame {
     // ── Export CSV ───────────────────────────────────────────��────────────────
 
     private void exportCsv() {
-        if (tableModel.getRowCount() == 0) { setStatus(I18n.t("Aucun fichier à exporter.")); return; }
+        // allEntries() : un export "CSV" incomplet si un filtre reste actif au moment du clic
+        // (sinon getRowCount()/get(i), qui portent sur la vue déjà filtrée) — le nom de l'action
+        // ne suggère aucune restriction à la vue courante.
+        if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Aucun fichier à exporter.")); return; }
         JFileChooser fc = new JFileChooser();
         fc.setSelectedFile(new File("opentagger_export.csv"));
         fc.setDialogTitle(I18n.t("Exporter en CSV"));
@@ -4517,12 +4571,12 @@ public class MainFrame extends JFrame {
         File out = fc.getSelectedFile();
         setStatus(I18n.t("Export CSV en cours…"));
         // Copie de la liste sur l'EDT AVANT de passer en arrière-plan : doInBackground() itérait
-        // avant ce correctif directement sur tableModel (getRowCount()/get(i)) depuis un thread de
-        // fond pendant que l'EDT peut concurremment ajouter/retirer des lignes (scan en cours,
-        // filtre) — la liste "visible" sous-jacente n'est pas synchronisée pour cet usage. Copier
-        // les références ici (rapide, pas de clonage profond de TagInfo) fige la structure itérée.
-        List<FileEntry> snapshot = new ArrayList<>(tableModel.getRowCount());
-        for (int i = 0; i < tableModel.getRowCount(); i++) snapshot.add(tableModel.get(i));
+        // avant un correctif précédent directement sur tableModel (getRowCount()/get(i)) depuis un
+        // thread de fond pendant que l'EDT peut concurremment ajouter/retirer des lignes (scan en
+        // cours, filtre) — allEntries() est elle-même une vue live (non copiée) sur la liste
+        // mutable sous-jacente, donc toujours recopiée ici dans un ArrayList frais pour figer la
+        // structure itérée.
+        List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() throws Exception {
                 try (PrintWriter pw = new PrintWriter(
@@ -4557,9 +4611,11 @@ public class MainFrame extends JFrame {
     // ── Export playlist ───────────────────────────────────────────────────────
 
     private void exportPlaylist(String format) {
+        // allEntries() (compte ET liste réelle juste en dessous) : sinon un fichier tagué masqué
+        // par un filtre actif est silencieusement absent de la playlist exportée.
         long tagged = 0;
-        for (int i = 0; i < tableModel.getRowCount(); i++)
-            if (tableModel.get(i).status == FileEntry.Status.TAGGED) tagged++;
+        for (FileEntry e : tableModel.allEntries())
+            if (e.status == FileEntry.Status.TAGGED) tagged++;
         if (tagged == 0) { setStatus(I18n.t("Aucun fichier tagué à exporter.")); return; }
 
         JFileChooser fc = new JFileChooser();
@@ -4572,8 +4628,7 @@ public class MainFrame extends JFrame {
         if (!out.getName().toLowerCase().endsWith(ext))
             out = new File(out.getAbsolutePath() + ext);
 
-        List<FileEntry> all = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
+        List<FileEntry> all = new ArrayList<>(tableModel.allEntries());
 
         final File outFinal = out;
         setStatus(I18n.t("Export %s en cours…", format.toUpperCase()));
@@ -4597,7 +4652,7 @@ public class MainFrame extends JFrame {
     // ── Podcast ───────────────────────────────────────────────────────────────
 
     private void openPodcastDialog() {
-        if (tableModel.getRowCount() == 0) { setStatus(I18n.t("Chargez d'abord les fichiers audio à tagger.")); return; }
+        if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Chargez d'abord les fichiers audio à tagger.")); return; }
         // Bug réel signalé par l'utilisateur : passer TOUTE la table (TAGGED/IDENTIFIED compris)
         // fait sonder la durée ffprobe (un sous-processus, jusqu'à 10s de timeout CHACUN — voir
         // AudioDuration.probeSeconds) de CHAQUE fichier dans PodcastMatcher.match(), avant même de
@@ -4606,9 +4661,9 @@ public class MainFrame extends JFrame {
         // de podcast ne peut de toute façon correspondre qu'à un fichier PAS DÉJÀ identifié comme
         // vraie musique — restreindre aux PENDING/SKIPPED (même filtre que AlbumCompletionWorker
         // pour ses candidats) réduit l'ensemble à sonder à ce qui est réellement pertinent.
+        // allEntries() : sinon candidats limités aux fichiers visibles si un filtre est actif.
         List<com.opentagger.model.FileEntry> candidates = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        for (FileEntry e : tableModel.allEntries()) {
             if (e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.SKIPPED) candidates.add(e);
         }
         if (candidates.isEmpty()) {
@@ -4692,9 +4747,12 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de détecter les doublons.", String.join(", ", ops)));
             return;
         }
-        if (tableModel.getRowCount() == 0) { setStatus(I18n.t("Aucun fichier chargé.")); return; }
-        List<FileEntry> all = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) all.add(tableModel.get(i));
+        // allEntries() (TOUTE la bibliothèque), pas getRowCount()/get(i) (la vue déjà filtrée par
+        // recherche/chip de statut) : sinon un filtre resté actif au moment du clic (recherche en
+        // cours, filtre sur un statut) masque silencieusement une partie des fichiers à la
+        // détection — un vrai doublon dont une seule copie passe le filtre n'était jamais signalé.
+        if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Aucun fichier chargé.")); return; }
+        List<FileEntry> all = new ArrayList<>(tableModel.allEntries());
         List<DuplicateDetector.DuplicateGroup> groups = DuplicateDetector.detect(all);
         if (groups.isEmpty()) { setStatus(I18n.t("Aucun doublon détecté.")); LOG.info("[Doublons] Aucun doublon parmi " + all.size() + " fichiers."); return; }
         int total = groups.stream().mapToInt(g -> g.files().size()).sum();
@@ -4727,8 +4785,9 @@ public class MainFrame extends JFrame {
         List<FileEntry> missing    = new ArrayList<>();
         List<FileEntry> mislabeled = new ArrayList<>();
         List<FileEntry> corrupt    = new ArrayList<>();
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            FileEntry e = tableModel.get(i);
+        // allEntries() : sinon les fichiers en erreur masqués par un filtre actif ne sont jamais
+        // proposés à ce nettoyage.
+        for (FileEntry e : tableModel.allEntries()) {
             if (e.status != FileEntry.Status.ERROR) continue;
             if ("Fichier introuvable".equals(e.message)) missing.add(e);
             else if (e.message != null && e.message.contains("ne correspond pas à l'extension")) mislabeled.add(e);
@@ -4879,8 +4938,9 @@ public class MainFrame extends JFrame {
             for (int r : sel)
                 candidates.add(tableModel.get(table.convertRowIndexToModel(r)));
         } else {
-            for (int i = 0; i < tableModel.getRowCount(); i++)
-                candidates.add(tableModel.get(i));
+            // allEntries() : "de tout" doit couvrir toute la bibliothèque, pas juste la vue
+            // filtrée du moment.
+            candidates.addAll(tableModel.allEntries());
         }
 
         // Filtrer : seulement les TAGGED avec un recordingMbid (soumission utile)

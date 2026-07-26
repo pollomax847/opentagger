@@ -44,9 +44,9 @@ public final class TagEnrichment {
      * qui ne dépend d'aucune heuristique ni de son câblage. Ne fait jamais planter l'appelant
      * (réseau, comme enrichGenre ci-dessus).
      */
-    public static void enrichClassicalWork(TagInfo ti, MusicBrainzClient mb) {
+    public static void enrichClassicalWork(TagInfo ti, MusicBrainzClient mb, MetadataCache cache) {
         if (ti.workMbid.isBlank()) return;
-        try { mb.resolveClassicalWork(ti); } catch (Exception ignored) {}
+        try { mb.resolveClassicalWork(ti, cache); } catch (Exception ignored) {}
     }
 
     /**

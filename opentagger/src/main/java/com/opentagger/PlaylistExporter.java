@@ -33,7 +33,11 @@ public class PlaylistExporter {
 
                 String artist   = m3u(ti.artist.isBlank() ? "?" : ti.artist);
                 String title    = m3u(ti.title.isBlank()  ? p.getFileName().toString() : ti.title);
-                int    duration = -1; // -1 = durée inconnue
+                // ti.durationSec est déjà connu (colonne Durée du tableau principal) — avant ce
+                // correctif, -1 ("durée inconnue") était écrit systématiquement, alors que la
+                // plupart des lecteurs (VLC, Kodi, MediaMonkey) l'utilisent pour le temps total
+                // affiché / la barre de progression de la playlist.
+                int    duration = ti.durationSec > 0 ? ti.durationSec : -1;
 
                 pw.println("#EXTINF:" + duration + "," + artist + " - " + title);
                 pw.println(p.toAbsolutePath());
@@ -67,6 +71,9 @@ public class PlaylistExporter {
                     try { pw.println("      <trackNum>" + Integer.parseInt(ti.track) + "</trackNum>"); }
                     catch (NumberFormatException ignored) {}
                 }
+                // <duration> XSPF est en millisecondes — champ prévu par le format, jamais écrit
+                // avant ce correctif alors que ti.durationSec est disponible ici comme pour le M3U.
+                if (ti.durationSec > 0) pw.println("      <duration>" + (ti.durationSec * 1000) + "</duration>");
                 pw.println("    </track>");
                 count++;
             }

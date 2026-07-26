@@ -457,9 +457,15 @@ public class TagWriter {
         sf(tag, FieldKey.CATALOG_NO,         i.catalogNo);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASE_TYPE, i.releaseType);
         sf(tag, FieldKey.ORIGINAL_YEAR,      i.originalYear);
+        // label/releaseStatus/media : champs MusicBrainz systématiquement extraits mais jamais
+        // écrits avant ce correctif (comparaison directe avec Picard sur un même fichier).
+        sf(tag, FieldKey.RECORD_LABEL,             i.label);
+        sf(tag, FieldKey.MUSICBRAINZ_RELEASE_STATUS, i.releaseStatus);
+        sf(tag, FieldKey.MEDIA,                    i.media);
 
         // ── IDs MusicBrainz ───────────────────────────────────────────────────
         sf(tag, FieldKey.MUSICBRAINZ_ARTISTID,         i.artistMbid);
+        sf(tag, FieldKey.MUSICBRAINZ_RELEASEARTISTID,  i.albumArtistMbid);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID, i.releaseGroupMbid);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASEID,        i.releaseMbid);
         sf(tag, FieldKey.MUSICBRAINZ_TRACK_ID,         i.recordingMbid);
@@ -559,6 +565,13 @@ public class TagWriter {
         apFreeform(cmd, "MusicBrainz Album Id",         i.releaseMbid);
         apFreeform(cmd, "MusicBrainz Release Group Id", i.releaseGroupMbid);
         apFreeform(cmd, "MusicBrainz Artist Id",        i.artistMbid);
+        apFreeform(cmd, "MusicBrainz Album Artist Id",  i.albumArtistMbid);
+
+        // Label/statut/support — mêmes champs que le chemin jaudiotagger normal (voir plus haut
+        // dans ce fichier), ajoutés ici aussi pour ne pas diverger sur le fallback M4A.
+        apFreeform(cmd, "LABEL",                     i.label);
+        apFreeform(cmd, "MusicBrainz Album Status",  i.releaseStatus);
+        apFreeform(cmd, "MEDIA",                     i.media);
 
         // ReplayGain
         apFreeform(cmd, "REPLAYGAIN_TRACK_GAIN", i.replayGainTrackGain);

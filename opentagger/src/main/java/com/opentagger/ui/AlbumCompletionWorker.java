@@ -163,7 +163,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         // ne démarre — observé en direct via jstack, "Tout tagger" semblait bloqué ici alors que le
         // vrai traitement par release n'avait pas encore commencé. Étant maintenant du pur accès
         // mémoire (pas d'I/O), plus besoin de thread-pool du tout.
-        Map<String, FileEntry> candidateIndex = new ConcurrentHashMap<>();
+        // Map<String, FileEntry> avant ce correctif : un put() sur le même titre normalisé
+        // écrasait silencieusement le candidat précédent. Or plusieurs candidats DIFFÉRENTS
+        // partagent très souvent le même titre normalisé ("Intro", "Outro", "Interlude", "Skit"
+        // existent sur d'innombrables albums différents) — avec plusieurs fichiers "01 - Intro.mp3"
+        // non identifiés provenant d'albums différents dans la bibliothèque, un seul restait
+        // joignable par cette passe ; les autres devenaient invisibles, sans le moindre message.
+        Map<String, List<FileEntry>> candidateIndex = new ConcurrentHashMap<>();
         for (FileEntry e : candidates) {
             if (isCancelled()) break;
             java.nio.file.Path p = e.currentPath != null ? e.currentPath : e.file.toPath();
@@ -171,7 +177,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             String t = (e.current != null && e.current.title != null) ? e.current.title.trim() : "";
             if (t.isBlank()) t = filenameTitle(p.getFileName().toString());
             String key = normalize(t);
-            if (!key.isBlank()) candidateIndex.put(key, e);
+            // ArrayList simple, pas une variante thread-safe : tous les accès (lecture ET
+            // suppression) se font plus bas sous synchronized(candidateIndex) — cette boucle de
+            // construction, elle, tourne avant tout traitement parallèle.
+            if (!key.isBlank())
+                candidateIndex.computeIfAbsent(key, k -> new ArrayList<>()).add(e);
         }
 
         // ── 2. Pour chaque release (en parallèle), récupérer la tracklist et compléter
@@ -202,7 +212,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     /** Traite une release entière : tracklist + toutes ses pistes manquantes. Appelé en parallèle,
      *  un thread par release, depuis le pool créé dans doInBackground(). */
     private void processRelease(String relMbid, Map<String, FileEntry> found, MetadataCache cache,
-                                 Map<String, FileEntry> candidateIndex,
+                                 Map<String, List<FileEntry>> candidateIndex,
                                  MusicBrainzClient mb, LastFmClient lastFm) {
         if (isCancelled()) return;
 
@@ -212,6 +222,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
         publish(I18n.t("Album : %s (%d piste(s) trouvée(s) / %d au total)",
                 tl.album(), found.size(), tl.tracks().size()));
+
+        // Avant ce correctif, une piste manquante sans AUCUN candidat correspondant nulle part
+        // dans la bibliothèque était simplement ignorée en silence — impossible de savoir, à la
+        // fin, LESQUELLES précisément manquaient encore (seulement le compte de départ ci-dessus).
+        List<String> stillMissing = new ArrayList<>();
 
         for (ReleaseTrack track : tl.tracks()) {
             if (isCancelled()) break;
@@ -223,8 +238,15 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             FileEntry hit;
             synchronized (candidateIndex) {
                 hit = findCandidate(candidateIndex, track.title(), track.artist());
-                if (hit == null) continue;
-                candidateIndex.values().remove(hit);
+                if (hit == null) {
+                    stillMissing.add((track.trackNo() > 0 ? track.trackNo() + ". " : "") + track.title());
+                    continue;
+                }
+                // Retire hit de la liste qui le contient réellement (le titre normalisé qui a
+                // servi à le trouver peut différer de celui d'un doublon partageant la même clé).
+                for (List<FileEntry> bucket : candidateIndex.values()) {
+                    if (bucket.remove(hit)) break;
+                }
             }
 
             // Construire le TagInfo complet
@@ -273,7 +295,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // No-op ici en pratique : la tracklist MB (ReleaseTrack) ne porte pas de workMbid,
             // seulement recordingMbid — ajouté quand même pour cohérence avec les autres pipelines
             // et pour rester correct si ReleaseTrack gagne un jour ce champ.
-            TagEnrichment.enrichClassicalWork(ti, mb);
+            TagEnrichment.enrichClassicalWork(ti, mb, cache);
 
             // Empreinte AcoustID : calculée systématiquement après toute identification
             // réussie (TaggingWorker/BatchProcessor/App/MatchDialog le font déjà, comme
@@ -308,6 +330,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             publish(I18n.t("  ✓ %s → piste %d \"%s\" (identifié, pas encore enregistré)",
                     hit.filename(), track.trackNo(), track.title()));
             matched.incrementAndGet();
+        }
+
+        if (!stillMissing.isEmpty()) {
+            publish(I18n.t("  ⚠ %s : album toujours incomplet — %d piste(s) introuvable(s) dans la bibliothèque : %s",
+                    tl.album(), stillMissing.size(), String.join(", ", stillMissing)));
         }
     }
 
@@ -363,7 +390,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     }
 
     /** Doit être appelé avec le verrou sur candidateIndex déjà tenu par l'appelant. */
-    private FileEntry findCandidate(Map<String, FileEntry> index, String trackTitle, String trackArtist) {
+    private FileEntry findCandidate(Map<String, List<FileEntry>> index, String trackTitle, String trackArtist) {
         String norm = normalize(trackTitle);
         if (norm.isBlank()) return null;
         // Piste MB au titre générique ("Unknown", "Track 5"...) : rare sur une vraie release
@@ -372,17 +399,20 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         // qui ne vérifie aujourd'hui aucune ressemblance de contenu réel.
         if (isGenericTitle(norm)) return null;
 
-        // 1. Correspondance exacte
-        FileEntry hit = index.get(norm);
-        if (hit != null && artistCompatible(hit, trackArtist)) return hit;
+        // 1. Correspondance exacte — plusieurs candidats peuvent partager le même titre normalisé
+        // (ex. "Intro" sur des dizaines d'albums différents) : on prend le premier compatible avec
+        // l'artiste attendu, pas juste "le" candidat comme avant ce correctif.
+        List<FileEntry> exact = index.get(norm);
+        if (exact != null) {
+            for (FileEntry c : exact) if (artistCompatible(c, trackArtist)) return c;
+        }
 
         // 2. Inclusion (le candidat contient le titre de la piste ou l'inverse)
         // Garde de longueur minimale : évite les faux positifs avec des mots très courts
-        for (Map.Entry<String, FileEntry> e : index.entrySet()) {
+        for (Map.Entry<String, List<FileEntry>> e : index.entrySet()) {
             String k = e.getKey();
-            if (!artistCompatible(e.getValue(), trackArtist)) continue;
-            if ((k.contains(norm) && norm.length() >= 12) ||
-                (norm.contains(k) && k.length() >= 12)) return e.getValue();
+            if (!((k.contains(norm) && norm.length() >= 12) || (norm.contains(k) && k.length() >= 12))) continue;
+            for (FileEntry c : e.getValue()) if (artistCompatible(c, trackArtist)) return c;
         }
 
         // 3. Similarité par mots partagés (≥ 70%)
@@ -390,10 +420,12 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         if (trackWords.length < 2) return null;
         int best = 0;
         FileEntry bestEntry = null;
-        for (Map.Entry<String, FileEntry> e : index.entrySet()) {
-            if (!artistCompatible(e.getValue(), trackArtist)) continue;
+        for (Map.Entry<String, List<FileEntry>> e : index.entrySet()) {
             int shared = countSharedWords(trackWords, e.getKey().split("\\s+"));
-            if (shared > best) { best = shared; bestEntry = e.getValue(); }
+            if (shared <= best) continue;
+            for (FileEntry c : e.getValue()) {
+                if (artistCompatible(c, trackArtist)) { best = shared; bestEntry = c; break; }
+            }
         }
         if (bestEntry != null && best >= Math.max(1, (int)(trackWords.length * 0.7))) {
             return bestEntry;

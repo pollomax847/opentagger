@@ -109,7 +109,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels";
+                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels+labels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -126,7 +126,7 @@ public class MusicBrainzClient {
         String url = BASE_URL + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels";
+                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels+labels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -333,13 +333,47 @@ public class MusicBrainzClient {
         info.artistsSort = sorts.toString();
     }
 
-    /** Extrait script, country depuis la release (disponibles en inline recording lookup). */
+    /**
+     * Extrait script, country, barcode, statut, label/catalogue et l'id MusicBrainz de l'artiste
+     * de la parution depuis la release (disponibles en inline recording lookup). Avant ce
+     * correctif, seuls script/country étaient lus — barcode/label/catalogNo/releaseStatus/
+     * albumArtistMbid existaient déjà (barcode/catalogNo) ou ont été ajoutés au modèle
+     * (label/releaseStatus/albumArtistMbid) mais restaient systématiquement vides : comparé à
+     * Picard sur le même fichier, ces champs étaient présents côté MusicBrainz mais jamais lus ici.
+     */
     private void extractReleaseDetails(JsonNode release, TagInfo info) {
         String sc = release.path("text-representation").path("script").asText("").trim();
         if (!sc.isBlank() && info.script.isBlank()) info.script = sc;
 
         String co = release.path("country").asText("").trim();
         if (!co.isBlank() && info.country.isBlank()) info.country = co;
+
+        String bc = release.path("barcode").asText("").trim();
+        if (!bc.isBlank() && info.barcode.isBlank()) info.barcode = bc;
+
+        String status = release.path("status").asText("").trim();
+        if (!status.isBlank() && info.releaseStatus.isBlank()) info.releaseStatus = status;
+
+        // label-info : présent seulement si inc=labels a été demandé — un release peut avoir
+        // plusieurs labels (co-productions), on garde le premier comme le fait Picard.
+        JsonNode labelInfo = release.path("label-info");
+        if (labelInfo.isArray() && !labelInfo.isEmpty()) {
+            JsonNode first = labelInfo.get(0);
+            String labelName = first.path("label").path("name").asText("").trim();
+            String catNo     = first.path("catalog-number").asText("").trim();
+            if (!labelName.isBlank() && info.label.isBlank())    info.label    = labelName;
+            if (!catNo.isBlank()     && info.catalogNo.isBlank()) info.catalogNo = catNo;
+        }
+
+        // Id de l'artiste de la PARUTION — distinct de artistMbid (artiste de la PISTE, déjà
+        // rempli par extractTrackArtists). Même nœud artist-credit que celui lu par les deux
+        // appelants pour albumArtist/albumArtistSort, relu ici pour rester dans cette seule
+        // méthode partagée plutôt que dupliquer l'extraction dans les deux call sites.
+        JsonNode releaseCredits = release.path("artist-credit");
+        if (releaseCredits.isArray() && !releaseCredits.isEmpty() && info.albumArtistMbid.isBlank()) {
+            String raid = releaseCredits.get(0).path("artist").path("id").asText("").trim();
+            if (!raid.isBlank()) info.albumArtistMbid = raid;
+        }
     }
 
     /**
@@ -463,6 +497,11 @@ public class MusicBrainzClient {
                 // Numéro de disc (position du medium)
                 int pos = medium.path("position").asInt(0);
                 if (pos > 0 && discCount > 1) info.discNo = String.valueOf(pos);
+
+                // Support (CD, Digital Media, Vinyl…) — jamais lu avant ce correctif alors que
+                // "format" est présent sur ce même nœud medium déjà parcouru pour track/discNo.
+                String fmt = medium.path("format").asText("").trim();
+                if (!fmt.isBlank() && info.media.isBlank()) info.media = fmt;
                 break;
             }
         }
@@ -622,7 +661,7 @@ public class MusicBrainzClient {
     public TagInfo lookupRecording(String mbid) throws Exception {
         boolean mbGenres = Config.get().bool("mb.use_genres", false);
         String url = BASE_URL + "/recording/" + mbid.trim()
-                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs"
+                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs+labels"
                 + (mbGenres ? "+genres" : "")
                 + "+artist-rels+recording-rels+work-rels";
 
@@ -841,9 +880,9 @@ public class MusicBrainzClient {
      * fiable (période/époque musicale n'existe pas comme champ MB ; section d'opéra/partie sont un
      * niveau de granularité que "parts" ne distingue pas assez proprement pour être fiable).
      */
-    public void resolveClassicalWork(TagInfo info) throws Exception {
+    public void resolveClassicalWork(TagInfo info, MetadataCache cache) throws Exception {
         if (info.workMbid.isBlank()) return;
-        JsonNode work = fetchWork(info.workMbid);
+        JsonNode work = fetchWork(info.workMbid, cache);
         if (work == null) return;
         info.isClassical = "1";
 
@@ -867,7 +906,7 @@ public class MusicBrainzClient {
 
                 String parentId = parent.path("id").asText("").trim();
                 if (info.movementTotal.isBlank() && !parentId.isBlank()) {
-                    JsonNode parentWork = fetchWork(parentId);
+                    JsonNode parentWork = fetchWork(parentId, cache);
                     if (parentWork != null) {
                         int total = countPartsRelations(parentWork.path("relations"), "forward");
                         if (total > 0) info.movementTotal = String.valueOf(total);
@@ -879,10 +918,23 @@ public class MusicBrainzClient {
         extractOpusCatalog(work.path("attributes"), catalogSourceTitle, info);
     }
 
-    private JsonNode fetchWork(String workMbid) throws Exception {
+    private JsonNode fetchWork(String workMbid, MetadataCache cache) throws Exception {
+        // Avant ce correctif : seule requête MB de tout le projet à ne jamais passer par
+        // MetadataCache (contrairement à searchRecording()/lookupRelease()/lookupRecording(), qui
+        // le font tous systématiquement) — pour une bibliothèque classique (l'usage même que cette
+        // méthode cible), une symphonie de 4 mouvements refaisait un aller-retour réseau complet
+        // vers MusicBrainz pour CHAQUE mouvement (et même deux fois par mouvement : l'œuvre elle-
+        // même, puis l'œuvre globale parente si besoin du nombre total de mouvements), sans jamais
+        // réutiliser un résultat déjà obtenu.
+        String cacheKey = "work:" + workMbid.trim();
+        String cached = cache.getLookup(cacheKey);
+        if (cached != null) return mapper.readTree(cached);
+
         String url = BASE_URL + "/work/" + workMbid.trim() + "?fmt=json&inc=work-rels";
         HttpResponse<String> resp = getWithRetry(url);
-        return resp == null ? null : mapper.readTree(resp.body());
+        if (resp == null) return null;
+        cache.putLookup(cacheKey, resp.body());
+        return mapper.readTree(resp.body());
     }
 
     private JsonNode findPartsRelation(JsonNode relations, String direction) {

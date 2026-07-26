@@ -221,7 +221,7 @@ public class MatchDialog extends JDialog {
                 MetadataCache cache = new MetadataCache();
                 try {
                     TagEnrichment.enrichGenre(chosen, discogs, lastFm, cache);
-                    TagEnrichment.enrichClassicalWork(chosen, mb);
+                    TagEnrichment.enrichClassicalWork(chosen, mb, cache);
 
                     // Empreinte AcoustID : calculée systématiquement après toute identification réussie
                     // (TaggingWorker/BatchProcessor/App le font déjà, comme Picard) — une correspondance

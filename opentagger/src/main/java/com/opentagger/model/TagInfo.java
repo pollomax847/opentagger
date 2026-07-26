@@ -151,7 +151,9 @@ public class TagInfo {
     public String shazamCoverUrl      = "";
 
     // ── IDs & identifiants ───────────────────────────────────────────────────
-    public String comment             = "";    // MB disambiguation
+    // Désambiguïsation MB, description de podcast, ou tag COMMENT déjà présent dans le fichier —
+    // affiché/éditable dans DetailPanel (onglet Général).
+    public String comment             = "";
     public String isrc                = "";
     public String amazonId            = "";
     public String discogsId           = "";
@@ -177,9 +179,20 @@ public class TagInfo {
     public String catalogNo           = "";
     public String releaseType         = "";    // Album, Single, EP, Broadcast…
     public String originalYear        = "";    // Première année de parution
+    // Label discographique + statut de parution + support physique/numérique — présents dans la
+    // réponse MB (label-info[].label.name, status, media[].format) mais jamais extraits ni écrits
+    // avant ce correctif : comparé côté à côté avec Picard sur un même fichier, ces 3 champs (plus
+    // barcode/catalogNo ci-dessus, qui existaient déjà mais n'étaient jamais renseignés) restaient
+    // vides dans OpenTagger alors que MusicBrainz les fournit pour la quasi-totalité des releases.
+    public String label               = "";    // Label discographique
+    public String releaseStatus       = "";    // Official, Bootleg, Promotion…
+    public String media               = "";    // CD, Digital Media, Vinyl…
 
     // ── IDs MusicBrainz ──────────────────────────────────────────────────────
     public String artistMbid          = "";
+    public String albumArtistMbid     = "";    // Id MusicBrainz de l'ARTISTE DE LA PARUTION — distinct
+                                                // d'artistMbid (l'artiste de la PISTE) : les deux peuvent
+                                                // diverger (piste avec featuring, compilation Various Artists…).
     public String releaseGroupMbid    = "";
     public String releaseMbid         = "";
     public String recordingMbid       = "";

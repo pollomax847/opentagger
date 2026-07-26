@@ -202,8 +202,10 @@ public class RenamePreviewDialog extends JDialog {
         FileRenamer renamer = new FileRenamer();
         List<PreviewRow> result = new ArrayList<>();
 
-        for (int i = 0; i < model.getRowCount(); i++) {
-            FileEntry e = model.get(i);
+        // allEntries() : sinon un fichier tagué masqué par un filtre actif n'apparaissait jamais
+        // dans l'aperçu — et n'était donc jamais renommé sur le disque non plus (voir aussi
+        // MainFrame.buildRenameJob(), l'exécution réelle, même correctif).
+        for (FileEntry e : model.allEntries()) {
             if (e.status != FileEntry.Status.TAGGED) continue;
             if (e.currentPath == null) continue;
 

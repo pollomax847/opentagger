@@ -301,6 +301,10 @@ public class FileRenamer {
         if (s == null || s.isBlank()) return "";
         // Retirer l'extension audio si le tag la contient (ex: title="Song.mp3")
         s = AUDIO_EXT.matcher(s.trim()).replaceAll("");
+        // Octet nul : un tag corrompu (mauvais encodage, script utilisateur buggé) peut en
+        // contenir un ; Path.of()/Paths.get() lève InvalidPathException dessus, non rattrapée
+        // ici — voir docs/files/04-COMPARAISON-PICARD-ONETAGGER.md (OneTagger issue #157).
+        s = s.replace("\u0000", "");
         String cleaned = s.trim()
                 .replaceAll("[\\\\:*?\"<>|]", "_")
                 .replaceAll("\\.{2,}", ".")

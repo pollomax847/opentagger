@@ -165,7 +165,12 @@ public class SongRecClient {
                 switch (name) {
                     case "Album"    -> ti.album = text;
                     case "Released" -> ti.year  = text.length() >= 4 ? text.substring(0, 4) : text;
-                    case "Label"    -> { if (ti.comment.isBlank()) ti.comment = "Label: " + text; }
+                    // Écrivait auparavant "Label: " + text dans ti.comment (faute d'un champ
+                    // dédié) — comment sert à la désambiguïsation MusicBrainz (voir son
+                    // commentaire de champ), pas de raison d'y mélanger le label. TagInfo.label
+                    // existe maintenant (voir TaggingWorker/MusicBrainzClient) et est affiché/
+                    // éditable dans DetailPanel → onglet URLs & IDs.
+                    case "Label"    -> { if (ti.label.isBlank()) ti.label = text; }
                 }
             }
         }

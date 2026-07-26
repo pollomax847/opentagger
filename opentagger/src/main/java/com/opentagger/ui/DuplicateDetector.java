@@ -123,7 +123,18 @@ public class DuplicateDetector {
      */
     public static int qualityScore(FileEntry e) {
         File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-        int formatScore = switch (ext(f.getName()).toLowerCase()) {
+        String extension = ext(f.getName()).toLowerCase();
+        // ALAC (Apple Lossless) est TOUJOURS stocké avec l'extension .m4a sur disque — il n'existe
+        // pas d'extension ".alac" en pratique, donc le cas "alac" ci-dessous ne pouvait jamais
+        // matcher un vrai fichier. Un fichier ALAC sans perte et un fichier AAC avec perte
+        // partageant la même extension .m4a recevaient donc le même score de format (700 000),
+        // différenciés seulement par le débit — risque concret de recommander/pré-cocher pour
+        // suppression le master sans perte au profit d'une copie compressée simplement plus
+        // grosse en taille. Sondé via jaudiotagger (déjà utilisé partout ailleurs dans le projet)
+        // pour lire le vrai type d'encodage ; repli silencieux sur le score .m4a par défaut si la
+        // lecture échoue (fichier verrouillé/corrompu) ou si c'est bien de l'AAC.
+        if ("m4a".equals(extension) && isActuallyAlac(f)) extension = "alac";
+        int formatScore = switch (extension) {
             case "flac" -> 1_000_000;
             case "alac" -> 900_000;
             case "m4a"  -> 700_000;
@@ -160,8 +171,28 @@ public class DuplicateDetector {
             .orElse(files.get(0));
     }
 
+    private static boolean isActuallyAlac(File f) {
+        try {
+            org.jaudiotagger.audio.AudioFile af = org.jaudiotagger.audio.AudioFileIO.read(f);
+            String encoding = af.getAudioHeader().getEncodingType();
+            return encoding != null && encoding.toUpperCase().contains("ALAC");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static String normalize(String s) {
-        return s.toLowerCase().replaceAll("[^a-z0-9]", "");
+        // [^a-z0-9] ne matche que l'ASCII pur — un accent ("é") ne matche ni a-z ni 0-9, donc
+        // [^a-z0-9] le désigne comme "à supprimer" et la lettre ENTIÈRE disparaît au lieu d'être
+        // ramenée à sa forme sans accent : "Céline Dion" → "clinedion" mais "Celine Dion" →
+        // "celinedion", deux chaînes différentes pour un doublon bien réel (variation
+        // d'accentuation très courante : Céline Dion, Beyoncé, Mötley Crüe, Björk...), jamais
+        // détecté par le niveau TITLE_HEURISTIC. Décomposition Unicode NFD (sépare la lettre de sa
+        // marque d'accent) puis suppression des seules marques combinantes, en gardant la lettre
+        // de base — "Céline"/"Celine" donnent maintenant tous deux "celine".
+        String n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD);
+        n = n.replaceAll("\\p{M}", "");
+        return n.toLowerCase().replaceAll("[^a-z0-9]", "");
     }
 
     private static String ext(String filename) {

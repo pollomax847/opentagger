@@ -262,7 +262,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // pouvait rester décochée à tort si aucun Work MB n'était trouvé.
         String classicalBefore = ti.isClassical + "|" + ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
         corrector.detectClassical(ti);
-        TagEnrichment.enrichClassicalWork(ti, mb);
+        TagEnrichment.enrichClassicalWork(ti, mb, cache);
         String classicalAfter  = ti.isClassical + "|" + ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
         if (!classicalAfter.equals(classicalBefore)) { log(I18n.t("  œuvre=%s opus=%s", ti.overallWork, ti.opus)); changed = true; }
 

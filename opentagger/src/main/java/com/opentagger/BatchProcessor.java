@@ -151,7 +151,7 @@ public class BatchProcessor {
                 // partage inter-threads (cachedTagsKey/cachedTagsList d'instance).
                 LastFmClient lastFm = new LastFmClient();
                 TagEnrichment.enrichGenre(best, discogs, lastFm, cache);
-                TagEnrichment.enrichClassicalWork(best, new MusicBrainzClient());
+                TagEnrichment.enrichClassicalWork(best, new MusicBrainzClient(), cache);
                 // Mood + URLs artiste Last.fm — même gap : absents du CLI/batch jusqu'à présent.
                 if (best.mood.isBlank()) { try { lastFm.enrichMood(best, cache); } catch (Exception ignored) {} }
                 try { lastFm.enrichArtistUrls(best, cache); } catch (Exception ignored) {}
