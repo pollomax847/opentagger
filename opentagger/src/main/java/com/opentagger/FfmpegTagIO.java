@@ -115,6 +115,7 @@ public final class FfmpegTagIO {
             ti.releaseMbid      = tag(tags, "MUSICBRAINZ_ALBUMID");
             ti.recordingMbid    = tag(tags, "MUSICBRAINZ_TRACKID");
             ti.releaseGroupMbid = tag(tags, "MUSICBRAINZ_RELEASEGROUPID");
+            ti.taggedDate       = tag(tags, "OT_TAGGEDDATE");
         } catch (Exception ignored) {}
         return ti;
     }
@@ -181,6 +182,7 @@ public final class FfmpegTagIO {
         meta(cmd, "MUSICBRAINZ_ALBUMID",        i.releaseMbid);
         meta(cmd, "MUSICBRAINZ_TRACKID",        i.recordingMbid);
         meta(cmd, "MUSICBRAINZ_RELEASEGROUPID", i.releaseGroupMbid);
+        meta(cmd, "OT_TAGGEDDATE",              i.taggedDate);
 
         if (!i.track.isBlank())
             meta(cmd, "track", i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal);

@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -67,6 +68,7 @@ public class TagWriter {
                 copy.acoustidId          = "";
                 copy.acoustidFingerprint = "";
             }
+            copy.taggedDate = java.time.LocalDate.now().toString();
             FfmpegTagIO.write(fichier, copy);
             if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
             return copy;
@@ -96,6 +98,7 @@ public class TagWriter {
             merged.acoustidId          = "";
             merged.acoustidFingerprint = "";
         }
+        merged.taggedDate = java.time.LocalDate.now().toString();
 
         writeNative(fichier, merged, coverImage, preserved, Config.get().clearExistingTags());
 
@@ -408,7 +411,7 @@ public class TagWriter {
         // ── Audio / tempo / tonalité ──────────────────────────────────────────
         sf(tag, FieldKey.BPM,                i.bpm);
         sf(tag, FieldKey.FBPM,               i.fbpm);
-        sf(tag, FieldKey.KEY,                i.initialKey);
+        sf(tag, FieldKey.KEY,   Config.get().writeCamelotKey() ? toCamelot(i.initialKey) : i.initialKey);
         sf(tag, FieldKey.LANGUAGE,           i.language);
 
         // ── Humeur (Essentia) ─────────────────────────────────────────────────
@@ -479,6 +482,9 @@ public class TagWriter {
 
         // ── Statistiques d'écoute ───────────────────────────────────────────────
         setCustomField(tag, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+
+        // ── Marqueur de taguage (portable, indépendant du cache SQLite) ─────────
+        setCustomField(tag, "OT_TAGGEDDATE", i.taggedDate);
 
         // ── URLs ──────────────────────────────────────────────────────────────
         sf(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE,   i.artistOfficialUrl);
@@ -594,6 +600,9 @@ public class TagWriter {
 
         // Statistiques d'écoute
         apFreeform(cmd, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+
+        // Marqueur de taguage (portable, indépendant du cache SQLite)
+        apFreeform(cmd, "OT_TAGGEDDATE", i.taggedDate);
 
         cmd.add("--overWrite");
 
@@ -743,6 +752,27 @@ public class TagWriter {
         } catch (Exception ignored) {}
     }
 
+    // Table Camelot Wheel — clé Essentia (lettre + dièse, ex "C#", "C#m") → notation Camelot
+    // (ex "3B"/"9A"), utilisée par les DJ pour le mixage harmonique. Essentia (EssentiaClient,
+    // tonal.key_key + key_scale) ne produit que des dièses, jamais de bémols — table volontairement
+    // limitée à ces 24 clés.
+    private static final Map<String, String> CAMELOT = Map.ofEntries(
+        Map.entry("C",  "8B"),  Map.entry("C#", "3B"),  Map.entry("D",  "10B"), Map.entry("D#", "5B"),
+        Map.entry("E",  "12B"), Map.entry("F",  "7B"),  Map.entry("F#", "2B"),  Map.entry("G",  "9B"),
+        Map.entry("G#", "4B"),  Map.entry("A",  "11B"), Map.entry("A#", "6B"),  Map.entry("B",  "1B"),
+        Map.entry("Cm", "5A"),  Map.entry("C#m","12A"), Map.entry("Dm", "7A"),  Map.entry("D#m","2A"),
+        Map.entry("Em", "9A"),  Map.entry("Fm", "4A"),  Map.entry("F#m","11A"), Map.entry("Gm", "6A"),
+        Map.entry("G#m","1A"),  Map.entry("Am", "8A"),  Map.entry("A#m","3A"),  Map.entry("Bm", "10A")
+    );
+
+    /** Notation Camelot (8A/8B…) pour une clé au format Essentia ("Cm"/"F#"…). Clé non reconnue
+     *  (bémol, format inattendu déjà présent dans un fichier tiers…) → renvoyée telle quelle plutôt
+     *  que vidée, pour ne jamais faire disparaître une information déjà là. */
+    private static String toCamelot(String key) {
+        if (key == null || key.isBlank()) return key;
+        return CAMELOT.getOrDefault(key.trim(), key);
+    }
+
     /**
      * Champs sans FieldKey (ReplayGain ×4, IS_INSTRUMENTAL, DISCOGS_RELEASE_ID).
      * Dispatch selon le type de tag :
@@ -797,6 +827,35 @@ public class TagWriter {
             Mp4TagTextField field = new Mp4TagTextField(atomId, value);
             mp4.addField(field);
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * Contrepartie lecture de {@link #setCustomField} — même dispatch par type de tag, jamais
+     * d'exception propagée (comme {@code getTagFirst}). Public : appelé depuis MainFrame.readTags()
+     * pour afficher le marqueur OT_TAGGEDDATE au scan, sans re-tagger le fichier.
+     */
+    public static String getCustomField(Tag tag, String name) {
+        try {
+            if (tag instanceof AbstractID3v2Tag id3) {
+                for (org.jaudiotagger.tag.TagField field : id3.getFields("TXXX")) {
+                    if (field instanceof org.jaudiotagger.tag.id3.AbstractID3v2Frame frame
+                            && frame.getBody() instanceof FrameBodyTXXX txxx
+                            && name.equalsIgnoreCase(txxx.getDescription())) {
+                        return txxx.getText();
+                    }
+                }
+                return "";
+            } else if (tag instanceof Mp4Tag) {
+                String v = tag.getFirst("----:com.apple.iTunes:" + name);
+                return v != null ? v : "";
+            } else {
+                // FLAC / OGG — VorbisComment plain-text, même convention que setCustomField.
+                String v = tag.getFirst(name.toUpperCase());
+                return v != null ? v : "";
+            }
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     // ── Réparation M4A ────────────────────────────────────────────────────────
@@ -921,7 +980,12 @@ public class TagWriter {
         try { return tag.getFirst(key); } catch (Exception e) { return ""; }
     }
 
-    private static final Map<FieldKey, Field> KEY_TO_FIELD = new HashMap<>();
+    // ConcurrentHashMap : fieldFor() est appelé depuis mergeWithExisting() sur le chemin par
+    // défaut (clearExistingTags=false), et write() tourne en parallèle (SaveWorker/BatchProcessor,
+    // plusieurs threads sur un même writer partagé) — un HashMap classique ici s'exposait au même
+    // risque de corruption sous computeIfAbsent() concurrent que celui déjà évité pour aliasCache
+    // dans TaggingWorker/InfoCompleterWorker/AlbumCompletionWorker/BatchProcessor.
+    private static final Map<FieldKey, Field> KEY_TO_FIELD = new ConcurrentHashMap<>();
 
     private Field fieldFor(FieldKey key) {
         return KEY_TO_FIELD.computeIfAbsent(key, k -> {

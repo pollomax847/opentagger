@@ -163,6 +163,14 @@ public class TagInfo {
     public String acoustidId          = "";
     public String acoustidFingerprint = "";
 
+    // Marqueur "déjà tagué par OpenTagger" écrit directement dans le fichier (tag custom
+    // OT_TAGGEDDATE, date ISO — voir TagWriter), en plus du suivi par MetadataCache (SQLite
+    // local). Portable et lisible par n'importe quel outil, contrairement au cache — utile si le
+    // cache est perdu/corrompu ou si le fichier est déplacé hors du suivi de l'appli (voir la
+    // fragilité déjà rencontrée sur file_history après un rename externe). Non éditable : réécrit
+    // à chaque enregistrement avec la date du jour, jamais lu depuis un champ UI.
+    public String taggedDate          = "";
+
     // Source de l'identification (MetadataCache.SOURCE_SONGREC/ACOUSTID/MBID/TEXT) — bookkeeping
     // interne, JAMAIS écrit dans le fichier (TagWriter ne mappe que des FieldKey explicites, pas
     // de réflexion sur TagInfo, donc ce champ est ignoré par l'écriture sans rien à faire de plus).

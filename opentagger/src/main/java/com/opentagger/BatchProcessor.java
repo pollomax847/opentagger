@@ -96,6 +96,23 @@ public class BatchProcessor {
 
         cache.close();
         printSummary();
+        runPostTagCommand();
+    }
+
+    /** Même hook que MainFrame.runPostTagCommand() (GUI) — mode CLI aussi couvert : un run par
+     *  lots (cron, script) doit pouvoir déclencher la même automatisation post-traitement (scan
+     *  Plex, rebalance mergerfs…) qu'un "Enregistrer tout" depuis l'interface. */
+    private void runPostTagCommand() {
+        String cmd = Config.get().postTagCommand();
+        if (cmd.isBlank()) return;
+        try {
+            new ProcessBuilder("sh", "-c", cmd)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+        } catch (Exception ex) {
+            System.out.println("Commande post-taguage : échec du lancement — " + ex.getMessage());
+        }
     }
 
     private void processOne(File fichier) {

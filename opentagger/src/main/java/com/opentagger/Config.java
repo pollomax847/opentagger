@@ -314,6 +314,23 @@ public class Config {
     // --- ReplayGain ---
     public boolean replayGainEnabled() { return bool("replaygain.enabled",       false); }
 
+    // --- Clé musicale ---
+    // Camelot (8A/8B…) plutôt que la notation standard (Cm/F#…) — utile pour le mixage DJ
+    // (compatibilité harmonique), voir comparaison avec OneTagger dans docs/files/.
+    public boolean writeCamelotKey()   { return bool("audio.camelot_key",        false); }
+
+    // --- Marqueur de taguage portable ---
+    // Tag OT_TAGGEDDATE écrit dans le fichier lui-même (pas seulement le cache SQLite local) —
+    // survit à un cache perdu/corrompu ou un fichier déplacé hors suivi. Toujours actif : aucune
+    // raison de désactiver un marqueur purement additif, contrairement aux options ci-dessus qui
+    // changent un format de sortie.
+
+    // --- Commande post-traitement ---
+    // Exécutée une fois à la fin d'un run de taguage complet (pas par fichier — bibliothèques de
+    // 100k+ fichiers, un hook par fichier serait ingérable) — ex: déclencher un scan Plex, un
+    // rebalance mergerfs. Chaîne vide = désactivé.
+    public String  postTagCommand()    { return str ("hooks.post_tag_command",   ""); }
+
     // --- Translittération artistes ---
     public boolean translateArtists()  { return bool("metadata.translate_artists", false); }
 

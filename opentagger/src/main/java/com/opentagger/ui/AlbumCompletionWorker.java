@@ -103,8 +103,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         // Ouvrir le cache ici pour vérifier la source d'identification des ancres TAGGED
         MetadataCache cacheForSrc = new MetadataCache();
         try {
-            for (int i = 0; i < tableModel.getRowCount(); i++) {
-                FileEntry e = tableModel.get(i);
+            // allEntries() : sinon un filtre actif au moment du lancement de "Passe complète
+            // album" masquait des ancres TAGGED/IDENTIFIED et des candidats SKIPPED/PENDING hors
+            // vue — la complétion ratait des albums pourtant présents dans la bibliothèque (même
+            // classe de bug que le "round 13" de MainFrame/RenamePreviewDialog).
+            for (FileEntry e : tableModel.allEntries()) {
                 // IDENTIFIED accepté comme ancre au même titre que TAGGED : porte déjà les mêmes
                 // données d'identification complètes (releaseMbid/recordingMbid), juste pas
                 // encore écrites sur le disque — inutile d'attendre "Enregistrer tout" pour

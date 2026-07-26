@@ -3373,12 +3373,36 @@ public class MainFrame extends JFrame {
                     // (activeOperations, etc.) ; si quelque chose bloque, la recherche est juste
                     // sautée cette fois-ci, sans forcer.
                     if (chkAutoGroupCompilations.isSelected()) groupByCompilations();
+                    runPostTagCommand();
                 });
             }
         });
         // SAVE est le seul TaskKind volontairement compatible avec TAGGING en parallèle (voir
         // WorkerHub.conflictsWith).
         WorkerHub.get().submit(WorkerHub.TaskKind.SAVE, I18n.t("Enregistrement"), w, w::stopNow);
+    }
+
+    /**
+     * Hook optionnel (Config.postTagCommand(), réglages → Démarrage) exécuté une fois à la fin
+     * d'un "Enregistrer tout" — pas par fichier, une bibliothèque de 100k+ fichiers rendrait un
+     * hook par fichier ingérable. Comparaison avec OneTagger (docs/files/) : équivalent de son
+     * "postCommand", en version fin-de-run plutôt que par-piste pour cette raison de volumétrie.
+     * Fire-and-forget (comme le "Ouvrir le dossier" du menu contextuel juste au-dessus) : on ne
+     * bloque pas l'EDT à attendre une commande arbitraire qui peut très bien ne jamais terminer
+     * (ex. déclencher un scan Plex en tâche de fond).
+     */
+    private void runPostTagCommand() {
+        String cmd = Config.get().postTagCommand();
+        if (cmd.isBlank()) return;
+        try {
+            new ProcessBuilder("sh", "-c", cmd)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            setStatus(I18n.t("Commande post-taguage lancée."));
+        } catch (Exception ex) {
+            setStatus(I18n.t("Commande post-taguage : échec du lancement — %s", ex.getMessage()));
+        }
     }
 
     /**
@@ -4441,6 +4465,9 @@ public class MainFrame extends JFrame {
             ti.releaseMbid        = g(tag, FieldKey.MUSICBRAINZ_RELEASEID);
             ti.recordingMbid      = g(tag, FieldKey.MUSICBRAINZ_TRACK_ID);
             ti.releaseGroupMbid   = g(tag, FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
+
+            // ── Marqueur de taguage (portable, indépendant du cache SQLite) ──
+            ti.taggedDate         = TagWriter.getCustomField(tag, "OT_TAGGEDDATE");
 
         } catch (Exception ignored) {}
         return ti;

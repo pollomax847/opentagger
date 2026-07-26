@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.FileRenamer;
 import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.ui.DuplicateDetector.DuplicateGroup;
@@ -8,9 +9,12 @@ import javax.swing.*;
 import javax.swing.border.*;
 import java.awt.*;
 import java.io.File;
+import java.nio.file.Path;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Dialogue de gestion des doublons.
@@ -285,22 +289,30 @@ public class DuplicatesDialog extends JDialog {
             @Override protected Void doInBackground() {
                 java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
                 trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
-                List<File> deletedParents = new ArrayList<>();
+                // Map plutôt que List : associe chaque dossier parent à la racine de scan du
+                // fichier qui s'y trouvait, pour borner deleteEmptyAncestors() (voir plus bas —
+                // même raison que MainFrame.buildRenameJob(), remonter sans borne peut geler
+                // l'appli sur une bibliothèque multi-racines).
+                Map<File, Path> deletedParents = new LinkedHashMap<>();
                 for (FileEntry e : toDelete) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
                     boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
                     if (moved) {
                         publish(e);
                         if (chkCleanDirs.isSelected() && f.getParentFile() != null)
-                            deletedParents.add(f.getParentFile());
+                            deletedParents.put(f.getParentFile(), e.scanRoot);
                         deleted++;
                     } else {
                         errors++;
                     }
                 }
-                // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés
+                // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés —
+                // même logique que FileRenamer utilise déjà après un renommage (cover.jpg/log
+                // opentagger_*.log/résidu AppleDouble laissés derrière comptent comme "vide", pas
+                // seulement un dossier littéralement sans aucun fichier — voir isDeletableLeftover).
                 if (chkCleanDirs.isSelected())
-                    for (File dir : deletedParents) dirsRemoved += cleanEmptyAncestors(dir);
+                    for (Map.Entry<File, Path> pe : deletedParents.entrySet())
+                        dirsRemoved += FileRenamer.deleteEmptyAncestors(pe.getKey().toPath(), pe.getValue());
                 return null;
             }
 
@@ -370,7 +382,7 @@ public class DuplicatesDialog extends JDialog {
             int moved = 0, errors = 0, dirsRemoved = 0;
 
             @Override protected Void doInBackground() {
-                List<File> oldParents = new ArrayList<>();
+                Map<File, Path> oldParents = new LinkedHashMap<>();
                 for (FileEntry e : toMove) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
                     try {
@@ -387,14 +399,16 @@ public class DuplicatesDialog extends JDialog {
                         e.currentPath = dest;
                         publish(e);
                         if (chkCleanDirs.isSelected() && f.getParentFile() != null)
-                            oldParents.add(f.getParentFile());
+                            oldParents.put(f.getParentFile(), e.scanRoot);
                         moved++;
                     } catch (Exception ex) {
                         errors++;
                     }
                 }
+                // Même logique que deleteSelected() ci-dessus — voir son commentaire.
                 if (chkCleanDirs.isSelected())
-                    for (File dir : oldParents) dirsRemoved += cleanEmptyAncestors(dir);
+                    for (Map.Entry<File, Path> pe : oldParents.entrySet())
+                        dirsRemoved += FileRenamer.deleteEmptyAncestors(pe.getKey().toPath(), pe.getValue());
                 return null;
             }
 
@@ -418,22 +432,6 @@ public class DuplicatesDialog extends JDialog {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Remonte les dossiers parents et supprime ceux qui sont vides. Retourne le nombre supprimé. */
-    private static int cleanEmptyAncestors(File dir) {
-        int count = 0;
-        while (dir != null && dir.isDirectory()) {
-            String[] contents = dir.list();
-            if (contents != null && contents.length == 0) {
-                if (dir.delete()) count++;
-                else break;
-                dir = dir.getParentFile();
-            } else {
-                break;
-            }
-        }
-        return count;
-    }
 
     private static String ext(String name) {
         int i = name.lastIndexOf('.');

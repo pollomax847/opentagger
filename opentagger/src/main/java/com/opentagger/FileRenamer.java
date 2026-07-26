@@ -396,7 +396,10 @@ public class FileRenamer {
 
     // ── Nettoyage des dossiers vides ──────────────────────────────────────────
 
-    public static void deleteEmptyAncestors(Path sourceDir, Path stopAt) {
+    /** @return le nombre de dossiers effectivement supprimés (remontée des ancêtres arrêtée dès
+     *  qu'un dossier contient autre chose qu'un résidu supprimable — voir {@link #isDeletableLeftover}). */
+    public static int deleteEmptyAncestors(Path sourceDir, Path stopAt) {
+        int removed = 0;
         Path dir = sourceDir;
         while (dir != null && !dir.equals(stopAt)) {
             if (!Files.isDirectory(dir)) { dir = dir.getParent(); continue; }
@@ -405,9 +408,11 @@ public class FileRenamer {
                 if (!entries.stream().allMatch(FileRenamer::isDeletableLeftover)) break;
                 for (Path leftover : entries) Files.deleteIfExists(leftover);
                 Files.delete(dir);
+                removed++;
             } catch (IOException e) { break; }
             dir = dir.getParent();
         }
+        return removed;
     }
 
     /** Vrai si {@code p} est un résidu que le taguage peut avoir laissé derrière lui une fois

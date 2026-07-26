@@ -134,6 +134,8 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JCheckBox  chkReplayGainEnabled;
+    private JCheckBox  chkCamelotKey;
+    private JTextField tfPostTagCommand;
 
     // ── Onglet Transcodage ────────────────────────────────────────────────────
     private JCheckBox               chkTranscodeAuto;
@@ -401,11 +403,25 @@ public class SettingsDialog extends JDialog {
                 BorderFactory.createEtchedBorder(), I18n.t("Fermeture de la fenêtre")));
         closePanel.add(chkCloseMinimizes);
 
+        tfPostTagCommand = tf();
+        JPanel postTagPanel = new JPanel(new BorderLayout(6, 4));
+        postTagPanel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Commande après un run de taguage")));
+        postTagPanel.add(tfPostTagCommand, BorderLayout.CENTER);
+        JLabel postTagHint = new JLabel(I18n.t(
+            "<html><i>Exécutée une seule fois à la fin d'un \"Tout tagger\"/\"Enregistrer tout\" "
+            + "(pas par fichier) — ex : déclencher un scan Plex, un rebalance mergerfs. "
+            + "Vide = désactivé.</i></html>"));
+        postTagHint.setBorder(new EmptyBorder(4, 0, 0, 0));
+        postTagHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        postTagPanel.add(postTagHint, BorderLayout.SOUTH);
+
         JPanel topPanels = new JPanel();
         topPanels.setLayout(new BoxLayout(topPanels, BoxLayout.Y_AXIS));
         topPanels.add(langPanel);
         topPanels.add(updatePanel);
         topPanels.add(closePanel);
+        topPanels.add(postTagPanel);
 
         JPanel outer = new JPanel(new BorderLayout());
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
@@ -1220,6 +1236,7 @@ public class SettingsDialog extends JDialog {
         chkLyricsEnabled    = new JCheckBox(I18n.t("Activer la récupération des paroles"));
         chkSaveLrc          = new JCheckBox(I18n.t("Écrire un fichier .lrc (paroles synchronisées, si trouvées sur lrclib.net)"));
         chkReplayGainEnabled= new JCheckBox(I18n.t("Calculer et écrire le ReplayGain (via ffmpeg, lent)"));
+        chkCamelotKey       = new JCheckBox(I18n.t("Écrire la clé au format Camelot (8A/8B…) plutôt qu'en notation standard"));
         lblFpcalcStatus     = new JLabel();
 
         refreshFpcalcStatus();
@@ -1242,6 +1259,7 @@ public class SettingsDialog extends JDialog {
             { "Paroles (LyricsOvh) :",  chkLyricsEnabled,   "https://lyricsovh.docs.apiary.io/"             },
             { "",                       chkSaveLrc,         "https://lrclib.net"                            },
             { "ReplayGain :",           chkReplayGainEnabled, null                                           },
+            { "",                       chkCamelotKey,      null                                             },
         };
         for (int i = 0; i < rows.length; i++) {
             String     label = I18n.t((String) rows[i][0]);
@@ -1834,6 +1852,7 @@ public class SettingsDialog extends JDialog {
         cmbLanguage.setSelectedIndex("en".equals(cfg.uiLanguage()) ? 1 : 0);
         chkUpdateCheck.setSelected(cfg.updateCheckEnabled());
         chkCloseMinimizes.setSelected(cfg.closeMinimizesToTaskbar());
+        tfPostTagCommand.setText(cfg.postTagCommand());
         tfMbUserAgent      .setText(cfg.str("musicbrainz.user_agent",   "OpenTagger/1.0 (bain.paul24@gmail.com)"));
         tfAcoustIdKey      .setText(cfg.str("acoustid.api_key",         ""));
         tfAcoustIdUserToken.setText(cfg.str("acoustid.user_token",      ""));
@@ -1884,6 +1903,7 @@ public class SettingsDialog extends JDialog {
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkLastfmArtistUrls .setSelected(cfg.bool("lastfm.fetch_artist_urls", true));
         chkReplayGainEnabled.setSelected(cfg.replayGainEnabled());
+        chkCamelotKey.setSelected(cfg.writeCamelotKey());
 
         String genreSrc = cfg.str("discogs.genre_source", "style_then_genre");
         cmbDiscogsGenreSource.setSelectedIndex(
@@ -2018,6 +2038,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("ui.language", newLanguage);
         p.setProperty("update.check_enabled", String.valueOf(chkUpdateCheck.isSelected()));
         p.setProperty("ui.close_minimizes",   String.valueOf(chkCloseMinimizes.isSelected()));
+        p.setProperty("hooks.post_tag_command", tfPostTagCommand.getText().trim());
         p.setProperty("update.last_check_ms", String.valueOf(Config.get().lastUpdateCheckMs()));
 
         p.setProperty("musicbrainz.user_agent",        tfMbUserAgent.getText().trim());
@@ -2072,6 +2093,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("lastfm.fetch_artist_urls", String.valueOf(chkLastfmArtistUrls.isSelected()));
         p.setProperty("replaygain.enabled",     String.valueOf(chkReplayGainEnabled.isSelected()));
+        p.setProperty("audio.camelot_key",      String.valueOf(chkCamelotKey.isSelected()));
 
         String[] genreSources = {"style_then_genre", "genre_then_style", "genre_only"};
         p.setProperty("discogs.genre_source", genreSources[cmbDiscogsGenreSource.getSelectedIndex()]);

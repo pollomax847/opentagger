@@ -127,6 +127,7 @@ public class DetailPanel extends JPanel {
     private final JTextField tfArtistMbid          = tf(36);
     private final JTextField tfAlbumArtistMbid     = tf(36);
     private final JTextField tfAcoustidId          = tf(36);
+    private final JTextField tfTaggedDate          = tf(12);
     private final JTextField tfDiscogsId           = tf(20);
     private final JTextField tfAppleMusicId        = tf(20);
     private final JTextField tfRoonAlbumTag        = tf(20);
@@ -182,7 +183,7 @@ public class DetailPanel extends JPanel {
         // silencieusement au clic "Appliquer", sans aucune erreur ni message.
         for (JTextField tf : new JTextField[]{
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid,
-            tfArtistMbid, tfAlbumArtistMbid, tfAcoustidId, tfWorkMbid}) {
+            tfArtistMbid, tfAlbumArtistMbid, tfAcoustidId, tfWorkMbid, tfTaggedDate}) {
             tf.setEditable(false);
             tf.putClientProperty("FlatLaf.style", "foreground: #8899bb");
         }
@@ -287,6 +288,7 @@ public class DetailPanel extends JPanel {
         set(tfArtistMbid,          t.artistMbid);
         set(tfAlbumArtistMbid,     t.albumArtistMbid);
         set(tfAcoustidId,          t.acoustidId);
+        set(tfTaggedDate,          t.taggedDate);
         set(tfDiscogsId,           t.discogsId);
         set(tfAppleMusicId,        t.appleMusicId);
         set(tfRoonAlbumTag,        t.roonAlbumTag);
@@ -391,7 +393,7 @@ public class DetailPanel extends JPanel {
             tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
-            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag}) {
+            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate}) {
             tf.setText("");
         }
     }
@@ -818,6 +820,8 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Apple Music ID :"),         tfAppleMusicId);
         fields.put(I18n.t("Roon Album Tag :"),         tfRoonAlbumTag);
         fields.put(I18n.t("Roon Track Tag :"),         tfRoonTrackTag);
+        fields.put(I18n.t("─── OpenTagger ───"),       sep());
+        fields.put(I18n.t("Tagué par OpenTagger le :"), tfTaggedDate);
         return scroll(formPanel(fields));
     }
 
@@ -955,6 +959,8 @@ public class DetailPanel extends JPanel {
         hl(tfOpus,              g(tfOpus),              before.opus);
         hl(tfClassicalCatalog,  g(tfClassicalCatalog),  before.classicalCatalog);
         hl(tfClassicalNickname, g(tfClassicalNickname), before.classicalNickname);
+        hl(tfSection,           g(tfSection),           before.section);
+        hl(tfOverallWork,       g(tfOverallWork),       before.overallWork);
         hl(tfGrouping,          g(tfGrouping),          before.grouping);
         hlBool(chkClassical,    chkClassical.isSelected(), "1".equals(before.isClassical));
         // Contributeurs
@@ -1068,7 +1074,7 @@ public class DetailPanel extends JPanel {
             tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
-            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag,
+            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate,
             tfLabel, tfCatalogNo, tfBarcode, tfReleaseStatus, tfMedia,
             tfReleaseType, tfOriginalYear, tfCountry, tfScript
         };
