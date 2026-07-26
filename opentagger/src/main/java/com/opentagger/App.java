@@ -229,6 +229,7 @@ public class App {
         // 9. Écrire les tags + pochette
         try {
             new TagWriter().write(fichier, choisi, cover);
+            if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
             TagEnrichment.recordSuccess(cache, fichier, choisi);
         } catch (Exception e) {
             System.out.println();

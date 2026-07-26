@@ -62,6 +62,39 @@ public final class AudioFormatCheck {
                 + "renommé/converti par erreur à un moment donné.", real, ext);
     }
 
+    // Contrairement à EXPECTED (une extension → tokens attendus, pour la détection), celle-ci va
+    // dans l'autre sens : un token ffprobe → LA SEULE extension canonique vers laquelle proposer un
+    // renommage automatique. Ne couvre QUE les cas non ambigus. La famille MP4 (mov/mp4/m4a/3gp)
+    // est délibérément absente d'ici : ffprobe ne distingue pas un .m4a musique d'un .m4b livre
+    // audio ou d'un vrai .mp4 vidéo à partir du seul format_name — résolue à part dans
+    // suggestCorrectExtension() avec un choix par défaut documenté, pas une correspondance directe.
+    private static final Map<String, String> CANONICAL_EXT = Map.of(
+        "flac", "flac",
+        "wav",  "wav",
+        "aiff", "aiff",
+        "asf",  "wma"
+    );
+
+    /**
+     * Extension vers laquelle renommer un fichier mal étiqueté (voir describeMismatch()), déduite
+     * du format réel détecté par ffprobe. {@code null} si le format réel n'est pas reconnu avec
+     * assez de certitude pour agir seul (mieux vaut ne rien proposer que deviner faux).
+     *
+     * Cas MP4 (mov/mp4/m4a/3gp) résolu en ".m4a" par défaut : de très loin le cas le plus fréquent
+     * dans une bibliothèque musicale (constaté deux fois en session : "Double Je.mp3"/"Belsunce
+     * Breakdown.mp3", tous deux de l'AAC/M4A sous un tag ID3 collé devant) — un .m4b (livre audio)
+     * ou un .mp4 vidéo mal étiqueté ".mp3" serait de toute façon une coïncidence extrêmement rare.
+     */
+    public static String suggestCorrectExtension(java.io.File f) {
+        String real = detectRealFormat(f);
+        if (real == null || real.isBlank()) return null;
+        String r = real.toLowerCase();
+        if (r.contains("mov") || r.contains("mp4") || r.contains("m4a") || r.contains("3gp")) return "m4a";
+        for (Map.Entry<String, String> entry : CANONICAL_EXT.entrySet())
+            if (r.contains(entry.getKey())) return entry.getValue();
+        return null;
+    }
+
     private static String detectRealFormat(java.io.File f) {
         try {
             List<String> cmd = List.of(Config.get().str("audio.ffprobe_path", "ffprobe"),

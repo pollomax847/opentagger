@@ -75,6 +75,8 @@ public class MusicBrainzClient {
             extractTrackArtists(rec.path("artist-credit"), info);
             JsonNode isrcsCached = rec.path("isrcs");
             if (isrcsCached.isArray() && !isrcsCached.isEmpty()) info.isrc = isrcsCached.get(0).asText("").trim();
+            int lengthMsCached = rec.path("length").asInt(0);
+            if (lengthMsCached > 0) info.mbDurationSec = lengthMsCached / 1000;
             boolean onlyOfficial = Config.get().bool("musicbrainz.only_official", true);
             JsonNode chosen = findBestRelease(rec.path("releases"), onlyOfficial);
             if (chosen == null) chosen = findBestRelease(rec.path("releases"), false);
@@ -165,7 +167,13 @@ public class MusicBrainzClient {
                 .replace("?",  "\\?")
                 .replace(":",  "\\:")
                 .replace("/",  "\\/")
-                .replace("\"", "");
+                // Un guillemet dans la valeur était jusqu'ici SUPPRIMÉ plutôt qu'échappé — les
+                // champs de la requête sont eux-mêmes entre guillemets (recording:"..."), donc un
+                // titre/artiste contenant un guillemet littéral (ex. une référence "12"" vinyle,
+                // ou un nom scrappé avec des guillemets anglais courbes normalisés en droits) était
+                // silencieusement altéré au lieu d'être recherché tel quel — \" est la séquence
+                // Lucene standard pour un guillemet littéral à l'intérieur d'une phrase.
+                .replace("\"", "\\\"");
     }
 
     /**
@@ -223,6 +231,10 @@ public class MusicBrainzClient {
             info.recordingMbid = rec.path("id").asText("").trim();
             JsonNode isrcsNode = rec.path("isrcs");
             if (isrcsNode.isArray() && !isrcsNode.isEmpty()) info.isrc = isrcsNode.get(0).asText("").trim();
+            // Durée déclarée par MB pour CET enregistrement (ms) — voir TagInfo.mbDurationSec et
+            // TaggingWorker.isDurationMismatch() pour la détection de rip tronqué/mauvais match.
+            int lengthMs = rec.path("length").asInt(0);
+            if (lengthMs > 0) info.mbDurationSec = lengthMs / 1000;
 
             // ── Artiste(s) piste ───────────────────────────────────────────
             extractTrackArtists(rec.path("artist-credit"), info);
@@ -628,6 +640,8 @@ public class MusicBrainzClient {
 
         JsonNode isrcsLookup = rec.path("isrcs");
         if (isrcsLookup.isArray() && !isrcsLookup.isEmpty()) info.isrc = isrcsLookup.get(0).asText("").trim();
+        int lengthMsLookup = rec.path("length").asInt(0);
+        if (lengthMsLookup > 0) info.mbDurationSec = lengthMsLookup / 1000;
 
         JsonNode releases = rec.path("releases");
         boolean onlyOfficial = Config.get().bool("musicbrainz.only_official", true);

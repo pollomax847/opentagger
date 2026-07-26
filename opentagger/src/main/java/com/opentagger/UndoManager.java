@@ -82,30 +82,33 @@ public class UndoManager {
 
     // ── Utilitaires ──────────────────────────────────────────────────────────
 
-    /** Copie profonde d'un TagInfo (uniquement les champs String + int score). */
+    /**
+     * Copie profonde d'un TagInfo — TOUS les champs déclarés, pas seulement les String. Avant ce
+     * correctif, le filtre `f.getType() != String.class` excluait tout champ non-String ajouté au
+     * modèle sans que personne ne le remarque (aujourd'hui seuls score/durationSec/mbDurationSec
+     * sont concernés, aucun n'étant éditable par DetailPanel — donc pas de perte observable
+     * actuellement — mais le prochain champ non-String ajouté à TagInfo aurait silencieusement
+     * cessé d'être restauré par Annuler/Rétablir). Score était déjà copié séparément ; supprimé
+     * ici car couvert par la boucle générique.
+     */
     public static TagInfo snapshot(TagInfo src) {
         if (src == null) return new TagInfo();
         TagInfo dst = new TagInfo();
-        dst.score = src.score;
-        for (Field f : TagInfo.class.getDeclaredFields()) {
-            if (f.getType() != String.class) continue;
-            try {
-                f.setAccessible(true);
-                f.set(dst, f.get(src));
-            } catch (IllegalAccessException ignored) {}
-        }
+        copyAllFields(src, dst);
         return dst;
     }
 
     private void applySnapshot(FileEntry entry, TagInfo snap) {
         if (entry.result == null) entry.result = new TagInfo();
-        TagInfo dst = entry.result;
-        dst.score = snap.score;
+        copyAllFields(snap, entry.result);
+    }
+
+    private static void copyAllFields(TagInfo src, TagInfo dst) {
         for (Field f : TagInfo.class.getDeclaredFields()) {
-            if (f.getType() != String.class) continue;
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
             try {
                 f.setAccessible(true);
-                f.set(dst, f.get(snap));
+                f.set(dst, f.get(src));
             } catch (IllegalAccessException ignored) {}
         }
     }

@@ -93,8 +93,10 @@ public class SongRecClient {
     /** Durée en secondes via ffprobe, -1 si indisponible. */
     private double probeDuration(File f) {
         try {
+            // "ffprobe" en dur ignorait audio.ffprobe_path — voir AudioDuration.probeSeconds()
+            // pour le même correctif et la raison (chemin ffmpeg/ffprobe personnalisé hors PATH).
             ProcessBuilder pb = new ProcessBuilder(
-                "ffprobe", "-v", "error",
+                Config.get().str("audio.ffprobe_path", "ffprobe"), "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "csv=p=0",
                 f.getAbsolutePath());

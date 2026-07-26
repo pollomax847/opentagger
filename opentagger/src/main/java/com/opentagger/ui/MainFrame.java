@@ -200,6 +200,35 @@ public class MainFrame extends JFrame {
     // 2 (déjà bridée séparément par scanTagPool) pour ne pas la retarder inutilement.
     private final java.util.concurrent.Semaphore phase1Semaphore = new java.util.concurrent.Semaphore(2);
 
+    // Cache PARTAGÉ du scan_cache (voir MetadataCache.loadScanCacheMap) — un seul chargement de
+    // toute la table réutilisé par tous les scans démarrés en même temps, plutôt qu'une copie
+    // complète par dossier. Constaté en direct : scan_cache non purgé depuis des années
+    // (~4,3 Go / plusieurs centaines de milliers de lignes) ; 5 dossiers de démarrage scannés en
+    // parallèle chargeaient chacun leur propre copie déballée en HashMap simultanément — assez à
+    // lui seul pour épuiser un tas de 5 Go (OutOfMemoryError constaté en direct dès le lancement,
+    // avant même de compter les 95k fichiers du scan). Compteur de références : chargé à la
+    // première demande, libéré dès que plus aucun scan actif n'en a besoin.
+    private final Object scanCacheMapLock = new Object();
+    private java.util.Map<String, MetadataCache.ScanCacheEntry> sharedScanCacheMap;
+    private int scanCacheMapRefCount = 0;
+
+    private java.util.Map<String, MetadataCache.ScanCacheEntry> acquireScanCacheMap(MetadataCache cache) {
+        synchronized (scanCacheMapLock) {
+            if (sharedScanCacheMap == null) sharedScanCacheMap = cache.loadScanCacheMap();
+            scanCacheMapRefCount++;
+            return sharedScanCacheMap;
+        }
+    }
+
+    private void releaseScanCacheMap() {
+        synchronized (scanCacheMapLock) {
+            if (--scanCacheMapRefCount <= 0) {
+                scanCacheMapRefCount = 0;
+                sharedScanCacheMap = null;
+            }
+        }
+    }
+
     // Surveillance automatique des dossiers chargés (WatchService)
     private com.opentagger.FolderWatcher folderWatcher;
 
@@ -208,6 +237,7 @@ public class MainFrame extends JFrame {
     public static void launch(java.io.File[] initialDirs) {
         FlatDarkLaf.setup();
         UIManager.put("Table.alternateRowColor", new Color(45, 47, 52));
+        applyModernTheme();
         SwingUtilities.invokeLater(() ->
             SplashScreen.show(() -> SwingUtilities.invokeLater(() -> {
                 MainFrame frame = new MainFrame();
@@ -217,6 +247,51 @@ public class MainFrame extends JFrame {
                 frame.checkForUpdates(false);
             }))
         );
+    }
+
+    /**
+     * Jusqu'ici, FlatDarkLaf.setup() tournait avec ses réglages par défaut — le look "moderne"
+     * de l'appli venait entièrement de retouches ponctuelles composant par composant (chips de
+     * statut, boutons accentués…), jamais des contrôles Swing standards (JComboBox, JSpinner,
+     * JScrollBar, JTabbedPane, cases à cocher) qui gardaient l'angle droit et l'accent bleu par
+     * défaut de FlatLaf — d'où l'impression d'ensemble "daté" malgré les retouches locales.
+     * Quelques propriétés UIManager globales suffisent à uniformiser TOUT le reste de l'appli
+     * (chaque dialogue, y compris ceux jamais retouchés individuellement) sans toucher un seul
+     * appel de construction de composant.
+     */
+    private static void applyModernTheme() {
+        // Accent unique = le teal déjà utilisé pour les boutons principaux (ACCENT ci-dessous) —
+        // avant ce correctif, coches/radios/curseurs/barres de progression gardaient le bleu par
+        // défaut de FlatLaf, en désaccord avec les boutons "Ouvrir dossier"/"Tout tagger" etc.
+        UIManager.put("Component.accentColor", ACCENT);
+        UIManager.put("Component.focusColor",  new Color(0x4DB6AC, true));
+
+        // Angles arrondis uniformes (boutons, champs, combos, spinners) — FlatLaf par défaut est
+        // presque à angle droit (arc=4), ce qui lit "utilitaire des années 2010" plutôt que
+        // "app actuelle" à côté d'un Cover Flow et de chips colorées déjà bien plus travaillés.
+        UIManager.put("Component.arc",       10);
+        UIManager.put("Button.arc",          10);
+        UIManager.put("ProgressBar.arc",     999); // pilule complète, pas juste arrondie
+        UIManager.put("CheckBox.arc",        4);
+
+        // Ascenseurs fins et arrondis façon navigateur moderne — ceux de FlatLaf par défaut sont
+        // larges et carrés, très visibles sur le grand tableau principal (des dizaines de milliers
+        // de lignes chez cet utilisateur, donc un ascenseur omniprésent à l'écran).
+        UIManager.put("ScrollBar.width",       11);
+        UIManager.put("ScrollBar.thumbArc",    999);
+        UIManager.put("ScrollBar.trackArc",    999);
+        UIManager.put("ScrollBar.thumbInsets", new Insets(2, 3, 2, 3));
+        UIManager.put("ScrollBar.showButtons", false);
+
+        // Séparateurs d'onglets nets (Préférences a 9 onglets à plat, l'historique en a 2) —
+        // sans ça, l'onglet actif ne se distingue que par une fine ligne de soulignement,
+        // ambigu dès qu'on a plus de 4-5 onglets côte à côte.
+        UIManager.put("TabbedPane.showTabSeparators",        true);
+        UIManager.put("TabbedPane.tabSeparatorsFullHeight",  true);
+
+        // Un peu plus d'air dans les boutons — le texte touchait presque les bords par défaut,
+        // perceptible sur les gros boutons de la barre d'outils principale (police en gras 12).
+        UIManager.put("Button.margin", new Insets(4, 12, 4, 12));
     }
 
     public MainFrame() {
@@ -876,13 +951,13 @@ public class MainFrame extends JFrame {
         brandPanel.add(appName);
 
         // ── Actions centre ───────────────────────────────────────────────────
-        JButton btnOpen = accentBtn(I18n.t("Ouvrir dossier"), "Ctrl+O");
+        JButton btnOpen = accentBtn(I18n.t("Ouvrir dossier"), "Ctrl+O", ToolbarIcon.Kind.FOLDER_OPEN);
         btnOpen.addActionListener(e -> openFolder());
 
-        btnTagAll    = headerBtn(I18n.t("Tout tagger"), I18n.t("Tagger tous les fichiers cochés (F6)"));
-        btnTagSel    = headerBtn(I18n.t("Tagger la sélection"), I18n.t("Tagger les lignes sélectionnées (F7)"));
-        btnSaveAll   = headerBtn(I18n.t("Enregistrer tout"), I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"));
-        btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"));
+        btnTagAll    = headerBtn(I18n.t("Tout tagger"), I18n.t("Tagger tous les fichiers cochés (F6)"), ToolbarIcon.Kind.TAG);
+        btnTagSel    = headerBtn(I18n.t("Tagger la sélection"), I18n.t("Tagger les lignes sélectionnées (F7)"), ToolbarIcon.Kind.TAG_CHECK);
+        btnSaveAll   = headerBtn(I18n.t("Enregistrer tout"), I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"), ToolbarIcon.Kind.SAVE);
+        btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"), ToolbarIcon.Kind.STOP);
         btnTagAll.addActionListener(e -> startTagging(false));
         btnTagSel.addActionListener(e -> startTagging(true));
         btnSaveAll.addActionListener(e -> saveAll());
@@ -1057,7 +1132,7 @@ public class MainFrame extends JFrame {
         for (String id : secondary) {
             ToolbarAction action = findToolbarAction(id.trim());
             if (action == null) continue;
-            JButton btn = secondaryBtn(action.label(), action.tooltip());
+            JButton btn = secondaryBtn(action.label(), action.tooltip(), secondaryIconFor(action.id()));
             btn.addActionListener(e -> action.handler().run());
             if ("transcode".equals(action.id())) btnTranscode = btn; // conservé : lu par transcodeFiles()
             if ("refreshFolders".equals(action.id())) {
@@ -1070,20 +1145,30 @@ public class MainFrame extends JFrame {
         secondaryToolbarPanel.repaint();
     }
 
-    private JButton accentBtn(String text, String tip) {
+    private JButton accentBtn(String text, String tip) { return accentBtn(text, tip, null); }
+
+    // Icône sombre (même teinte que le texte #1E1F22) : les 4 boutons "header" sont tous sur le
+    // fond sombre de la barre d'outils, celui-ci seul est sur fond teal plein — une icône claire y
+    // serait quasi invisible (faible contraste clair-sur-clair une fois le halo du fond pris en
+    // compte), d'où une couleur d'icône dédiée par variante de bouton plutôt qu'une seule globale.
+    private JButton accentBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
         b.setToolTipText(tip);
         b.setFocusPainted(false);
         b.putClientProperty("FlatLaf.style",
             "background: #4DB6AC; foreground: #1E1F22; font: bold 12 $defaultFont");
+        if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0x1E1F22))); b.setIconTextGap(7); }
         return b;
     }
 
-    private JButton headerBtn(String text, String tip) {
+    private JButton headerBtn(String text, String tip) { return headerBtn(text, tip, null); }
+
+    private JButton headerBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
         b.setToolTipText(tip);
         b.setFocusPainted(false);
         b.putClientProperty("FlatLaf.style", "foreground: #CFD8DC");
+        if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0xCFD8DC))); b.setIconTextGap(7); }
         return b;
     }
 
@@ -1092,12 +1177,27 @@ public class MainFrame extends JFrame {
      *  distinguer visuellement des 5 actions fixes (Ouvrir/Rafraîchir/Tout tagger/Tagger la
      *  sélection/Annuler), plutôt que d'avoir 8+ boutons de poids visuel identique dans la même
      *  rangée. */
-    private JButton secondaryBtn(String text, String tip) {
+    private JButton secondaryBtn(String text, String tip) { return secondaryBtn(text, tip, null); }
+
+    private JButton secondaryBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
         b.setToolTipText(tip);
         b.setFocusPainted(false);
         b.putClientProperty("FlatLaf.style", "foreground: #90A4AE; font: 11 $defaultFont");
+        if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0x90A4AE), 14)); b.setIconTextGap(6); }
         return b;
+    }
+
+    /** Associe un id d'action de la barre secondaire (voir toolbarActionRegistry()) à une icône —
+     *  seules les actions les plus fréquentes ont une icône dédiée pour l'instant ; les autres
+     *  restent en texte seul plutôt que d'improviser un glyphe qui ne représenterait rien. */
+    private static ToolbarIcon.Kind secondaryIconFor(String actionId) {
+        return switch (actionId) {
+            case "refreshFolders"  -> ToolbarIcon.Kind.REFRESH;
+            case "transcode"       -> ToolbarIcon.Kind.TRANSCODE;
+            case "submitAcoustId"  -> ToolbarIcon.Kind.UPLOAD;
+            default -> null;
+        };
     }
 
     private JButton iconBtn(String text, String tip) {
@@ -1291,6 +1391,29 @@ public class MainFrame extends JFrame {
                 int mr = convertRowIndexToModel(row);
                 return tableModel.getTooltip(mr);
             }
+
+            // Avant ce correctif, un tableau vide (premier lancement, ou "Vider" cliqué) était un
+            // simple rectangle sombre sans aucune indication — rien ne dit à un nouvel utilisateur
+            // comment commencer. Dessiné directement dans le JTable (pas un composant séparé) pour
+            // rester dans la zone déjà scrollable/redimensionnable sans toucher au reste du layout.
+            @Override protected void paintComponent(Graphics g) {
+                super.paintComponent(g);
+                if (getRowCount() > 0) return;
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(new Color(0x6E6E72));
+                String line1 = I18n.t("Aucun fichier chargé");
+                String line2 = I18n.t("Ctrl+O ou glissez-déposer un dossier ici pour commencer");
+                Rectangle vis = getVisibleRect();
+                g2.setFont(getFont().deriveFont(Font.BOLD, 15f));
+                FontMetrics fm1 = g2.getFontMetrics();
+                int y = vis.y + vis.height / 2;
+                g2.drawString(line1, vis.x + (vis.width - fm1.stringWidth(line1)) / 2, y - 6);
+                g2.setFont(getFont().deriveFont(Font.PLAIN, 12f));
+                FontMetrics fm2 = g2.getFontMetrics();
+                g2.drawString(line2, vis.x + (vis.width - fm2.stringWidth(line2)) / 2, y + fm2.getHeight());
+                g2.dispose();
+            }
         };
         configureTable();
         installContextMenu();
@@ -1436,6 +1559,12 @@ public class MainFrame extends JFrame {
 
     private void configureTable() {
         table.setRowHeight(26);
+        // Sans ça, un JTable avec 0 ligne (ou moins de lignes que la hauteur du viewport) ne
+        // remplit que sa hauteur de contenu réelle — le grand rectangle vide sous l'en-tête est
+        // alors peint par le JScrollPane (fond du viewport), PAS par le JTable lui-même, et le
+        // message d'accueil dessiné dans son paintComponent() (voir sa création juste au-dessus)
+        // ne s'affiche jamais faute de surface sur laquelle se dessiner.
+        table.setFillsViewportHeight(true);
         table.setShowHorizontalLines(false);
         table.setIntercellSpacing(new Dimension(0, 0));
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
@@ -1481,9 +1610,12 @@ public class MainFrame extends JFrame {
         colWidth(cm, 3, 190, 70,  340);  // Artiste album
         colWidth(cm, 4, 200, 80,  380);  // Titre
         colWidth(cm, 5, 200, 60,  360);  // Album
-        colWidth(cm, 6, 52,  36,  68);   // Année
+        // Année/Piste élargies (62/56, avant 52/44) : leurs en-têtes ("Année", "Piste") étaient
+        // tronqués en "Ann…"/"Pi…" par défaut sur un premier lancement — repéré à l'écran, pas
+        // seulement en lisant le code (voir capture d'écran de revue d'interface).
+        colWidth(cm, 6, 62,  44,  76);   // Année
         colWidth(cm, 7, 120, 50,  220);  // Genre
-        colWidth(cm, 8, 44,  28,  60);   // Piste
+        colWidth(cm, 8, 56,  36,  70);   // Piste
         colWidth(cm, 9, 130, 80,  220);  // Statut
         colWidth(cm, 10, 56,  40,  90);  // Durée
 
@@ -2112,35 +2244,90 @@ public class MainFrame extends JFrame {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) return;
 
-        if (rows.length == 1) {
-            // ── Fichier unique ─────────────────────────────────────────────
-            int       mr   = table.convertRowIndexToModel(rows[0]);
-            FileEntry e    = tableModel.get(mr);
-            TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
-            TagInfo   ti   = e.activeTags();
-            detailPanel.collect(ti);
-            refreshTableRow(mr, ti);
-            undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Modifier %s", e.filename()));
-            // Ne marquer TAGGED qu'APRÈS confirmation d'écriture réussie — sinon un échec
-            // d'écriture (permissions, fichier verrouillé...) laissait quand même le statut à
-            // TAGGED, jamais annulé (même défaut déjà corrigé dans les autres pipelines).
-            if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
-            setStatus(I18n.t("Tags sauvegardés — %s", e.filename()));
-        } else {
-            // ── Édition en lot ─────────────────────────────────────────────
-            int saved = 0;
-            for (int row : rows) {
-                int       mr   = table.convertRowIndexToModel(row);
+        // Traçabilité des corrections manuelles (table MetadataCache.corrections, jusqu'ici
+        // écrite par personne — voir recordFieldCorrections) : une seule connexion pour tout
+        // l'appel plutôt qu'une par fichier édité en lot.
+        MetadataCache correctionsCache = new MetadataCache();
+        try {
+            if (rows.length == 1) {
+                // ── Fichier unique ─────────────────────────────────────────────
+                int       mr   = table.convertRowIndexToModel(rows[0]);
                 FileEntry e    = tableModel.get(mr);
                 TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
                 TagInfo   ti   = e.activeTags();
                 detailPanel.collect(ti);
                 refreshTableRow(mr, ti);
-                undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Lot %s", e.filename()));
+                undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Modifier %s", e.filename()));
+                recordFieldCorrections(correctionsCache, e, snap, ti);
+                // Ne marquer TAGGED qu'APRÈS confirmation d'écriture réussie — sinon un échec
+                // d'écriture (permissions, fichier verrouillé...) laissait quand même le statut à
+                // TAGGED, jamais annulé (même défaut déjà corrigé dans les autres pipelines).
                 if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
-                saved++;
+                setStatus(I18n.t("Tags sauvegardés — %s", e.filename()));
+            } else {
+                // ── Édition en lot ─────────────────────────────────────────────
+                // Écrivait auparavant directement sur l'EDT (une écriture TagWriter par fichier
+                // sélectionné, potentiellement des dizaines) — sur une sélection multiple assez
+                // large, ou un simple fichier M4A qui déclenche la chaîne de réparation ffmpeg
+                // (voir TagWriter), ça gelait l'interface pour toute la durée du lot. La collecte
+                // depuis DetailPanel (lecture des champs UI) reste sur l'EDT ; seule l'écriture
+                // disque (I/O) est poussée en arrière-plan, comme buildRenameJob().
+                record PendingWrite(FileEntry entry, int modelRow, TagInfo snap, TagInfo ti) {}
+                List<PendingWrite> pending = new ArrayList<>();
+                for (int row : rows) {
+                    int       mr   = table.convertRowIndexToModel(row);
+                    FileEntry e    = tableModel.get(mr);
+                    TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
+                    TagInfo   ti   = e.activeTags();
+                    detailPanel.collect(ti);
+                    refreshTableRow(mr, ti);
+                    undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Lot %s", e.filename()));
+                    pending.add(new PendingWrite(e, mr, snap, ti));
+                }
+                setStatus(I18n.t("Sauvegarde de %d fichier(s)…", pending.size()));
+                new SwingWorker<Integer, PendingWrite>() {
+                    @Override protected Integer doInBackground() {
+                        int saved = 0;
+                        for (PendingWrite w : pending) {
+                            recordFieldCorrections(correctionsCache, w.entry(), w.snap(), w.ti());
+                            if (writeTagsSafe(w.entry(), w.ti())) { saved++; publish(w); }
+                        }
+                        return saved;
+                    }
+                    @Override protected void process(List<PendingWrite> chunks) {
+                        for (PendingWrite w : chunks) markManuallyTagged(w.entry(), w.ti(), w.modelRow());
+                    }
+                    @Override protected void done() {
+                        correctionsCache.close();
+                        int saved = 0;
+                        try { saved = get(); } catch (Exception ignored) {}
+                        setStatus(I18n.t("Tags sauvegardés — %d fichier(s).", saved));
+                    }
+                }.execute();
+                return; // le finally ci-dessous fermerait correctionsCache avant la fin du worker
             }
-            setStatus(I18n.t("Tags sauvegardés — %d fichier(s).", saved));
+        } finally {
+            if (rows.length == 1) correctionsCache.close();
+        }
+    }
+
+    /**
+     * Journalise chaque champ texte modifié à la main dans la table `corrections` — jusqu'ici
+     * créée et écrivable (MetadataCache.recordCorrection) mais jamais appelée nulle part dans le
+     * dépôt : la traçabilité des corrections promise par la Javadoc de classe de MetadataCache
+     * n'existait pas en pratique. Réflexion sur les champs String publics de TagInfo plutôt qu'une
+     * liste à la main : reste correct si de nouveaux champs texte sont ajoutés au modèle.
+     */
+    private void recordFieldCorrections(MetadataCache cache, FileEntry e, TagInfo before, TagInfo after) {
+        String path = (e.currentPath != null ? e.currentPath : e.file.toPath()).toString();
+        for (java.lang.reflect.Field f : TagInfo.class.getFields()) {
+            if (f.getType() != String.class) continue;
+            try {
+                String oldVal = (String) f.get(before);
+                String newVal = (String) f.get(after);
+                if (newVal != null && !newVal.equals(oldVal))
+                    cache.recordCorrection(path, f.getName(), oldVal, newVal);
+            } catch (IllegalAccessException ignored) {}
         }
     }
 
@@ -2826,7 +3013,8 @@ public class MainFrame extends JFrame {
                 // 100k+ fichiers relancée régulièrement (session de plusieurs jours), la quasi-
                 // totalité des fichiers n'ont pas changé depuis le dernier scan — inutile de
                 // refaire un AudioFileIO.read() coûteux pour chacun.
-                java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap = cache.loadScanCacheMap();
+                java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap = acquireScanCacheMap(cache);
+                try {
 
                 // ── Phase 2 : lecture des tags (parallèle, pool PARTAGÉ — voir scanTagPool) ──
                 // Publication dans l'ORDRE DE FIN RÉEL (ExecutorCompletionService) plutôt que dans
@@ -2893,6 +3081,9 @@ public class MainFrame extends JFrame {
                 // ouverte plutôt que risquer une fermeture concurrente avec une tâche en cours.
                 if (fullyDrained) cache.close();
                 return new int[]{ newEntries.size(), tagged };
+                } finally {
+                    releaseScanCacheMap();
+                }
             }
 
             @Override
@@ -3685,7 +3876,7 @@ public class MainFrame extends JFrame {
             int[] done = {0};
             com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
 
-            new SwingWorker<String, FileEntry>() {
+            SwingWorker<String, FileEntry> worker = new SwingWorker<>() {
                 int renamed = 0, skipped = 0, errors = 0;
 
                 @Override
@@ -3693,6 +3884,11 @@ public class MainFrame extends JFrame {
                     FileRenamer renamer = new FileRenamer();
                     boolean cleanupEmptyDirs = Config.get().deleteEmptyDirsAfterRename();
                     for (int i = 0; i < tableModel.getRowCount(); i++) {
+                        // Vérifié à chaque itération (pas seulement avant la boucle) : c'est le
+                        // point d'annulation coopératif utilisé par RenamePreviewDialog (bouton
+                        // Annuler / fermeture pendant un renommage) — cancel(false) plutôt que
+                        // cancel(true) pour ne jamais interrompre un Files.move en plein vol.
+                        if (isCancelled()) break;
                         FileEntry e = tableModel.get(i);
                         if (e.status != FileEntry.Status.TAGGED) continue;
                         Path oldPath = e.currentPath;
@@ -3744,7 +3940,9 @@ public class MainFrame extends JFrame {
                     try { setStatus(get()); } catch (Exception ignore) {}
                     onDone.run();
                 }
-            }.execute();
+            };
+            worker.execute();
+            return () -> worker.cancel(false);
         };
     }
 
@@ -4065,6 +4263,18 @@ public class MainFrame extends JFrame {
             try {
                 if (af.getAudioHeader() != null) ti.durationSec = af.getAudioHeader().getTrackLength();
             } catch (Exception ignored) {}
+            // jaudiotagger renvoie parfois 0 pour un .m4a/AAC structurellement valide (constaté en
+            // direct : un fichier de 7,8 Mo, flux AAC de 3:56 confirmé par ffprobe, mais
+            // getTrackLength()==0 — probablement un souci de parsing des atomes mvhd/mdhd/stts pour
+            // certains encodeurs). Grave : durationSec==0 est LE signal utilisé ailleurs pour repérer
+            // les fichiers vides/corrompus (voir le commentaire sur ce champ dans TagInfo.java) — un
+            // faux 0 fait donc passer un fichier parfaitement bon pour cassé. Contre-vérification via
+            // ffprobe (lecture des métadonnées du conteneur seulement, pas un décodage complet — coût
+            // négligeable), seulement pour ce cas rare plutôt que sur chaque fichier scanné.
+            if (ti.durationSec <= 0) {
+                int probed = com.opentagger.AudioDuration.probeSeconds(f.getAbsolutePath());
+                if (probed > 0) ti.durationSec = probed;
+            }
             Tag tag = af.getTag();
             if (tag == null) return ti;
 
@@ -4306,6 +4516,13 @@ public class MainFrame extends JFrame {
         if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
         File out = fc.getSelectedFile();
         setStatus(I18n.t("Export CSV en cours…"));
+        // Copie de la liste sur l'EDT AVANT de passer en arrière-plan : doInBackground() itérait
+        // avant ce correctif directement sur tableModel (getRowCount()/get(i)) depuis un thread de
+        // fond pendant que l'EDT peut concurremment ajouter/retirer des lignes (scan en cours,
+        // filtre) — la liste "visible" sous-jacente n'est pas synchronisée pour cet usage. Copier
+        // les références ici (rapide, pas de clonage profond de TagInfo) fige la structure itérée.
+        List<FileEntry> snapshot = new ArrayList<>(tableModel.getRowCount());
+        for (int i = 0; i < tableModel.getRowCount(); i++) snapshot.add(tableModel.get(i));
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() throws Exception {
                 try (PrintWriter pw = new PrintWriter(
@@ -4313,8 +4530,7 @@ public class MainFrame extends JFrame {
                     // En-tête BOM pour Excel
                     pw.print('﻿');
                     pw.println(I18n.t("Fichier,Artiste,Artiste Album,Titre,Album,Année,Genre,Piste,Disque,Compositeur,Chef,MBID,Statut"));
-                    for (int i = 0; i < tableModel.getRowCount(); i++) {
-                        FileEntry e = tableModel.get(i);
+                    for (FileEntry e : snapshot) {
                         TagInfo  ti = e.activeTags();
                         pw.println(csv(e.filename()) + "," + csv(ti.artist) + "," + csv(ti.albumArtist)
                             + "," + csv(ti.title) + "," + csv(ti.album) + "," + csv(ti.year)
@@ -4542,8 +4758,8 @@ public class MainFrame extends JFrame {
 
         if (!mislabeled.isEmpty()) {
             StringBuilder mb = new StringBuilder(I18n.t(
-                "<html><b>%d fichier(s) écarté(s) de la suppression</b> — pas corrompus, juste "
-                + "une mauvaise extension (contenu réel différent du nom de fichier) :<br><br>", mislabeled.size()));
+                "<html><b>%d fichier(s) mal étiqueté(s)</b> — pas corrompus, juste une mauvaise "
+                + "extension (contenu réel différent du nom de fichier) :<br><br>", mislabeled.size()));
             int shownM = Math.min(mislabeled.size(), 8);
             for (int i = 0; i < shownM; i++) {
                 File f = mislabeled.get(i).currentPath != null
@@ -4552,9 +4768,44 @@ public class MainFrame extends JFrame {
             }
             if (mislabeled.size() > shownM)
                 mb.append(I18n.t("&nbsp;… et %d autre(s)<br>", mislabeled.size() - shownM));
-            mb.append(I18n.t("<br><i>À renommer manuellement avec la bonne extension, pas à supprimer.</i></html>"));
-            JOptionPane.showMessageDialog(this, mb.toString(),
-                I18n.t("Fichiers mal étiquetés (non supprimés)"), JOptionPane.INFORMATION_MESSAGE);
+            mb.append(I18n.t("<br>Renommer automatiquement vers l'extension correspondant au contenu "
+                + "réel détecté (ffprobe) ?<br><i>Seul le nom change, rien d'autre n'est modifié — "
+                + "jamais de suppression.</i></html>"));
+            int renameOk = JOptionPane.showConfirmDialog(this, mb.toString(),
+                I18n.t("Fichiers mal étiquetés"), JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+            if (renameOk == JOptionPane.YES_OPTION) {
+                int renamed = 0, skipped = 0;
+                for (FileEntry e : mislabeled) {
+                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    String newExt = com.opentagger.AudioFormatCheck.suggestCorrectExtension(f);
+                    if (newExt == null) { skipped++; continue; }
+                    String name = f.getName();
+                    int dot = name.lastIndexOf('.');
+                    String stem = dot > 0 ? name.substring(0, dot) : name;
+                    java.nio.file.Path parent = f.toPath().getParent();
+                    java.nio.file.Path dest = parent.resolve(stem + "." + newExt);
+                    for (int n = 2; java.nio.file.Files.exists(dest) && n < 100; n++)
+                        dest = parent.resolve(stem + " (" + n + ")." + newExt);
+                    if (java.nio.file.Files.exists(dest)) { skipped++; continue; }
+                    try {
+                        java.nio.file.Files.move(f.toPath(), dest);
+                        e.currentPath = dest;
+                        // result (tags déjà identifiés) survit à l'échec d'écriture d'origine — pas
+                        // besoin de tout ré-identifier, juste retenter l'enregistrement sur le
+                        // fichier renommé. Pas de result (chemin inattendu) : retombe en PENDING.
+                        e.status  = e.result != null ? FileEntry.Status.IDENTIFIED : FileEntry.Status.PENDING;
+                        e.message = "";
+                        tableModel.update(e);
+                        renamed++;
+                    } catch (Exception ex) {
+                        skipped++;
+                    }
+                }
+                refreshStats();
+                setStatus(skipped > 0
+                    ? I18n.t("%d fichier(s) renommé(s) — %d non résolu(s) (format non reconnu, à faire manuellement).", renamed, skipped)
+                    : I18n.t("%d fichier(s) renommé(s) avec la bonne extension.", renamed));
+            }
         }
 
         if (corrupt.isEmpty()) return;
@@ -4705,6 +4956,13 @@ public class MainFrame extends JFrame {
     }
 
     private void showError(String msg) {
+        // writeTagsSafe() (donc showError indirectement) est désormais aussi appelé depuis le
+        // thread d'arrière-plan de l'édition en lot (voir applyDetail()) — JOptionPane hors EDT
+        // n'est pas garanti thread-safe côté Swing.
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> showError(msg));
+            return;
+        }
         JOptionPane.showMessageDialog(this, msg, I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
     }
 

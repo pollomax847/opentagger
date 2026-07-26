@@ -3,6 +3,7 @@ package com.opentagger;
 import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
+import java.io.BufferedWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.LocalDateTime;
@@ -14,22 +15,57 @@ import java.util.List;
  * Journalise les corrections appliquées par un batch de taguage.
  * Un fichier .log est écrit à la fin de chaque session dans le dossier
  * de la première piste traitée (ou dans ~/.opentagger/ en fallback).
+ *
+ * Écrit INCRÉMENTALEMENT (une ligne par entrée, flush() sur chaque écriture) dans un fichier
+ * temporaire dès la construction, plutôt que d'accumuler tout le journal en RAM jusqu'à un
+ * flush() final — avant ce correctif, un crash/kill de l'appli en plein scan (OOM, coupure de
+ * courant, force-quit) perdait la totalité des notes de correction de la session, potentiellement
+ * des heures de taguage sur une grosse bibliothèque. flush(folder) ne fait plus qu'écrire le
+ * résumé final et déplacer ce fichier temporaire déjà à jour vers la destination définitive.
  */
 public class CorrectionLog {
 
     private static final DateTimeFormatter FMT_FILE = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm");
     private static final DateTimeFormatter FMT_HEAD = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
 
-    private final List<String>    lines     = new ArrayList<>();
-    private final LocalDateTime   startTime = LocalDateTime.now();
+    private final LocalDateTime  startTime = LocalDateTime.now();
+    private final Path           tempPath;
+    private final BufferedWriter writer;
     private int cntTagged = 0, cntSkipped = 0, cntError = 0;
 
     public CorrectionLog() {
-        lines.add("════════════════════════════════════════════════════════════════");
-        lines.add("  OpenTagger — Notes de correction");
-        lines.add("  Session : " + startTime.format(FMT_HEAD));
-        lines.add("════════════════════════════════════════════════════════════════");
-        lines.add("");
+        String filename = "opentagger_" + startTime.format(FMT_FILE) + ".log";
+        Path tmp;
+        BufferedWriter w;
+        try {
+            Path logsDir = Path.of(Config.configDir(), "logs");
+            Files.createDirectories(logsDir);
+            tmp = logsDir.resolve(filename);
+            w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            // Repli silencieux si ~/.opentagger/logs est inaccessible (permissions, disque plein) :
+            // writer reste null, writeLines() ne fait rien, flush() renverra alors null comme avant
+            // ce correctif dans ce cas déjà dégradé.
+            tmp = null;
+            w = null;
+        }
+        tempPath = tmp;
+        writer = w;
+
+        writeLines(
+            "════════════════════════════════════════════════════════════════",
+            "  OpenTagger — Notes de correction",
+            "  Session : " + startTime.format(FMT_HEAD),
+            "════════════════════════════════════════════════════════════════",
+            "");
+    }
+
+    private void writeLines(String... ls) {
+        if (writer == null) return;
+        try {
+            for (String l : ls) { writer.write(l); writer.newLine(); }
+            writer.flush();
+        } catch (Exception ignored) {}
     }
 
     // ── Ajout d'une entrée par fichier traité ──────────────────────────────────
@@ -44,6 +80,7 @@ public class CorrectionLog {
             default      -> {}
         }
 
+        List<String> lines = new ArrayList<>();
         lines.add("────────────────────────────────────────────────────────────────");
         lines.add("Fichier : " + entry.filename());
         lines.add("Statut  : " + statusLabel(entry.status));
@@ -72,6 +109,7 @@ public class CorrectionLog {
         }
 
         lines.add("");
+        writeLines(lines.toArray(new String[0]));
     }
 
     // ── Écriture du fichier ────────────────────────────────────────────────────
@@ -79,22 +117,29 @@ public class CorrectionLog {
     public Path flush(Path folder) {
         long elapsedSec = java.time.Duration.between(startTime, LocalDateTime.now()).getSeconds();
 
-        lines.add("════════════════════════════════════════════════════════════════");
-        lines.add("  Résumé de la session");
-        lines.add(String.format("  Durée   : %dm %02ds", elapsedSec / 60, elapsedSec % 60));
-        lines.add("  Tagués  : " + cntTagged);
-        lines.add("  Ignorés : " + cntSkipped);
-        lines.add("  Erreurs : " + cntError);
-        lines.add("  Total   : " + (cntTagged + cntSkipped + cntError));
-        lines.add("════════════════════════════════════════════════════════════════");
+        writeLines(
+            "════════════════════════════════════════════════════════════════",
+            "  Résumé de la session",
+            String.format("  Durée   : %dm %02ds", elapsedSec / 60, elapsedSec % 60),
+            "  Tagués  : " + cntTagged,
+            "  Ignorés : " + cntSkipped,
+            "  Erreurs : " + cntError,
+            "  Total   : " + (cntTagged + cntSkipped + cntError),
+            "════════════════════════════════════════════════════════════════");
+        try { if (writer != null) writer.close(); } catch (Exception ignored) {}
+
+        if (tempPath == null) return null; // writer jamais ouvert (voir constructeur)
 
         Path dest = resolveOutputPath(folder);
         try {
             Files.createDirectories(dest.getParent());
-            Files.write(dest, lines, StandardCharsets.UTF_8);
+            if (!tempPath.equals(dest)) Files.move(tempPath, dest, StandardCopyOption.REPLACE_EXISTING);
             return dest;
         } catch (Exception e) {
-            return null;
+            // Le déplacement vers le dossier de la bibliothèque a échoué (cross-device, permissions
+            // sur un montage NAS) — le journal reste consultable à son emplacement temporaire,
+            // jamais perdu (c'est tout l'intérêt de l'écriture incrémentale ci-dessus).
+            return tempPath;
         }
     }
 
@@ -105,7 +150,7 @@ public class CorrectionLog {
             Path p = folder.resolve(filename);
             if (Files.isWritable(folder)) return p;
         }
-        // Fallback : ~/.opentagger/logs/
+        // Fallback : ~/.opentagger/logs/ (c'est déjà là que tempPath a été créé)
         return Path.of(Config.configDir(), "logs", filename);
     }
 

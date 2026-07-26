@@ -99,10 +99,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
             futures.add(pool.submit(() -> processOne(entry, fileIdx, total)));
         }
 
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
-        }
+        WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         cache.close();
         return null;
     }

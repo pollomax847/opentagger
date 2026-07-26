@@ -18,6 +18,13 @@ public class TagInfo {
     // resté invisible dans le tableau sans cette colonne.
     public int    durationSec         = 0;
 
+    // Durée déclarée par MusicBrainz pour l'enregistrement identifié (champ "length", ms → sec) —
+    // PAS un tag non plus, jamais écrit dans le fichier (TagWriter ne mappe que des FieldKey
+    // explicites). Sert uniquement à la détection d'incohérence (voir TaggingWorker.
+    // isDurationMismatch()) : un fichier bien plus court que ce que MusicBrainz annonce pour ce
+    // titre suggère un rip tronqué ou une mauvaise identification. 0 = non renseigné par MB.
+    public int    mbDurationSec       = 0;
+
     // ── Standard ────────────────────────────────────────────────────────────
     public String title               = "";
     public String artist              = "";
@@ -193,6 +200,7 @@ public class TagInfo {
             TagInfo c = new TagInfo();
             c.score = this.score;
             c.durationSec = this.durationSec;
+            c.mbDurationSec = this.mbDurationSec;
             for (java.lang.reflect.Field f : TagInfo.class.getFields()) {
                 if (f.getType() == String.class) f.set(c, f.get(this));
             }

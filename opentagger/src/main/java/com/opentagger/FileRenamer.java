@@ -35,6 +35,23 @@ public class FileRenamer {
             new java.util.concurrent.Semaphore(
                     Math.max(1, Config.get().num("rename.max_concurrent_cross_device_moves", 1)));
 
+    // Un verrou par nom de destination CONTESTÉ (pas un verrou global — voir lockFor()) couvrant
+    // "vérifier que la cible est libre" + "déplacer" dans rename()/moveToFolder() : sans lui, deux
+    // threads du pool batch (batch.threads) visant le même nom de destination (deux fichiers
+    // résolvant au même masque) passent TOUS LES DEUX le test Files.exists() avant qu'aucun n'ait
+    // bougé son fichier, puis Files.move avec ATOMIC_MOVE (sans REPLACE_EXISTING) écrase quand même
+    // silencieusement la destination sur Linux — vérifié empiriquement : rename(2) POSIX remplace
+    // toujours la cible, REPLACE_EXISTING ou pas. Le thread qui finit en second gagne, le fichier de
+    // l'autre disparaît sans exception. Verrouiller uniquement sur le chemin de base contesté (pas
+    // globalement) évite de sérialiser tout le renommage batch pour des fichiers qui ne se disputent
+    // jamais le même nom.
+    private static final java.util.concurrent.ConcurrentHashMap<String, Object> TARGET_LOCKS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static Object lockFor(Path baseTarget) {
+        return TARGET_LOCKS.computeIfAbsent(baseTarget.toString(), k -> new Object());
+    }
+
     // ── Données des masques ───────────────────────────────────────────────────
     private final List<String> labels      = new ArrayList<>();
     private final List<String> expressions = new ArrayList<>();
@@ -139,21 +156,23 @@ public class FileRenamer {
         Path cible = rootDir.resolve(chemin + ext).normalize();
         if (cible.equals(fichier)) return null;
 
-        if (cible.getParent() != null) Files.createDirectories(cible.getParent());
+        synchronized (lockFor(cible)) {
+            if (cible.getParent() != null) Files.createDirectories(cible.getParent());
 
-        // Résolution de collision
-        if (Files.exists(cible)) {
-            int n = 2;
-            do {
-                cible = rootDir.resolve(chemin + " (" + n++ + ")" + ext).normalize();
-                if (cible.getParent() != null) Files.createDirectories(cible.getParent());
-            } while (Files.exists(cible) && n < 100);
-            if (Files.exists(cible))
-                throw new IOException("Impossible de renommer '"
-                        + fichier.getFileName() + "' : 98 fichiers en collision existent déjà.");
+            // Résolution de collision
+            if (Files.exists(cible)) {
+                int n = 2;
+                do {
+                    cible = rootDir.resolve(chemin + " (" + n++ + ")" + ext).normalize();
+                    if (cible.getParent() != null) Files.createDirectories(cible.getParent());
+                } while (Files.exists(cible) && n < 100);
+                if (Files.exists(cible))
+                    throw new IOException("Impossible de renommer '"
+                            + fichier.getFileName() + "' : 98 fichiers en collision existent déjà.");
+            }
+
+            moveFile(fichier, cible);
         }
-
-        moveFile(fichier, cible);
         return cible;
     }
 
@@ -314,17 +333,19 @@ public class FileRenamer {
         Path cible = targetFolder.resolve(nom).normalize();
         if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
 
-        if (Files.exists(cible)) {
-            int n = 2;
-            do {
-                cible = targetFolder.resolve(stem + " (" + n++ + ")" + ext).normalize();
-            } while (Files.exists(cible) && n < 100);
-            if (Files.exists(cible))
-                throw new IOException("Impossible de déplacer '" + nom
-                        + "' : 98 fichiers en collision existent déjà.");
-        }
+        synchronized (lockFor(cible)) {
+            if (Files.exists(cible)) {
+                int n = 2;
+                do {
+                    cible = targetFolder.resolve(stem + " (" + n++ + ")" + ext).normalize();
+                } while (Files.exists(cible) && n < 100);
+                if (Files.exists(cible))
+                    throw new IOException("Impossible de déplacer '" + nom
+                            + "' : 98 fichiers en collision existent déjà.");
+            }
 
-        moveFile(fichier, cible);
+            moveFile(fichier, cible);
+        }
         return cible;
     }
 

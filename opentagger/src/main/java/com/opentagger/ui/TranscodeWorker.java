@@ -7,6 +7,7 @@ import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 
 import javax.swing.*;
+import java.awt.Desktop;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,7 +29,12 @@ import java.util.function.Consumer;
  */
 public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progress> {
 
-    public record Progress(FileEntry entry, Path newPath, String error, int done, int total) {}
+    /** unreadable = CONFIRMÉ illisible (double vérification, voir AudioTranscoder.
+     *  verifyUnreadable()) — pas juste un premier message d'erreur qui y ressemble. trashed =
+     *  effectivement envoyé à la corbeille système (implique unreadable, mais pas l'inverse : le
+     *  réglage peut être désactivé, ou l'envoi à la corbeille peut lui-même échouer). */
+    public record Progress(FileEntry entry, Path newPath, String error, int done, int total,
+                            boolean unreadable, boolean trashed) {}
 
     private final List<FileEntry>    entries;
     private final FileTableModel     tableModel;
@@ -81,23 +87,45 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
                     Path newPath = tx.transcode(e.currentPath, format, bitrate, deleteSource);
                     if (newPath != null) {
                         done.incrementAndGet();
-                        publish(new Progress(e, newPath, null, done.get() + skipped.get() + errors.get(), total));
+                        publish(new Progress(e, newPath, null, done.get() + skipped.get() + errors.get(), total, false, false));
                     } else {
                         skipped.incrementAndGet();
-                        publish(new Progress(e, null, null, done.get() + skipped.get() + errors.get(), total));
+                        publish(new Progress(e, null, null, done.get() + skipped.get() + errors.get(), total, false, false));
                     }
                 } catch (Exception ex) {
                     errors.incrementAndGet();
                     String msg = ex.getMessage() != null ? ex.getMessage() : I18n.t("erreur");
-                    publish(new Progress(e, null, msg, done.get() + skipped.get() + errors.get(), total));
+                    Path curPath = e.currentPath != null ? e.currentPath : e.file.toPath();
+
+                    // Ne jamais isoler un fichier sur la seule foi de CE message d'erreur : un
+                    // échec de transcodage peut venir d'ailleurs (codec de sortie manquant, bitrate
+                    // invalide...). Contre-vérification indépendante — un second appel ffmpeg,
+                    // décodage seul vers "null", rien écrit sur le disque — seulement si ce premier
+                    // message ressemble déjà à une source corrompue ; les deux doivent être
+                    // d'accord avant de considérer le fichier réellement illisible.
+                    boolean unreadable = AudioTranscoder.isUnreadableSourceError(msg)
+                            && tx.verifyUnreadable(curPath);
+
+                    // Corbeille système (récupérable), jamais suppression définitive — voir
+                    // MainFrame.deleteErrorFiles() pour le même choix sur les fichiers illisibles
+                    // détectés manuellement.
+                    boolean trashed = false;
+                    if (unreadable && Config.get().transcodeMoveUnreadableEnabled()) {
+                        try {
+                            Desktop desktop = Desktop.getDesktop();
+                            if (desktop.isSupported(Desktop.Action.MOVE_TO_TRASH)) {
+                                trashed = desktop.moveToTrash(curPath.toFile());
+                            }
+                        } catch (Exception trashEx) {
+                            msg = msg + " (corbeille échouée: " + trashEx.getMessage() + ")";
+                        }
+                    }
+                    publish(new Progress(e, null, msg, done.get() + skipped.get() + errors.get(), total, unreadable, trashed));
                 }
             }));
         }
 
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
-        }
+        WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
 
         return I18n.t("Transcodage — ✓ %d converti(s)  déjà OK %d  ✗ %d erreur(s)",
                 done.get(), skipped.get(), errors.get());
@@ -106,6 +134,16 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
     @Override
     protected void process(List<Progress> chunks) {
         for (Progress pr : chunks) {
+            if (pr.trashed()) {
+                // Fichier parti à la corbeille : plus de ligne à mettre à jour, juste à retirer
+                // du tableau (le fichier lui-même n'existe plus à cet emplacement).
+                int idx = tableModel.indexOf(pr.entry());
+                if (idx >= 0) tableModel.remove(idx);
+                if (onProgress != null) onProgress.accept(pr);
+                continue;
+            }
+            if (pr.unreadable())
+                pr.entry().status = FileEntry.Status.ERROR;
             if (pr.newPath() != null)
                 pr.entry().currentPath = pr.newPath();
             if (pr.error() != null)

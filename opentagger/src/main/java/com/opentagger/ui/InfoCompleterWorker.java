@@ -94,26 +94,30 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     protected Void doInBackground() throws Exception {
         int total = entries.size();
 
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
-        pool = Executors.newFixedThreadPool(threads);
-        List<Future<?>> futures = new java.util.ArrayList<>();
+        try {
+            int threads = Math.max(1, Config.get().num("batch.threads", 3));
+            pool = Executors.newFixedThreadPool(threads);
+            List<Future<?>> futures = new java.util.ArrayList<>();
 
-        for (int i = 0; i < entries.size(); i++) {
-            if (isCancelled()) break;
-            final FileEntry entry  = entries.get(i);
-            final int       fileIdx = i + 1;
-            futures.add(pool.submit(() ->
-                    processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient())));
-        }
+            for (int i = 0; i < entries.size(); i++) {
+                if (isCancelled()) break;
+                final FileEntry entry  = entries.get(i);
+                final int       fileIdx = i + 1;
+                futures.add(pool.submit(() ->
+                        processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient())));
+            }
 
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
+            pool.shutdown();
+            for (Future<?> f : futures) {
+                try { f.get(); } catch (Exception ignored) {}
+            }
+        } finally {
+            // Comme AlbumCompletionWorker/PodcastWorker : fermer dans un finally, pas seulement
+            // en fin de chemin nominal — une exception avant ce point (ex. dans la boucle de
+            // soumission) laissait sinon la connexion SQLite ouverte pour toute la durée de vie
+            // de l'objet.
+            cache.close();
         }
-        // cache n'était jamais fermé avant — connexion SQLite qui fuyait pour toute la durée de
-        // vie de l'objet (contrairement à AlbumCompletionWorker/TaggingWorker, qui ferment déjà
-        // leur MetadataCache). Fermer seulement après que toutes les tâches ont fini d'écrire.
-        cache.close();
         return null;
     }
 

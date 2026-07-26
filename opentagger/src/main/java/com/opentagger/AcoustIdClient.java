@@ -74,7 +74,7 @@ public class AcoustIdClient {
             return List.of();
         }
 
-        List<String> mbids = parseMbids(root);
+        List<MbidCandidate> mbids = parseMbids(root);
         extractAcoustId(root);
         if (mbids.isEmpty()) return List.of();
 
@@ -88,16 +88,27 @@ public class AcoustIdClient {
         return results;
     }
 
-    private List<String> parseMbids(JsonNode root) {
-        List<String> mbids = new ArrayList<>();
+    /** Un MBID candidat associé au score de confiance AcoustID du résultat qui l'a produit. */
+    private record MbidCandidate(String mbid, double acoustidScore) {}
+
+    private List<MbidCandidate> parseMbids(JsonNode root) {
+        // MusicBrainz ne renvoie aucun score pour un lookup direct par ID (TagInfo.score y est
+        // toujours 100) : le seul signal de confiance disponible pour départager plusieurs MBIDs
+        // candidats est celui d'AcoustID lui-même, capturé ici avant d'être perdu.
+        java.util.Map<String, Double> bestScoreByMbid = new java.util.LinkedHashMap<>();
         for (JsonNode result : root.path("results")) {
             // Seuil abaissé à 0.5 comme Picard — AcoustID peut donner 0.6-0.8 sur fichiers bruités
-            if (result.path("score").asDouble() < 0.5) continue;
+            double score = result.path("score").asDouble();
+            if (score < 0.5) continue;
             for (JsonNode recording : result.path("recordings")) {
                 String mbid = recording.path("id").asText("");
-                if (!mbid.isBlank() && !mbids.contains(mbid)) mbids.add(mbid);
+                if (mbid.isBlank()) continue;
+                bestScoreByMbid.merge(mbid, score, Math::max);
             }
         }
+        List<MbidCandidate> mbids = new ArrayList<>();
+        bestScoreByMbid.forEach((mbid, score) -> mbids.add(new MbidCandidate(mbid, score)));
+        mbids.sort((a, b) -> Double.compare(b.acoustidScore(), a.acoustidScore()));
         return mbids;
     }
 
@@ -114,30 +125,36 @@ public class AcoustIdClient {
     }
 
     /**
-     * Essaie jusqu'à 3 MBIDs et retourne le meilleur résultat.
-     * Corrige le bug original qui n'essayait que le premier MBID et utilisait
-     * une copie incomplète du lookup (sans artist-credits, release-groups, isrcs).
+     * Essaie jusqu'à 3 MBIDs (par ordre de confiance AcoustID décroissante) et retourne le
+     * meilleur résultat. TagInfo.score d'un lookup MB direct est toujours 100 (l'API n'a pas
+     * de notion de score pour un lookup par ID) : le classement se fait donc sur le score
+     * AcoustID de départ, pas sur ce score MB qui ne discrimine rien entre les candidats.
      */
-    private List<TagInfo> fetchBestFromMusicBrainz(List<String> mbids) {
-        List<TagInfo> best = List.of();
+    private List<TagInfo> fetchBestFromMusicBrainz(List<MbidCandidate> mbids) {
+        TagInfo best = null;
+        double bestAcoustidScore = -1;
         int tries = Math.min(mbids.size(), 3);
         for (int i = 0; i < tries; i++) {
+            MbidCandidate candidate = mbids.get(i);
             try {
                 // Utilise mbClient.lookupRecording qui inclut TOUS les inc= nécessaires
                 // Rate-limit MB : centralisé dans MusicBrainzClient.getWithRetry(), plus besoin
                 // de pause manuelle ici même si ce client a son propre MusicBrainzClient interne.
-                TagInfo info = mbClient.lookupRecording(mbids.get(i));
+                TagInfo info = mbClient.lookupRecording(candidate.mbid());
                 if (info != null && !info.title.isBlank()) {
-                    best = List.of(info);
-                    if (info.score >= 90) break; // bon résultat, on s'arrête
+                    if (candidate.acoustidScore() > bestAcoustidScore) {
+                        bestAcoustidScore = candidate.acoustidScore();
+                        best = info;
+                    }
+                    if (candidate.acoustidScore() >= 0.9) break; // confiance déjà excellente, inutile d'essayer les autres
                 }
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                System.out.println("  MB lookup " + mbids.get(i) + " : " + e.getMessage());
+                System.out.println("  MB lookup " + candidate.mbid() + " : " + e.getMessage());
             }
         }
-        return best;
+        return best != null ? List.of(best) : List.of();
     }
 }

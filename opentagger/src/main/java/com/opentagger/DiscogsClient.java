@@ -15,6 +15,8 @@ import java.util.List;
 
 public class DiscogsClient {
 
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(DiscogsClient.class.getName());
     private static final String BASE_URL = "https://api.discogs.com";
 
     private String authHeader() {
@@ -121,12 +123,36 @@ public class DiscogsClient {
                 .GET()
                 .build();
 
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return null;
+        HttpResponse<String> response = sendWithThrottleRetry(request);
+        if (response == null || response.statusCode() != 200) return null;
 
         cache.putLookup(cacheKey, response.body());
         JsonNode results = mapper.readTree(response.body()).path("results");
         return (results.isArray() && !results.isEmpty()) ? results.get(0) : null;
+    }
+
+    /**
+     * Avant ce correctif : un 429 (quota Discogs dépassé — 60 req/min pour une clé authentifiée)
+     * ou toute autre erreur HTTP se traduisait en simple `return null`, indiscernable dans les
+     * logs d'un "genre non trouvé" légitime. Une seule retentative après le délai indiqué par
+     * Retry-After (ou 5s à défaut) suffit ici : contrairement à MusicBrainz, Discogs n'est qu'un
+     * fournisseur de genre parmi d'autres (repli Last.fm ensuite), pas la source d'identification
+     * principale — pas besoin du backoff exponentiel complet de MusicBrainzClient.getWithRetry().
+     */
+    private HttpResponse<String> sendWithThrottleRetry(HttpRequest request) throws Exception {
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 429) {
+            long waitMs = 5000;
+            try {
+                waitMs = Long.parseLong(response.headers().firstValue("Retry-After").orElse("5")) * 1000L;
+            } catch (NumberFormatException ignored) {}
+            LOG.info("Discogs 429 (quota dépassé) — nouvelle tentative dans " + (waitMs / 1000) + "s");
+            Thread.sleep(waitMs);
+            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+        if (response.statusCode() != 200)
+            LOG.warning("Discogs HTTP " + response.statusCode() + " : " + request.uri());
+        return response;
     }
 
     private List<String> extraireTableau(JsonNode node) {

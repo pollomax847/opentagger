@@ -113,6 +113,12 @@ public class MetadataCache {
                 catch (SQLException ignored) { /* colonne déjà présente */ }
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_artist ON tagging_history(artist)");
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_title  ON tagging_history(title)");
+                // Sans cet index, "ORDER BY ts DESC LIMIT 5000" (queryHistory) force un tri complet
+                // de TOUTE la table avant de garder les 5000 dernières lignes — sur un historique
+                // accumulé sur des années (jamais purgé), ce tri pouvait prendre plusieurs minutes.
+                // Constaté en direct : gelait tout l'EDT (pas seulement HistoryDialog) puisque
+                // l'appel se fait sur le thread Swing, voir HistoryDialog.loadAll().
+                st.execute("CREATE INDEX IF NOT EXISTS idx_hist_ts ON tagging_history(ts)");
                 // ── Cache du scan (relecture des tags) ──────────────────────
                 // Évite de rappeler AudioFileIO.read() (lecture disque + parsing complet) pour un
                 // fichier déjà scanné dont ni la taille ni la date de modification n'ont changé
@@ -173,7 +179,7 @@ public class MetadataCache {
             ps.setString(2, json);
             ps.setLong(3, System.currentTimeMillis());
             ps.executeUpdate();
-        } catch (Exception ignored) {}
+        } catch (Exception e) { LOG.fine("putRecordingSearch : " + e.getMessage()); }
     }
 
     // ── Recording Lookup (par MBID) ──────────────────────────────────────────
@@ -198,7 +204,7 @@ public class MetadataCache {
             ps.setString(2, json);
             ps.setLong(3, System.currentTimeMillis());
             ps.executeUpdate();
-        } catch (Exception ignored) {}
+        } catch (Exception e) { LOG.fine("putLookup : " + e.getMessage()); }
     }
 
     // ── Cache image binaire (pochettes CAA/FanArt/podcasts) ──────────────────
@@ -226,7 +232,7 @@ public class MetadataCache {
             ps.setBytes(3, bytes);
             ps.setLong(4, System.currentTimeMillis());
             ps.executeUpdate();
-        } catch (Exception ignored) {}
+        } catch (Exception e) { LOG.fine("putCachedImage : " + e.getMessage()); }
     }
 
     // ── Historique des corrections ────────────────────────────────────────────
@@ -242,7 +248,7 @@ public class MetadataCache {
             ps.setString(4, newVal);
             ps.setLong(5, System.currentTimeMillis());
             ps.executeUpdate();
-        } catch (Exception ignored) {}
+        } catch (Exception e) { LOG.warning("recordCorrection : " + e.getMessage()); }
     }
 
     // ── Historique personnel (tagging_history + file_history) ────────────────
@@ -325,7 +331,13 @@ public class MetadataCache {
             ps.setLong(3, System.currentTimeMillis());
             ps.setString(4, source != null ? source : SOURCE_TEXT);
             ps.executeUpdate();
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            // Écriture la plus sensible du cache : un verrou SQLite perdu ici efface
+            // silencieusement l'association fichier→MBID (le fichier retombe en PENDING au
+            // prochain scan malgré des tags corrects sur le disque) — busy_timeout=5000 (voir
+            // init()) absorbe la contention normale, donc un échec ici est un vrai signal.
+            LOG.warning("recordFileTagging (" + path + ") : " + e.getMessage());
+        }
     }
 
     /** Supprime l'entrée d'un chemin de fichier dans file_history (après renommage). */
@@ -334,7 +346,7 @@ public class MetadataCache {
         try (PreparedStatement ps = conn.prepareStatement("DELETE FROM file_history WHERE path=?")) {
             ps.setString(1, path);
             ps.executeUpdate();
-        } catch (Exception ignored) {}
+        } catch (Exception e) { LOG.warning("deleteFileHistory (" + path + ") : " + e.getMessage()); }
     }
 
     /**
@@ -465,6 +477,34 @@ public class MetadataCache {
     public record HistoryEntry(
         String mbid, String artist, String title, String album, String year, long ts) {}
 
+    /**
+     * Historique des corrections manuelles — écrit par MainFrame.recordFieldCorrections()
+     * (voir applyDetail()), lu ici. Jusqu'à ce correctif, la table `corrections` était créée et
+     * écrivable mais sans aucun appelant ni lecteur dans tout le dépôt : voir HistoryDialog,
+     * onglet "Corrections".
+     */
+    public List<CorrectionEntry> queryCorrections(int limit) {
+        List<CorrectionEntry> list = new ArrayList<>();
+        if (conn == null) return list;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT path,field,old_value,new_value,ts FROM corrections ORDER BY ts DESC LIMIT ?")) {
+            ps.setInt(1, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next())
+                    list.add(new CorrectionEntry(
+                        nullStr(rs.getString("path")),
+                        nullStr(rs.getString("field")),
+                        nullStr(rs.getString("old_value")),
+                        nullStr(rs.getString("new_value")),
+                        rs.getLong("ts")));
+            }
+        } catch (Exception e) { LOG.warning("queryCorrections : " + e.getMessage()); }
+        return list;
+    }
+
+    public record CorrectionEntry(
+        String path, String field, String oldValue, String newValue, long ts) {}
+
     public record ExportEntry(
         String mbid, String artist, String title, String album, String year, String json, long ts) {}
 
@@ -590,6 +630,52 @@ public class MetadataCache {
             ps2.setLong(1, cutoff); ps2.executeUpdate();
             ps3.setLong(1, cutoff); ps3.executeUpdate();
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * Supprime du scan_cache les entrées dont le fichier n'existe plus sur disque (déplacé/
+     * supprimé/ancien point de montage retiré des dossiers surveillés) — jamais purgée jusqu'ici,
+     * la table grossit indéfiniment : 622 406 lignes / 4,3 Go constatés en direct pour une
+     * bibliothèque de ~96 000 fichiers. Combiné à un chargement dupliqué par scan concurrent
+     * (voir MainFrame.acquireScanCacheMap()), c'est la cause directe d'un OutOfMemoryError observé
+     * en direct au lancement (5 dossiers scannés en parallèle). Coûteux (un stat() par ligne, des
+     * centaines de milliers d'appels) : à lancer en tâche de fond (SwingWorker), jamais sur l'EDT.
+     */
+    public int purgeStaleScanCache() {
+        if (conn == null) return 0;
+        List<String> stale = new ArrayList<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT path FROM scan_cache")) {
+            while (rs.next()) {
+                String path = rs.getString(1);
+                if (path == null || !Files.exists(Paths.get(path))) stale.add(path);
+            }
+        } catch (Exception e) { LOG.warning("purgeStaleScanCache (lecture) : " + e.getMessage()); return 0; }
+        if (stale.isEmpty()) return 0;
+
+        try {
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM scan_cache WHERE path=?")) {
+                for (String path : stale) { ps.setString(1, path); ps.addBatch(); }
+                ps.executeBatch();
+            }
+            conn.commit();
+        } catch (Exception e) {
+            LOG.warning("purgeStaleScanCache (suppression) : " + e.getMessage());
+            try { conn.rollback(); } catch (Exception ignored) {}
+            return 0;
+        } finally {
+            try { conn.setAutoCommit(true); } catch (Exception ignored) {}
+        }
+        return stale.size();
+    }
+
+    /** Réclame l'espace disque libéré par les DELETE ci-dessus (SQLite ne rétrécit pas le fichier
+     *  tout seul) — à lancer juste après purgeStaleScanCache()/purgeHistory(), hors EDT. */
+    public void vacuum() {
+        if (conn == null) return;
+        try (Statement st = conn.createStatement()) { st.execute("VACUUM"); }
+        catch (Exception e) { LOG.warning("vacuum : " + e.getMessage()); }
     }
 
     /** Supprime tout l'historique personnel (action irréversible, demande confirmation dans l'UI). */

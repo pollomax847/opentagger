@@ -15,6 +15,8 @@ import java.util.List;
 
 public class LastFmClient {
 
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(LastFmClient.class.getName());
     private static final String BASE_URL = "https://ws.audioscrobbler.com/2.0/";
 
     // Tags Last.fm classifiés comme "mood"
@@ -193,12 +195,34 @@ public class LastFmClient {
                 .timeout(HttpTimeouts.apiCall())
                 .GET()
                 .build();
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return null;
+        HttpResponse<String> response = sendWithThrottleRetry(request);
+        if (response == null || response.statusCode() != 200) return null;
         JsonNode root = mapper.readTree(response.body());
         if (root.has("error")) return null;
         cache.putLookup(cacheKey, response.body());
         return root;
+    }
+
+    /**
+     * Avant ce correctif : un 429 (quota Last.fm dépassé) ou toute autre erreur HTTP se traduisait
+     * en simple `return null`, indiscernable dans les logs d'un "genre non trouvé" légitime. Une
+     * seule retentative après le délai Retry-After (5s à défaut) suffit — Last.fm n'est qu'un
+     * repli parmi d'autres dans TagEnrichment.enrichGenre, pas la source principale.
+     */
+    private HttpResponse<String> sendWithThrottleRetry(HttpRequest request) throws Exception {
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 429) {
+            long waitMs = 5000;
+            try {
+                waitMs = Long.parseLong(response.headers().firstValue("Retry-After").orElse("5")) * 1000L;
+            } catch (NumberFormatException ignored) {}
+            LOG.info("Last.fm 429 (quota dépassé) — nouvelle tentative dans " + (waitMs / 1000) + "s");
+            Thread.sleep(waitMs);
+            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+        if (response.statusCode() != 200)
+            LOG.warning("Last.fm HTTP " + response.statusCode() + " : " + request.uri());
+        return response;
     }
 
     private boolean isMoodTag(String t) {

@@ -39,6 +39,8 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spTrackMatchThreshold;
     private JCheckBox  chkOnlyOfficial;
     private JCheckBox  chkUseAcoustId;
+    private JCheckBox  chkAlbumFirstPass;
+    private JSpinner   spAlbumFirstPassMinFiles;
     // tfPreferredCountry supprimé — remplacé par le sélecteur lstCountriesModel/cmbCountryPicker
     private JSpinner   spResultsLimit;
     private JSpinner   spCacheDays;
@@ -57,6 +59,8 @@ public class SettingsDialog extends JDialog {
     private JTextField tfPodcastLibraryRoot;
     private JCheckBox  chkMoveSkipped;
     private JTextField tfSkippedFolder;
+    private JCheckBox  chkMoveDurationMismatch;
+    private JTextField tfDurationMismatchFolder;
     private JCheckBox  chkVideoAutoRecover;
     private JCheckBox  chkSkipSongRecOnConfidentMb;
     private JSpinner   spnSkipSongRecMinScore;
@@ -138,6 +142,7 @@ public class SettingsDialog extends JDialog {
     private JSpinner                spTranscodeBitrate;
     private JCheckBox               chkTranscodeDeleteSource;
     private JLabel                  lblTranscodeBitrate;
+    private JCheckBox               chkMoveUnreadable;
 
     // ── Onglet Matching — releases préférées + méta ───────────────────────────
     private JCheckBox  chkTranslateArtists;
@@ -553,6 +558,11 @@ public class SettingsDialog extends JDialog {
             + "défaut que MusicBrainz Picard (40%)."));
         chkOnlyOfficial  = new JCheckBox(I18n.t("Uniquement les releases officielles"));
         chkUseAcoustId   = new JCheckBox(I18n.t("Activer l'identification par empreinte AcoustID (plus précis, plus lent)"));
+        chkAlbumFirstPass = new JCheckBox(I18n.t("Passe « album d'abord » (identifie le dossier entier via une release MB avant de tagger fichier par fichier)"));
+        chkAlbumFirstPass.setToolTipText(I18n.t(
+            "Quand un dossier contient au moins le nombre de fichiers ci-dessous, tente de résoudre "
+            + "toute la tracklist d'un coup via MusicBrainz plutôt que de deviner piste par piste."));
+        spAlbumFirstPassMinFiles = new JSpinner(new SpinnerNumberModel(2, 2, 50, 1));
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
 
@@ -629,11 +639,15 @@ public class SettingsDialog extends JDialog {
             "Releases officielles seulement :",
             "",
             "Nb résultats MusicBrainz :",
-            "Durée cache (jours) :"
+            "Durée cache (jours) :",
+            "",
+            "Nb fichiers min. pour la passe album :"
         }, new JComponent[]{
             spMinScore, spTrackMatchThreshold, chkOnlyOfficial,
             chkUseAcoustId,
-            spResultsLimit, spCacheDays
+            spResultsLimit, spCacheDays,
+            chkAlbumFirstPass,
+            spAlbumFirstPassMinFiles
         }, "Critères de correspondance MusicBrainz");
 
         JPanel releasesPanel = form(new String[]{
@@ -1136,6 +1150,27 @@ public class SettingsDialog extends JDialog {
         skippedFolderPanel.add(tfSkippedFolder,   BorderLayout.CENTER);
         skippedFolderPanel.add(btnBrowseSkipped,  BorderLayout.EAST);
 
+        // ── Dossier des fichiers à durée incohérente avec MusicBrainz ──────────
+        chkMoveDurationMismatch = new JCheckBox(I18n.t("Déplacer les fichiers à durée incohérente avec MusicBrainz vers ce dossier"));
+        chkMoveDurationMismatch.setToolTipText(I18n.t(
+            "Un fichier identifié dont la durée diffère fortement (>20s et >20%) de celle déclarée par "
+            + "MusicBrainz pour ce titre est probablement un rip tronqué ou un mauvais match — jamais "
+            + "enregistré tel quel (\"Enregistrer tout\" l'ignore). Activer ceci le déplace en plus vers "
+            + "ce dossier dédié, séparé des fichiers non tagués ci-dessus. Rien n'est jamais supprimé."));
+        tfDurationMismatchFolder = tf();
+        tfDurationMismatchFolder.setToolTipText(I18n.t("Dossier où isoler les fichiers dont la durée ne correspond pas à MusicBrainz."));
+        JButton btnBrowseDurationMismatch = new JButton("…");
+        btnBrowseDurationMismatch.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser(tfDurationMismatchFolder.getText().isBlank()
+                    ? System.getProperty("user.home") : tfDurationMismatchFolder.getText());
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfDurationMismatchFolder.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel durationMismatchFolderPanel = new JPanel(new BorderLayout(4, 0));
+        durationMismatchFolderPanel.add(tfDurationMismatchFolder,      BorderLayout.CENTER);
+        durationMismatchFolderPanel.add(btnBrowseDurationMismatch,     BorderLayout.EAST);
+
         // ── Récupération vidéo automatique ──────────────────────────────────────
         chkVideoAutoRecover = new JCheckBox(I18n.t(
             "Récupérer automatiquement l'audio des vidéos (.webm/.vob/.mpg/.mpeg/.avi/.mkv) à chaque scan de dossier"));
@@ -1162,10 +1197,10 @@ public class SettingsDialog extends JDialog {
 
         JPanel p = form(
             new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :", "", "", ""},
+                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
             new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
-                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkVideoAutoRecover,
-                    chkSkipSongRecOnConfidentMb, skipSongRecScorePanel},
+                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
+                    chkVideoAutoRecover, chkSkipSongRecOnConfidentMb, skipSongRecScorePanel},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -1310,6 +1345,18 @@ public class SettingsDialog extends JDialog {
             spTranscodeBitrate.setEnabled(hasBitrate);
         });
 
+        // ── Fichiers source illisibles (moov atom manquant, flux corrompu, souvent carrément
+        // 0 octet — dégâts collatéraux constatés de l'incident disque plein du 2026-07-15) ────
+        // Confirmé par DEUX passes ffmpeg indépendantes avant toute action (voir AudioTranscoder.
+        // verifyUnreadable()) — jamais sur la foi d'un seul message d'erreur du transcodage.
+        // Envoyés à la corbeille système (récupérable), jamais supprimés définitivement.
+        chkMoveUnreadable = new JCheckBox(I18n.t("Envoyer à la corbeille les fichiers confirmés illisibles par ffmpeg"));
+        chkMoveUnreadable.setToolTipText(I18n.t(
+            "Un fichier que ffmpeg ne parvient même pas à ouvrir (\"moov atom not found\", \"Invalid "
+            + "data found\"...), confirmé par une seconde vérification indépendante (décodage seul, "
+            + "rien écrit sur le disque), est presque toujours corrompu ou vide (0 octet) — "
+            + "irrécupérable en l'état. Envoyé à la corbeille système, jamais supprimé définitivement."));
+
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), I18n.t("Transcodage audio (via ffmpeg)")));
@@ -1322,6 +1369,7 @@ public class SettingsDialog extends JDialog {
             { new JLabel(I18n.t("Format cible :")), cmbTranscodeFormat },
             { lblTranscodeBitrate,      spTranscodeBitrate },
             { chkTranscodeDeleteSource, null },
+            { chkMoveUnreadable,        null },
         };
 
         for (int i = 0; i < rows.length; i++) {
@@ -1741,10 +1789,21 @@ public class SettingsDialog extends JDialog {
         btnRow.add(btnAction); btnRow.add(btnLogout);
         inner.add(btnRow, bc);
 
+        // `hint` était en BorderLayout.CENTER, qui s'étire pour occuper TOUT l'espace restant du
+        // panneau — sur cet onglet, ça laissait un grand vide entre le formulaire et la légende
+        // d'aide (visible à l'écran : la légende flottait au milieu d'une zone vide au lieu de
+        // suivre directement le formulaire). `inner` et `hint` regroupés dans une même boîte
+        // verticale collée en NORTH : l'espace restant va sous les deux, pas entre eux.
+        JPanel top = new JPanel();
+        top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
+        inner.setAlignmentX(Component.LEFT_ALIGNMENT);
+        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        top.add(inner);
+        top.add(hint);
+
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBorder(new EmptyBorder(12, 12, 12, 12));
-        wrap.add(inner, BorderLayout.NORTH);
-        wrap.add(hint,  BorderLayout.CENTER);
+        wrap.add(top, BorderLayout.NORTH);
         return wrap;
     }
 
@@ -1779,6 +1838,8 @@ public class SettingsDialog extends JDialog {
         chkUseAcoustId  .setSelected(cfg.useAcoustId());
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
+        chkAlbumFirstPass       .setSelected(cfg.albumFirstPassEnabled());
+        spAlbumFirstPassMinFiles.setValue(cfg.albumFirstPassMinFiles());
 
         tfLibraryRoot        .setText(cfg.str("rename.library_root",  ""));
         tfPodcastLibraryRoot .setText(cfg.str("podcast.library_root", ""));
@@ -1790,6 +1851,8 @@ public class SettingsDialog extends JDialog {
         cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
         tfSkippedFolder   .setText(cfg.str("skipped.move_folder",           ""));
+        chkMoveDurationMismatch.setSelected(cfg.bool("duration_mismatch.move_enabled", false));
+        tfDurationMismatchFolder.setText(cfg.str("duration_mismatch.move_folder",          ""));
         chkVideoAutoRecover.setSelected(cfg.videoAutoRecover());
         chkSkipSongRecOnConfidentMb.setSelected(cfg.skipSongRecOnConfidentMb());
         spnSkipSongRecMinScore.setValue(cfg.skipSongRecMinScore());
@@ -1858,6 +1921,7 @@ public class SettingsDialog extends JDialog {
             if (fmtIds[i].equalsIgnoreCase(savedFmt)) { cmbTranscodeFormat.setSelectedIndex(i); break; }
         spTranscodeBitrate.setValue(cfg.transcodeBitrate());
         chkTranscodeDeleteSource.setSelected(cfg.transcodeDeleteSource());
+        chkMoveUnreadable.setSelected(cfg.bool("transcode.move_unreadable_enabled", false));
         boolean hasBitrate = cmbTranscodeFormat.getSelectedIndex() != 1;
         lblTranscodeBitrate.setEnabled(hasBitrate);
         spTranscodeBitrate.setEnabled(hasBitrate);
@@ -1961,6 +2025,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.use_acoustid",         String.valueOf(chkUseAcoustId.isSelected()));
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
+        p.setProperty("albums.album_first_pass",       String.valueOf(chkAlbumFirstPass.isSelected()));
+        p.setProperty("albums.album_first_pass_min",   String.valueOf(spAlbumFirstPassMinFiles.getValue()));
 
         p.setProperty("rename.library_root",   tfLibraryRoot.getText().trim());
         p.setProperty("podcast.library_root",  tfPodcastLibraryRoot.getText().trim());
@@ -1970,6 +2036,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());
+        p.setProperty("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatch.isSelected()));
+        p.setProperty("duration_mismatch.move_folder",  tfDurationMismatchFolder.getText().trim());
         p.setProperty("video.auto_recover",            String.valueOf(chkVideoAutoRecover.isSelected()));
         p.setProperty("tagging.skip_songrec_on_confident_mb", String.valueOf(chkSkipSongRecOnConfidentMb.isSelected()));
         p.setProperty("tagging.skip_songrec_min_score",       String.valueOf(spnSkipSongRecMinScore.getValue()));
@@ -2095,6 +2163,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("transcode.format",          fmtIds2[cmbTranscodeFormat.getSelectedIndex()]);
         p.setProperty("transcode.bitrate_kbps",    String.valueOf(spTranscodeBitrate.getValue()));
         p.setProperty("transcode.delete_source",   String.valueOf(chkTranscodeDeleteSource.isSelected()));
+        p.setProperty("transcode.move_unreadable_enabled", String.valueOf(chkMoveUnreadable.isSelected()));
 
         // Conserver le client_id/secret (identité d'application embarquée, plus modifiable
         // depuis ce dialogue — voir buildMbOAuthPanel), le token, refresh_token et username existants

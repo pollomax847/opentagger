@@ -144,6 +144,11 @@ public class Config {
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
     public String  skippedMoveFolder()             { return str ("skipped.move_folder",              ""); }
+    // Déplacement dédié des fichiers dont la durée ne correspond pas à celle déclarée par
+    // MusicBrainz (rip tronqué/mauvais match probable) — indépendant du déplacement générique
+    // SKIPPED/ERROR ci-dessus, désactivé par défaut (jamais de déplacement sans action explicite).
+    public boolean durationMismatchMoveEnabled()   { return bool("duration_mismatch.move_enabled", false); }
+    public String  durationMismatchMoveFolder()    { return str ("duration_mismatch.move_folder",      ""); }
     // Récupération vidéo (voir VideoScanner/VideoRecoveryWorker) automatique à chaque scan de
     // dossier (Ouvrir dossier/Rafraîchir) — activée par défaut à la demande explicite de
     // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop
@@ -342,6 +347,12 @@ public class Config {
     public String  transcodeFormat()        { return str ("transcode.format",          "mp3"); }
     public int     transcodeBitrate()       { return num ("transcode.bitrate_kbps",    320);   }
     public boolean transcodeDeleteSource()  { return bool("transcode.delete_source",   false); }
+    // Fichiers que ffmpeg refuse carrément d'ouvrir (moov atom manquant, flux corrompu, souvent
+    // carrément 0 octet — dégâts collatéraux constatés de l'incident disque plein du 2026-07-15)
+    // — confirmé par DEUX passes ffmpeg indépendantes (voir AudioTranscoder.verifyUnreadable()),
+    // jamais sur la foi d'un seul message d'erreur. Désactivé par défaut : envoyés à la corbeille
+    // système (récupérable), jamais supprimés définitivement, jamais sans activation explicite.
+    public boolean transcodeMoveUnreadableEnabled() { return bool("transcode.move_unreadable_enabled", false); }
 
     // --- Releases préférées (codes séparés par virgule) ---
     public String[] preferredCountries()    {

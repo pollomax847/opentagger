@@ -33,10 +33,13 @@ public class RenamePreviewDialog extends JDialog {
      * Contrat du renommage exécuté en arrière-plan.
      * onProgress(n) : appelé sur l'EDT après chaque fichier (n = nombre traités)
      * onDone()      : appelé sur l'EDT à la fin
+     * @return un callback d'annulation — avant ce correctif, rien ne permettait d'arrêter le job
+     *         une fois lancé (le bouton Fermer, toujours actif, laissait le SwingWorker tourner en
+     *         arrière-plan sans que l'utilisateur ne puisse plus le suivre ni l'interrompre).
      */
     @FunctionalInterface
     public interface RenameJob {
-        void start(IntConsumer onProgress, Runnable onDone);
+        Runnable start(IntConsumer onProgress, Runnable onDone);
     }
 
     /** Un groupe d'aperçu — un album (artiste album + album) ou, à défaut de tags, un dossier. */
@@ -63,9 +66,11 @@ public class RenamePreviewDialog extends JDialog {
     // Composants footer
     private JButton      btnApply;
     private JButton      btnClose;
+    private JButton      btnCancel;
     private JProgressBar progressBar;
     private JLabel       lblProgress;
     private JPanel       progressPanel;
+    private Runnable     cancelJob;
 
     public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, RenameJob job) {
         this(owner, rows, I18n.t("Aperçu du renommage"), job);
@@ -125,12 +130,27 @@ public class RenamePreviewDialog extends JDialog {
         progressPanel.add(lblProgress);
         progressPanel.setVisible(false);
 
+        btnCancel = new JButton(I18n.t("Annuler"));
+        btnCancel.setVisible(false);
+        btnCancel.addActionListener(e -> {
+            if (cancelJob != null) { cancelJob.run(); cancelJob = null; }
+            btnCancel.setVisible(false);
+            lblProgress.setText(I18n.t("Annulé."));
+        });
+
         btnApply.addActionListener(e -> startRename(job));
-        btnClose.addActionListener(e -> dispose());
+        // Fermer pendant un renommage en cours n'arrêtait avant ce correctif jamais le SwingWorker
+        // sous-jacent : le job continuait à écrire sur le disque après la fermeture de la fenêtre,
+        // invisible et non annulable.
+        btnClose.addActionListener(e -> {
+            if (cancelJob != null) { cancelJob.run(); cancelJob = null; }
+            dispose();
+        });
         getRootPane().setDefaultButton(btnApply);
 
         JPanel left  = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         left.add(progressPanel);
+        left.add(btnCancel);
 
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
         right.add(btnClose);
@@ -148,8 +168,9 @@ public class RenamePreviewDialog extends JDialog {
         btnApply.setText(I18n.t("En cours…"));
         progressBar.setValue(0);
         progressPanel.setVisible(true);
+        btnCancel.setVisible(true);
 
-        job.start(
+        cancelJob = job.start(
             // onProgress — appelé sur EDT après chaque fichier
             done -> {
                 progressBar.setValue(done);
@@ -158,6 +179,8 @@ public class RenamePreviewDialog extends JDialog {
             },
             // onDone — appelé sur EDT à la fin
             () -> {
+                cancelJob = null;
+                btnCancel.setVisible(false);
                 progressBar.setValue((int) willRenameCount);
                 progressBar.setString(I18n.t("Terminé"));
                 lblProgress.setText(I18n.t("✓ Terminé"));

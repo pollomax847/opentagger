@@ -161,6 +161,7 @@ public class BatchProcessor {
 
                 Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt, deezer, cache);
                 writer.write(fichier, best, cover);
+                if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
                 appliques.incrementAndGet();
 
                 // Sauvegarder dans l'historique pour éviter les re-lookups

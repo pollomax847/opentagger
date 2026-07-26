@@ -173,10 +173,28 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
                 correctionLog.addEntry(entry);
 
+                // Déplacement dédié durée incohérente (voir Config.durationMismatchMoveEnabled(),
+                // désactivé par défaut) — indépendant du déplacement générique SKIPPED/ERROR juste
+                // en dessous, dossier et bascule séparés. Exclu du bloc générique ci-dessous (voir
+                // sa condition "!entry.durationMismatch") pour ne pas tenter un second déplacement
+                // du même fichier vers un autre dossier.
+                if (entry.durationMismatch && Config.get().durationMismatchMoveEnabled()) {
+                    try {
+                        String folder = Config.get().durationMismatchMoveFolder();
+                        if (!folder.isBlank()) {
+                            java.nio.file.Path curPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
+                            java.nio.file.Path moved = FileRenamer.moveToFolder(curPath, java.nio.file.Paths.get(folder));
+                            if (moved != null) entry.currentPath = moved;
+                        }
+                    } catch (Exception ex) {
+                        log(I18n.t("  déplacement (durée incohérente) échoué: %s", ex.getMessage()));
+                    }
+                }
+
                 // Déplacer les fichiers non tagués (SKIPPED/ERROR) vers un dossier dédié si
                 // configuré — évite qu'ils restent mélangés dans la bibliothèque organisée par
                 // le renommage auto.
-                if (Config.get().skippedMoveEnabled()
+                if (Config.get().skippedMoveEnabled() && !entry.durationMismatch
                         && (entry.status == FileEntry.Status.SKIPPED || entry.status == FileEntry.Status.ERROR)) {
                     try {
                         String folder = Config.get().skippedMoveFolder();
@@ -195,10 +213,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }));
         }
 
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
-        }
+        WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
 
         // Remettre en attente toute entrée restée bloquée en PROCESSING
         for (FileEntry entry : queue) {
@@ -287,10 +302,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             futures.add(pool.submit(() -> processAlbumFolder(
                     group.getKey(), group.getValue(), done, new MusicBrainzClient(), new LastFmClient())));
         }
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
-        }
+        WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
 
         if (!done.isEmpty())
             onProgress.accept(I18n.t("[album-first] %d fichier(s) tagué(s) par album — %d restant(s) en pipeline normal",
@@ -379,6 +391,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 }
 
                 TagInfo ti = new TagInfo();
+                // Voir le même correctif dans processEntry() : sans ça la colonne Durée retombe à
+                // 0:00 pour tout fichier identifié par ce chemin (ti neuf, durationSec jamais
+                // renseigné), qu'il soit corrompu ou pas.
+                ti.durationSec      = entry.current != null ? entry.current.durationSec : 0;
                 ti.title            = track.title();
                 ti.artist           = track.artist();
                 ti.albumArtist      = tl.albumArtist();
@@ -631,6 +647,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             TagInfo best = results.get(0);
+            // best.durationSec est TOUJOURS 0 par défaut (MusicBrainzClient ne le renseigne jamais
+            // — seul mbDurationSec l'est, voir son commentaire) : sans cette ligne, la colonne Durée
+            // (qui affiche entry.activeTags().durationSec, donc "result" une fois identifié) retombe
+            // à 0:00 pour TOUT fichier identifié, corrompu ou pas — constaté en direct, confondu avec
+            // le signal "fichier vide". La vraie durée déjà lue au scan doit survivre à
+            // l'identification.
+            best.durationSec = entry.current.durationSec;
 
             if (best.score < seuil) {
                 entry.candidates = results;
@@ -639,6 +662,45 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log(I18n.t("  SKIPPED score trop bas"));
                 return;
             }
+
+            // ── Cohérence de durée avec MusicBrainz ─────────────────────────────
+            // Un score texte élevé peut malgré tout matcher le mauvais enregistrement (édit vs
+            // version complète, mauvais rip, fichier tronqué) — la durée déclarée par MB pour CE
+            // recording est un signal indépendant du score. Écart jugé significatif seulement au-
+            // delà de 20s ET 20% relatif, pour ne pas confondre avec un simple radio edit/remaster
+            // (quelques secondes d'écart légitimes). Ne PAS auto-accepter : traité comme un SKIPPED
+            // (pas IDENTIFIED), donc jamais proposé à "Enregistrer tout" avec des tags probablement
+            // faux pour ce fichier précis.
+            //
+            // AVANT ce correctif, seul results.get(0) (le mieux scoré côté texte) était vérifié —
+            // si CE candidat précis avait la mauvaise durée (ex. "Titre" a un radio edit ET une
+            // version complète dans MB, le edit sort en tête du score texte mais le fichier réel
+            // est la version complète), le fichier finissait "durée incohérente" et jamais tagué,
+            // alors que le BON candidat était déjà présent plus bas dans `results` avec un score
+            // toujours au-dessus du seuil. On parcourt maintenant tous les candidats valides par
+            // score décroissant (déjà l'ordre renvoyé par l'API MB) et on garde le premier dont la
+            // durée est cohérente, avant d'abandonner.
+            TagInfo durationOk = null;
+            for (TagInfo candidate : results) {
+                if (candidate.score < seuil) break; // triés par score décroissant : la suite ne fera que pire
+                candidate.durationSec = entry.current.durationSec;
+                if (!isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
+                    durationOk = candidate;
+                    break;
+                }
+            }
+            if (durationOk == null) {
+                entry.candidates = results;
+                entry.status = FileEntry.Status.SKIPPED;
+                entry.durationMismatch = true;
+                entry.message = I18n.t("Durée incohérente : fichier %s vs MusicBrainz %s (%s)",
+                    FileTableModel.formatDuration(entry.current.durationSec),
+                    FileTableModel.formatDuration(best.mbDurationSec), best.title);
+                log(I18n.t("  SKIPPED durée incohérente (%ds vs %ds)",
+                    entry.current.durationSec, best.mbDurationSec));
+                return;
+            }
+            best = durationOk;
 
             log(I18n.t("  ✓ identifié : %s – %s (score=%s)", best.artist, best.title, best.score));
 
@@ -1397,6 +1459,24 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * Génère une liste de suggestions d'amélioration pour un fichier tagué.
      * Chaque suggestion décrit un point qui mérite vérification manuelle.
      */
+    /** Voir l'appel dans processEntry() : écart jugé significatif seulement au-delà de 20s ET 20%
+     *  relatif (évite de confondre avec un radio edit/remaster légitime). 0 des deux côtés = pas
+     *  de comparaison possible.
+     *  ATTENTION : fileSec<=0 seul ne doit JAMAIS être traité comme "forcément vide/corrompu" ici —
+     *  tenté une fois (2026-07-18), reverté en urgence : entry.current.durationSec peut encore
+     *  valoir 0 simplement parce que la phase 2 du scan (lecture des tags, voir MainFrame.
+     *  readTags()) n'est pas encore passée sur ce fichier au moment où le taguage (qui peut
+     *  démarrer avant la fin du scan) l'examine — pas parce que le fichier est réellement vide.
+     *  Constaté en direct : des centaines de faux positifs sur des fichiers dont la Durée
+     *  s'affichait correctement (4:19, 5:07...) une fois le scan rattrapé. La vraie détection des
+     *  fichiers 0 octet reste le scan lui-même (voir MainFrame.readTags()/AudioDuration fallback),
+     *  pas cette comparaison. */
+    static boolean isDurationMismatch(int fileSec, int mbSec) {
+        if (fileSec <= 0 || mbSec <= 0) return false;
+        int diff = Math.abs(fileSec - mbSec);
+        return diff > 20 && diff > mbSec * 0.20;
+    }
+
     private static List<String> buildSuggestions(TagInfo best, int seuil) {
         List<String> s = new java.util.ArrayList<>();
         if (best.score > 0 && best.score < seuil + 20)

@@ -12,6 +12,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -101,6 +103,7 @@ public class MusicBrainzOAuth {
     private String authorizeScheme(String clientId, String clientSecret) throws Exception {
         registerSchemeHandler();
         Files.deleteIfExists(CODE_FILE);
+        preCreateCodeFileRestricted();
 
         String authUrl = AUTH_URL
             + "?client_id="    + encode(clientId)
@@ -129,6 +132,29 @@ public class MusicBrainzOAuth {
             }
         }
         throw new Exception("Délai dépassé (2 min). Vérifiez que l'app est bien autorisée dans le navigateur.");
+    }
+
+    /**
+     * Pré-crée oauth-code.tmp en 0600 (propriétaire seul) AVANT d'ouvrir le navigateur — le script
+     * oauth-handler.sh y écrit ensuite via `echo ... > fichier`, qui TRONQUE un fichier existant
+     * sans jamais réinitialiser ses permissions. Sans ce correctif, le fichier créé par le script
+     * héritait des permissions par défaut du umask (souvent 644, lisible par tout utilisateur
+     * local) : sur une machine multi-utilisateurs, n'importe quel autre compte local pouvait lire
+     * le code d'autorisation OAuth pendant la fenêtre (jusqu'à 2 min) où le fichier existe, et
+     * potentiellement l'échanger contre un token avant l'appli elle-même. Ignoré sur Windows
+     * (PosixFilePermission n'existe pas sur NTFS ; authorizeScheme y utilise de toute façon le
+     * registre + --oauth-callback, pas ce fichier).
+     */
+    private void preCreateCodeFileRestricted() {
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")) return;
+        try {
+            java.util.Set<PosixFilePermission> perms = java.util.EnumSet.of(
+                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+            Files.createFile(CODE_FILE, PosixFilePermissions.asFileAttribute(perms));
+        } catch (Exception ignored) {
+            // FileAlreadyExistsException (race improbable) ou filesystem sans support POSIX —
+            // le script écrira quand même, juste sans la garantie de permissions restreintes.
+        }
     }
 
     /** Installe le handler URL scheme pour OAuth (Linux via xdg-mime, Windows via registre). */

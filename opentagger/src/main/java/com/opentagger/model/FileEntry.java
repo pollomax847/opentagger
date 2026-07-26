@@ -40,6 +40,12 @@ public class FileEntry {
     /** Forcer la ré-identification même si le cache ou les tags MB existants sont valides. */
     public boolean forceReidentify = false;
 
+    /** SKIPPED spécifiquement parce que la durée du fichier ne correspond pas à celle déclarée par
+     *  MusicBrainz pour l'enregistrement identifié (voir TaggingWorker.isDurationMismatch()) — pas
+     *  une simple non-identification. Distingue ce cas pour le déplacement optionnel dédié (voir
+     *  Config.durationMismatchMoveEnabled()), séparé du déplacement générique SKIPPED/ERROR. */
+    public boolean durationMismatch = false;
+
     /**
      * Racine du dossier scanné — le renommage par masque est relatif à cette racine.
      * Ex : racine=/musique, masque={artist}/{album}/{track} - {title}

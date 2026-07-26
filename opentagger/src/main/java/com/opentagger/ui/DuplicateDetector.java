@@ -119,7 +119,7 @@ public class DuplicateDetector {
     /**
      * Score de qualité d'un fichier.
      * Plus le score est élevé, plus le fichier est de bonne qualité.
-     * Critères : priorité format (FLAC > M4A > MP3…), puis taille fichier.
+     * Critères : priorité format (FLAC > M4A > MP3…), puis débit binaire réel.
      */
     public static int qualityScore(FileEntry e) {
         File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
@@ -133,9 +133,24 @@ public class DuplicateDetector {
             case "wma"  -> 300_000;
             default     -> 100_000;
         };
-        // Taille en Ko comme proxy de débit binaire (max 999 Ko pour ne pas dépasser int)
-        int sizeScore = (int) Math.min(f.length() / 1024, 999);
-        return formatScore + sizeScore;
+        return formatScore + bitrateScore(e, f);
+    }
+
+    /**
+     * Débit binaire estimé en kbps (taille × 8 / durée), plafonné à 999 pour ne pas dépasser le
+     * budget du format ci-dessus. Remplace l'ancien proxy "taille de fichier / 1024 Ko, plafonné
+     * à 999" : la quasi-totalité des MP3 réels (plusieurs Mo) saturait déjà ce plafond, rendant le
+     * départage inopérant au-delà — et la taille brute confondait de toute façon durée et qualité
+     * (un morceau plus long paraissait "meilleur" sans l'être). Repli sur l'ancien proxy si la
+     * durée est inconnue (0) plutôt que de retourner un score nul qui écraserait tout classement.
+     */
+    private static int bitrateScore(FileEntry e, File f) {
+        int durationSec = e.activeTags().durationSec;
+        if (durationSec > 0) {
+            long kbps = (f.length() * 8L) / 1024L / durationSec;
+            return (int) Math.min(kbps, 999);
+        }
+        return (int) Math.min(f.length() / 1024, 999);
     }
 
     /** Fichier avec le meilleur score de qualité dans le groupe. */

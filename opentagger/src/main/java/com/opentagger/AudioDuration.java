@@ -11,8 +11,12 @@ public final class AudioDuration {
     /** Durée en secondes (arrondie), ou -1 si indisponible/ffprobe absent. */
     public static int probeSeconds(String path) {
         try {
+            // "ffprobe" en dur ignorait audio.ffprobe_path (voir FfmpegTagIO.ffprobePath()/
+            // AudioFormatCheck) : un utilisateur ayant dû configurer un chemin ffmpeg/ffprobe
+            // personnalisé (binaire hors PATH) se retrouvait ici avec un ffprobe introuvable,
+            // dégradation silencieuse (-1, juste un fallback vers le matching par titre).
             ProcessBuilder pb = new ProcessBuilder(
-                "ffprobe", "-v", "error",
+                Config.get().str("audio.ffprobe_path", "ffprobe"), "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "csv=p=0",
                 path);

@@ -169,12 +169,34 @@ public class LocalCorrector {
         for (String g : genreList) {
             if (g.equalsIgnoreCase(input)) return g;
         }
-        // Correspondance partielle
         String lower = input.toLowerCase();
+
+        // Correspondance par MOT ENTIER (ex. "Rock" dans "Classic Rock") plutôt que sous-chaîne
+        // brute : avant ce correctif, le premier match par ORDRE DU FICHIER l'emportait, donc
+        // "Rock" (absent tel quel de genrelist.txt) se normalisait silencieusement en "Acid Rock"
+        // (première entrée contenant la sous-chaîne "rock", sans rapport avec la proximité réelle
+        // du genre) — "Rockabilly" aurait même pu gagner avant "Classic Rock" pour la même raison.
+        // Parmi les entrées où `input` apparaît comme mot entier, on garde la plus courte (la plus
+        // proche d'une correspondance exacte) ; à égalité, l'ordre du fichier tranche (déterministe).
+        String bestWordMatch = null;
         for (String g : genreList) {
-            if (g.toLowerCase().contains(lower) || lower.contains(g.toLowerCase())) return g;
+            for (String token : g.toLowerCase().split("[^\\p{L}\\p{N}]+")) {
+                if (token.equals(lower) && (bestWordMatch == null || g.length() < bestWordMatch.length())) {
+                    bestWordMatch = g;
+                }
+            }
         }
-        return null;
+        if (bestWordMatch != null) return bestWordMatch;
+
+        // Repli final : sous-chaîne brute, mais la plus COURTE (la plus proche de l'input) au lieu
+        // de la première rencontrée dans le fichier.
+        String bestSubstring = null;
+        for (String g : genreList) {
+            if (g.toLowerCase().contains(lower) || lower.contains(g.toLowerCase())) {
+                if (bestSubstring == null || g.length() < bestSubstring.length()) bestSubstring = g;
+            }
+        }
+        return bestSubstring;
     }
 
     // ── 5. Détection musique classique ──────────────────────────────────────

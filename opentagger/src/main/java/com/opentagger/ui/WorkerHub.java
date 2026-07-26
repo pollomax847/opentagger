@@ -67,8 +67,26 @@ public final class WorkerHub {
 
         /** Toujours passer par ici, jamais worker.cancel(true) en direct : cancelAction est le
          *  stopNow()/cancel(bool) propre à chaque worker (voir SaveWorker.stopNow() et pareil
-         *  ailleurs) — un Future.cancel() nu n'interromprait pas leur pool interne. */
-        public void cancel() { cancelAction.run(); }
+         *  ailleurs) — un Future.cancel() nu n'interromprait pas leur pool interne.
+         *
+         *  Libère aussi `kind` immédiatement, sans attendre le "state"==DONE du worker (voir le
+         *  listener posé dans submit()) : ce DONE peut ne jamais arriver si le thread reste
+         *  bloqué sur une E/S non interruptible (montage NAS/MergerFS qui décroche en pleine
+         *  écriture — déjà vu en prod, voir le commentaire de timeout dans
+         *  AudioTranscoder.transcode()) — shutdownNow()/cancel(true) n'y peuvent rien, ni ffmpeg
+         *  ni un simple Files.write() ne se laissent interrompre par un thread Java. Sans ce
+         *  retrait immédiat, "Arrêter" réinitialise l'UI (MainFrame.stopAll()) mais WorkerHub
+         *  continue de croire la tâche active pour toujours, bloquant tout Enregistrer/Tagger
+         *  ultérieur avec un message trompeur ("Enregistrement annulé"/"Taguage en cours") même
+         *  après un arrêt explicite — retour utilisateur après plusieurs jours d'utilisation
+         *  continue. Un thread zombie ainsi abandonné reste borné à `batch.threads` fichiers déjà
+         *  en cours au moment du clic (le pool est shutdownNow() juste avant, donc rien d'autre
+         *  ne démarre) — même risque déjà accepté côté UI, qui remet ces mêmes entrées PROCESSING
+         *  à PENDING sans attendre ces threads non plus (voir MainFrame.stopAll()). */
+        public void cancel() {
+            cancelAction.run();
+            WorkerHub.get().active.remove(kind, this);
+        }
     }
 
     private static final WorkerHub INSTANCE = new WorkerHub();
@@ -191,8 +209,17 @@ public final class WorkerHub {
         }
     }
 
+    // 900s (15 min) par défaut jusqu'ici — trop agressif en pratique : constaté en direct sur un lot
+    // de 1252 fichiers "Enregistrer tout", CROSS_DEVICE_COPY_LIMIT (voir FileRenamer) sérialise les
+    // déplacements cross-device à 1 seul à la fois pour ménager un disque mécanique/USB de
+    // destination — un fichier peut légitimement attendre son tour plus de 15 minutes derrière des
+    // centaines d'autres. Ce délai déclenchait alors pool.shutdownNow(), qui interrompt TOUS les
+    // threads en cours (pas seulement celui jugé "bloqué"), causant une cascade de "Déplacement
+    // cross-device interrompu" sur des fichiers qui progressaient normalement. Relevé à 6h : reste
+    // un filet de sécurité contre un VRAI blocage infini (appel réseau/sous-processus sans propre
+    // timeout), sans jamais confondre ça avec une file d'attente longue mais bornée.
     public static long defaultFutureTimeoutSec() {
-        return Config.get().num("worker.future_timeout_sec", 900);
+        return Config.get().num("worker.future_timeout_sec", 21600);
     }
 
     private static void log(String msg) {

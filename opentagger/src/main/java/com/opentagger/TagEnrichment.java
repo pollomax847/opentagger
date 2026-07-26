@@ -247,6 +247,14 @@ public final class TagEnrichment {
             } catch (Exception ignored) {}
         }
 
+        // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
+        // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien
+        // ne la relit après ce point (les appelants ne testent que res.cover() == null). La
+        // laisser traîner accumulait un fichier temporaire par piste sur toute une bibliothèque.
+        if (cover != null) {
+            try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+        }
+
         // Paroles synchronisées (.lrc à côté de l'audio, même basename) — même logique/opt-in que
         // la pochette fichier juste au-dessus. Sidecar plutôt qu'un tag embarqué : voir la Javadoc
         // de TagInfo.syncedLyrics pour le pourquoi (support lecteur bien plus large, notamment
