@@ -3248,10 +3248,39 @@ public class MainFrame extends JFrame {
                 // plutôt qu'à chaque fichier — évite O(n²) sur 100k+ fichiers.
                 refreshStats();
             }
-            if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
+            if (SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 onTaggingDone(toTag);
+                // "Tout tagger" ne prend qu'un instantané de allEntries() au moment du clic — les
+                // fichiers ajoutés ensuite par un scan encore actif (bibliothèque multi-racines,
+                // support lent type exFAT/fuseblk) restaient PENDING indéfiniment tant qu'on ne
+                // recliquait pas manuellement une fois le scan terminé. Pas pour selOnly (sélection
+                // explicite et figée) ni si l'utilisateur a annulé volontairement (bouton Arrêter).
+                if (!selOnly && !w.isCancelled()) scheduleAutoTaggingFollowUp();
+            }
         });
         WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Taguage"), w, w::stopNow);
+    }
+
+    /**
+     * Revérifie périodiquement (tant qu'un scan tourne encore) s'il y a de nouveaux fichiers à
+     * taguer, et relance automatiquement "Tout tagger" dessus — voir le commentaire d'appel dans
+     * startTagging(). S'arrête de lui-même dès que plus aucun scan n'est actif (activeScanWorkers
+     * vide) ; ne fait rien si un taguage est déjà en cours par un autre biais (ex. reclic manuel
+     * pendant l'intervalle d'attente) pour ne jamais en superposer deux.
+     */
+    private void scheduleAutoTaggingFollowUp() {
+        javax.swing.Timer t = new javax.swing.Timer(5000, null);
+        t.addActionListener(e -> {
+            t.stop();
+            if (activeScanWorkers.isEmpty()) return;
+            if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) return;
+            boolean hasWork = tableModel.allEntries().stream().anyMatch(fe ->
+                    fe.selected && fe.status != FileEntry.Status.TAGGED && fe.status != FileEntry.Status.IDENTIFIED);
+            if (hasWork) startTagging(false);
+            else scheduleAutoTaggingFollowUp(); // rien de neuf pour l'instant — on réessaiera
+        });
+        t.setRepeats(false);
+        t.start();
     }
 
     /**
@@ -3373,13 +3402,50 @@ public class MainFrame extends JFrame {
                     // (activeOperations, etc.) ; si quelque chose bloque, la recherche est juste
                     // sautée cette fois-ci, sans forcer.
                     if (chkAutoGroupCompilations.isSelected()) groupByCompilations();
-                    runPostTagCommand();
+                    // Même suivi automatique que "Tout tagger" (scheduleAutoTaggingFollowUp,
+                    // même raison) : tant qu'un scan/taguage encore actif continue à produire des
+                    // IDENTIFIED, Enregistrer se relance tout seul dessus plutôt que de les laisser
+                    // en attente indéfiniment d'un reclic manuel — sinon exactement le piège
+                    // rencontré en pratique : un fichier fraîchement identifié par le suivi
+                    // automatique du taguage, mais jamais écrit sur le disque faute de reclic sur
+                    // Enregistrer. runPostTagCommand() différé jusqu'à la vraie fin de la chaîne
+                    // (voir scheduleAutoSaveFollowUp) : sinon un hook pensé pour "une fois à la fin
+                    // d'un run complet" (scan Plex...) se déclencherait à chaque relance
+                    // intermédiaire sur une grosse bibliothèque.
+                    boolean stillFeeding = !activeScanWorkers.isEmpty()
+                            || WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent();
+                    if (!w.isCancelled() && stillFeeding) scheduleAutoSaveFollowUp();
+                    else runPostTagCommand();
                 });
             }
         });
         // SAVE est le seul TaskKind volontairement compatible avec TAGGING en parallèle (voir
         // WorkerHub.conflictsWith).
         WorkerHub.get().submit(WorkerHub.TaskKind.SAVE, I18n.t("Enregistrement"), w, w::stopNow);
+    }
+
+    /**
+     * Revérifie périodiquement (tant qu'un scan ou un taguage tourne encore) s'il y a de nouveaux
+     * fichiers IDENTIFIED à enregistrer, et relance automatiquement "Enregistrer tout" dessus —
+     * même mécanisme que scheduleAutoTaggingFollowUp(), voir son commentaire. Appelle
+     * runPostTagCommand() une seule fois, à la toute fin réelle de la chaîne (plus ni scan ni
+     * taguage actif), pas à chaque relance intermédiaire.
+     */
+    private void scheduleAutoSaveFollowUp() {
+        javax.swing.Timer t = new javax.swing.Timer(5000, null);
+        t.addActionListener(e -> {
+            t.stop();
+            boolean stillFeeding = !activeScanWorkers.isEmpty()
+                    || WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent();
+            if (!stillFeeding) { runPostTagCommand(); return; }
+            if (WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isPresent()) return; // déjà relancé ailleurs
+            boolean hasWork = tableModel.allEntries().stream()
+                    .anyMatch(fe -> fe.selected && fe.status == FileEntry.Status.IDENTIFIED);
+            if (hasWork) saveAll();
+            else scheduleAutoSaveFollowUp(); // rien de neuf pour l'instant — on réessaiera
+        });
+        t.setRepeats(false);
+        t.start();
     }
 
     /**

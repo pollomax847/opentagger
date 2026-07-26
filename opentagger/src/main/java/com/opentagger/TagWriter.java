@@ -69,7 +69,7 @@ public class TagWriter {
                 copy.acoustidFingerprint = "";
             }
             copy.taggedDate = java.time.LocalDate.now().toString();
-            FfmpegTagIO.write(fichier, copy);
+            FfmpegTagIO.write(fichier, copy, coverImage);
             if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
             return copy;
         }
@@ -160,8 +160,19 @@ public class TagWriter {
 
     // ── Écriture native jaudiotagger ──────────────────────────────────────────
 
+    /** Vrai pour .m4a ET .mp4 : même conteneur ISO-BMFF, même fragilité de parsing d'arbre
+     *  d'atomes côté jaudiotagger (vérifié en direct : un .mp4 audio produit exactement la même
+     *  classe d'exception — {@code Mp4AtomTree.buildChildrenOfNode}, "newPosition > limit" — que
+     *  les .m4a qui déclenchent la chaîne de repli ci-dessous). Seule l'extension diffère ; jusqu'à
+     *  ce correctif, .mp4 ne bénéficiait d'AUCUNE des 3 couches de réparation/repli réservées à
+     *  .m4a et échouait donc systématiquement dès que jaudiotagger butait sur ce genre de fichier. */
+    private static boolean isM4aFamily(File f) {
+        String n = f.getName().toLowerCase();
+        return n.endsWith(".m4a") || n.endsWith(".mp4");
+    }
+
     /**
-     * Chaîne de fallback pour M4A :
+     * Chaîne de fallback pour M4A/MP4 :
      *  1. jaudiotagger natif          → tous les champs
      *  2. ffmpeg repair + retry       → tous les champs
      *  3. AtomicParsley               → tous les champs (cover, MBIDs, ReplayGain)
@@ -174,7 +185,7 @@ public class TagWriter {
             doWriteNative(fichier, i, coverImage, preserved, clearExisting);
             return;
         } catch (Exception e) {
-            if (!fichier.getName().toLowerCase().endsWith(".m4a")) throw translateKnownJaudiotaggerBug(fichier, e);
+            if (!isM4aFamily(fichier)) throw translateKnownJaudiotaggerBug(fichier, e);
         }
 
         // jaudiotagger réécrit l'arbre d'atomes M4A directement sur le fichier original ; si sa
@@ -858,14 +869,14 @@ public class TagWriter {
         }
     }
 
-    // ── Réparation M4A ────────────────────────────────────────────────────────
+    // ── Réparation M4A/MP4 ───────────────────────────────────────────────────
 
     /**
-     * Répare les M4A illisibles par jaudiotagger via ffmpeg -movflags +faststart.
+     * Répare les M4A/MP4 illisibles par jaudiotagger via ffmpeg -movflags +faststart.
      * Idempotent : si le fichier est déjà lisible ET écrivable, ne fait rien.
      */
     public static boolean repairM4aIfNeeded(File f) {
-        if (!f.getName().toLowerCase().endsWith(".m4a")) return false;
+        if (!isM4aFamily(f)) return false;
         try {
             AudioFileIO.read(f);
             return false; // lecture OK — on tente quand même l'écriture normalement
