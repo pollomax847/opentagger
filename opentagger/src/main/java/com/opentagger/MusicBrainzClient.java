@@ -563,40 +563,58 @@ public class MusicBrainzClient {
 
     public record ReleaseTracklist(String releaseMbid, String album, String albumArtist,
                                    String albumArtistSort, String year, String releaseGroupMbid,
-                                   boolean isCompilation, List<ReleaseTrack> tracks) {}
+                                   boolean isCompilation, List<ReleaseTrack> tracks,
+                                   String country, String barcode, String releaseStatus,
+                                   String label, String catalogNo, String script,
+                                   String albumArtistMbid, String releaseType, String originalYear) {}
 
     public ReleaseTracklist lookupRelease(String releaseMbid) throws Exception {
+        // +labels : sinon label/catalogNo restent structurellement vides pour tout fichier
+        // identifié par ce chemin "album en bloc" (le principal sur un scan par dossier) — même
+        // JSON déjà récupéré ici, juste jamais lu pour ces champs avant ce correctif (comparé à
+        // Picard sur un même fichier : pays/code-barres/statut/label/catalogue/script/MBID artiste
+        // release manquaient systématiquement alors que MusicBrainz les fournit bel et bien).
         String url = BASE_URL + "/release/" + releaseMbid.trim()
-                + "?fmt=json&inc=recordings+artist-credits+release-groups";
+                + "?fmt=json&inc=recordings+artist-credits+release-groups+labels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return null;
 
         JsonNode root = mapper.readTree(response.body());
+        return parseReleaseTracklist(releaseMbid, root);
+    }
+
+    /** Extraction commune à lookupRelease() et parseReleaseFromCache() (même forme de JSON) —
+     *  réutilise extractSecondaryTypes()/extractReleaseDetails() (mêmes champs, même logique que
+     *  les deux autres chemins d'identification) via un TagInfo jetable plutôt que dupliquer leur
+     *  contenu ici. */
+    private ReleaseTracklist parseReleaseTracklist(String releaseMbid, JsonNode root) {
         String album     = root.path("title").asText("").trim();
         String date      = root.path("date").asText("");
         String year      = date.length() >= 4 ? date.substring(0, 4) : date;
         String rgMbid    = root.path("release-group").path("id").asText("").trim();
 
-        // AlbumArtist
         String albumArtist     = "";
         String albumArtistSort = "";
-        boolean isCompilation  = false;
         JsonNode ac = root.path("artist-credit");
         if (ac.isArray() && !ac.isEmpty()) {
             albumArtist     = ac.get(0).path("name").asText("").trim();
             albumArtistSort = ac.get(0).path("artist").path("sort-name").asText("").trim();
         }
-        if (Config.get().vaName().equalsIgnoreCase(albumArtist) || "Various Artists".equalsIgnoreCase(albumArtist)) isCompilation = true;
-        JsonNode secTypes = root.path("release-group").path("secondary-types");
-        if (secTypes.isArray()) {
-            for (JsonNode t : secTypes)
-                if ("Compilation".equalsIgnoreCase(t.asText())) { isCompilation = true; break; }
-        }
+
+        TagInfo tmp = new TagInfo();
+        tmp.albumArtist = albumArtist;
+        extractSecondaryTypes(root, tmp); // isCompilation/isLive/isSoundtrack/isGreatestHits + releaseType
+        extractReleaseDetails(root, tmp); // script/country/barcode/status/label/catalogNo/albumArtistMbid
+        String frd = root.path("release-group").path("first-release-date").asText("").trim();
+        if (frd.length() >= 4) tmp.originalYear = frd.substring(0, 4);
 
         List<ReleaseTrack> tracks = parseTracks(root.path("media"), albumArtist);
         return new ReleaseTracklist(releaseMbid, album, albumArtist, albumArtistSort,
-                                    year, rgMbid, isCompilation, tracks);
+                                    year, rgMbid, "1".equals(tmp.isCompilation), tracks,
+                                    tmp.country, tmp.barcode, tmp.releaseStatus,
+                                    tmp.label, tmp.catalogNo, tmp.script,
+                                    tmp.albumArtistMbid, tmp.releaseType, tmp.originalYear);
     }
 
     /** Parse le tableau "media" (disques + pistes) d'une réponse MB release, avec durée (lengthMs). */
@@ -632,27 +650,10 @@ public class MusicBrainzClient {
     public ReleaseTracklist parseReleaseFromCache(String json) {
         try {
             JsonNode root = mapper.readTree(json);
-            String relMbid   = root.path("id").asText("").trim();
-            String album     = root.path("title").asText("").trim();
-            String date      = root.path("date").asText("");
-            String year      = date.length() >= 4 ? date.substring(0, 4) : date;
-            String rgMbid    = root.path("release-group").path("id").asText("").trim();
-            String albumArtist = "", albumArtistSort = "";
-            boolean isCompilation = false;
-            JsonNode ac = root.path("artist-credit");
-            if (ac.isArray() && !ac.isEmpty()) {
-                albumArtist     = ac.get(0).path("name").asText("").trim();
-                albumArtistSort = ac.get(0).path("artist").path("sort-name").asText("").trim();
-            }
-            if (Config.get().vaName().equalsIgnoreCase(albumArtist) || "Various Artists".equalsIgnoreCase(albumArtist)) isCompilation = true;
-            JsonNode secTypes = root.path("release-group").path("secondary-types");
-            if (secTypes.isArray())
-                for (JsonNode t : secTypes)
-                    if ("Compilation".equalsIgnoreCase(t.asText())) { isCompilation = true; break; }
-            List<ReleaseTrack> tracks = parseTracks(root.path("media"), albumArtist);
+            String relMbid = root.path("id").asText("").trim();
+            String album   = root.path("title").asText("").trim();
             if (relMbid.isBlank() || album.isBlank()) return null;
-            return new ReleaseTracklist(relMbid, album, albumArtist, albumArtistSort,
-                                        year, rgMbid, isCompilation, tracks);
+            return parseReleaseTracklist(relMbid, root);
         } catch (Exception e) { return null; }
     }
 
@@ -660,8 +661,17 @@ public class MusicBrainzClient {
     // Utilisé par AcoustIdClient après résolution AcoustID → MBID
     public TagInfo lookupRecording(String mbid) throws Exception {
         boolean mbGenres = Config.get().bool("mb.use_genres", false);
+        // "labels" RETIRÉ : invalide pour la ressource recording côté API MB — "labels is not a
+        // valid inc parameter for the recording resource" (HTTP 400), vérifié en direct, y compris
+        // seul ou combiné à d'autres inc. Avant ce correctif, CET APPEL ÉCHOUAIT SYSTÉMATIQUEMENT
+        // (100% des appels, silencieusement — getWithRetry() ne retente pas sur 400, renvoie juste
+        // null, seul un System.out.println jamais visible en trace la cause) : aucun appelant de
+        // lookupRecording() (vérification MBID existant, complétion album/année manquants) n'a
+        // jamais reçu la moindre donnée. Contrepartie : label-info reste indisponible via cette
+        // méthode (comme lookupRelease(), qui ne l'a jamais eu non plus) — pas un problème nouveau,
+        // juste pas rattrapable ici sans casser l'appel entier pour tout le reste.
         String url = BASE_URL + "/recording/" + mbid.trim()
-                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs+labels"
+                + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs"
                 + (mbGenres ? "+genres" : "")
                 + "+artist-rels+recording-rels+work-rels";
 

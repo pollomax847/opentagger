@@ -164,6 +164,11 @@ public class MainFrame extends JFrame {
     private boolean scanDetailsExpanded = false;
     // Workers de scan actifs — permettent l'annulation
     private final java.util.List<SwingWorker<?,?>> activeScanWorkers = new java.util.ArrayList<>();
+    // Empêche scheduleAutoSaveFollowUp() de démarrer plusieurs chaînes de minuteries en parallèle
+    // (onTaggingDone() ET la chaîne d'Enregistrer elle-même peuvent chacune vouloir la déclencher) —
+    // voir le commentaire de scheduleAutoSaveFollowUp() pour le pourquoi de cette relance depuis
+    // onTaggingDone().
+    private boolean autoSaveWatchPending = false;
 
     // Budget PARTAGÉ (tous scans confondus, tout le lancement) de relectures forcées pour rattraper
     // les entrées scan_cache sans durée (voir la boucle de scan) — évite qu'une bibliothèque de
@@ -3432,17 +3437,42 @@ public class MainFrame extends JFrame {
      * taguage actif), pas à chaque relance intermédiaire.
      */
     private void scheduleAutoSaveFollowUp() {
+        // Garde anti-doublon : onTaggingDone() ET ce timer lui-même peuvent chacun vouloir
+        // (re)lancer cette chaîne — vrai seulement pendant la fenêtre d'attente de 5s, effacé dès
+        // que le timer se déclenche (voir plus bas), pas pendant tout le cycle de vie de la chaîne.
+        if (autoSaveWatchPending) return;
+        autoSaveWatchPending = true;
         javax.swing.Timer t = new javax.swing.Timer(5000, null);
         t.addActionListener(e -> {
             t.stop();
+            autoSaveWatchPending = false;
             boolean stillFeeding = !activeScanWorkers.isEmpty()
                     || WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent();
-            if (!stillFeeding) { runPostTagCommand(); return; }
-            if (WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isPresent()) return; // déjà relancé ailleurs
             boolean hasWork = tableModel.allEntries().stream()
                     .anyMatch(fe -> fe.selected && fe.status == FileEntry.Status.IDENTIFIED);
-            if (hasWork) saveAll();
-            else scheduleAutoSaveFollowUp(); // rien de neuf pour l'instant — on réessaiera
+            if (!stillFeeding && !hasWork) { runPostTagCommand(); return; } // vraiment terminé
+
+            if (WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isPresent()) {
+                scheduleAutoSaveFollowUp(); // déjà en cours (ailleurs) — revérifier plus tard
+                return;
+            }
+            if (hasWork) {
+                saveAll();
+                // saveAll() peut refuser en silence (juste un setStatus("Encore en cours…")) si
+                // INFO_COMPLETER/ALBUM_COMPLETION tourne — voir WorkerHub.conflictsWith() : ils
+                // touchent les mêmes FileEntry qu'Enregistrer, blocage volontaire pour éviter une
+                // course, pas un bug. Avec postTagCompletion=FIELDS_AND_ALBUMS (déclenché après
+                // CHAQUE fin de "Tout tagger", donc très fréquent avec le suivi automatique), il y a
+                // presque toujours l'un des deux actif à un instant donné — sans cette revérification,
+                // la chaîne mourait net au premier refus, silencieusement, y compris pour un clic
+                // manuel sur "Enregistrer tout" qui semblait alors "ne rien faire" (observé en
+                // direct). saveAll() ne pose son propre relais (scheduleAutoSaveFollowUp() sur DONE)
+                // que s'il démarre vraiment — SAVE absent de WorkerHub juste après l'appel = refusé,
+                // on reprend la main ici.
+                if (WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isEmpty()) scheduleAutoSaveFollowUp();
+            } else if (stillFeeding) {
+                scheduleAutoSaveFollowUp(); // rien à enregistrer pour l'instant, mais ça continue d'arriver
+            }
         });
         t.setRepeats(false);
         t.start();
@@ -3822,6 +3852,15 @@ public class MainFrame extends JFrame {
         } else if (autoAlbums) {
             SwingUtilities.invokeLater(this::completeAlbums);
         }
+        // Lien manquant entre les deux boucles auto : scheduleAutoTaggingFollowUp() (Tout tagger)
+        // et scheduleAutoSaveFollowUp() (Enregistrer tout) sont chacune auto-suffisantes une fois
+        // lancées, mais RIEN ne déclenchait jamais la toute première Enregistrer tant que
+        // l'utilisateur ne cliquait pas dessus manuellement — observé en direct sur un run réel de
+        // 11h+ : le taguage tournait en continu (auto-suivi actif, des milliers de fichiers
+        // IDENTIFIED accumulés), mais file_history restait figé, RIEN n'était jamais écrit sur le
+        // disque. Ici, systématiquement après un "Tout tagger" (manuel ou auto-relancé), on
+        // s'assure qu'une chaîne de surveillance d'Enregistrer tourne aussi.
+        if (!autoSaveWatchPending) scheduleAutoSaveFollowUp();
     }
 
     /**

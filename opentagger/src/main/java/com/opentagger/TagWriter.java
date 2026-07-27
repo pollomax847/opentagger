@@ -590,6 +590,43 @@ public class TagWriter {
         apFreeform(cmd, "MusicBrainz Album Status",  i.releaseStatus);
         apFreeform(cmd, "MEDIA",                     i.media);
 
+        // Parité avec le chemin jaudiotagger natif — jusqu'à ce correctif, ~30 champs manquaient
+        // ici (mood, pays, script, code-barres, ISRC, langue, note, tags, URLs, classique, empreinte
+        // AcoustID) alors qu'ils étaient bien calculés en mémoire par la cascade d'enrichissement :
+        // silencieusement perdus pour tout fichier retombant sur ce fallback (ex. M4A protégé par
+        // DRM iTunes — jaudiotagger natif y échoue systématiquement, AtomicParsley sait l'écrire).
+        // Noms d'atome vérifiés en décompilant Mp4FieldKey.class (mêmes constantes que jaudiotagger
+        // utilise lui-même pour M4A en écriture native), pas devinés.
+        apFreeform(cmd, "MOOD",              i.mood);
+        apFreeform(cmd, "MOOD_AGGRESSIVE",   i.moodAggressive);
+        apFreeform(cmd, "MOOD_ACOUSTIC",     i.moodAcoustic);
+        apFreeform(cmd, "MOOD_ELECTRONIC",   i.moodElectronic);
+        apFreeform(cmd, "MOOD_HAPPY",        i.moodHappy);
+        apFreeform(cmd, "MOOD_PARTY",        i.moodParty);
+        apFreeform(cmd, "MOOD_RELAXED",      i.moodRelaxed);
+        apFreeform(cmd, "MOOD_SAD",          i.moodSad);
+        apFreeform(cmd, "MOOD_VALENCE",      i.moodValence);
+        apFreeform(cmd, "MOOD_AROUSAL",      i.moodArousal);
+        apFreeform(cmd, "MOOD_DANCEABILITY", i.moodDanceability);
+        apFreeform(cmd, "MOOD_INSTRUMENTAL", i.moodInstrumental);
+        apFreeform(cmd, "COUNTRY",           i.country);
+        apFreeform(cmd, "SCRIPT",            i.script);
+        apFreeform(cmd, "BARCODE",           i.barcode);
+        apFreeform(cmd, "ISRC",              i.isrc);
+        apFreeform(cmd, "LANGUAGE",          i.language);
+        apFreeform(cmd, "RATING",            i.rating);
+        apFreeform(cmd, "TAGS",              i.tags);
+        apFreeform(cmd, "ACOUSTID_FINGERPRINT", i.acoustidFingerprint);
+        apFreeform(cmd, "CLASSICAL_CATALOG", i.classicalCatalog);
+        apFreeform(cmd, "MusicBrainz Album Type", i.releaseType);
+        apFreeform(cmd, "URL_OFFICIAL_ARTIST_SITE",   i.artistOfficialUrl);
+        apFreeform(cmd, "URL_WIKIPEDIA_ARTIST_SITE",  i.artistWikipediaUrl);
+        apFreeform(cmd, "URL_DISCOGS_ARTIST_SITE",    i.artistDiscogsUrl);
+        apFreeform(cmd, "URL_OFFICIAL_RELEASE_SITE",  i.releaseOfficialUrl);
+        apFreeform(cmd, "URL_WIKIPEDIA_RELEASE_SITE", i.releaseWikipediaUrl);
+        apFreeform(cmd, "URL_DISCOGS_RELEASE_SITE",   i.releaseDiscogsUrl);
+        apFreeform(cmd, "URL_LYRICS_SITE",            i.lyricsUrl);
+
         // ReplayGain
         apFreeform(cmd, "REPLAYGAIN_TRACK_GAIN", i.replayGainTrackGain);
         apFreeform(cmd, "REPLAYGAIN_TRACK_PEAK", i.replayGainTrackPeak);

@@ -409,6 +409,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 ti.recordingMbid    = track.recordingMbid();
                 ti.artistMbid       = track.artistMbid();
                 ti.isCompilation    = tl.isCompilation() ? "1" : "";
+                // Métadonnées release — jusqu'à ce correctif, jamais lues sur ce chemin
+                // "album en bloc" (le principal sur un scan par dossier) alors que MusicBrainz les
+                // fournit dans la même réponse déjà récupérée (voir MusicBrainzClient.lookupRelease()
+                // / parseReleaseTracklist()) : elles restaient vides ici puis Discogs (source de
+                // secours, moins fiable — utilise littéralement "Unknown" pour un pays inconnu)
+                // venait les combler en silence, sans que MusicBrainz ait pourtant manqué la donnée.
+                ti.country          = tl.country();
+                ti.barcode          = tl.barcode();
+                ti.releaseStatus    = tl.releaseStatus();
+                ti.label            = tl.label();
+                ti.catalogNo        = tl.catalogNo();
+                ti.script           = tl.script();
+                ti.albumArtistMbid  = tl.albumArtistMbid();
+                ti.releaseType      = tl.releaseType();
+                ti.originalYear     = tl.originalYear();
                 ti.score            = 100;
 
                 File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
