@@ -20,9 +20,12 @@ public final class ImageDownloader {
     /**
      * Télécharge une image vers un fichier temporaire. Retourne null si échec ou image trop
      * petite. Mise en cache façon Picard (un seul cache réseau pour tout, pas seulement
-     * MusicBrainz) — partagée par FanArtClient et PodcastWorker (les deux seuls appelants),
-     * évite de retélécharger la même pochette d'artiste/album ou la même image de podcast à
-     * chaque piste/épisode.
+     * MusicBrainz) — partagée par FanArtClient, DeezerClient et TagEnrichment (résolution de
+     * pochette Shazam), évite de retélécharger la même pochette d'artiste/album à chaque piste.
+     * Le fichier temporaire retourné n'est PAS auto-supprimé : chaque appelant doit le nettoyer
+     * lui-même après usage, idéalement dans un {@code finally} (voir TagEnrichment.saveEntry) —
+     * sinon une exception après l'appel (écriture de tag en échec...) le laisse traîner
+     * indéfiniment.
      */
     public static Path downloadToTempFile(String imageUrl, MetadataCache cache) throws Exception {
         if (imageUrl == null || imageUrl.isBlank()) return null;

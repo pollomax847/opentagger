@@ -385,7 +385,7 @@ public final class FfmpegTagIO {
     }
 
     private static void meta(List<String> cmd, String key, String value) {
-        if (value != null && !value.isBlank()) { cmd.add("-metadata"); cmd.add(key + "=" + value); }
+        if (value != null && !value.isBlank()) { cmd.add("-metadata"); cmd.add(key + "=" + TagWriter.sanitizeArg(value)); }
     }
 
     private static String runCapture(List<String> cmd, int timeoutSec) throws Exception {

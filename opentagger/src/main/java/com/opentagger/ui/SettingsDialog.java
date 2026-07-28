@@ -39,8 +39,6 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spTrackMatchThreshold;
     private JCheckBox  chkOnlyOfficial;
     private JCheckBox  chkUseAcoustId;
-    private JCheckBox  chkAlbumFirstPass;
-    private JSpinner   spAlbumFirstPassMinFiles;
     // tfPreferredCountry supprimé — remplacé par le sélecteur lstCountriesModel/cmbCountryPicker
     private JSpinner   spResultsLimit;
     private JSpinner   spCacheDays;
@@ -285,8 +283,17 @@ public class SettingsDialog extends JDialog {
         btnCancel.addActionListener(e -> dispose());
         btnApply .addActionListener(e -> save());
 
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6));
-        buttons.add(btnApply); buttons.add(btnCancel); buttons.add(btnOk);
+        JButton btnResetOptions = new JButton(I18n.t("Réinitialiser les options…"));
+        btnResetOptions.addActionListener(e -> resetOptionsToDefault());
+
+        JPanel buttonsRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6));
+        buttonsRight.add(btnApply); buttonsRight.add(btnCancel); buttonsRight.add(btnOk);
+        JPanel buttonsLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        buttonsLeft.add(btnResetOptions);
+
+        JPanel buttons = new JPanel(new BorderLayout());
+        buttons.add(buttonsLeft,  BorderLayout.WEST);
+        buttons.add(buttonsRight, BorderLayout.EAST);
         buttons.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
 
         getContentPane().setLayout(new BorderLayout());
@@ -574,11 +581,6 @@ public class SettingsDialog extends JDialog {
             + "défaut que MusicBrainz Picard (40%)."));
         chkOnlyOfficial  = new JCheckBox(I18n.t("Uniquement les releases officielles"));
         chkUseAcoustId   = new JCheckBox(I18n.t("Activer l'identification par empreinte AcoustID (plus précis, plus lent)"));
-        chkAlbumFirstPass = new JCheckBox(I18n.t("Passe « album d'abord » (identifie le dossier entier via une release MB avant de tagger fichier par fichier)"));
-        chkAlbumFirstPass.setToolTipText(I18n.t(
-            "Quand un dossier contient au moins le nombre de fichiers ci-dessous, tente de résoudre "
-            + "toute la tracklist d'un coup via MusicBrainz plutôt que de deviner piste par piste."));
-        spAlbumFirstPassMinFiles = new JSpinner(new SpinnerNumberModel(2, 2, 50, 1));
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
 
@@ -655,15 +657,11 @@ public class SettingsDialog extends JDialog {
             "Releases officielles seulement :",
             "",
             "Nb résultats MusicBrainz :",
-            "Durée cache (jours) :",
-            "",
-            "Nb fichiers min. pour la passe album :"
+            "Durée cache (jours) :"
         }, new JComponent[]{
             spMinScore, spTrackMatchThreshold, chkOnlyOfficial,
             chkUseAcoustId,
-            spResultsLimit, spCacheDays,
-            chkAlbumFirstPass,
-            spAlbumFirstPassMinFiles
+            spResultsLimit, spCacheDays
         }, "Critères de correspondance MusicBrainz");
 
         JPanel releasesPanel = form(new String[]{
@@ -859,9 +857,10 @@ public class SettingsDialog extends JDialog {
         compilationSeriesPicker.add(compilationSeriesBtns,      BorderLayout.SOUTH);
 
         JLabel compilationSeriesHint = new JLabel(I18n.t(
-            "<html><i>Ex. Stars 80, NRJ, Fun Radio, RFM. Les morceaux dont l'enregistrement existe<br>"
-          + "aussi sur une release dont le titre contient un de ces noms seront reliés à cette<br>"
-          + "compilation via Outils → Grouper par compilations.</i></html>"));
+            "<html><i>Détection automatique : toute release marquée \"Compilation\" par<br>"
+          + "MusicBrainz est déjà repérée sans rien configurer ici. Cette liste est facultative,<br>"
+          + "pour ajouter en plus un nom de titre précis (ex. Stars 80, NRJ, Fun Radio, RFM)<br>"
+          + "via Outils → Grouper par compilations.</i></html>"));
         compilationSeriesHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         compilationSeriesHint.setBorder(new EmptyBorder(0, 10, 4, 0));
 
@@ -901,10 +900,17 @@ public class SettingsDialog extends JDialog {
         chkSaveAcoustidFingerprints   = new JCheckBox(I18n.t("Sauvegarder l'empreinte AcoustID dans les tags"));
         chkIgnoreExistingFingerprints = new JCheckBox(I18n.t("Forcer le re-fingerprint (même si AcoustID déjà présent)"));
         spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
-        spBatchThreads             = new JSpinner(new SpinnerNumberModel(3, 1, 16, 1));
+        spBatchThreads             = new JSpinner(new SpinnerNumberModel(6, 1, 16, 1));
         spBatchThreads.setToolTipText(I18n.t("Fichiers traités en parallèle pendant le taguage (GUI et CLI/--dossier). "
                 + "Le rate-limit MusicBrainz (1 requête/s) reste respecté quel que soit ce réglage — "
                 + "augmenter aide surtout les étapes non-MB (BPM, paroles, écriture disque)."));
+        int cpuCores = Runtime.getRuntime().availableProcessors();
+        JLabel batchThreadsHint = new JLabel(I18n.t(
+            "<html><i>%d cœur(s) CPU détecté(s) — au-delà, gain limité : le frein réel devient<br>"
+          + "MusicBrainz (1 req/s, indépendant de ce réglage) ou le disque mécanique (déjà<br>"
+          + "limité à 1 accès à la fois par disque physique, voir Audio).</i></html>", cpuCores));
+        batchThreadsHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        batchThreadsHint.setBorder(new EmptyBorder(0, 10, 4, 0));
 
         JLabel id3Hint = new JLabel(I18n.t(
             "<html><i>ID3v2.3 : recommandé pour voitures, NAS anciens, Windows Explorer.<br>" +
@@ -946,6 +952,7 @@ public class SettingsDialog extends JDialog {
             { new JLabel(""), chkIgnoreExistingFingerprints },
             { new JLabel(I18n.t("Threads fpcalc :")), spFpcalcThreads },
             { new JLabel(I18n.t("Threads de taguage :")), spBatchThreads },
+            { new JLabel(""), batchThreadsHint },
         };
         for (int i = 0; i < fpRows.length; i++) {
             GridBagConstraints lc = new GridBagConstraints();
@@ -1867,8 +1874,6 @@ public class SettingsDialog extends JDialog {
         chkUseAcoustId  .setSelected(cfg.useAcoustId());
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
-        chkAlbumFirstPass       .setSelected(cfg.albumFirstPassEnabled());
-        spAlbumFirstPassMinFiles.setValue(cfg.albumFirstPassMinFiles());
 
         tfLibraryRoot        .setText(cfg.str("rename.library_root",  ""));
         tfPodcastLibraryRoot .setText(cfg.str("podcast.library_root", ""));
@@ -1995,7 +2000,7 @@ public class SettingsDialog extends JDialog {
         chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
         chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
-        spBatchThreads            .setValue(cfg.num("batch.threads", 3));
+        spBatchThreads            .setValue(cfg.num("batch.threads", 6));
 
         String mode = cfg.str("mb.oauth.mode", "scheme");
         cmbMbOAuthMode.setSelectedIndex(
@@ -2056,8 +2061,6 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.use_acoustid",         String.valueOf(chkUseAcoustId.isSelected()));
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
-        p.setProperty("albums.album_first_pass",       String.valueOf(chkAlbumFirstPass.isSelected()));
-        p.setProperty("albums.album_first_pass_min",   String.valueOf(spAlbumFirstPassMinFiles.getValue()));
 
         p.setProperty("rename.library_root",   tfLibraryRoot.getText().trim());
         p.setProperty("podcast.library_root",  tfPodcastLibraryRoot.getText().trim());
@@ -2249,6 +2252,63 @@ public class SettingsDialog extends JDialog {
                     I18n.t("Erreur sauvegarde : %s", ex.getMessage()),
                     I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    /** Clés API/identifiants personnels — jamais effacées par {@link #resetOptionsToDefault()},
+     *  contrairement à toutes les autres options du dialogue. */
+    private static final String[] PRESERVED_ON_RESET = {
+        "musicbrainz.user_agent", "app.contact",
+        "acoustid.api_key", "acoustid.user_token",
+        "discogs.consumer_key", "discogs.consumer_secret",
+        "lastfm.api_key", "fanart.api_key", "rapidapi.key", "audd.api_token",
+        "listenbrainz.username",
+        "mb.oauth.client_id", "mb.oauth.client_secret", "mb.oauth.token",
+        "mb.oauth.refresh_token", "mb.oauth.username", "mb.oauth.collection_id",
+    };
+
+    /** Réinitialise TOUTES les options (matching, tags, renommage, audio, script, barre d'outils,
+     *  dossiers de démarrage, etc.) aux valeurs par défaut — en ne réécrivant que les clés listées
+     *  dans {@link #PRESERVED_ON_RESET}, le fichier utilisateur perd toute autre clé et chaque
+     *  réglage retombe sur le même défaut que {@code Config}/le jar bundlé utilisent déjà pour une
+     *  toute première installation (mécanisme existant, pas dupliqué ici). Demandé le 2026-07-28 :
+     *  l'utilisateur veut pouvoir repartir d'une config propre sans reperdre ses clés API/comptes. */
+    private void resetOptionsToDefault() {
+        int confirm = JOptionPane.showConfirmDialog(this,
+            I18n.t("Réinitialiser TOUTES les options aux valeurs par défaut ?\n\n"
+                 + "Cela inclut : dossiers de démarrage, chemin de bibliothèque/renommage, masques, "
+                 + "filtres de correspondance, options de tags, transcodage, script, barre d'outils…\n\n"
+                 + "Les clés API et identifiants (AcoustID, Discogs, Last.fm, FanArt.tv, AudD, "
+                 + "RapidAPI, ListenBrainz, connexion MusicBrainz) sont conservés."),
+            I18n.t("Réinitialiser les options"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION) return;
+
+        Properties fresh = new Properties();
+        for (String key : PRESERVED_ON_RESET) {
+            String v = Config.get().str(key, "");
+            if (!v.isBlank()) fresh.setProperty(key, v);
+        }
+
+        try {
+            Path dir = Paths.get(Config.configDir());
+            if (!Files.exists(dir)) Files.createDirectories(dir);
+            try (Writer w = Files.newBufferedWriter(Paths.get(SETTINGS_FILE))) {
+                fresh.store(w, "OpenTagger user settings (options réinitialisées le "
+                        + java.time.LocalDate.now() + " — clés API/identifiants conservés)");
+            }
+            Config.get().reload();
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("Erreur : %s", ex.getMessage()),
+                    I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        java.awt.Window ownerWindow = getOwner();
+        dispose();
+        if (onPreferencesSaved != null) onPreferencesSaved.run();
+        JOptionPane.showMessageDialog(ownerWindow,
+                I18n.t("Options réinitialisées aux valeurs par défaut."),
+                I18n.t("Réinitialiser les options"), JOptionPane.INFORMATION_MESSAGE);
     }
 
     // ── Helpers UI ───────────────────────────────────────────────────────────

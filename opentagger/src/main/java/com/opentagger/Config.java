@@ -165,8 +165,6 @@ public class Config {
     // résultat est gardé tel quel et SongRec est sauté pour ce fichier.
     public boolean skipSongRecOnConfidentMb()      { return bool("tagging.skip_songrec_on_confident_mb", false); }
     public int     skipSongRecMinScore()           { return num ("tagging.skip_songrec_min_score",  90);    }
-    public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }
-    public int     albumFirstPassMinFiles()        { return num ("albums.album_first_pass_min",    2);    }
 
     /** 3 états au lieu de 2 cases à cocher séparées ("Compléter aussi les fichiers incomplets" +
      * "Compléter les albums automatiquement après le taguage") — fusionnées le 2026-07-16 à la
@@ -346,11 +344,12 @@ public class Config {
         return v.isBlank() ? new String[]{"en"} : v.split(",");
     }
 
-    /** Noms de séries de compilations (ex. "Stars 80", "NRJ", "Fun Radio", "RFM") que l'utilisateur
-     *  veut voir reliées à ses morceaux déjà tagués — voir ui.CompilationClusterWorker ("Grouper
-     *  par compilations…"), qui vérifie si le recording d'une piste existe aussi sur une release
-     *  dont le titre contient un de ces noms. Vide par défaut : aucune série ne correspond tant que
-     *  l'utilisateur n'en a pas explicitement listé dans les Réglages. */
+    /** Noms de séries de compilations (ex. "Stars 80", "NRJ", "Fun Radio", "RFM") — voir
+     *  ui.CompilationClusterWorker ("Grouper par compilations…"), qui matche par défaut n'importe
+     *  quelle release marquée "Compilation" par MusicBrainz (secondary-type officiel, automatique) ;
+     *  cette liste ne sert plus qu'à ajouter en complément un nom de titre précis, pour les rares cas
+     *  où MusicBrainz ne marquerait pas le secondary-type. Vide par défaut : la détection MB seule
+     *  suffit, aucune liste requise. */
     public String[] compilationSeriesNames() {
         String v = str("compilation.series_names", "");
         return v.isBlank() ? new String[0] : v.split(",");

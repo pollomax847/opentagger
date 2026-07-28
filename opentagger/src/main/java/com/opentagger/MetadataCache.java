@@ -67,7 +67,15 @@ public class MetadataCache {
                 // Chaque worker ouvre sa propre connexion (synchronized ne protège que sa
                 // propre instance) — sans busy_timeout, un accès concurrent depuis une autre
                 // connexion échoue immédiatement en SQLITE_BUSY au lieu d'attendre son tour.
-                st.execute("PRAGMA busy_timeout=5000");
+                // 5000 → 20000 (2026-07-28) : un échec ici n'est pas fatal (juste un warning, voir
+                // recordFileTagging()/saveTaggingHistory()) mais fait retomber silencieusement un
+                // fichier pourtant bien taggé en PENDING au prochain scan — observé en direct sur
+                // cette machine (plusieurs autres services partagent les mêmes disques physiques,
+                // voir la note mémoire sur la contention disque partagée) : des dizaines
+                // d'avertissements SQLITE_BUSY sur un seul run de sauvegarde malgré les 5s déjà
+                // accordées. Un délai plus généreux coûte au pire quelques secondes d'attente
+                // occasionnelles, largement préférable à perdre ce suivi.
+                st.execute("PRAGMA busy_timeout=20000");
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS recordings (
                         query_hash TEXT PRIMARY KEY,
@@ -111,6 +119,13 @@ public class MetadataCache {
                 // Migration silencieuse pour les bases existantes (SQLite ALTER TABLE)
                 try { st.execute("ALTER TABLE file_history ADD COLUMN identified_by TEXT DEFAULT 'text'"); }
                 catch (SQLException ignored) { /* colonne déjà présente */ }
+                // Sans cet index, loadTaggedPaths() ("WHERE mbid IS NOT NULL AND mbid != ''") force
+                // un parcours complet de TOUTE la table à chaque scan — sur un historique accumulé
+                // sur des années (des centaines de milliers de lignes), constaté en direct 2026-07-28
+                // via jstack : plus de 5 minutes passées dans NativeDB.step() pour cette seule
+                // requête, retardant d'autant l'affichage du statut "Tagué" de chaque fichier au
+                // scan. Même raison que idx_hist_ts un peu plus bas pour tagging_history.
+                st.execute("CREATE INDEX IF NOT EXISTS idx_filehistory_mbid ON file_history(mbid)");
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_artist ON tagging_history(artist)");
                 st.execute("CREATE INDEX IF NOT EXISTS idx_hist_title  ON tagging_history(title)");
                 // Sans cet index, "ORDER BY ts DESC LIMIT 5000" (queryHistory) force un tri complet

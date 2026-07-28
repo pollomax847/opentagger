@@ -229,7 +229,6 @@ public class App {
         // 9. Écrire les tags + pochette
         try {
             new TagWriter().write(fichier, choisi, cover);
-            if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
             TagEnrichment.recordSuccess(cache, fichier, choisi);
         } catch (Exception e) {
             System.out.println();
@@ -237,6 +236,11 @@ public class App {
             moveIfConfiguredSkipped(fichier);
             cache.close();
             return;
+        } finally {
+            // Nettoyage dans un finally (voir même correctif dans TagEnrichment.saveEntry) : sinon
+            // sauté sur toute exception de write() (M4A/WAV, disque plein...), fuite de fichier
+            // temporaire à chaque échec d'écriture.
+            if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
         }
 
         System.out.println();

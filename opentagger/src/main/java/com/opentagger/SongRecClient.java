@@ -22,7 +22,20 @@ public class SongRecClient {
     private static final int    SEGMENT_SEC = 15;   // durée du segment envoyé à Shazam
     private final ObjectMapper  mapper      = new ObjectMapper();
 
+    // ThreadLocal (pas un champ d'instance) : SongRecClient est partagé par un seul worker mais
+    // pas garanti mono-thread selon l'appelant (voir batch.threads) — chaque thread garde SA
+    // propre dernière raison sans risque de course. Avant ce correctif, TOUT échec (timeout
+    // ffmpeg, segment illisible, timeout SongRec, aucun match Shazam...) finissait en un simple
+    // "return null" indifférencié : aucune trace nulle part (ni log, ni cache, ni journal UI) de
+    // LAQUELLE de ces causes s'était produite pour un fichier resté PENDING.
+    private static final ThreadLocal<String> LAST_FAILURE_REASON = new ThreadLocal<>();
+
+    /** Raison du dernier échec de {@link #recognize(File)} sur CE thread, ou null si le dernier
+     *  appel a réussi (ou si recognize() n'a pas encore été appelé sur ce thread). */
+    public static String lastFailureReason() { return LAST_FAILURE_REASON.get(); }
+
     public TagInfo recognize(File audioFile) throws Exception {
+        LAST_FAILURE_REASON.remove();
         // Jusqu'à 3 extractions ffmpeg à des offsets différents = jusqu'à 3 déplacements de tête
         // de lecture séparés sur un disque mécanique — un seul permis pour tout l'appel (pas un
         // par offset) évite de le reprendre/relâcher inutilement 3 fois de suite. Voir DiskIoThrottle.
@@ -45,8 +58,10 @@ public class SongRecClient {
 
             for (int offset : offsets) {
                 TagInfo result = recognizeAt(bin, audioFile, offset, duration);
-                if (result != null) return result;
+                if (result != null) { LAST_FAILURE_REASON.remove(); return result; }
             }
+            if (LAST_FAILURE_REASON.get() == null)
+                LAST_FAILURE_REASON.set("aucun résultat sur " + offsets.length + " segment(s) testé(s)");
             return null;
         } finally {
             DiskIoThrottle.release(gate);
@@ -71,9 +86,15 @@ public class SongRecClient {
                 );
                 // ProcessUtils avec timeout 30s — évite blocage infini sur fichiers corrompus
                 ProcessUtils.readWithTimeout(ffmpeg, 30);
-                if (!Files.exists(tmp) || Files.size(tmp) < 1000) return null;
+                if (!Files.exists(tmp) || Files.size(tmp) < 1000) {
+                    LAST_FAILURE_REASON.set("extraction ffmpeg du segment à " + offsetSec
+                        + "s vide/trop petite (fichier source illisible à cet offset ?)");
+                    return null;
+                }
                 segment = tmp.toFile();
             } catch (Exception e) {
+                LAST_FAILURE_REASON.set("extraction ffmpeg du segment à " + offsetSec
+                    + "s en échec : " + e.getMessage());
                 return null;
             }
         }
@@ -83,8 +104,20 @@ public class SongRecClient {
                     segment.getAbsolutePath());
             pb.redirectErrorStream(false);
             String json = ProcessUtils.readStringWithTimeout(pb, 30);
-            if (json == null || json.isBlank() || !json.contains("\"track\"")) return null;
-            return parse(json);
+            if (json == null || json.isBlank()) {
+                LAST_FAILURE_REASON.set("binaire songrec sans réponse à " + offsetSec
+                    + "s (timeout 30s ou binaire indisponible)");
+                return null;
+            }
+            if (!json.contains("\"track\"")) {
+                LAST_FAILURE_REASON.set("aucun morceau reconnu par Shazam à " + offsetSec + "s");
+                return null;
+            }
+            TagInfo parsed = parse(json);
+            if (parsed == null)
+                LAST_FAILURE_REASON.set("réponse SongRec à " + offsetSec
+                    + "s sans titre/artiste exploitable");
+            return parsed;
         } finally {
             if (tmp != null) { try { Files.deleteIfExists(tmp); } catch (IOException ignored) {} }
         }

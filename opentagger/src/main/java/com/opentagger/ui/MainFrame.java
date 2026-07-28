@@ -72,7 +72,7 @@ public class MainFrame extends JFrame {
     // ── Composants header ────────────────────────────────────────────────────
     // btnRefresh n'est plus fixe (voir buildHeader()) : peut être null si l'utilisateur l'a retiré
     // de la barre d'outils secondaire personnalisable — tout accès doit être null-safe.
-    private JButton    btnTagAll, btnTagSel, btnSaveAll, btnCancel, btnTranscode, btnRefresh;
+    private JButton    btnTagAll, btnSaveAll, btnCancel, btnTranscode, btnRefresh;
     // Conteneur des boutons secondaires personnalisables — voir populateSecondaryToolbar().
     private JPanel     secondaryToolbarPanel;
     private JCheckBox  chkAcoustId;
@@ -175,8 +175,16 @@ public class MainFrame extends JFrame {
     // 150k+ fichiers dont le cache entier précède la colonne Durée transforme un rescan normalement
     // rapide (cache-hit) en relecture complète de tout le disque d'un coup. Se reconstitue à chaque
     // relance de l'appli (pas persisté) ; le reste du cache converge sur plusieurs sessions.
+    //
+    // 4000 (valeur d'origine) mesuré à l'usage : sur cette bibliothèque, 324 343 entrées sur
+    // 676 225 (48 %, le passif complet d'avant la colonne Durée, 2026-07-13) ont encore une durée
+    // manquante — à 4000/lancement il aurait fallu ~80 relances pour tout rattraper. Remonté à
+    // 50 000 (~7 relances pour converger entièrement) : le pic mémoire observé à l'origine
+    // (~5 Go quasi instantané) concernait un rattrapage NON throttlé sur la quasi-totalité du
+    // cache d'un coup ; 50 000 reste un sous-ensemble borné, largement dans la marge du tas
+    // (-Xmx8g, voir launch.sh/install-opentagger.sh).
     private final java.util.concurrent.atomic.AtomicInteger durationBackfillBudget =
-            new java.util.concurrent.atomic.AtomicInteger(4000);
+            new java.util.concurrent.atomic.AtomicInteger(50_000);
 
     // Pool PARTAGÉ pour la lecture de tags pendant un scan de dossier (phase 2) — un par scan
     // (16 threads, cores*2) causait un vrai blocage constaté en direct : plusieurs dossiers
@@ -664,8 +672,14 @@ public class MainFrame extends JFrame {
                         java.nio.file.Path img = com.opentagger.TagEnrichment.resolveCover(
                                 forCover, e.file, caa, fanArt, deezer, cache);
                         if (img != null) {
-                            writer.writeCoverOnly(e.file, img);
-                            java.nio.file.Files.deleteIfExists(img);
+                            // Nettoyage dans un finally (même correctif que TagEnrichment.saveEntry/
+                            // BatchProcessor/App.java) : writeCoverOnly() levant une exception
+                            // sautait ce nettoyage, fuite de fichier temporaire à chaque échec.
+                            try {
+                                writer.writeCoverOnly(e.file, img);
+                            } finally {
+                                try { java.nio.file.Files.deleteIfExists(img); } catch (Exception ignored) {}
+                            }
                         }
                     } catch (Exception ignored) {}
                 }
@@ -960,12 +974,18 @@ public class MainFrame extends JFrame {
         JButton btnOpen = accentBtn(I18n.t("Ouvrir dossier"), "Ctrl+O", ToolbarIcon.Kind.FOLDER_OPEN);
         btnOpen.addActionListener(e -> openFolder());
 
-        btnTagAll    = headerBtn(I18n.t("Tout tagger"), I18n.t("Tagger tous les fichiers cochés (F6)"), ToolbarIcon.Kind.TAG);
-        btnTagSel    = headerBtn(I18n.t("Tagger la sélection"), I18n.t("Tagger les lignes sélectionnées (F7)"), ToolbarIcon.Kind.TAG_CHECK);
+        // Fusionné (2026-07-28) : un seul bouton, contextuel — tague la sélection courante du
+        // tableau si des lignes sont surlignées (JTable.getSelectedRows()), sinon retombe sur tous
+        // les fichiers COCHÉS (comportement historique de "Tout tagger") — même distinction
+        // sélection/coché que startTagging(selOnly) gère déjà en interne. F6 (tout)/F7 (sélection)
+        // et les entrées de menu correspondantes restent inchangés pour qui veut forcer l'un ou
+        // l'autre explicitement ; ce bouton n'est qu'un raccourci visuel pour le cas courant.
+        btnTagAll    = headerBtn(I18n.t("Tagger"), I18n.t(
+                "Tagger la sélection si des lignes sont surlignées dans le tableau, "
+                + "sinon tous les fichiers cochés (F6 = tout, F7 = sélection)"), ToolbarIcon.Kind.TAG);
         btnSaveAll   = headerBtn(I18n.t("Enregistrer tout"), I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"), ToolbarIcon.Kind.SAVE);
         btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"), ToolbarIcon.Kind.STOP);
-        btnTagAll.addActionListener(e -> startTagging(false));
-        btnTagSel.addActionListener(e -> startTagging(true));
+        btnTagAll.addActionListener(e -> startTagging(table.getSelectedRowCount() > 0));
         btnSaveAll.addActionListener(e -> saveAll());
         btnCancel.addActionListener(e -> stopAll());
         btnCancel.setEnabled(false);
@@ -975,7 +995,6 @@ public class MainFrame extends JFrame {
         actionsPanel.add(btnOpen);
         actionsPanel.add(vSep());
         actionsPanel.add(btnTagAll);
-        actionsPanel.add(btnTagSel);
         actionsPanel.add(btnSaveAll);
         actionsPanel.add(btnCancel);
 
@@ -1114,7 +1133,7 @@ public class MainFrame extends JFrame {
         FileEntry e = coverFlowRepresentative.get(tile.groupKey());
         if (e == null) { clearDetail(); return; }
         TagInfo ti = e.activeTags();
-        lblFilePath.setText("  " + (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath());
+        setFilePathLabel("  " + (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath());
         detailPanel.populate(ti);
         loadCoverThumb(e.currentPath != null ? e.currentPath.toFile() : e.file);
         setStatus(I18n.t("Cover Flow — %d / %d — %s", index + 1, total, tile.title()));
@@ -1624,6 +1643,12 @@ public class MainFrame extends JFrame {
         colWidth(cm, 8, 56,  36,  70);   // Piste
         colWidth(cm, 9, 130, 80,  220);  // Statut
         colWidth(cm, 10, 56,  40,  90);  // Durée
+        // Colonne masquée de la VUE (pas du modèle — FileTableModel/AlbumTreeTableModel gardent
+        // COL_DURATION=10 intact, tout comme le comparateur de tri juste au-dessus) : trop de
+        // fichiers affichaient encore "0:00" malgré le rattrapage en arrière-plan (bibliothèque
+        // scannée bien avant l'ajout de la colonne, cache pas encore reconverti partout) pour que
+        // cette colonne reste utile à l'affichage tant que ce rattrapage n'a pas convergé.
+        cm.removeColumn(cm.getColumn(10));
 
         // Renderer coloré — mode-aware : en vue arborescence (viewMode == GROUPED), une ligne
         // d'en-tête de groupe n'a pas de FileEntry.Status unique (voir AlbumTreeTableModel.
@@ -2065,6 +2090,27 @@ public class MainFrame extends JFrame {
 
     // ── Panneau de détail ─────────────────────────────────────────────────────
 
+    // Longueur max avant troncature du chemin affiché sous la pochette (lblFilePath) — un JLabel
+    // n'ellipse jamais son texte tout seul et sa preferred width (texte complet) pilote celle de
+    // TOUT le panneau de détail (BoxLayout.Y_AXIS autour de coverSection/lblFilePath/detailPanel,
+    // voir buildDetailPanel()) : un chemin long (bibliothèque à plusieurs niveaux de dossiers)
+    // forçait tout le panneau — pochette comprise — à s'élargir/se décaler pour l'accommoder,
+    // rognant le texte des champs des onglets Pochette/URLs & IDs tant que la fenêtre n'était pas
+    // agrandie à la main. Le chemin complet reste consultable via l'info-bulle au survol.
+    private static final int FILE_PATH_LABEL_MAX_CHARS = 60;
+
+    private void setFilePathLabel(String fullText) {
+        lblFilePath.setToolTipText(fullText.isBlank() ? null : fullText.strip());
+        if (fullText.length() <= FILE_PATH_LABEL_MAX_CHARS) {
+            lblFilePath.setText(fullText);
+            return;
+        }
+        // Tronque le DÉBUT (garde la fin — nom de fichier et derniers dossiers, le plus utile
+        // visuellement) plutôt que la fin, contrairement à une troncature "..." classique en
+        // queue de chaîne.
+        lblFilePath.setText("…" + fullText.substring(fullText.length() - FILE_PATH_LABEL_MAX_CHARS + 1));
+    }
+
     private JPanel buildDetailPanel() {
         // ── Pochette (cliquable, centrée en haut) ────────────────────────────
         lblCoverImg = new JLabel("—", SwingConstants.CENTER);
@@ -2119,24 +2165,39 @@ public class MainFrame extends JFrame {
         detailPanel.setOnCoverClick(this::openCoverDialog);
 
         // ── Assemblage ───────────────────────────────────────────────────────
-        JPanel content = new JPanel();
-        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
-        content.add(coverSection);
-        content.add(lblFilePath);
-        content.add(Box.createVerticalStrut(6));
-        content.add(accentLine);
-        content.add(metaTitle);
-        content.add(detailPanel);
+        // En-tête (pochette + chemin + séparateur) FIXE, hors de tout scroll — avant ce correctif,
+        // header+onglets étaient empilés dans UN SEUL panneau lui-même mis dans un JScrollPane
+        // extérieur, alors que chaque onglet (buildGeneralTab()/buildClassicalTab()/etc., voir
+        // scroll()) a DÉJÀ son propre JScrollPane interne. Deux défilements imbriqués : sur un
+        // onglet avec beaucoup de champs, descendre dedans faisait aussi sortir la pochette/le
+        // chemin de l'écran (défiler le scroll EXTÉRIEUR), obligeant à remonter séparément pour les
+        // revoir — repéré par l'utilisateur ("scroller en haut ET en bas"). Pattern web usuel :
+        // en-tête "sticky" fixe, seul le contenu de l'onglet actif défile en dessous, indépendamment
+        // — obtenu simplement en supprimant le JScrollPane extérieur et en laissant BorderLayout
+        // donner tout l'espace restant (NORTH pris par l'en-tête, SOUTH par le footer) au
+        // JTabbedPane, dont chaque onglet gère déjà son propre scroll.
+        JPanel header = new JPanel();
+        header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
+        header.add(coverSection);
+        header.add(lblFilePath);
+        header.add(Box.createVerticalStrut(6));
+        header.add(accentLine);
+        header.add(metaTitle);
 
-        JScrollPane scroll = new JScrollPane(content,
-            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
-            JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        scroll.setBorder(null);
-        scroll.getVerticalScrollBar().setUnitIncrement(12);
+        // Masquer la vignette permanente (coverSection, juste au-dessus) pendant que l'onglet
+        // Pochette est actif : il affiche déjà la MÊME image, en plus grand — le duplicata
+        // donnait une impression brouillonne/redondante (repéré à l'écran). revalidate()+repaint()
+        // nécessaires : BoxLayout ne re-remesure pas tout seul un composant masqué via setVisible().
+        detailPanel.setOnPochetteTabActive(onPochette -> {
+            coverSection.setVisible(!onPochette);
+            header.revalidate();
+            header.repaint();
+        });
 
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(new MatteBorder(0, 1, 0, 0, new Color(0x3A3B3E)));
-        panel.add(scroll, BorderLayout.CENTER);
+        panel.add(header,      BorderLayout.NORTH);
+        panel.add(detailPanel, BorderLayout.CENTER);
         panel.add(detailPanel.buildFooter(), BorderLayout.SOUTH);
         return panel;
     }
@@ -2190,7 +2251,7 @@ public class MainFrame extends JFrame {
             // Mode fichier unique
             FileEntry e  = entries.get(0);
             TagInfo   ti = e.activeTags();
-            lblFilePath.setText("  " + (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath());
+            setFilePathLabel("  " + (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath());
             detailPanel.populate(ti);
             if (e.result != null) detailPanel.highlightChanges(e.current);
             File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
@@ -2904,7 +2965,10 @@ public class MainFrame extends JFrame {
                 try {
                     com.opentagger.model.TagInfo ti = readTags(f);
                     MetadataCache cache = new MetadataCache();
-                    boolean wasTagged = cache.loadTaggedPaths().contains(f.getAbsolutePath());
+                    // Même repli que loadDirectory() sur le marqueur portable OT_TAGGEDDATE/
+                    // recordingMbid quand le cache (chemin → tagué) rate un fichier déplacé.
+                    boolean wasTagged = cache.loadTaggedPaths().contains(f.getAbsolutePath())
+                            || !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
                     cache.close();
                     return new LoadResult(ti, wasTagged);
                 } catch (Exception e) { return new LoadResult(new com.opentagger.model.TagInfo(), false); }
@@ -2965,17 +3029,74 @@ public class MainFrame extends JFrame {
             }
 
             @Override protected int[] doInBackground() throws Exception {
-                // ── Phase 1 : lister les fichiers, EN FLUX ──────────────────────────
-                // Avant : AudioScanner().scan(dir) parcourait toute l'arborescence et ne renvoyait
-                // qu'une fois terminé — sur une grosse bibliothèque (disque externe, dizaines de
-                // milliers de fichiers dans des milliers de sous-dossiers), ce parcours seul (avant
-                // même la lecture des tags) pouvait prendre un temps notable pendant lequel RIEN
-                // n'apparaissait dans le tableau. Publier par lots au fur et à mesure de la
-                // découverte fait apparaître les premiers fichiers en continu plutôt qu'en un seul
-                // bloc à la fin.
-                List<FileEntry> newEntries = new ArrayList<>();
+                // ── Parcours (phase 1) ET lecture des tags (phase 2) EN PARALLÈLE ───────────
+                // Avant : phase 2 (lecture des tags) n'était soumise à scanTagPool qu'une fois
+                // phase 1 (parcours complet de l'arborescence) entièrement terminée — sur un
+                // disque lent avec des dizaines de milliers de fichiers, l'utilisateur pouvait
+                // attendre de longues minutes (36 min constatées en direct via jstack, 2026-07-28)
+                // avec un tableau intégralement vide avant qu'un SEUL fichier n'affiche ses vraies
+                // infos, même déjà tagué. Restructuré : chaque fichier découvert par le parcours
+                // est désormais immédiatement soumis à scanTagPool, SANS attendre la fin du
+                // parcours — un thread séparé (tagConsumer, ci-dessous) consomme les résultats de
+                // lecture au fur et à mesure qu'ils arrivent, pendant que le parcours continue de
+                // découvrir de nouveaux fichiers. Les deux avancent concurremment au lieu de l'un
+                // après l'autre.
                 List<FileEntry> batch = new ArrayList<>();
                 final long[] lastBatchMs = { System.currentTimeMillis() };
+
+                // Cache chargé en tâche de fond, EN PARALLÈLE du parcours — pas avant. Un premier
+                // essai le chargeait avant de démarrer le parcours (pour que taggedPaths/
+                // scanCacheMap soient prêts dès la première tâche de lecture) mais loadTaggedPaths()
+                // s'est révélé bien plus lent que prévu sur une grosse bibliothèque (plusieurs
+                // minutes, constaté en direct 2026-07-28 via jstack : bloqué dans
+                // NativeDB.step()) — ça retardait le tout premier affichage du parcours d'autant,
+                // exactement le problème qu'on essayait de résoudre. Le chargement tourne
+                // maintenant sur son propre thread ; seules les tâches de lecture de tags (plus
+                // bas, sur scanTagPool) attendent sa fin via .join(), jamais le parcours lui-même.
+                MetadataCache cache = new MetadataCache();
+                java.util.concurrent.CompletableFuture<Object[]> cacheDataFuture =
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> new Object[]{
+                        cache.loadTaggedPaths(), acquireScanCacheMap(cache)
+                    });
+                try {
+
+                // Publication dans l'ORDRE DE FIN RÉEL (ExecutorCompletionService) plutôt que dans
+                // l'ordre de soumission : un seul fichier lent (gros FLAC, latence disque externe)
+                // ne bloque plus l'affichage de tous les fichiers soumis après lui.
+                java.util.concurrent.CompletionService<Object[]> completion =
+                    new java.util.concurrent.ExecutorCompletionService<>(scanTagPool);
+                java.util.concurrent.atomic.AtomicInteger submitted = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.atomic.AtomicInteger completedCount = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.atomic.AtomicInteger tagged = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.atomic.AtomicBoolean walkDone = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+                // Consommateur : publie chaque résultat de lecture dès qu'il est prêt, PENDANT que
+                // le parcours (plus bas) continue de soumettre de nouveaux fichiers — ce
+                // découplage sur un thread à part est ce qui permet aux deux phases d'avancer en
+                // même temps plutôt que séquentiellement.
+                Thread tagConsumer = new Thread(() -> {
+                    try {
+                        while (!(walkDone.get() && completedCount.get() >= submitted.get())) {
+                            if (isCancelled()) return;
+                            java.util.concurrent.Future<Object[]> f =
+                                completion.poll(150, java.util.concurrent.TimeUnit.MILLISECONDS);
+                            if (f == null) continue;
+                            try {
+                                Object[] result = f.get();
+                                if (Boolean.TRUE.equals(result[2])) tagged.incrementAndGet();
+                                publish(result);
+                            } catch (Exception ignored) {
+                            } finally {
+                                completedCount.incrementAndGet();
+                            }
+                        }
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }, "ScanTagConsumer");
+                tagConsumer.setDaemon(true);
+                tagConsumer.start();
+
                 // Au plus 2 marches récursives à la fois, tous dossiers de démarrage confondus —
                 // voir phase1Semaphore. Bloque CE thread de fond (pas l'EDT) jusqu'à son tour.
                 phase1Semaphore.acquire();
@@ -2987,59 +3108,31 @@ public class MainFrame extends JFrame {
                 new AudioScanner().scan(dir, f -> {
                     if (isCancelled()) return;
                     if (alreadyInTable.contains(f.toPath().toAbsolutePath())) return;
-                    FileEntry e = new FileEntry(f, new com.opentagger.model.TagInfo());
-                    e.scanRoot = root;
-                    newEntries.add(e);
-                    batch.add(e);
+                    FileEntry entry = new FileEntry(f, new com.opentagger.model.TagInfo());
+                    entry.scanRoot = root;
+                    batch.add(entry);
                     long now = System.currentTimeMillis();
                     if (batch.size() >= 200 || now - lastBatchMs[0] >= 200) {
                         publish(new Object[]{ new ArrayList<>(batch) });
                         batch.clear();
                         lastBatchMs[0] = now;
                     }
-                }, this::isCancelled);
-                } finally {
-                    phase1Semaphore.release();
-                }
-                if (!batch.isEmpty()) publish(new Object[]{ new ArrayList<>(batch) });
-                if (isCancelled()) return new int[]{0, 0};
-                // Phase 1 terminée : plus aucune insertion en rafale à venir pour ce scan — signaler
-                // à l'EDT de réattacher le RowSorter dès maintenant (voir PHASE1_DONE_MARKER) plutôt
-                // que d'attendre la fin de toute la phase 2, pour que le filtre redevienne utilisable
-                // pendant la lecture des tags (qui peut prendre longtemps sur 2 To).
-                publish(new Object[]{ PHASE1_DONE_MARKER });
-
-                // Enregistrer le dossier pour l'auto-watch (hors EDT — walkFileTree peut être long)
-                if (folderWatcher != null) folderWatcher.watch(dir.toPath());
-
-                // ── Cache : juste les chemins → mbid (pas de TagInfo en RAM) ─────
-                // Optimisation mémoire : on ne charge pas toute la tagging_history en heap.
-                // Les fichiers déjà tagués sont marqués TAGGED ; leurs tags viennent de entry.current
-                // (déjà écrits dans le fichier), ce qui est identique à ce qu'on afficherait.
-                MetadataCache cache = new MetadataCache();
-                java.util.Set<String> taggedPaths = cache.loadTaggedPaths();
-                // Chargé une fois (pas un SELECT par fichier) : path → tags déjà lus lors d'un
-                // scan précédent + l'empreinte mtime/size de l'époque. Sur une bibliothèque de
-                // 100k+ fichiers relancée régulièrement (session de plusieurs jours), la quasi-
-                // totalité des fichiers n'ont pas changé depuis le dernier scan — inutile de
-                // refaire un AudioFileIO.read() coûteux pour chacun.
-                java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap = acquireScanCacheMap(cache);
-                try {
-
-                // ── Phase 2 : lecture des tags (parallèle, pool PARTAGÉ — voir scanTagPool) ──
-                // Publication dans l'ORDRE DE FIN RÉEL (ExecutorCompletionService) plutôt que dans
-                // l'ordre de soumission : un seul fichier lent (gros FLAC, latence disque externe)
-                // ne bloque plus l'affichage de tous les fichiers soumis après lui.
-                java.util.concurrent.CompletionService<Object[]> completion =
-                    new java.util.concurrent.ExecutorCompletionService<>(scanTagPool);
-
-                for (FileEntry entry : newEntries) {
-                    final File f = entry.file;
+                    submitted.incrementAndGet();
                     completion.submit(() -> {
+                        final File ff = entry.file;
+                        // .join() ne bloque QUE ce thread de scanTagPool, jamais le parcours —
+                        // si le chargement du cache (ci-dessus) n'est pas encore fini, cette tâche
+                        // (et elle seule) patiente ici, pendant que le parcours continue ailleurs.
+                        Object[] cacheData = cacheDataFuture.join();
+                        @SuppressWarnings("unchecked")
+                        java.util.Set<String> taggedPaths = (java.util.Set<String>) cacheData[0];
+                        @SuppressWarnings("unchecked")
+                        java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap =
+                            (java.util.Map<String, MetadataCache.ScanCacheEntry>) cacheData[1];
                         com.opentagger.model.TagInfo ti;
-                        long mtime = f.lastModified();
-                        long size  = f.length();
-                        MetadataCache.ScanCacheEntry cached = scanCacheMap.get(f.getAbsolutePath());
+                        long mtime = ff.lastModified();
+                        long size  = ff.length();
+                        MetadataCache.ScanCacheEntry cached = scanCacheMap.get(ff.getAbsolutePath());
                         if (cached != null && cached.mtime() == mtime && cached.size() == size) {
                             // Inchangé depuis le dernier scan (même mtime + taille) : on réutilise
                             // les tags déjà lus plutôt que de rouvrir le fichier.
@@ -3056,41 +3149,69 @@ public class MainFrame extends JFrame {
                             // rattrapés cette fois-ci le seront aux scans suivants, jusqu'à ce que
                             // le cache entier ait convergé.
                             if (cached.tagInfo().durationSec <= 0 && durationBackfillBudget.getAndDecrement() > 0) {
-                                try { ti = readTags(f); }
+                                try { ti = readTags(ff); }
                                 catch (Exception e) { ti = cached.tagInfo(); }
-                                cache.putScanCache(f.getAbsolutePath(), mtime, size, ti);
+                                cache.putScanCache(ff.getAbsolutePath(), mtime, size, ti);
                             } else {
                                 ti = cached.tagInfo();
                             }
                         } else {
-                            try { ti = readTags(f); }
+                            try { ti = readTags(ff); }
                             catch (Exception e) { ti = new com.opentagger.model.TagInfo(); }
-                            cache.putScanCache(f.getAbsolutePath(), mtime, size, ti);
+                            cache.putScanCache(ff.getAbsolutePath(), mtime, size, ti);
                         }
-                        boolean wasPreviouslyTagged = taggedPaths.contains(f.getAbsolutePath());
+                        // Le cache (chemin → tagué) rate un fichier déplacé/réorganisé hors du
+                        // pipeline de renommage interne (mergerfs, réorganisation manuelle, outil
+                        // externe...) — voir le commentaire de TagEnrichment.enrichAndWrite sur ce
+                        // même piège pour le SEUL cas déjà couvert (renommage auto interne). Repli
+                        // sur le marqueur portable écrit DANS le fichier lui-même (OT_TAGGEDDATE,
+                        // ou recordingMbid déjà présent) — exactement ce pour quoi ti.taggedDate a
+                        // été conçu ("indépendant du cache SQLite", voir readTags()) mais qui
+                        // n'était jusqu'ici jamais consulté ici. Trouvé en direct 2026-07-28 : un
+                        // fichier réellement taggué (OT_TAGGEDDATE présent) réapparaissait "En
+                        // attente" après réorganisation du dossier.
+                        boolean wasPreviouslyTagged = taggedPaths.contains(ff.getAbsolutePath())
+                                || !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
                         return new Object[]{ entry, ti, wasPreviouslyTagged };
                     });
+                }, this::isCancelled);
+                } finally {
+                    phase1Semaphore.release();
                 }
-                // PAS de shutdown() ici : scanTagPool est partagé entre tous les scans, pas
-                // propre à celui-ci. Idem à l'annulation — abandonner la queue plutôt que tuer un
-                // pool utilisé par d'éventuels autres scans en cours.
+                if (!batch.isEmpty()) publish(new Object[]{ new ArrayList<>(batch) });
+                walkDone.set(true);
+                if (isCancelled()) {
+                    tagConsumer.interrupt();
+                    try { tagConsumer.join(2000); } catch (InterruptedException ignored) {}
+                    return new int[]{0, 0};
+                }
+                // Parcours terminé : plus aucune insertion en rafale à venir pour ce scan —
+                // signaler à l'EDT de réattacher le RowSorter dès maintenant (voir
+                // PHASE1_DONE_MARKER) plutôt que d'attendre la fin de toute la lecture des tags,
+                // pour que le filtre redevienne utilisable pendant que tagConsumer continue.
+                publish(new Object[]{ PHASE1_DONE_MARKER });
 
-                int tagged = 0;
-                boolean fullyDrained = true;
-                for (int i = 0; i < newEntries.size(); i++) {
-                    if (isCancelled()) { fullyDrained = false; break; }
-                    Object[] result;
-                    try { result = completion.take().get(); }
-                    catch (Exception e) { continue; }
-                    if (Boolean.TRUE.equals(result[2])) tagged++;
-                    publish(result);
+                // Enregistrer le dossier pour l'auto-watch, sur un thread à part, sans attendre —
+                // FolderWatcher.watch() fait SON PROPRE parcours récursif complet de l'arborescence
+                // (un register() par sous-dossier) — indépendant de tagConsumer, aucune raison de
+                // le bloquer ni d'en dépendre.
+                if (folderWatcher != null) {
+                    Path watchRoot = dir.toPath();
+                    Thread watchThread = new Thread(() -> folderWatcher.watch(watchRoot), "FolderWatcher-register");
+                    watchThread.setDaemon(true);
+                    watchThread.start();
                 }
+
+                tagConsumer.join();
+                // PAS de shutdown() ici : scanTagPool est partagé entre tous les scans, pas
+                // propre à celui-ci.
+                boolean fullyDrained = !isCancelled();
                 // cache reste ouvert tant que des tâches soumises au pool partagé peuvent encore
-                // y écrire (putScanCache) — ne fermer qu'une fois certain que le pool est vidé
-                // (boucle complète, jamais annulée). Sur annulation, la connexion est laissée
-                // ouverte plutôt que risquer une fermeture concurrente avec une tâche en cours.
+                // y écrire (putScanCache) — ne fermer qu'une fois certain que tagConsumer a fini
+                // de drainer (boucle complète, jamais annulée). Sur annulation, la connexion est
+                // laissée ouverte plutôt que risquer une fermeture concurrente avec une tâche en cours.
                 if (fullyDrained) cache.close();
-                return new int[]{ newEntries.size(), tagged };
+                return new int[]{ submitted.get(), tagged.get() };
                 } finally {
                     releaseScanCacheMap();
                 }
@@ -3219,7 +3340,7 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
+        btnTagAll.setEnabled(false);
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setString(""); progress.setVisible(true);
 
@@ -3367,7 +3488,7 @@ public class MainFrame extends JFrame {
         logRunStart(I18n.t("Enregistrement"), toSave.size());
         setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
 
-        // Contrairement à btnTagAll/btnTagSel (désactivés par startTagging(), réactivés par
+        // Contrairement à btnTagAll (désactivé par startTagging(), réactivé par
         // resetBtns()), ce bouton ne changeait jusqu'ici JAMAIS d'apparence pendant tout
         // l'enregistrement (vérifié : aucun "btnSaveAll.set" ailleurs dans ce fichier avant ce
         // correctif) — il restait affiché "Enregistrer tout", parfaitement cliquable. Or un second
@@ -3740,7 +3861,7 @@ public class MainFrame extends JFrame {
      */
     private void resetForReidentification(List<FileEntry> targets, Runnable onDone) {
         setStatus(I18n.t("Réinitialisation de %d fichier(s)…", targets.size()));
-        btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
+        btnTagAll.setEnabled(false);
         new SwingWorker<Void, FileEntry>() {
             @Override protected Void doInBackground() {
                 MetadataCache cache = new MetadataCache();
@@ -3811,7 +3932,7 @@ public class MainFrame extends JFrame {
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
                 onTaggingDone(forcedTargets);
         });
-        btnTagAll.setEnabled(false); btnTagSel.setEnabled(false);
+        btnTagAll.setEnabled(false);
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setString(""); progress.setVisible(true);
         WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Re-taguage forcé"), w, w::stopNow);
@@ -4009,7 +4130,7 @@ public class MainFrame extends JFrame {
     }
 
     private void resetBtns() {
-        btnTagAll.setEnabled(true); btnTagSel.setEnabled(true);
+        btnTagAll.setEnabled(true);
         btnCancel.setEnabled(false); progress.setVisible(false);
     }
 
@@ -4278,24 +4399,27 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Groupement par compilations annulé."));
             return;
         }
-        java.util.List<String> ops = activeOperations();
-        if (!ops.isEmpty()) {
-            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de grouper par compilations.", String.join(", ", ops)));
+        // Blockers PRÉCIS (WorkerHub.conflictsWith), pas activeOperations() (bloquait sur
+        // N'IMPORTE QUELLE tâche active, y compris Tagger — alors que cette passe ne lit que des
+        // fichiers déjà TAGUÉS, jamais ceux que Tagger traite, ensembles disjoints, voir
+        // WorkerHub.conflictsWith()). Cette passe ne s'exclut donc réellement qu'avec les tâches
+        // qui ÉCRIVENT sur des fichiers déjà tagués (Enregistrer, Complétion, Transcodage...).
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.COMPILATION_CLUSTER);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de grouper par compilations.", String.join(", ", blockers)));
             return;
         }
-        // Même garde que clusterAlbums() et pour la même raison : ne traiter qu'une bibliothèque
-        // taguée à 100%, jamais un sous-ensemble encore en cours de taguage.
-        long unfinished = tableModel.allEntries().stream()
-                .filter(e -> e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.PROCESSING)
-                .count();
-        if (unfinished > 0) {
-            setStatus(I18n.t("%d fichier(s) pas encore tagué(s) — la bibliothèque doit être taguée à 100%% avant de grouper par compilations.", unfinished));
-            return;
-        }
+        // L'exigence "bibliothèque taguée à 100 %" (héritée de clusterAlbums()) est retirée : cette
+        // passe filtre déjà elle-même sur status==TAGGED (voir CompilationClusterWorker), donc des
+        // fichiers encore PENDING/PROCESSING ailleurs dans la table ne changent rien à sa
+        // correction — juste moins de correspondances trouvées pour l'instant, plus au fil du
+        // taguage. Bloquer ici empêchait justement de lancer les deux passes ensemble (retour
+        // utilisateur : "vérifie si on peut améliorer que les deux tournent ensemble").
         setStatus(I18n.t("Recherche de correspondances de compilations…"));
         CompilationClusterWorker w = new CompilationClusterWorker(
             tableModel,
             this::setStatus,
+            s -> appendLogLine(s, FileEntry.Status.IDENTIFIED, null),
             matches -> SwingUtilities.invokeLater(() -> {
                 if (matches.isEmpty()) {
                     setStatus(I18n.t("Aucune correspondance de compilation trouvée."));
@@ -4436,25 +4560,35 @@ public class MainFrame extends JFrame {
         // de tenter AudioFileIO.read() en sachant qu'il va échouer.
         if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
         TagInfo ti = new TagInfo();
+        AudioFile af = null;
         try {
-            AudioFile af = AudioFileIO.read(f);
-            // Avant le "tag == null" ci-dessous : l'en-tête audio (durée, débit...) est
-            // indépendant du tag lui-même, un fichier sans AUCUN tag a quand même une durée.
+            af = AudioFileIO.read(f);
+        } catch (Exception ignored) {}
+        // En-tête audio (durée, débit...) indépendant du tag lui-même, un fichier sans AUCUN tag a
+        // quand même une durée — et un fichier dont AudioFileIO.read() plante entièrement (en-tête
+        // ID3/atom abîmé mais fichier par ailleurs parfaitement lisible/jouable) mérite quand même
+        // qu'on essaie de lui trouver une durée : avant ce correctif, un AudioFileIO.read() en échec
+        // sautait purement et simplement la sonde ffprobe ci-dessous, laissant durationSec à 0.
+        if (af != null) {
             try {
                 if (af.getAudioHeader() != null) ti.durationSec = af.getAudioHeader().getTrackLength();
             } catch (Exception ignored) {}
-            // jaudiotagger renvoie parfois 0 pour un .m4a/AAC structurellement valide (constaté en
-            // direct : un fichier de 7,8 Mo, flux AAC de 3:56 confirmé par ffprobe, mais
-            // getTrackLength()==0 — probablement un souci de parsing des atomes mvhd/mdhd/stts pour
-            // certains encodeurs). Grave : durationSec==0 est LE signal utilisé ailleurs pour repérer
-            // les fichiers vides/corrompus (voir le commentaire sur ce champ dans TagInfo.java) — un
-            // faux 0 fait donc passer un fichier parfaitement bon pour cassé. Contre-vérification via
-            // ffprobe (lecture des métadonnées du conteneur seulement, pas un décodage complet — coût
-            // négligeable), seulement pour ce cas rare plutôt que sur chaque fichier scanné.
-            if (ti.durationSec <= 0) {
-                int probed = com.opentagger.AudioDuration.probeSeconds(f.getAbsolutePath());
-                if (probed > 0) ti.durationSec = probed;
-            }
+        }
+        // jaudiotagger renvoie parfois 0 pour un .m4a/AAC structurellement valide (constaté en
+        // direct : un fichier de 7,8 Mo, flux AAC de 3:56 confirmé par ffprobe, mais
+        // getTrackLength()==0 — probablement un souci de parsing des atomes mvhd/mdhd/stts pour
+        // certains encodeurs). Grave : durationSec==0 est LE signal utilisé ailleurs pour repérer
+        // les fichiers vides/corrompus (voir le commentaire sur ce champ dans TagInfo.java) — un
+        // faux 0 fait donc passer un fichier parfaitement bon pour cassé. Contre-vérification via
+        // ffprobe (lecture des métadonnées du conteneur seulement, pas un décodage complet — coût
+        // négligeable), déclenchée dès que durationSec est encore à 0 à ce stade — que ce soit parce
+        // que getTrackLength() a renvoyé 0, ou parce qu'AudioFileIO.read() a échoué plus haut.
+        if (ti.durationSec <= 0) {
+            int probed = com.opentagger.AudioDuration.probeSeconds(f.getAbsolutePath());
+            if (probed > 0) ti.durationSec = probed;
+        }
+        if (af == null) return ti;
+        try {
             Tag tag = af.getTag();
             if (tag == null) return ti;
 
@@ -4948,8 +5082,11 @@ public class MainFrame extends JFrame {
         }
 
         if (!mislabeled.isEmpty()) {
+            // Largeur fixée — même correctif que juste au-dessus pour "corrupt" (voir son
+            // commentaire) : un nom de fichier inhabituellement long étirerait autrement la boîte
+            // de dialogue au lieu d'y faire un retour à la ligne.
             StringBuilder mb = new StringBuilder(I18n.t(
-                "<html><b>%d fichier(s) mal étiqueté(s)</b> — pas corrompus, juste une mauvaise "
+                "<html><body style='width: 480px'><b>%d fichier(s) mal étiqueté(s)</b> — pas corrompus, juste une mauvaise "
                 + "extension (contenu réel différent du nom de fichier) :<br><br>", mislabeled.size()));
             int shownM = Math.min(mislabeled.size(), 8);
             for (int i = 0; i < shownM; i++) {
@@ -5002,8 +5139,13 @@ public class MainFrame extends JFrame {
         if (corrupt.isEmpty()) return;
 
         // Construire le message de confirmation (uniquement les vraies erreurs de lecture/format)
+        // Largeur FIXÉE (style width sur le body) — sans ça, du HTML Swing ne fait jamais de
+        // retour à la ligne tout seul : e.message peut être un diagnostic ffmpeg brut d'une seule
+        // ligne très longue (options libavdevice/libavfilter, chemins complets...), ce qui étirait
+        // toute la boîte de dialogue sur la largeur de l'écran (voire des deux écrans en dual-
+        // monitor) au lieu de rester dans une taille raisonnable — repéré à l'écran.
         StringBuilder sb = new StringBuilder(
-                I18n.t("<html>Déplacer <b>%d fichier(s) illisible(s)</b> dans la corbeille ?<br><br>", corrupt.size()));
+                I18n.t("<html><body style='width: 480px'>Déplacer <b>%d fichier(s) illisible(s)</b> dans la corbeille ?<br><br>", corrupt.size()));
         int shown = Math.min(corrupt.size(), 8);
         for (int i = 0; i < shown; i++) {
             FileEntry e = corrupt.get(i);
@@ -5130,9 +5272,13 @@ public class MainFrame extends JFrame {
                             if (!r.accepted()) errors.add(r.file().getName() + " : " + r.message());
                     }
                     if (!errors.isEmpty()) {
-                        StringBuilder sb = new StringBuilder(I18n.t("<html><b>Erreurs lors de la soumission :</b><br><br>"));
+                        // Largeur fixée — même correctif que deleteErrorFiles() (voir son
+                        // commentaire) : r.message() peut être une réponse d'erreur API brute, une
+                        // seule ligne potentiellement longue, sans quoi la boîte de dialogue
+                        // s'étirerait au lieu de faire un retour à la ligne.
+                        StringBuilder sb = new StringBuilder(I18n.t("<html><body style='width: 480px'><b>Erreurs lors de la soumission :</b><br><br>"));
                         for (String e : errors) sb.append("• ").append(e).append("<br>");
-                        sb.append("</html>");
+                        sb.append("</body></html>");
                         JOptionPane.showMessageDialog(MainFrame.this,
                             sb.toString(), I18n.t("Soumission AcoustID"), JOptionPane.ERROR_MESSAGE);
                     }

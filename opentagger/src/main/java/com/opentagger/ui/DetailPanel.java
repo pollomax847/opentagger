@@ -158,6 +158,17 @@ public class DetailPanel extends JPanel {
 
     // ─────────────────────────────────────────────────────────────────────────
 
+    // Index de l'onglet Pochette dans le JTabbedPane ci-dessous — utilisé par
+    // MainFrame (via onPochetteTabActive) pour masquer la vignette permanente d'en-tête
+    // (coverSection) quand cet onglet est actif : elle affiche la MÊME image en double, en plus
+    // petit, juste au-dessus — repéré à l'écran comme donnant une impression "brouillon"/redondante.
+    public static final int POCHETTE_TAB_INDEX = 1;
+    private java.util.function.Consumer<Boolean> onPochetteTabActive;
+
+    public void setOnPochetteTabActive(java.util.function.Consumer<Boolean> callback) {
+        onPochetteTabActive = callback;
+    }
+
     public DetailPanel() {
         super(new BorderLayout());
         JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
@@ -168,6 +179,10 @@ public class DetailPanel extends JPanel {
         tabs.addTab(I18n.t("Audio / Mood"),  buildAudioTab());
         tabs.addTab(I18n.t("Paroles"),       buildLyricsTab());
         tabs.addTab(I18n.t("URLs & IDs"),    buildIdsTab());
+        tabs.addChangeListener(e -> {
+            if (onPochetteTabActive != null)
+                onPochetteTabActive.accept(tabs.getSelectedIndex() == POCHETTE_TAB_INDEX);
+        });
         add(tabs, BorderLayout.CENTER);
 
         // Champs mood en lecture seule
@@ -746,16 +761,27 @@ public class DetailPanel extends JPanel {
             }
         });
 
-        JPanel center = new JPanel();
-        center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
-        center.setBorder(new EmptyBorder(20, 20, 10, 20));
+        // GridBagLayout à une seule cellule (weightx/weighty=1, anchor CENTER par défaut) plutôt
+        // que BoxLayout + vertical glue avant/après : ce dernier centre correctement seulement si
+        // LUI-MÊME reçoit sa hauteur réelle disponible, ce qui n'est pas garanti une fois imbriqué
+        // dans le JTabbedPane (qui se dimensionne sur l'onglet le plus haut, ex. Classique/Audio-
+        // Mood) + le JScrollPane du panneau de détail — repéré à l'écran : la pochette apparaissait
+        // décalée vers le bas plutôt que centrée, l'espace en trop n'étant pas réparti également
+        // entre les deux glues. Un GridBagLayout à une cellule centre de façon fiable quel que soit
+        // l'espace alloué, sans dépendre de ce partage de "slack" entre composants.
+        JPanel coverGroup = new JPanel();
+        coverGroup.setLayout(new BoxLayout(coverGroup, BoxLayout.Y_AXIS));
         lblCoverTab.setAlignmentX(java.awt.Component.CENTER_ALIGNMENT);
         lblCoverInfo.setAlignmentX(java.awt.Component.CENTER_ALIGNMENT);
-        center.add(Box.createVerticalGlue());
-        center.add(lblCoverTab);
-        center.add(Box.createVerticalStrut(8));
-        center.add(lblCoverInfo);
-        center.add(Box.createVerticalGlue());
+        coverGroup.add(lblCoverTab);
+        coverGroup.add(Box.createVerticalStrut(8));
+        coverGroup.add(lblCoverInfo);
+
+        JPanel center = new JPanel(new GridBagLayout());
+        center.setBorder(new EmptyBorder(20, 20, 10, 20));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 1; gbc.weighty = 1;
+        center.add(coverGroup, gbc);
 
         JButton btnChange = new JButton(I18n.t("Changer la pochette…"));
         btnChange.addActionListener(e -> { if (onCoverClick != null) onCoverClick.run(); });

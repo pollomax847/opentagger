@@ -177,6 +177,14 @@ public final class WorkerHub {
         if (a == b) return true;
         if ((a == TaskKind.LISTENBRAINZ_SYNC && b == TaskKind.TAGGING)
                 || (a == TaskKind.TAGGING && b == TaskKind.LISTENBRAINZ_SYNC)) return true;
+        // Recherche de compilation (CompilationClusterWorker) : ne fait QUE chercher des
+        // correspondances et les remonter pour revue utilisateur (CompilationMatchDialog) — n'écrit
+        // RIEN sur le disque ni ne mute aucun FileEntry pendant cette passe (voir sa Javadoc), et
+        // ne regarde que les fichiers déjà TAGUÉS, jamais les PENDING/PROCESSING que Tagger traite
+        // — ensembles disjoints, même exception que Enregistrer/Tagger juste en dessous. Débloqué
+        // le 2026-07-28 après un retour utilisateur ("ça bloque le taguage pour rien").
+        if ((a == TaskKind.TAGGING && b == TaskKind.COMPILATION_CLUSTER)
+                || (a == TaskKind.COMPILATION_CLUSTER && b == TaskKind.TAGGING)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction

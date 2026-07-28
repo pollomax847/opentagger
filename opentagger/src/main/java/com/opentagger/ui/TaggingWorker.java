@@ -119,29 +119,25 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             queue = entries;
         }
 
-        // Phase A — Album-first : 1 recherche MB par dossier au lieu de 1 par piste.
-        // Cible les dossiers ≥ N fichiers dont les pistes n'ont pas encore de releaseMbid.
-        java.util.Set<FileEntry> taggedByAlbum = Config.get().albumFirstPassEnabled()
-                ? albumFirstPass(queue) : new java.util.HashSet<>();
-
         int total = queue.size();
         AtomicInteger done = new AtomicInteger(0);
-
-        // Fichiers déjà tagués par l'album-first pass : juste compter la progression.
-        // Le reste part en parallèle (batch.threads, même réglage que BatchProcessor/CLI) —
+        // Chaque fichier part en parallèle (batch.threads, même réglage que BatchProcessor/CLI) —
         // le rate-limit MB reste correct quel que soit le nombre de threads puisqu'il est
-        // désormais centralisé dans MusicBrainzClient.getWithRetry(), pas ici.
-        List<FileEntry> toProcess = new java.util.ArrayList<>();
-        for (FileEntry entry : queue) {
-            if (taggedByAlbum.contains(entry)) {
-                setProgress((done.incrementAndGet() * 100) / total);
-                correctionLog.addEntry(entry);
-            } else {
-                toProcess.add(entry);
-            }
-        }
+        // centralisé dans MusicBrainzClient.getWithRetry(), pas ici.
+        //
+        // Passe "album-first" (identification en bloc par dossier avant le pipeline piste par
+        // piste) supprimée le 2026-07-27 : sur une bibliothèque avec beaucoup de dossiers
+        // "compilation"/vrac (noms de titre seuls, artistes disparates au sein d'un même dossier),
+        // elle engloutissait des dizaines de milliers de tentatives d'appariement ratées contre une
+        // tracklist MB choisie à l'aveugle avant qu'aucun fichier ne soit réellement tagué (retour
+        // utilisateur : "rien ne travaille"). Un album correctement identifié piste par piste ici
+        // est de toute façon complété ensuite par AlbumCompletionWorker (action manuelle
+        // "Compléter les albums") — même travail (regrouper par releaseMbid déjà connu, retrouver
+        // les pistes manquantes du même album parmi les PENDING/SKIPPED), mais SANS jamais deviner
+        // à l'aveugle une release pour un dossier dont rien n'est encore identifié.
+        List<FileEntry> toProcess = queue;
 
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().num("batch.threads", 6));
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
         int startIdx = done.get();
@@ -255,351 +251,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         for (FileEntry e : chunks) onUpdate.accept(e);
     }
 
-    // ── Phase album-first ─────────────────────────────────────────────────────
-
-    /**
-     * Groupe les fichiers en attente par dossier parent.
-     * Pour chaque groupe ≥ albumFirstPassMinFiles, cherche la release dans MB
-     * par nom d'album (dossier ou tag existant), récupère la tracklist complète
-     * et apparie chaque fichier à une piste (numéro, puis titre).
-     * Résultat : ensemble des FileEntry tagués — ils seront sautés dans la boucle per-track.
-     */
-    private java.util.Set<FileEntry> albumFirstPass(List<FileEntry> queue) {
-        // ConcurrentHashMap-backed : plusieurs dossiers/albums sont maintenant traités en
-        // parallèle (voir plus bas), chacun ajoutant ses propres entrées ici concurremment.
-        java.util.Set<FileEntry> done = java.util.concurrent.ConcurrentHashMap.newKeySet();
-        int minFiles = Config.get().albumFirstPassMinFiles();
-
-        // Grouper par dossier parent
-        java.util.Map<java.nio.file.Path, List<FileEntry>> byFolder = new java.util.LinkedHashMap<>();
-        for (FileEntry e : queue) {
-            java.nio.file.Path folder =
-                (e.currentPath != null ? e.currentPath : e.file.toPath()).getParent();
-            byFolder.computeIfAbsent(folder, k -> new java.util.ArrayList<>()).add(e);
-        }
-
-        List<java.util.Map.Entry<java.nio.file.Path, List<FileEntry>>> foldersToProcess =
-                new java.util.ArrayList<>();
-        for (var group : byFolder.entrySet())
-            if (group.getValue().size() >= minFiles) foldersToProcess.add(group);
-        if (foldersToProcess.isEmpty()) return done;
-
-        // Parallélisé PAR DOSSIER/ALBUM (même clé de config "batch.threads" que le reste) — trouvé
-        // en observant un vrai run de production (log utilisateur réel) : ce chemin traite la quasi
-        // totalité d'une bibliothèque bien organisée en albums, mais tournait entièrement sur UN
-        // SEUL thread, contrairement à la boucle piste-par-piste juste après elle (et à
-        // AlbumCompletionWorker, qui parallélise déjà par release) — les ~12 cœurs/threads
-        // configurés ne servaient donc à rien pour la majorité réelle du travail. Chaque dossier
-        // reste traité séquentiellement EN INTERNE (usedTracks reste un HashSet local à un seul
-        // thread à la fois — aucun risque de double-assignation d'une même piste) ; seuls les
-        // dossiers ENTRE EUX tournent maintenant en parallèle. Réutilise le champ `pool` (comme la
-        // phase piste-par-piste plus bas) pour que stopNow() interrompe la phase réellement active.
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
-        pool = Executors.newFixedThreadPool(threads);
-        List<Future<?>> futures = new java.util.ArrayList<>();
-        for (var group : foldersToProcess) {
-            if (isCancelled()) break;
-            futures.add(pool.submit(() -> processAlbumFolder(
-                    group.getKey(), group.getValue(), done, new MusicBrainzClient(), new LastFmClient())));
-        }
-        WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
-
-        if (!done.isEmpty())
-            onProgress.accept(I18n.t("[album-first] %d fichier(s) tagué(s) par album — %d restant(s) en pipeline normal",
-                    done.size(), queue.size() - done.size()));
-        return done;
-    }
-
-    /** Traite un dossier/album entier de la passe album-first. Appelé en parallèle, un thread par
-     *  dossier, depuis le pool créé dans albumFirstPass() — voir son commentaire pour le pourquoi.
-     *  mb/lastFm passés en paramètres (et non les champs partagés du même nom) pour la même raison
-     *  que processEntry() : ces deux classes gardent un état mutable entre appels, donc chaque
-     *  dossier traité en parallèle doit avoir ses propres instances. */
-    private void processAlbumFolder(java.nio.file.Path folder, List<FileEntry> files,
-                                     java.util.Set<FileEntry> done,
-                                     MusicBrainzClient mb, LastFmClient lastFm) {
-        if (isCancelled()) return;
-        String folderName = folder.getFileName() != null ? folder.getFileName().toString() : "";
-
-        // Déterminer le nom d'album et l'artiste hint depuis les tags existants
-        String albumName  = "";
-        String artistHint = "";
-        for (FileEntry e : files) {
-            if (e.current != null) {
-                if (albumName.isBlank()  && !e.current.album.isBlank())       albumName  = e.current.album;
-                if (artistHint.isBlank() && !e.current.albumArtist.isBlank()) artistHint = e.current.albumArtist;
-                if (artistHint.isBlank() && !e.current.artist.isBlank())      artistHint = e.current.artist;
-            }
-        }
-        if (albumName.isBlank()) albumName = folderName;
-        if (albumName.isBlank()) return;
-
-        // Garde anti-dossier-fourre-tout : un nom d'album générique ("Musique", "Music"…, voir
-        // isGenericTag) est trop peu fiable pour piloter tout un dossier vers UNE SEULE release MB.
-        // Bug réel constaté en production (2026-07-17) : un dossier "Musique" mélangeant des artistes
-        // sans rapport contenait UN fichier Theatre of Tragedy, dont l'indice d'artiste a orienté la
-        // recherche vers l'album "Musique" du même groupe (['mju:zɪk], AFM Records 2019 — existe
-        // vraiment sur MusicBrainz, coïncidence de nom). Score MB à 100%, donc la garde "score < 70"
-        // plus bas ne protège pas de ce cas — matchFileToTrack() a ensuite associé des fichiers
-        // totalement étrangers (ex. "andreas johnson - CRUSH.flac") à des pistes de cet album. Un nom
-        // de dossier/album générique fait maintenant sauter la passe album-first pour CE dossier —
-        // les fichiers repassent par la boucle piste-par-piste normale (plus lente, mais chaque
-        // fichier est vérifié individuellement plutôt que rattaché en bloc à une release aléatoire).
-        if (isGenericTag(albumName)) {
-            onProgress.accept(I18n.t(
-                    "[album-first] \"%s\" — nom générique (dossier fourre-tout) → fallback piste/piste",
-                    albumName));
-            return;
-        }
-
-        onProgress.accept(I18n.t("[album-first] \"%s\" (%d fichiers) — recherche MB…",
-                albumName, files.size()));
-
-        try {
-            String relMbid = mb.searchBestRelease(albumName, artistHint);
-            if (relMbid == null || relMbid.isBlank()) {
-                onProgress.accept(I18n.t(
-                        "[album-first] \"%s\" — non trouvé dans MB (score < 70) → fallback piste/piste",
-                        albumName));
-                return;
-            }
-
-            MusicBrainzClient.ReleaseTracklist tl = fetchTracklistCached(relMbid, mb);
-            if (tl == null || tl.tracks().isEmpty()) return;
-
-            onProgress.accept(I18n.t(
-                    "[album-first] \"%s\" trouvé — %d pistes, appariement…", tl.album(), tl.tracks().size()));
-
-            // Garde anti-doublon : une piste de la tracklist ne doit jamais être appliquée à
-            // deux fichiers différents (une erreur d'appariement a déjà causé, en production,
-            // l'application du même MBID/pochette à des dizaines de fichiers sans rapport).
-            java.util.Set<String> usedTracks = new java.util.HashSet<>();
-            for (FileEntry entry : files) {
-                if (isCancelled()) break;
-                File entryFile = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-                MusicBrainzClient.ReleaseTrack track = matchFileToTrack(entry, tl.tracks(), entryFile);
-                if (track == null) {
-                    log(I18n.t("[album-first] %s → pas d'appariement dans tracklist", entry.filename()));
-                    continue;
-                }
-                String trackKey = !track.recordingMbid().isBlank()
-                        ? track.recordingMbid() : (track.disc() + "/" + track.trackNo());
-                if (!usedTracks.add(trackKey)) {
-                    log(I18n.t("[album-first] %s → piste déjà assignée à un autre fichier de ce dossier, ignoré (garde anti-doublon)",
-                        entry.filename()));
-                    continue;
-                }
-
-                TagInfo ti = new TagInfo();
-                // Voir le même correctif dans processEntry() : sans ça la colonne Durée retombe à
-                // 0:00 pour tout fichier identifié par ce chemin (ti neuf, durationSec jamais
-                // renseigné), qu'il soit corrompu ou pas.
-                ti.durationSec      = entry.current != null ? entry.current.durationSec : 0;
-                ti.title            = track.title();
-                ti.artist           = track.artist();
-                ti.albumArtist      = tl.albumArtist();
-                ti.albumArtistSort  = tl.albumArtistSort();
-                ti.album            = tl.album();
-                ti.year             = tl.year();
-                ti.track            = track.trackNo()  > 0 ? String.valueOf(track.trackNo())  : "";
-                ti.trackTotal       = track.trackTotal()> 0 ? String.valueOf(track.trackTotal()): "";
-                ti.discNo           = track.disc()     > 0 ? String.valueOf(track.disc())     : "";
-                ti.releaseMbid      = tl.releaseMbid();
-                ti.releaseGroupMbid = tl.releaseGroupMbid();
-                ti.recordingMbid    = track.recordingMbid();
-                ti.artistMbid       = track.artistMbid();
-                ti.isCompilation    = tl.isCompilation() ? "1" : "";
-                // Métadonnées release — jusqu'à ce correctif, jamais lues sur ce chemin
-                // "album en bloc" (le principal sur un scan par dossier) alors que MusicBrainz les
-                // fournit dans la même réponse déjà récupérée (voir MusicBrainzClient.lookupRelease()
-                // / parseReleaseTracklist()) : elles restaient vides ici puis Discogs (source de
-                // secours, moins fiable — utilise littéralement "Unknown" pour un pays inconnu)
-                // venait les combler en silence, sans que MusicBrainz ait pourtant manqué la donnée.
-                ti.country          = tl.country();
-                ti.barcode          = tl.barcode();
-                ti.releaseStatus    = tl.releaseStatus();
-                ti.label            = tl.label();
-                ti.catalogNo        = tl.catalogNo();
-                ti.script           = tl.script();
-                ti.albumArtistMbid  = tl.albumArtistMbid();
-                ti.releaseType      = tl.releaseType();
-                ti.originalYear     = tl.originalYear();
-                ti.score            = 100;
-
-                File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-
-                // Vérifier que le fichier existe encore avant tout traitement coûteux — sur une
-                // session longue (des heures), un fichier peut déjà avoir été renommé/déplacé
-                // par une passe précédente sans que cette entrée en mémoire ait été rafraîchie.
-                // Sans ce garde-fou, chaque fichier "fantôme" grillait plusieurs secondes dans
-                // toute la chaîne d'enrichissement PUIS la chaîne de repli M4A complète
-                // (jaudiotagger+ffmpeg+AtomicParsley+ffmpeg) pour un échec garanti — observé en
-                // direct : des centaines de fichiers déjà renommés bloquant toute la passe
-                // album-first (et donc tout le reste, via la garde mutuelle-exclusion de
-                // MainFrame — ce chemin tourne séquentiellement, pas en pool comme le reste).
-                if (!fichier.exists()) {
-                    log(I18n.t("[album-first] %s → fichier introuvable (déjà déplacé/renommé ?), ignoré", entry.filename()));
-                    continue;
-                }
-
-                // Toutes les étapes d'enrichissement ci-dessous existaient déjà dans la boucle
-                // piste-par-piste plus bas, mais l'album-first pass (chemin emprunté par la
-                // majorité d'une grosse bibliothèque bien organisée en albums) les sautait
-                // TOUTES : ni genre Discogs/Last.fm, ni pochette, ni translittération d'artiste,
-                // ni script tagger, ni empreinte AcoustID, ni soumission MusicBrainz. Trouvé en
-                // observant un run réel où "encore des audios non traduits" concernait presque
-                // exclusivement des fichiers passés par ce chemin (artistMbid restait vide, donc
-                // TagEnrichment.translateArtist() se désactivait silencieusement pour tous).
-                taggerScript.apply(ti);
-                TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
-                TagEnrichment.enrichClassicalWork(ti, mb, cache);
-                if (ti.mood.isBlank()) { try { lastFm.enrichMood(ti, cache); } catch (Exception ignored) {} }
-                try { lastFm.enrichArtistUrls(ti, cache); } catch (Exception ignored) {}
-                if (bpmEnabled && ti.bpm.isBlank()) {
-                    int bpm = bpmDet.detect(fichier.getAbsolutePath());
-                    if (bpm > 0) ti.bpm = String.valueOf(bpm);
-                }
-                if (Config.get().saveAcoustidFingerprints() && ti.acoustidFingerprint.isBlank()
-                        && FpcalcInstaller.isAvailable()) {
-                    try { ti.acoustidFingerprint = Fingerprinter.compute(fichier).fingerprint(); }
-                    catch (Exception ignored) {}
-                }
-                if (essentiaEnabled) essentia.analyze(fichier.getAbsolutePath(), ti);
-                TagEnrichment.translateArtist(ti, mb, aliasCache);
-                try { lyrics.enrich(ti); } catch (Exception ignored) {}
-
-                // Plus d'écriture ici — façon Picard, l'identification ne touche jamais le disque.
-                // La pochette (comme le reste de ce qui touche le disque : renommage, soumission MB)
-                // n'est résolue qu'au moment d'Enregistrer — voir TagEnrichment.saveEntry().
-                // ti complet (enrichissement fini) reste en mémoire, status=IDENTIFIED ; c'est
-                // SaveWorker (déclenché par "Enregistrer tout") qui écrit/renomme/soumet à MB plus
-                // tard, via TagEnrichment.saveEntry — voir son commentaire pour le pourquoi.
-                ti.identificationSource = MetadataCache.SOURCE_MBID;
-
-                // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le
-                // TableRowSorter en direct depuis l'EDT (déjà vu 697× en 3 jours ailleurs
-                // dans ce même worker — voir SafeTableRowSorter pour le filet de sécurité).
-                SwingUtilities.invokeLater(() -> {
-                    entry.result  = ti;
-                    entry.status  = FileEntry.Status.IDENTIFIED;
-                    entry.message = "";
-                });
-                publish(entry);
-                done.add(entry);
-                log(I18n.t("[album-first] ✓ %s → piste %s \"%s\" (identifié, pas encore enregistré)",
-                    entry.filename(), track.trackNo(), track.title()));
-            }
-
-        } catch (Exception ex) {
-            onProgress.accept(I18n.t("[album-first] Erreur \"%s\" : %s", albumName, ex.getMessage()));
-            log(I18n.t("[album-first] exception : %s", ex.getMessage()));
-        }
-    }
-
-    /**
-     * Récupère la tracklist d'une release via le cache local si déjà connue, sinon MusicBrainz
-     * (et alimente le cache pour la prochaine fois) — même mécanisme que
-     * {@code AlbumCompletionWorker.fetchTracklist()}, déjà en production. Avant ce fix,
-     * albumFirstPass()/clusterAlbums() appelaient toutes deux mb.lookupRelease() en direct sans
-     * jamais consulter ce cache : une même release pouvait être re-téléchargée deux fois dans UN
-     * SEUL run (une fois par chacune de ces deux méthodes), et à chaque nouveau lancement de
-     * l'appli pour des releases déjà connues d'un run précédent — observé en direct sur le log
-     * réel de l'utilisateur (relances fréquentes, même bibliothèque).
-     * mb en paramètre (pas le champ partagé) depuis la parallélisation par dossier
-     * d'albumFirstPass() — chaque dossier traité en parallèle a sa propre instance.
-     */
-    private MusicBrainzClient.ReleaseTracklist fetchTracklistCached(String relMbid, MusicBrainzClient mb) {
-        String cacheKey = "release:" + relMbid;
-        try {
-            String cached = cache.getLookup(cacheKey);
-            if (cached != null) {
-                MusicBrainzClient.ReleaseTracklist tl = mb.parseReleaseFromCache(cached);
-                if (tl != null) return tl;
-            }
-            MusicBrainzClient.ReleaseTracklist tl = mb.lookupRelease(relMbid);
-            if (tl != null) {
-                String raw = mb.lastRawJson();
-                if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
-            }
-            return tl;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * Apparie un fichier à une piste de la tracklist. Le garde-fou "titre générique"
-     * (GENERIC_TITLE_WORDS/isGenericTitle, partagé avec AlbumCompletionWorker) reste un
-     * pré-filtre AVANT tout scoring — Picard n'a pas cette protection explicite et resterait
-     * vulnérable à la coïncidence "Recording 001 vs Recording 001" (deux chaînes identiques
-     * scorent 1.0 en titre peu importe leur contenu informatif), donc on la garde en plus du
-     * modèle de scoring. Le reste délègue à {@link com.opentagger.TrackMatcher#findBestTrack}
-     * (recordingMbid exact d'abord, puis score composite pondéré identique à MusicBrainz Picard :
-     * titre/artiste/durée/n°piste/n°disque combinés en un seul score sur TOUTES les candidates à
-     * la fois, plus de cascade de paliers indépendants ni d'ambiguïté disque à gérer à la main).
-     */
-    private MusicBrainzClient.ReleaseTrack matchFileToTrack(
-            FileEntry entry, List<MusicBrainzClient.ReleaseTrack> tracks, File audioFile) {
-        String title = (entry.current != null && !entry.current.title.isBlank())
-                ? entry.current.title : filenameToTitle(entry.filename());
-        String normTitle = title.isBlank() ? "" : AlbumCompletionWorker.normalize(title);
-        if (AlbumCompletionWorker.isGenericTitle(normTitle)) return null;
-
-        if (entry.current != null && !entry.current.recordingMbid.isBlank()) {
-            for (MusicBrainzClient.ReleaseTrack t : tracks)
-                if (entry.current.recordingMbid.equals(t.recordingMbid())) return t;
-        }
-
-        TagInfo scoring = entry.current != null ? entry.current.copy() : new TagInfo();
-        scoring.title = title; // effectif (retombé sur le nom de fichier si le tag était vide)
-        if (scoring.track.isBlank()) {
-            int num = extractTrackNumber(entry);
-            if (num > 0) scoring.track = String.valueOf(num);
-        }
-
-        int fileDurMs = -1;
-        if (audioFile != null) {
-            int fileDurSec = AudioDuration.probeSeconds(audioFile.getAbsolutePath());
-            if (fileDurSec > 0) fileDurMs = fileDurSec * 1000;
-        }
-
-        return com.opentagger.TrackMatcher.findBestTrack(
-                scoring, tracks, fileDurMs, Config.get().trackMatchingThreshold());
-    }
-
-    /**
-     * Extrait le numéro de piste depuis le tag ou le nom de fichier.
-     * Gère "01 - title.mp3" mais aussi le préfixe "disque-piste" ("1-01 06 Title.m4a") :
-     * dans ce cas le premier nombre ("1") n'est PAS le numéro de piste (c'est le disque, ou
-     * un préfixe parasite) — on prend le DERNIER nombre de la série de préfixes numériques,
-     * qui est toujours le plus proche du titre et donc le plus fiable.
-     */
-    private int extractTrackNumber(FileEntry entry) {
-        if (entry.current != null && !entry.current.track.isBlank()) {
-            try { return Integer.parseInt(entry.current.track.replaceAll("[^0-9]", "")); }
-            catch (NumberFormatException ignored) {}
-        }
-        java.util.regex.Matcher prefix =
-            java.util.regex.Pattern.compile("^(?:\\d{1,3}[\\s.\\-_]+)+").matcher(entry.filename());
-        if (prefix.find()) {
-            java.util.regex.Matcher nums = java.util.regex.Pattern.compile("\\d{1,3}").matcher(prefix.group());
-            int last = 0;
-            while (nums.find()) {
-                try { last = Integer.parseInt(nums.group()); } catch (NumberFormatException ignored) {}
-            }
-            if (last > 0) return last;
-        }
-        return 0;
-    }
-
-    /** Titre à partir du nom de fichier (retire extension, numéro de piste, "Artiste - "). */
-    private String filenameToTitle(String filename) {
-        int dot = filename.lastIndexOf('.');
-        String name = dot > 0 ? filename.substring(0, dot) : filename;
-        name = name.replaceAll("^\\d{1,3}[\\s.\\-_]+", "");
-        name = name.replaceAll("^[^-]+ - ", "");
-        return name.trim();
-    }
+    // Passe "album-first" (albumFirstPass/processAlbumFolder/fetchTracklistCached/
+    // matchFileToTrack/extractTrackNumber/filenameToTitle) supprimée le 2026-07-27 — voir le
+    // commentaire au point d'appel ci-dessus (doInBackground()) pour le pourquoi. AlbumCompletionWorker
+    // couvre le même besoin (compléter un album à partir d'une release déjà connue) sans le défaut
+    // de deviner une release à l'aveugle pour un dossier vierge.
 
     // mb/acoustId/lastFm passés en paramètres (et non les champs partagés du même nom) : chaque
     // fichier traité en parallèle doit avoir ses propres instances, ces 3 classes gardant un état
@@ -1055,8 +711,18 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             try {
                 log(I18n.t("  SongRec..."));
                 TagInfo sr = songRec.recognize(fichier);
-                if (sr != null && !sr.artist.isBlank() && !sr.title.isBlank()) {
+                boolean srOk = sr != null && !sr.artist.isBlank() && !sr.title.isBlank();
+                if (srOk) {
                     log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
+                } else if (SongRecClient.lastFailureReason() != null) {
+                    // Jusqu'à ce correctif : un échec SongRec (timeout ffmpeg, aucun match
+                    // Shazam, réponse illisible...) ne laissait ABSOLUMENT aucune trace dans le
+                    // journal — le fichier passait directement à l'étape suivante (AcoustID) sans
+                    // que rien n'explique pourquoi, restant PENDING sans indice si les étapes
+                    // suivantes échouaient aussi.
+                    log(I18n.t("  SongRec ✗ %s", SongRecClient.lastFailureReason()));
+                }
+                if (srOk) {
                     // Enrichir avec MusicBrainz (ajoute MBIDs, piste, disque, etc.)
                     String srHash = MetadataCache.queryHash(sr.artist, sr.title);
                     String srCached = cache.getRecordingSearch(srHash);
@@ -1287,6 +953,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 TagInfo sr = songRec.recognize(fichier);
                 if (sr != null) {
                     log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
+                } else if (SongRecClient.lastFailureReason() != null) {
+                    log(I18n.t("  SongRec ✗ %s", SongRecClient.lastFailureReason()));
+                }
+                if (sr != null) {
                     // MB complète : MBID, album complet, track#, disc#, albumArtist, année…
                     List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
                     if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {

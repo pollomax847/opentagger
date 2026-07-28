@@ -74,7 +74,7 @@ public class BatchProcessor {
         // MusicBrainzClient.getWithRetry()) borne de toute façon le débit réel des requêtes MB
         // quel que soit le nombre de threads ; au-delà de 3, le gain vient surtout des étapes non-MB
         // (BPM, paroles, empreinte, écriture disque) qui peuvent, elles, tourner en parallèle.
-        int threads = Config.get().num("batch.threads", 3);
+        int threads = Config.get().num("batch.threads", 6);
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
@@ -177,8 +177,14 @@ public class BatchProcessor {
                 try { new LyricsClient().enrich(best); } catch (Exception ignored) {}
 
                 Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt, deezer, cache);
-                writer.write(fichier, best, cover);
-                if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
+                // Nettoyage dans un finally (voir même correctif dans TagEnrichment.saveEntry) :
+                // writer.write() levant une exception sautait ce nettoyage, fuite de fichier
+                // temporaire à chaque échec d'écriture (M4A/WAV, disque plein...).
+                try {
+                    writer.write(fichier, best, cover);
+                } finally {
+                    if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
+                }
                 appliques.incrementAndGet();
 
                 // Sauvegarder dans l'historique pour éviter les re-lookups

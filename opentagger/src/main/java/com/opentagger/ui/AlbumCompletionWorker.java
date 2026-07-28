@@ -231,6 +231,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         // fin, LESQUELLES précisément manquaient encore (seulement le compte de départ ci-dessus).
         List<String> stillMissing = new ArrayList<>();
 
+        // Une seule fois par release (comme TrackMatcher.findBestTrack en interne) — ReleaseTrack
+        // ne connaît que son propre n° de disque, pas le total de la release.
+        int releaseDiscTotal = tl.tracks().stream()
+                .mapToInt(MusicBrainzClient.ReleaseTrack::disc).max().orElse(0);
+
         for (ReleaseTrack track : tl.tracks()) {
             if (isCancelled()) break;
             if (found.containsKey(track.recordingMbid())) continue; // déjà là
@@ -240,7 +245,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // réclamer le même fichier candidat.
             FileEntry hit;
             synchronized (candidateIndex) {
-                hit = findCandidate(candidateIndex, track.title(), track.artist());
+                hit = findCandidate(candidateIndex, track, releaseDiscTotal);
                 if (hit == null) {
                     stillMissing.add((track.trackNo() > 0 ? track.trackNo() + ". " : "") + track.title());
                     continue;
@@ -393,47 +398,82 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     }
 
     /** Doit être appelé avec le verrou sur candidateIndex déjà tenu par l'appelant. */
-    private FileEntry findCandidate(Map<String, List<FileEntry>> index, String trackTitle, String trackArtist) {
-        String norm = normalize(trackTitle);
+    /**
+     * Trouve le meilleur fichier candidat pour UNE piste manquante donnée. Avant ce correctif
+     * (2026-07-28, suite à un doute exprimé par l'utilisateur en comparant avec Picard) : une
+     * cascade de 3 paliers indépendants (titre exact → inclusion → ≥70% de mots partagés) qui
+     * s'arrêtait au PREMIER candidat "compatible artiste" rencontré à chaque palier — jamais de
+     * vrai classement entre plusieurs candidats plausibles, et surtout AUCUNE prise en compte de
+     * la durée, alors que c'est le signal le plus fort pour départager deux titres qui se
+     * ressemblent (ex. deux chansons nommées pareil par deux artistes différents, l'une en 2min,
+     * l'autre en 5min). Repris maintenant sur {@link TrackMatcher#scoreTrack}, le même score
+     * pondéré (titre+durée+artiste+n°piste+n°disque) que Picard utilise et que le pipeline
+     * d'identification principal utilise déjà ailleurs dans ce projet — les 3 anciens paliers
+     * servent maintenant seulement à RASSEMBLER les candidats plausibles (pré-filtrage nécessaire :
+     * scorer TOUS les fichiers SKIPPED/PENDING contre CHAQUE piste manquante serait bien trop
+     * coûteux sur une grosse bibliothèque), plus un vrai argmax + seuil décide ENSUITE, au lieu de
+     * s'arrêter au premier qui répond à peu près. artistCompatible() reste un filtre DUR en amont
+     * (pas seulement une composante parmi d'autres du score) : conservé tel quel, c'est le
+     * garde-fou qui a corrigé un vrai cas trouvé en production (voir sa Javadoc, "Mercy" Madame
+     * Monsieur vs Shawn Mendes) — le poids artiste (6) dans le score pondéré seul n'aurait pas
+     * suffi à écarter ce genre de faux positif si le titre matchait bien par ailleurs.
+     */
+    private FileEntry findCandidate(Map<String, List<FileEntry>> index,
+                                     MusicBrainzClient.ReleaseTrack track, int releaseDiscTotal) {
+        String norm = normalize(track.title());
         if (norm.isBlank()) return null;
         // Piste MB au titre générique ("Unknown", "Track 5"...) : rare sur une vraie release
         // cataloguée mais pas impossible (bootlegs, field recordings) — un candidat SKIPPED tout
-        // aussi mal nommé (dictaphone) matcherait sinon même en correspondance "exacte" (étape 1),
-        // qui ne vérifie aujourd'hui aucune ressemblance de contenu réel.
+        // aussi mal nommé (dictaphone) matcherait sinon même en correspondance "exacte".
         if (isGenericTitle(norm)) return null;
 
-        // 1. Correspondance exacte — plusieurs candidats peuvent partager le même titre normalisé
-        // (ex. "Intro" sur des dizaines d'albums différents) : on prend le premier compatible avec
-        // l'artiste attendu, pas juste "le" candidat comme avant ce correctif.
+        // Rassemble TOUS les candidats plausibles des 3 anciens paliers (au lieu de retourner au
+        // premier trouvé) — un Set pour dédoublonner un même FileEntry apparu dans plusieurs paliers.
+        java.util.LinkedHashSet<FileEntry> pool = new java.util.LinkedHashSet<>();
         List<FileEntry> exact = index.get(norm);
-        if (exact != null) {
-            for (FileEntry c : exact) if (artistCompatible(c, trackArtist)) return c;
-        }
-
-        // 2. Inclusion (le candidat contient le titre de la piste ou l'inverse)
-        // Garde de longueur minimale : évite les faux positifs avec des mots très courts
+        if (exact != null) pool.addAll(exact);
         for (Map.Entry<String, List<FileEntry>> e : index.entrySet()) {
             String k = e.getKey();
-            if (!((k.contains(norm) && norm.length() >= 12) || (norm.contains(k) && k.length() >= 12))) continue;
-            for (FileEntry c : e.getValue()) if (artistCompatible(c, trackArtist)) return c;
+            if ((k.contains(norm) && norm.length() >= 12) || (norm.contains(k) && k.length() >= 12))
+                pool.addAll(e.getValue());
         }
-
-        // 3. Similarité par mots partagés (≥ 70%)
         String[] trackWords = norm.split("\\s+");
-        if (trackWords.length < 2) return null;
-        int best = 0;
-        FileEntry bestEntry = null;
-        for (Map.Entry<String, List<FileEntry>> e : index.entrySet()) {
-            int shared = countSharedWords(trackWords, e.getKey().split("\\s+"));
-            if (shared <= best) continue;
-            for (FileEntry c : e.getValue()) {
-                if (artistCompatible(c, trackArtist)) { best = shared; bestEntry = c; break; }
+        if (trackWords.length >= 2) {
+            int minShared = Math.max(1, (int) (trackWords.length * 0.7));
+            for (Map.Entry<String, List<FileEntry>> e : index.entrySet()) {
+                if (countSharedWords(trackWords, e.getKey().split("\\s+")) >= minShared)
+                    pool.addAll(e.getValue());
             }
         }
-        if (bestEntry != null && best >= Math.max(1, (int)(trackWords.length * 0.7))) {
-            return bestEntry;
+        if (pool.isEmpty()) return null;
+
+        double threshold = com.opentagger.Config.get().trackMatchingThreshold();
+        FileEntry best = null;
+        double bestScore = -1.0;
+        for (FileEntry c : pool) {
+            if (!artistCompatible(c, track.artist())) continue;
+            TagInfo candTags = new TagInfo();
+            // Même repli que la construction de l'index ci-dessus (doInBackground()) : un candidat
+            // SKIPPED/PENDING a très souvent un titre de tag vide (c'est justement pour ça qu'il
+            // n'a pas été identifié normalement) — sans repli sur le nom de fichier, scoreTrack()
+            // ignorerait silencieusement la composante titre (poids 22, la plus lourde) pour la
+            // quasi-totalité des candidats réels.
+            String candTitle = (c.current != null && c.current.title != null && !c.current.title.isBlank())
+                    ? c.current.title
+                    : filenameTitle((c.currentPath != null ? c.currentPath : c.file.toPath()).getFileName().toString());
+            candTags.title = candTitle;
+            if (c.current != null) {
+                candTags.artist     = c.current.artist;
+                candTags.track      = c.current.track;
+                candTags.trackTotal = c.current.trackTotal;
+                candTags.discNo     = c.current.discNo;
+                candTags.discTotal  = c.current.discTotal;
+            }
+            int durMs = (c.current != null && c.current.durationSec > 0) ? c.current.durationSec * 1000 : -1;
+            double score = com.opentagger.TrackMatcher.scoreTrack(candTags, track, durMs, releaseDiscTotal);
+            if (score > bestScore) { bestScore = score; best = c; }
         }
-        return null;
+        return bestScore >= threshold ? best : null;
     }
 
     /**

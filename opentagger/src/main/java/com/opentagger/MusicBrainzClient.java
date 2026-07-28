@@ -17,7 +17,15 @@ import java.util.concurrent.atomic.AtomicLong;
 public class MusicBrainzClient {
 
     private static final String BASE_URL    = "https://musicbrainz.org/ws/2";
-    private static final int    MAX_RETRIES = 3;
+    // 3 → 1 (2026-07-27) : avec l'intervalle de cadence MB (1,1s, incompressible — voir
+    // MB_MIN_INTERVAL_MS, à ne jamais réduire sous peine de bannissement IP) et le timeout par
+    // requête (HttpTimeouts.apiCall(), 20s par défaut), un appel qui échoue systématiquement coûtait
+    // jusqu'à ~87s (20s + 1+20 + 2+20 + 4+20) avant d'abandonner — constaté en direct : MB répondait
+    // lentement (129 timeouts/retry en quelques minutes), rendant la passe album-first (une requête
+    // MB par dossier candidat) extrêmement lente sur une bibliothèque avec beaucoup de dossiers
+    // compilation. 1 retry ramène le pire cas à ~41s tout en gardant une chance de récupérer un
+    // accroc réseau ponctuel.
+    private static final int    MAX_RETRIES = 1;
 
     private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();

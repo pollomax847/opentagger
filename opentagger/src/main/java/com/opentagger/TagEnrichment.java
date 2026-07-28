@@ -232,27 +232,34 @@ public final class TagEnrichment {
                                         MetadataCache cache, MusicBrainzOAuth mbOauth, Path scanRoot,
                                         int maskIndex, java.util.function.Consumer<String> log) throws Exception {
         Path cover = resolveCover(ti, fichier, caa, fanArt, deezer, cache);
-        TagInfo written = writer.write(fichier, ti, cover);
+        TagInfo written;
+        try {
+            written = writer.write(fichier, ti, cover);
 
-        // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
-        // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
-        // de `cover`, résolu seulement maintenant (voir plus haut).
-        if (cover != null && Config.get().bool("cover.save_to_file", false)) {
-            try {
-                String fname = Config.get().str("cover.filename", "cover");
-                String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
-                Path dest = fichier.toPath().resolveSibling(fname + ext);
-                if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
-                    java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            } catch (Exception ignored) {}
-        }
-
-        // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
-        // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien
-        // ne la relit après ce point (les appelants ne testent que res.cover() == null). La
-        // laisser traîner accumulait un fichier temporaire par piste sur toute une bibliothèque.
-        if (cover != null) {
-            try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+            // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
+            // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
+            // de `cover`, résolu seulement maintenant (voir plus haut).
+            if (cover != null && Config.get().bool("cover.save_to_file", false)) {
+                try {
+                    String fname = Config.get().str("cover.filename", "cover");
+                    String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                    Path dest = fichier.toPath().resolveSibling(fname + ext);
+                    if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
+                        java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (Exception ignored) {}
+            }
+        } finally {
+            // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
+            // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien
+            // ne la relit après ce point (les appelants ne testent que res.cover() == null). La
+            // laisser traîner accumulait un fichier temporaire par piste sur toute une bibliothèque.
+            // Dans un finally (et non juste après l'appel comme avant ce correctif) : writer.write()
+            // lève régulièrement une exception (jaudiotagger M4A/WAV, disque plein...) — sans ça, la
+            // pochette téléchargée restait sur toute écriture en échec, fuite de fichiers temporaires
+            // qui s'accumule avec le taux d'échec réel observé sur cette bibliothèque.
+            if (cover != null) {
+                try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+            }
         }
 
         // Paroles synchronisées (.lrc à côté de l'audio, même basename) — même logique/opt-in que
