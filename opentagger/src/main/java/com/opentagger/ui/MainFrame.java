@@ -2236,9 +2236,23 @@ public class MainFrame extends JFrame {
         refreshDetail();
     }
 
+    // Dernière sélection effectivement traitée par refreshDetail() — évite de refaire tout le
+    // travail (populateMulti() itère TOUS les champs × TOUTES les entrées sélectionnées) quand la
+    // même sélection redéclenche un valueChanged SANS avoir réellement changé. Trouvé en direct
+    // 2026-07-29 : JTable$SortManager.restoreSelection() (déclenché par un simple
+    // fireTableRowsInserted lors d'un scan actif) émet un valueChanged avec isAdjusting=false À LA
+    // FIN de sa restauration — le garde `!e.getValueIsAdjusting()` déjà présent sur ce listener ne
+    // filtre donc PAS ces appels. Avec une sélection multiple large (ex. "tout sélectionner") et un
+    // scan qui met à jour des milliers de lignes, ce recalcul en boucle a gelé l'EDT plus d'une
+    // heure (populateMulti() sur des dizaines de milliers d'entrées, des dizaines de fois par
+    // seconde). List.equals() suffit ici : FileEntry n'a pas d'equals() custom (voir le commentaire
+    // de FileTableModel sur IdentityHashMap), donc c'est une comparaison par référence — exactement
+    // ce qu'il faut pour détecter "toujours les mêmes objets, dans le même ordre".
+    private List<FileEntry> lastDetailEntries = null;
+
     private void refreshDetail() {
         int[] rows = table.getSelectedRows();
-        if (rows.length == 0) { clearDetail(); return; }
+        if (rows.length == 0) { lastDetailEntries = null; clearDetail(); return; }
 
         // Résolution unifiée liste/arborescence : une ligne normale résout vers elle-même, une
         // ligne d'en-tête de groupe (vue arborescence) résout vers TOUS ses membres — permet
@@ -2247,6 +2261,8 @@ public class MainFrame extends JFrame {
         List<FileEntry> entries = new ArrayList<>();
         for (int r : rows) entries.addAll(entriesAtViewRow(r));
         if (entries.isEmpty()) { clearDetail(); return; }
+        if (entries.equals(lastDetailEntries)) return; // même sélection qu'avant, rien à refaire
+        lastDetailEntries = entries;
 
         if (entries.size() == 1) {
             // Mode fichier unique
@@ -4422,7 +4438,8 @@ public class MainFrame extends JFrame {
                 // Absent du Journal jusqu'ici — même trou que les autres pipelines audités
                 // aujourd'hui : le résultat par fichier (converti/déjà bon format/erreur)
                 // n'existait qu'un instant dans la barre de statut, écrasé au fichier suivant.
-                String fname = pr.entry() != null ? pr.entry().filename() : "?";
+                String fname = pr.oldName() != null ? pr.oldName()
+                        : pr.entry() != null ? pr.entry().filename() : "?";
                 if (pr.error() != null) {
                     appendLogLine("✗ " + I18n.t("Erreur transcodage") + " : " + fname + " — " + pr.error(),
                             FileEntry.Status.ERROR, pr.entry());

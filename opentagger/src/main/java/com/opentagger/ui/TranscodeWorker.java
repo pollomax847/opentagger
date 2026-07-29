@@ -33,8 +33,13 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
      *  verifyUnreadable()) — pas juste un premier message d'erreur qui y ressemble. trashed =
      *  effectivement envoyé à la corbeille système (implique unreadable, mais pas l'inverse : le
      *  réglage peut être désactivé, ou l'envoi à la corbeille peut lui-même échouer). */
-    public record Progress(FileEntry entry, Path newPath, String error, int done, int total,
-                            boolean unreadable, boolean trashed) {}
+    // oldName capturé AVANT le transcodage (voir son commentaire dans doInBackground()) : sans
+    // lui, le journal affichait "X → X" (nom identique des deux côtés) au lieu de "avant → après"
+    // — process() met déjà à jour entry.currentPath avant que le callback onProgress ne construise
+    // son message, donc entry.filename() n'y reflète plus jamais le nom d'origine. Trouvé en direct
+    // 2026-07-29 sur un run réel de transcodage.
+    public record Progress(FileEntry entry, String oldName, Path newPath, String error, int done,
+                            int total, boolean unreadable, boolean trashed) {}
 
     private final List<FileEntry>    entries;
     private final FileTableModel     tableModel;
@@ -83,14 +88,19 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
             if (isCancelled()) break;
             futures.add(pool.submit(() -> {
                 if (isCancelled()) return;
+                // Capturé AVANT le transcodage — process() (EDT) écrase entry.currentPath dès
+                // qu'un newPath existe, avant même que le callback onProgress ne s'exécute pour ce
+                // chunk ; entry.filename() à CE moment-là ne redonnerait donc plus jamais le nom
+                // d'origine, seulement le nouveau (voir Progress.oldName).
+                String oldName = e.filename();
                 try {
                     Path newPath = tx.transcode(e.currentPath, format, bitrate, deleteSource);
                     if (newPath != null) {
                         done.incrementAndGet();
-                        publish(new Progress(e, newPath, null, done.get() + skipped.get() + errors.get(), total, false, false));
+                        publish(new Progress(e, oldName, newPath, null, done.get() + skipped.get() + errors.get(), total, false, false));
                     } else {
                         skipped.incrementAndGet();
-                        publish(new Progress(e, null, null, done.get() + skipped.get() + errors.get(), total, false, false));
+                        publish(new Progress(e, oldName, null, null, done.get() + skipped.get() + errors.get(), total, false, false));
                     }
                 } catch (Exception ex) {
                     errors.incrementAndGet();
@@ -120,7 +130,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
                             msg = msg + " (corbeille échouée: " + trashEx.getMessage() + ")";
                         }
                     }
-                    publish(new Progress(e, null, msg, done.get() + skipped.get() + errors.get(), total, unreadable, trashed));
+                    publish(new Progress(e, oldName, null, msg, done.get() + skipped.get() + errors.get(), total, unreadable, trashed));
                 }
             }));
         }
