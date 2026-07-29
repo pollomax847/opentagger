@@ -1,25 +1,36 @@
 package com.opentagger.ui;
 
+import com.opentagger.AudioDuration;
 import com.opentagger.Config;
 import com.opentagger.I18n;
 import com.opentagger.VideoScanner;
 
 import javax.swing.*;
 import javax.swing.border.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.io.File;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
 
 /**
  * "Récupérer l'audio des vidéos non reconnues" — choisit un dossier (pré-rempli avec
  * {@code skipped.move_folder} s'il est configuré), y cherche les vidéos via {@link VideoScanner},
- * puis lance {@link VideoRecoveryWorker} sur la liste trouvée. Même structure que
+ * puis lance {@link VideoRecoveryWorker} sur les vidéos COCHÉES. Même structure que
  * {@link PodcastDialog} en plus simple : pas de matching à valider, chaque vidéo est traitée
  * indépendamment (reconnue → convertie/taguée/rangée, vidéo supprimée ; non reconnue → intacte).
+ *
+ * Case à cocher par vidéo (cochée par défaut — préserve le comportement historique "tout traiter"
+ * sauf décision explicite d'en exclure) + durée affichée + champ de filtre texte : demandé le
+ * 2026-07-29 après avoir élargi {@link VideoScanner} à des formats plus larges (.mov/.wmv/.flv/
+ * .3gp en plus de webm/vob/mpg/mpeg/avi/mkv) — un dossier de vidéos personnelles (souvenirs
+ * familiaux, pas des clips musicaux) mélange souvent les deux, et l'ancienne liste sans distinction
+ * forçait à tout traiter en bloc ou rien.
  */
 public class VideoRecoveryDialog extends JDialog {
 
@@ -28,8 +39,18 @@ public class VideoRecoveryDialog extends JDialog {
     private final JTextField   tfFolder    = new JTextField(40);
     private final JButton      btnBrowse   = new JButton(I18n.t("Parcourir…"));
     private final JButton      btnScan     = new JButton(I18n.t("Chercher des vidéos"));
-    private final DefaultListModel<File> lstModel = new DefaultListModel<>();
-    private final JList<File>  lstVideos   = new JList<>(lstModel);
+    private final JTextField   tfFilter    = new JTextField(20);
+    private final JButton      btnCheckAll = new JButton(I18n.t("Tout cocher"));
+    private final JButton      btnUncheckAll = new JButton(I18n.t("Tout décocher"));
+
+    // Parallèles par index (même convention que CompilationMatchDialog/DuplicatesDialog) : la
+    // ligne i de chaque liste concerne la même vidéo.
+    private final List<JCheckBox> boxes          = new ArrayList<>();
+    private final List<File>      videos         = new ArrayList<>();
+    private final List<JLabel>    durationLabels = new ArrayList<>();
+    private final List<JPanel>    rowPanels      = new ArrayList<>();
+
+    private final JPanel       rowsContainer = new JPanel();
     private final JScrollPane  scrollList;
     private final JLabel       lblStatus   = new JLabel(" ");
     private final JTextArea    taLog       = new JTextArea(8, 60);
@@ -53,9 +74,10 @@ public class VideoRecoveryDialog extends JDialog {
             tfFolder.setText(defaultFolder);
         }
 
-        lstVideos.setVisibleRowCount(8);
-        scrollList = new JScrollPane(lstVideos);
-        scrollList.setPreferredSize(new Dimension(560, 140));
+        rowsContainer.setLayout(new BoxLayout(rowsContainer, BoxLayout.Y_AXIS));
+        scrollList = new JScrollPane(rowsContainer);
+        scrollList.setPreferredSize(new Dimension(560, 160));
+        scrollList.getVerticalScrollBar().setUnitIncrement(16);
 
         taLog.setEditable(false);
         taLog.setLineWrap(true);
@@ -97,9 +119,9 @@ public class VideoRecoveryDialog extends JDialog {
         p.add(row);
 
         JLabel hint = new JLabel(I18n.t(
-            "  Cherche les .webm/.vob/.mpg/.mpeg/.avi/.mkv du dossier. Chaque vidéo reconnue est"
-          + " convertie en MP3, taguée, rangée, puis déplacée dans un sous-dossier \"Convertis\" ;"
-          + " les non reconnues sont déplacées dans \"Non identifié\"."));
+            "  Cherche les .webm/.vob/.mpg/.mpeg/.avi/.mkv/.mov/.wmv/.flv/.3gp du dossier. Chaque"
+          + " vidéo COCHÉE est convertie en MP3, taguée, rangée, puis déplacée dans un sous-dossier"
+          + " \"Convertis\" ; les non reconnues sont déplacées dans \"Non identifié\"."));
         hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         p.add(hint);
         return p;
@@ -113,6 +135,22 @@ public class VideoRecoveryDialog extends JDialog {
         lblFound.putClientProperty("FlatLaf.style", "font: bold 12 $defaultFont");
         p.add(lblFound);
         p.add(Box.createVerticalStrut(4));
+
+        // Filtre texte (nom de fichier) + tout cocher/décocher — pour trier les vidéos
+        // personnelles (souvenirs familiaux) des clips musicaux avant de lancer le traitement,
+        // sans devoir tout accepter ou tout refuser en bloc.
+        JPanel toolRow = new JPanel(new BorderLayout(6, 0));
+        JPanel filterPart = new JPanel(new BorderLayout(6, 0));
+        filterPart.add(new JLabel(I18n.t("Filtrer : ")), BorderLayout.WEST);
+        filterPart.add(tfFilter, BorderLayout.CENTER);
+        toolRow.add(filterPart, BorderLayout.CENTER);
+        JPanel checkBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        checkBtns.add(btnCheckAll);
+        checkBtns.add(btnUncheckAll);
+        toolRow.add(checkBtns, BorderLayout.EAST);
+        p.add(toolRow);
+        p.add(Box.createVerticalStrut(4));
+
         p.add(scrollList);
         p.add(Box.createVerticalStrut(4));
         p.add(lblStatus);
@@ -153,10 +191,17 @@ public class VideoRecoveryDialog extends JDialog {
     // ── Événements ────────────────────────────────────────────────────────────
 
     private void wireEvents() {
-        btnBrowse.addActionListener(e -> onBrowse());
-        btnScan  .addActionListener(e -> onScan());
-        btnStart .addActionListener(e -> onStart());
-        btnClose .addActionListener(e -> onClose());
+        btnBrowse    .addActionListener(e -> onBrowse());
+        btnScan      .addActionListener(e -> onScan());
+        btnStart     .addActionListener(e -> onStart());
+        btnClose     .addActionListener(e -> onClose());
+        btnCheckAll  .addActionListener(e -> boxes.forEach(cb -> cb.setSelected(true)));
+        btnUncheckAll.addActionListener(e -> boxes.forEach(cb -> cb.setSelected(false)));
+        tfFilter.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e)  { applyFilter(); }
+            @Override public void removeUpdate(DocumentEvent e)  { applyFilter(); }
+            @Override public void changedUpdate(DocumentEvent e) { applyFilter(); }
+        });
     }
 
     private void onBrowse() {
@@ -175,7 +220,15 @@ public class VideoRecoveryDialog extends JDialog {
             return;
         }
 
-        lstModel.clear();
+        rowsContainer.removeAll();
+        boxes.clear();
+        videos.clear();
+        durationLabels.clear();
+        rowPanels.clear();
+        tfFilter.setText("");
+        rowsContainer.revalidate();
+        rowsContainer.repaint();
+
         btnStart.setEnabled(false);
         lblStatus.setText(I18n.t("Recherche en cours…"));
         btnScan.setEnabled(false);
@@ -188,11 +241,14 @@ public class VideoRecoveryDialog extends JDialog {
                 btnScan.setEnabled(true);
                 try {
                     List<File> found = get();
-                    found.forEach(lstModel::addElement);
+                    for (File f : found) addVideoRow(f);
+                    rowsContainer.revalidate();
+                    rowsContainer.repaint();
                     lblStatus.setText(found.isEmpty()
                         ? I18n.t("Aucune vidéo trouvée dans ce dossier.")
                         : I18n.t("%d vidéo(s) trouvée(s).", found.size()));
                     btnStart.setEnabled(!found.isEmpty());
+                    if (!found.isEmpty()) probeDurationsAsync(found);
                 } catch (Exception ex) {
                     lblStatus.setText(I18n.t("Erreur : %s", ex.getMessage()));
                     LOG.warning("[VideoRecovery] Scan : " + ex.getMessage());
@@ -201,8 +257,77 @@ public class VideoRecoveryDialog extends JDialog {
         }.execute();
     }
 
+    private void addVideoRow(File f) {
+        JCheckBox cb = new JCheckBox();
+        cb.setSelected(true); // coché par défaut : préserve le comportement "tout traiter" d'avant
+
+        JLabel lblName = new JLabel(f.getName());
+        JLabel lblDur  = new JLabel(I18n.t("…"));
+        lblDur.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setBorder(new EmptyBorder(2, 4, 2, 6));
+        row.add(cb,      BorderLayout.WEST);
+        row.add(lblName, BorderLayout.CENTER);
+        row.add(lblDur,  BorderLayout.EAST);
+
+        boxes.add(cb);
+        videos.add(f);
+        durationLabels.add(lblDur);
+        rowPanels.add(row);
+        rowsContainer.add(row);
+    }
+
+    /** Sonde la durée de chaque vidéo en arrière-plan (ffprobe via AudioDuration, déjà utilisé
+     *  pour le repli durée des pistes audio) — une vidéo perso très longue (plusieurs dizaines de
+     *  minutes) ou très courte (quelques secondes, story/snippet) se repère ainsi d'un coup d'œil,
+     *  sans avoir à ouvrir chaque fichier. Incrémental (publish par fichier) plutôt qu'attendre la
+     *  fin de toutes les sondes : un dossier avec beaucoup de vidéos ne doit pas laisser "…" affiché
+     *  partout pendant longtemps. */
+    private void probeDurationsAsync(List<File> found) {
+        new SwingWorker<Void, Object[]>() {
+            @Override protected Void doInBackground() {
+                for (int i = 0; i < found.size(); i++) {
+                    int sec = AudioDuration.probeSeconds(found.get(i).getAbsolutePath());
+                    publish(new Object[]{ i, sec });
+                }
+                return null;
+            }
+            @Override protected void process(List<Object[]> chunks) {
+                for (Object[] c : chunks) {
+                    int idx = (int) c[0];
+                    int sec = (int) c[1];
+                    if (idx < durationLabels.size()) {
+                        durationLabels.get(idx).setText(sec > 0 ? FileTableModel.formatDuration(sec) : "?");
+                    }
+                }
+            }
+        }.execute();
+    }
+
+    /** Masque les lignes dont le nom de fichier ne contient pas le texte filtré — les cases restent
+     *  cochées/décochées même masquées (le filtre ne change jamais la sélection, juste l'affichage),
+     *  pour pouvoir filtrer par mot-clé, tout décocher, puis refiltrer sur un autre mot-clé sans
+     *  perdre les choix déjà faits ailleurs. */
+    private void applyFilter() {
+        String q = tfFilter.getText().trim().toLowerCase();
+        for (int i = 0; i < rowPanels.size(); i++) {
+            boolean match = q.isEmpty() || videos.get(i).getName().toLowerCase().contains(q);
+            rowPanels.get(i).setVisible(match);
+        }
+        rowsContainer.revalidate();
+        rowsContainer.repaint();
+    }
+
     private void onStart() {
-        if (lstModel.isEmpty()) return;
+        List<File> selected = new ArrayList<>();
+        for (int i = 0; i < boxes.size(); i++) {
+            if (boxes.get(i).isSelected()) selected.add(videos.get(i));
+        }
+        if (selected.isEmpty()) {
+            lblStatus.setText(I18n.t("Aucune vidéo cochée."));
+            return;
+        }
         if (WorkerHub.get().current(WorkerHub.TaskKind.VIDEO_RECOVERY).isPresent()) {
             JOptionPane.showMessageDialog(this,
                 I18n.t("Une récupération vidéo est déjà en cours (déclenchée automatiquement ou "
@@ -211,11 +336,10 @@ public class VideoRecoveryDialog extends JDialog {
             return;
         }
 
-        java.util.List<File> videos = java.util.Collections.list(lstModel.elements());
         int ok = JOptionPane.showConfirmDialog(this,
-            I18n.t("Identifier %d vidéo(s) ? Les reconnues seront converties/taguées puis déplacées\n"
-                 + "dans \"Convertis\" ; les non reconnues seront déplacées dans \"Non identifié\".",
-                 videos.size()),
+            I18n.t("Identifier %d vidéo(s) cochée(s) ? Les reconnues seront converties/taguées puis\n"
+                 + "déplacées dans \"Convertis\" ; les non reconnues seront déplacées dans \"Non identifié\".",
+                 selected.size()),
             I18n.t("Confirmer"), JOptionPane.YES_NO_OPTION);
         if (ok != JOptionPane.YES_OPTION) return;
 
@@ -228,7 +352,7 @@ public class VideoRecoveryDialog extends JDialog {
         Path scanRoot = java.nio.file.Paths.get(tfFolder.getText().trim());
         // onProgress est appelé depuis SwingWorker.process(), déjà garanti sur l'EDT — pas besoin
         // d'un invokeLater supplémentaire ici.
-        VideoRecoveryWorker w = new VideoRecoveryWorker(videos, scanRoot, msg -> taLog.append(msg + "\n"));
+        VideoRecoveryWorker w = new VideoRecoveryWorker(selected, scanRoot, msg -> taLog.append(msg + "\n"));
         w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
