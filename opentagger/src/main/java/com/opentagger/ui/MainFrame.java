@@ -3238,7 +3238,20 @@ public class MainFrame extends JFrame {
                         com.opentagger.model.TagInfo ti = (com.opentagger.model.TagInfo) chunk[1];
                         boolean wasTagged  = Boolean.TRUE.equals(chunk[2]);
                         entry.current = ti;
-                        if (wasTagged) {
+                        // Coquille vide (0 octet) : jusqu'à ce correctif, AudioFileIO.read() échouait
+                        // silencieusement (catch muet dans readTags()), le fichier atterrissait comme
+                        // un PENDING ordinaire — soumis ensuite à l'identification/taguage comme
+                        // n'importe quel autre fichier (recherches MB gaspillées sur un contenu qui
+                        // n'existe pas, tentative d'écriture risquée sur un fichier déjà mort). Repéré
+                        // en direct 2026-07-28 : plusieurs .m4a à 0 octet (voir le correctif de
+                        // sauvegarde anticipée dans TagWriter) jamais signalés nulle part au scan.
+                        // Priorité absolue sur wasTagged ci-dessous : un fichier vidé APRÈS avoir été
+                        // tagué (incident disque plein...) peut encore matcher le cache chemin→tagué,
+                        // mais son contenu réel prime sur ce que dit le cache.
+                        if (entry.file.length() == 0) {
+                            entry.status  = com.opentagger.model.FileEntry.Status.ERROR;
+                            entry.message = I18n.t("Fichier vide (0 octet) — corrompu, non identifiable.");
+                        } else if (wasTagged) {
                             // Les tags corrects sont DÉJÀ dans le fichier (entry.current)
                             // Pas besoin de charger un TagInfo depuis l'historique en mémoire
                             entry.status  = com.opentagger.model.FileEntry.Status.TAGGED;
@@ -3326,8 +3339,14 @@ public class MainFrame extends JFrame {
                 // IDENTIFIED exclu comme TAGGED : déjà identifié avec succès, juste pas encore
                 // enregistré — le re-identifier ici referait le même travail réseau pour rien
                 // (voir FileEntry.Status.IDENTIFIED). Utilisez "Enregistrer tout" pour ces fichiers.
+                // Coquille vide (0 octet, voir le marquage ERROR fait au scan ci-dessus) exclue elle
+                // aussi : contrairement aux autres ERROR (network, jaudiotagger...) potentiellement
+                // transitoires et donc légitimement retentés par "Tout tagger", un fichier à 0 octet
+                // reste à 0 octet tant que personne ne remplace son contenu — le retenter en boucle ne
+                // ferait que regaspiller des requêtes MB pour rien à chaque campagne de taguage.
                 if (e.selected && e.status != FileEntry.Status.TAGGED
-                        && e.status != FileEntry.Status.IDENTIFIED) toTag.add(e);
+                        && e.status != FileEntry.Status.IDENTIFIED
+                        && e.file.length() > 0) toTag.add(e);
             }
         }
         if (toTag.isEmpty()) {
@@ -5166,25 +5185,42 @@ public class MainFrame extends JFrame {
         // Corbeille système plutôt que File.delete() définitif (même changement que DuplicatesDialog
         // avant elle, même raison : un faux positif dans "corrupt" — ex. un futur format non encore
         // couvert par AudioFormatCheck — ne doit jamais être irrécupérable en un clic).
-        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
-        int deleted = 0, failDel = 0;
-        for (FileEntry e : corrupt) {
-            File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-            int idx = tableModel.indexOf(e);
-            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
-            if (moved) {
-                if (idx >= 0) tableModel.remove(idx);
-                deleted++;
-            } else {
-                failDel++;
+        //
+        // SwingWorker plutôt qu'une boucle directe sur l'EDT (comme avant ce correctif) : chaque
+        // moveToTrash()/delete() est une opération disque synchrone (écriture de métadonnées +
+        // déplacement pour la corbeille système), et avec le repérage désormais fiable des coquilles
+        // vides au scan (voir process() plus haut), "corrupt" peut contenir plusieurs milliers
+        // d'entrées d'un coup sur une grosse bibliothèque — gelait l'interface entière (aucun
+        // répaint) pour toute la durée de l'opération, repéré en direct 2026-07-28 (1734 fichiers).
+        setStatus(I18n.t("Suppression de %d fichier(s) illisible(s)…", corrupt.size()));
+        new SwingWorker<int[], FileEntry>() {
+            @Override protected int[] doInBackground() {
+                java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+                boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                int deleted = 0, failDel = 0;
+                for (FileEntry e : corrupt) {
+                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    if (moved) { deleted++; publish(e); } else { failDel++; }
+                }
+                return new int[]{ deleted, failDel, trashSupported ? 1 : 0 };
             }
-        }
-        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-        String msg = I18n.t("%d fichier(s) illisible(s) %s", deleted, where);
-        if (failDel > 0) msg += I18n.t(", %d échec(s) (permission refusée ?)", failDel);
-        setStatus(msg);
-        JOptionPane.showMessageDialog(this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
+            @Override protected void process(List<FileEntry> chunks) {
+                for (FileEntry e : chunks) {
+                    int idx = tableModel.indexOf(e);
+                    if (idx >= 0) tableModel.remove(idx);
+                }
+            }
+            @Override protected void done() {
+                int[] r;
+                try { r = get(); } catch (Exception ex) { return; }
+                String where = r[2] == 1 ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
+                String msg = I18n.t("%d fichier(s) illisible(s) %s", r[0], where);
+                if (r[1] > 0) msg += I18n.t(", %d échec(s) (permission refusée ?)", r[1]);
+                setStatus(msg);
+                JOptionPane.showMessageDialog(MainFrame.this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
+            }
+        }.execute();
     }
 
     private void submitAcoustId() {

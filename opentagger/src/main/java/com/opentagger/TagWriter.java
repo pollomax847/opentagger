@@ -177,6 +177,16 @@ public class TagWriter {
         return n.endsWith(".m4a") || n.endsWith(".mp4");
     }
 
+    /** Vérification a minima qu'une écriture M4A/MP4 "réussie" (aucune exception) a bien produit un
+     *  fichier exploitable, plutôt que de faire confiance à l'absence d'exception — voir writeNative().
+     *  AudioFileIO.read() suffit ici : il échoue déjà de façon fiable sur un fichier tronqué/vide
+     *  (mêmes classes d'exception que celles gérées par la chaîne de repli juste après). */
+    private static boolean isReadableM4a(File f) {
+        if (!f.exists() || f.length() == 0) return false;
+        try { AudioFileIO.read(f); return true; }
+        catch (Exception e) { return false; }
+    }
+
     /**
      * Chaîne de fallback pour M4A/MP4 :
      *  1. jaudiotagger natif          → tous les champs
@@ -187,19 +197,42 @@ public class TagWriter {
     private void writeNative(File fichier, TagInfo i, Path coverImage,
                               Map<String, String> preserved,
                               boolean clearExisting) throws Exception {
+        // jaudiotagger réécrit l'arbre d'atomes M4A/MP4 DIRECTEMENT sur le fichier original (pas de
+        // temp+rename comme les autres formats, voir writeM4aViaFfmpeg/AtomicParsley plus bas) — si
+        // CETTE toute première tentative est interrompue (disque plein, mergerfs qui relocalise le
+        // fichier en cours d'écriture via moveonenospc, voir fstab MusicPool), le fichier peut se
+        // retrouver tronqué/vide AVANT même qu'une exception Java n'ait la moindre chance d'être
+        // levée. Sauvegarder seulement APRÈS avoir capté l'exception (comme avant ce correctif)
+        // arrivait déjà trop tard dans ce cas précis : la "sauvegarde" copiait un fichier déjà vide,
+        // et restoreBackup() en fin de chaîne restaurait ce même vide — aucune protection réelle.
+        // Trouvé en direct 2026-07-28 : plusieurs .m4a à 0 octet dans la bibliothèque, mtimes
+        // concordant avec l'incident disque plein déjà identifié (voir mémoire "Runaway yt-dlp
+        // playlist export script"). Sauvegarde prise AVANT la première tentative pour M4A/MP4
+        // uniquement (coût d'une copie par écriture, inutile pour les autres formats dont le
+        // mécanisme jaudiotagger générique est déjà temp+rename, donc déjà sûr par construction).
+        Path earlyBackup = isM4aFamily(fichier) ? backupBeforeRepair(fichier) : null;
         try {
             doWriteNative(fichier, i, coverImage, preserved, clearExisting);
+            // jaudiotagger n'a rien levé, mais une écriture interrompue en plein milieu (voir
+            // ci-dessus) peut malgré tout laisser un résultat tronqué/vide sans exception détectable
+            // — vérifié explicitement plutôt que de faire confiance à l'absence d'exception.
+            if (earlyBackup != null && !isReadableM4a(fichier)) {
+                throw new Exception("écriture jaudiotagger sans exception mais fichier résultant"
+                    + " illisible/vide (" + fichier.length() + " octet(s))");
+            }
+            deleteBackupQuietly(earlyBackup);
             return;
         } catch (Exception e) {
             if (!isM4aFamily(fichier)) throw translateKnownJaudiotaggerBug(fichier, e);
+            // Remettre le fichier dans son état d'avant la première tentative avant d'engager la
+            // chaîne de repli ci-dessous : sans ça, runFfmpegRepair()/AtomicParsley repartiraient
+            // d'un fichier potentiellement déjà tronqué/vide plutôt que de l'original intact.
+            if (earlyBackup != null) restoreBackup(fichier, earlyBackup);
         }
 
-        // jaudiotagger réécrit l'arbre d'atomes M4A directement sur le fichier original ; si sa
-        // propre vérification post-écriture a échoué (ci-dessus), le fichier peut déjà avoir une
-        // structure cassée AVANT même que les fallbacks ci-dessous ne s'exécutent. On sauvegarde
-        // donc l'état actuel pour pouvoir restaurer l'original si toute la chaîne échoue — avant
-        // ce correctif, un échec complet ne laissait aucun filet et aucune trace de la cause réelle
-        // (stderr jeté à /dev/null à chaque étape).
+        // Deuxième sauvegarde pour la chaîne de repli elle-même (repair ffmpeg/AtomicParsley/ffmpeg
+        // direct, chacun risqué à sa façon) — indépendante de earlyBackup ci-dessus, restaurée déjà
+        // à ce stade, donc à jour avec l'original intact.
         Path backup = backupBeforeRepair(fichier);
         StringBuilder diag = new StringBuilder();
         try {
