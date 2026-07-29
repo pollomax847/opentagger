@@ -903,6 +903,7 @@ public class MainFrame extends JFrame {
 
         JMenu retraitement = new JMenu(I18n.t("Re-traitement"));
         retraitement.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
+        retraitement.add(mitem(I18n.t("Marquer la sélection comme déjà taggée…"), null, e -> markAsAlreadyTagged()));
         retraitement.add(mitem(I18n.t("Synchroniser ListenBrainz…"), null,    e -> syncListenBrainz()));
         m.add(retraitement);
 
@@ -3465,10 +3466,14 @@ public class MainFrame extends JFrame {
      * Même bascule annuler/lancer qu'completeAlbums() : recliquer pendant que ça tourne annule.
      */
     private void saveAll() {
+        // Un second clic pendant un enregistrement en cours ne l'annule plus (retiré à la demande
+        // de l'utilisateur, 2026-07-29 : fonctionnalité jamais demandée, et le bouton "Annuler
+        // l'enregistrement" restait parfois affiché même une fois l'enregistrement réellement
+        // terminé). Simple garde contre un double lancement concurrent — pas de ré-étiquetage du
+        // bouton, pas d'annulation possible depuis ce bouton.
         Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.SAVE);
         if (running.isPresent()) {
-            running.get().cancel();
-            setStatus(I18n.t("Enregistrement annulé."));
+            setStatus(I18n.t("Enregistrement déjà en cours — attendez la fin."));
             return;
         }
         // PAS de garde sur TAGGING ici, volontairement — voir startTagging()/forceRetag() pour le
@@ -3507,19 +3512,6 @@ public class MainFrame extends JFrame {
         logRunStart(I18n.t("Enregistrement"), toSave.size());
         setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
 
-        // Contrairement à btnTagAll (désactivé par startTagging(), réactivé par
-        // resetBtns()), ce bouton ne changeait jusqu'ici JAMAIS d'apparence pendant tout
-        // l'enregistrement (vérifié : aucun "btnSaveAll.set" ailleurs dans ce fichier avant ce
-        // correctif) — il restait affiché "Enregistrer tout", parfaitement cliquable. Or un second
-        // clic sur ce bouton ANNULE l'enregistrement en cours (voir le bloc `running.isPresent()`
-        // tout en haut de cette méthode) : un utilisateur qui re-cliquait — parce que rien ne
-        // semblait se passer visuellement, ou pour lancer "un second enregistrement" — annulait sans
-        // le savoir celui en cours, ne laissant sur le disque que la portion déjà traitée à ce
-        // moment précis. Vu de l'extérieur, ça ressemble exactement à un enregistrement "au hasard"/
-        // incomplet d'une fois sur l'autre selon le moment exact du clic.
-        btnSaveAll.setText(I18n.t("Annuler l'enregistrement"));
-        btnSaveAll.setToolTipText(I18n.t("Un enregistrement est en cours — cliquer l'annule"));
-
         SaveWorker w = new SaveWorker(toSave, maskIndex,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> SwingUtilities.invokeLater(() -> {
@@ -3539,8 +3531,6 @@ public class MainFrame extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     progress.setVisible(false);
                     refreshStats();
-                    btnSaveAll.setText(I18n.t("Enregistrer tout"));
-                    btnSaveAll.setToolTipText(I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"));
                     // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
                     // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
                     // qu'à l'Enregistrement. groupByCompilations() garde ses propres gardes
@@ -3922,6 +3912,115 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 refreshStats();
                 onDone.run();
+            }
+        }.execute();
+    }
+
+    /** Tamponne les fichiers sélectionnés comme "déjà taggués" (marqueur OT_TAGGEDDATE + historique
+     *  du cache), SANS relancer aucune identification — pour les audios que l'utilisateur sait déjà
+     *  correctement taggués (session OpenTagger antérieure au marqueur OT_TAGGEDDATE, autre outil,
+     *  ou fichier déplacé hors du pipeline de renommage interne — voir le repli sur ce marqueur déjà
+     *  ajouté dans loadDirectory()/loadSingleFile()) mais que le scan affiche encore "En attente"
+     *  faute de correspondance dans le cache SQLite. Réécrit les MÊMES tags déjà lus (entry.current)
+     *  avec juste OT_TAGGEDDATE en plus — aucune identification, aucun autre champ modifié. Applique
+     *  ENSUITE le même renommage/déplacement (masque + dossier configuré) qu'un taguage normal si
+     *  activé dans les Réglages (même bloc que TagEnrichment.saveEntry(), copié ici plutôt
+     *  qu'appelé : saveEntry() résout aussi une pochette via appel réseau CAA/FanArt/Deezer/Shazam,
+     *  ce qui n'a pas de sens pour un fichier qu'on ne fait que "confirmer déjà bon" — demandé le
+     *  2026-07-28 : "si les audios on veut qu'ils soit bien taggué comme il faut par rapport au
+     *  masque et déplacement vers le dossier de notre choix").
+     */
+    private void markAsAlreadyTagged() {
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        if (sel.length == 0) {
+            setStatus(I18n.t("Sélectionnez d'abord les fichiers à marquer comme déjà taggués."));
+            return;
+        }
+        List<FileEntry> targets = new ArrayList<>();
+        for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
+
+        int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
+        int confirm = JOptionPane.showConfirmDialog(this,
+            I18n.t("Marquer %d fichier(s) comme déjà taggué(s) ?\n\n"
+                 + "Les tags déjà présents sur le disque sont réécrits tels quels, avec juste un "
+                 + "marqueur de date ajouté (OT_TAGGEDDATE) — aucune identification."
+                 + (maskIndex >= 0
+                    ? "\nLe renommage/déplacement automatique (masque configuré) sera aussi "
+                      + "appliqué, comme pour un enregistrement normal."
+                    : "\nLe renommage automatique est désactivé dans les Réglages — le fichier "
+                      + "ne sera pas déplacé."),
+                 targets.size()),
+            I18n.t("Marquer comme déjà taggué"), JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        setStatus(I18n.t("Marquage de %d fichier(s)…", targets.size()));
+        record MarkResult(FileEntry entry, boolean ok, String msg, Path newPath) {}
+        new SwingWorker<Void, MarkResult>() {
+            int done = 0, errors = 0;
+            @Override protected Void doInBackground() {
+                TagWriter    writer  = new TagWriter();
+                FileRenamer  renamer = new FileRenamer();
+                MetadataCache cache  = new MetadataCache();
+                try {
+                    for (FileEntry e : targets) {
+                        File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                        try {
+                            com.opentagger.model.TagInfo ti = e.current != null ? e.current : readTags(fichier);
+                            ti.taggedDate = java.time.LocalDate.now().toString();
+                            com.opentagger.model.TagInfo written = writer.write(fichier, ti);
+
+                            String cacheKey = !written.recordingMbid.isBlank()
+                                    ? written.recordingMbid
+                                    : MetadataCache.syntheticKey(written.artist, written.title);
+                            cache.recordFileTagging(fichier.getAbsolutePath(), cacheKey, MetadataCache.SOURCE_EXISTING);
+
+                            Path newPath = null;
+                            if (maskIndex >= 0) {
+                                Path curPath   = fichier.toPath();
+                                Path oldParent = curPath.getParent();
+                                String libRoot = Config.get().libraryRoot();
+                                Path root = (!libRoot.isBlank() && Files.isDirectory(java.nio.file.Paths.get(libRoot)))
+                                        ? java.nio.file.Paths.get(libRoot)
+                                        : (e.scanRoot != null ? e.scanRoot : oldParent);
+                                newPath = renamer.rename(curPath, written, maskIndex, root);
+                                if (newPath != null) {
+                                    // Re-classer l'historique sous le nouveau chemin — même piège
+                                    // que TagEnrichment.saveEntry(), voir son commentaire.
+                                    cache.deleteFileHistory(curPath.toFile().getAbsolutePath());
+                                    cache.recordFileTagging(newPath.toFile().getAbsolutePath(), cacheKey, MetadataCache.SOURCE_EXISTING);
+                                    if (Config.get().deleteEmptyDirsAfterRename()) {
+                                        FileRenamer.deleteEmptyAncestors(oldParent, root);
+                                    }
+                                }
+                            }
+                            done++;
+                            publish(new MarkResult(e, true, null, newPath));
+                        } catch (Exception ex) {
+                            errors++;
+                            publish(new MarkResult(e, false,
+                                    ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName(), null));
+                        }
+                    }
+                } finally { cache.close(); }
+                return null;
+            }
+            @Override protected void process(List<MarkResult> chunk) {
+                for (MarkResult r : chunk) {
+                    if (r.ok()) {
+                        r.entry().status  = FileEntry.Status.TAGGED;
+                        r.entry().message = "";
+                        if (r.newPath() != null) r.entry().currentPath = r.newPath();
+                    } else {
+                        r.entry().status  = FileEntry.Status.ERROR;
+                        r.entry().message = r.msg();
+                    }
+                    tableModel.update(r.entry());
+                }
+            }
+            @Override protected void done() {
+                refreshStats();
+                setStatus(I18n.t("%d fichier(s) marqué(s) comme déjà taggué(s)", done)
+                        + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "") + ".");
             }
         }.execute();
     }

@@ -33,7 +33,7 @@ import java.util.logging.Logger;
  * Tables de traçabilité :
  *  - corrections(path, field, old, new, ts) — historique des corrections
  */
-public class MetadataCache {
+public class MetadataCache implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(MetadataCache.class.getName());
 
@@ -330,6 +330,9 @@ public class MetadataCache {
     public static final String SOURCE_ACOUSTID = "acoustid";
     public static final String SOURCE_MBID     = "mbid";
     public static final String SOURCE_TEXT     = "text";
+    /** Fichier marqué "déjà taggué" manuellement (MainFrame.markAsAlreadyTagged()) — pas identifié
+     *  par OpenTagger lui-même, juste tamponné à partir de ses tags déjà présents sur le disque. */
+    public static final String SOURCE_EXISTING = "existing";
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {

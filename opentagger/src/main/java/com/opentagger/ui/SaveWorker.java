@@ -55,7 +55,6 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     private final DeezerClient      deezer   = new DeezerClient();
     private final TagWriter         writer   = new TagWriter();
     private final FileRenamer       renamer  = new FileRenamer();
-    private final MetadataCache     cache    = new MetadataCache();
     private final MusicBrainzOAuth  mbOauth  = new MusicBrainzOAuth();
 
     private final AtomicInteger doneCount = new AtomicInteger();
@@ -100,7 +99,6 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         }
 
         WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
-        cache.close();
         return null;
     }
 
@@ -128,7 +126,19 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         }
 
         log(I18n.t("▶ SAVE %s", fichier.getName()));
-        try {
+        // Une MetadataCache PAR FICHIER plutôt qu'une instance partagée entre les threads du pool
+        // (comme avant ce correctif) : ses méthodes sont toutes synchronized sur l'instance elle-
+        // même (nécessaire pour protéger sa Connection JDBC unique, qui n'est pas thread-safe) —
+        // partagée entre 6 threads (batch.threads), ça sérialise tout le monde au moindre appel
+        // (getCachedImage, getLookup, saveTaggingHistory...) même pour des fichiers sans aucun
+        // rapport entre eux, réduisant l'enregistrement "parallèle" à peu de chose près à du
+        // séquentiel. Trouvé en direct 2026-07-29 via jstack (5 threads BLOCKED sur le même moniteur
+        // pendant qu'un 6e tenait le verrou). Chaque MetadataCache ouvre sa PROPRE connexion SQLite
+        // (déjà configurée WAL + busy_timeout=20000, voir son constructeur) — plusieurs connexions
+        // séparées vers le même fichier .db sont le cas d'usage normal de ce mode, avec un vrai
+        // parallélisme sur les lectures et une sérialisation fine (pas un verrou JVM grossier) sur
+        // les écritures.
+        try (MetadataCache cache = new MetadataCache()) {
             TagEnrichment.SaveResult res = TagEnrichment.saveEntry(
                     fichier, ti, caa, fanArt, deezer, writer, renamer, cache, mbOauth,
                     entry.scanRoot, maskIndex, msg -> log("  " + msg));

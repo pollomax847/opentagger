@@ -12,8 +12,12 @@ import java.util.Set;
  *  audio (M4A) ; l'inclure ici créerait une ambiguïté entre les deux pipelines. */
 public class VideoScanner {
 
+    // .mov/.wmv/.flv/.3gp ajoutés le 2026-07-29 (formats vidéo courants manquants — un .mov
+    // Apple/QuickTime, par exemple, n'était vu ni par AudioScanner ni par VideoScanner : invisible
+    // des deux côtés). .3gp n'entre pas en conflit avec le ".3gp" éventuel côté AudioScanner —
+    // AudioScanner ne gère pas cette extension (seulement mp4/m4a de la même famille mov/mp4/3gp).
     private static final Set<String> EXTENSIONS = Set.of(
-        ".webm", ".vob", ".mpg", ".mpeg", ".avi", ".mkv"
+        ".webm", ".vob", ".mpg", ".mpeg", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".3gp"
     );
 
     /** Sous-dossiers créés par {@code ui.VideoRecoveryWorker} pour les vidéos déjà traitées

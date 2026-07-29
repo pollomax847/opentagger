@@ -61,7 +61,6 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
-    private final MetadataCache     cache   = new MetadataCache();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
 
@@ -94,29 +93,29 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     protected Void doInBackground() throws Exception {
         int total = entries.size();
 
-        try {
-            int threads = Math.max(1, Config.get().num("batch.threads", 3));
-            pool = Executors.newFixedThreadPool(threads);
-            List<Future<?>> futures = new java.util.ArrayList<>();
+        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        pool = Executors.newFixedThreadPool(threads);
+        List<Future<?>> futures = new java.util.ArrayList<>();
 
-            for (int i = 0; i < entries.size(); i++) {
-                if (isCancelled()) break;
-                final FileEntry entry  = entries.get(i);
-                final int       fileIdx = i + 1;
-                futures.add(pool.submit(() ->
-                        processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient())));
-            }
+        for (int i = 0; i < entries.size(); i++) {
+            if (isCancelled()) break;
+            final FileEntry entry  = entries.get(i);
+            final int       fileIdx = i + 1;
+            // MetadataCache ajoutée aux instances fraîches par tâche le 2026-07-29 (même
+            // correctif que TaggingWorker/SaveWorker) : ses méthodes sont toutes synchronized sur
+            // l'instance (Connection JDBC unique, pas thread-safe) — la partager entre threads via
+            // un champ `cache` sérialisait tout le monde au moindre accès cache. Chaque tâche ouvre
+            // et ferme la sienne (try-with-resources).
+            futures.add(pool.submit(() -> {
+                try (MetadataCache taskCache = new MetadataCache()) {
+                    processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient(), taskCache);
+                }
+            }));
+        }
 
-            pool.shutdown();
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
-        } finally {
-            // Comme AlbumCompletionWorker/PodcastWorker : fermer dans un finally, pas seulement
-            // en fin de chemin nominal — une exception avant ce point (ex. dans la boucle de
-            // soumission) laissait sinon la connexion SQLite ouverte pour toute la durée de vie
-            // de l'objet.
-            cache.close();
+        pool.shutdown();
+        for (Future<?> f : futures) {
+            try { f.get(); } catch (Exception ignored) {}
         }
         return null;
     }
@@ -124,7 +123,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     /** Traite un fichier. Appelé en parallèle, une tâche par fichier, depuis le pool créé dans
      *  doInBackground(). */
     private void processOne(FileEntry entry, int fileIdx, int total,
-                             MusicBrainzClient mb, LastFmClient lastFm) {
+                             MusicBrainzClient mb, LastFmClient lastFm, MetadataCache cache) {
         if (isCancelled()) return;
 
         File fichier = entry.currentPath != null
@@ -143,7 +142,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         log(I18n.t("▶ COMPLÉTER %s", fichier.getName()));
 
         try {
-            completeEntry(entry, fichier, mb, lastFm);
+            completeEntry(entry, fichier, mb, lastFm, cache);
         } catch (Exception ex) {
             log(I18n.t("  ✗ erreur: %s", ex.getMessage()));
         }
@@ -152,7 +151,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         publish(entry);
     }
 
-    private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm) throws Exception {
+    private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm,
+                                MetadataCache cache) throws Exception {
         // Lire le TagInfo actuel depuis e.result ou depuis le fichier
         TagInfo ti = entry.result != null ? entry.result : readTagsFromFile(fichier);
         if (ti == null || (ti.artist.isBlank() && ti.title.isBlank())) {

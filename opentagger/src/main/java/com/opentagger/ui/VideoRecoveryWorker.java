@@ -53,7 +53,6 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final DeezerClient     deezer   = new DeezerClient();
     private final TagWriter        writer   = new TagWriter();
     private final FileRenamer      renamer  = new FileRenamer();
-    private final MetadataCache    cache    = new MetadataCache();
     private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
 
     private final AtomicInteger converted    = new AtomicInteger();
@@ -99,7 +98,6 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
         for (Future<?> f : futures) {
             try { f.get(); } catch (Exception ignored) {}
         }
-        cache.close();
         return null;
     }
 
@@ -139,8 +137,14 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
                 throw new IOException("Extraction audio impossible (format déjà mp3 ?)");
             }
 
-            TagEnrichment.SaveResult res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
-                    deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+            // MetadataCache PAR FICHIER, pas le champ partagé — même correctif que SaveWorker
+            // (2026-07-29) : ses méthodes sont toutes synchronized sur l'instance (Connection JDBC
+            // unique), la partager entre threads sérialisait tout le monde au moindre accès cache.
+            TagEnrichment.SaveResult res;
+            try (MetadataCache cache = new MetadataCache()) {
+                res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
+                        deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+            }
 
             Path movedTo = moveToSubfolder(video, VideoScanner.CONVERTED_FOLDER);
             converted.incrementAndGet();

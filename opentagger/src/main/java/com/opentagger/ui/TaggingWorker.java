@@ -156,10 +156,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     String.format("[%d/%d] %s — %s", fileIdx, total, fname, s));
                 step.accept(I18n.t("identification…"));
 
-                // Instances fraîches par tâche (voir le commentaire sur processEntry()) :
-                // jamais les champs partagés mb/acoustId/lastFm quand plusieurs fichiers
-                // tournent en même temps.
-                processEntry(entry, step, new MusicBrainzClient(), new AcoustIdClient(), new LastFmClient());
+                // Instances fraîches par tâche (voir le commentaire sur processEntry()) : jamais
+                // les champs partagés mb/acoustId/lastFm/cache quand plusieurs fichiers tournent en
+                // même temps. cache ajoutée à cette règle le 2026-07-29 : ses méthodes sont toutes
+                // synchronized sur l'instance (nécessaire pour sa Connection JDBC unique) — la
+                // partager entre threads (comme avant ce correctif, avec le champ `cache` de la
+                // classe) sérialisait tout le monde au moindre accès au cache, réduisant le
+                // parallélisme réel à peu de chose près à du séquentiel sur une grosse bibliothèque
+                // (trouvé en direct via jstack, plusieurs threads BLOCKED sur le même moniteur).
+                try (MetadataCache taskCache = new MetadataCache()) {
+                    processEntry(entry, step, new MusicBrainzClient(), new AcoustIdClient(), new LastFmClient(), taskCache);
+                }
 
                 // Si annulé pendant processEntry, remettre l'entrée en attente
                 if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
@@ -266,7 +273,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // champs dans toute cette méthode sans avoir à réécrire le moindre appel mb.xxx()/lastFm.xxx()
     // du corps existant.
     private void processEntry(FileEntry entry, Consumer<String> step,
-                               MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm) {
+                               MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm,
+                               MetadataCache cache) {
         try {
             File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
 
@@ -302,7 +310,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             log(I18n.t("▶ START  %s", fichier.getName()));
 
             log(I18n.t("  findTags..."));
-            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm);
+            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm, cache);
             entry.forceReidentify = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
             log(I18n.t("  findTags → %s résultat(s)%s", results.size(),
@@ -312,7 +320,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             if (results.isEmpty()) {
                 entry.status  = FileEntry.Status.SKIPPED;
-                entry.message = I18n.t("Non identifié");
+                entry.message = I18n.t("Non identifié") + videoHintIfAny(fichier);
                 log(I18n.t("  SKIPPED (non identifié)"));
                 return;
             }
@@ -329,7 +337,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (best.score < seuil) {
                 entry.candidates = results;
                 entry.status  = FileEntry.Status.SKIPPED;
-                entry.message = I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size());
+                entry.message = I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size())
+                        + videoHintIfAny(fichier);
                 log(I18n.t("  SKIPPED score trop bas"));
                 return;
             }
@@ -366,7 +375,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 entry.durationMismatch = true;
                 entry.message = I18n.t("Durée incohérente : fichier %s vs MusicBrainz %s (%s)",
                     FileTableModel.formatDuration(entry.current.durationSec),
-                    FileTableModel.formatDuration(best.mbDurationSec), best.title);
+                    FileTableModel.formatDuration(best.mbDurationSec), best.title)
+                        + videoHintIfAny(fichier);
                 log(I18n.t("  SKIPPED durée incohérente (%ds vs %ds)",
                     entry.current.durationSec, best.mbDurationSec));
                 return;
@@ -563,9 +573,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         } catch (Exception ex) {
             entry.status  = FileEntry.Status.ERROR;
-            entry.message = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+            entry.message = (ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName())
+                    + videoHintIfAny(f);
             log(I18n.t("  ✗ ERROR %s : %s", entry.filename(), entry.message));
         }
+    }
+
+    /** Indice "ceci est peut-être une vidéo" pour un ".mp4" en échec d'identification — voir
+     *  AudioFormatCheck.hasVideoStream() pour le pourquoi (AudioScanner/VideoScanner ne se parlent
+     *  pas sur ce cas ambigu). Chaîne vide (jamais null, pour la concaténation directe sur
+     *  entry.message) si l'extension n'est pas ".mp4" ou si aucun flux vidéo n'est détecté —
+     *  ffprobe n'est appelé QUE pour les ".mp4" déjà en échec, jamais sur le chemin normal.
+     */
+    private static String videoHintIfAny(File fichier) {
+        if (!fichier.getName().toLowerCase().endsWith(".mp4")) return "";
+        if (!com.opentagger.AudioFormatCheck.hasVideoStream(fichier)) return "";
+        return I18n.t(" — vidéo détectée : voir Outils → Récupérer l'audio des vidéos non reconnues");
     }
 
     private static void log(String msg) {
@@ -576,7 +600,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
     private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify,
-                                    MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm) throws Exception {
+                                    MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm,
+                                    MetadataCache cache) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
         if (TagWriter.repairM4aIfNeeded(fichier)) log(I18n.t("  M4A réparé OK"));
 

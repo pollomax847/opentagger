@@ -95,6 +95,39 @@ public final class AudioFormatCheck {
         return null;
     }
 
+    /**
+     * {@code true} si ce fichier contient un flux VIDÉO réel (pas juste audio) — spécifiquement
+     * pour lever l'ambiguïté ".mp4" qu'{@link #describeMismatch}/{@link #suggestCorrectExtension}
+     * documentent déjà comme non résoluble par le seul format_name (mov/mp4/m4a/3gp est la même
+     * famille de conteneur, que le contenu soit un morceau audio pur ou un vrai clip vidéo).
+     * AudioScanner traite tous les ".mp4" comme candidats audio, et VideoScanner (utilisé par
+     * ui.VideoRecoveryWorker) les exclut délibérément pour la même raison — un vrai .mp4 vidéo
+     * passe donc par le pipeline audio normal, y échoue (non identifié / durée incohérente), sans
+     * qu'aucun des deux systèmes ne signale à l'utilisateur qu'il s'agit en fait d'une vidéo.
+     * Opportuniste comme le reste de cette classe : jamais appelé sur le chemin normal, seulement
+     * après un échec déjà survenu (voir TaggingWorker, appelé uniquement pour les ".mp4" en échec).
+     */
+    public static boolean hasVideoStream(java.io.File f) {
+        try {
+            List<String> cmd = List.of(Config.get().str("audio.ffprobe_path", "ffprobe"),
+                    "-v", "quiet", "-select_streams", "v", "-show_entries", "stream=codec_type",
+                    "-of", "csv=p=0", f.getAbsolutePath());
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(false);
+            Process p = pb.start();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try (InputStream is = p.getInputStream()) { is.transferTo(out); } catch (Exception ignored) {}
+            });
+            boolean done = p.waitFor(10, TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); return false; }
+            try { drain.join(1000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            return !out.toString(StandardCharsets.UTF_8).strip().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static String detectRealFormat(java.io.File f) {
         try {
             List<String> cmd = List.of(Config.get().str("audio.ffprobe_path", "ffprobe"),
