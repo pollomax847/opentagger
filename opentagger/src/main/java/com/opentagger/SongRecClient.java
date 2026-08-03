@@ -8,6 +8,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 
 /**
  * Reconnaissance audio via SongRec (client Shazam open-source, sans clé API).
@@ -56,16 +57,67 @@ public class SongRecClient {
                 offsets = new int[]{0, (int)(duration / 4), (int)(duration / 2)};
             }
 
+            TagInfo first = null;
+            int firstOffset = -1;
             for (int offset : offsets) {
                 TagInfo result = recognizeAt(bin, audioFile, offset, duration);
-                if (result != null) { LAST_FAILURE_REASON.remove(); return result; }
+                if (result != null) { first = result; firstOffset = offset; break; }
             }
-            if (LAST_FAILURE_REASON.get() == null)
-                LAST_FAILURE_REASON.set("aucun résultat sur " + offsets.length + " segment(s) testé(s)");
-            return null;
+            if (first == null) {
+                if (LAST_FAILURE_REASON.get() == null)
+                    LAST_FAILURE_REASON.set("aucun résultat sur " + offsets.length + " segment(s) testé(s)");
+                return null;
+            }
+
+            // Deuxième vérification, sur un extrait DIFFÉRENT du même fichier — trouvée nécessaire
+            // en direct (2026-08-01) : un fichier nommé "Rasputin" (durée réelle 4:28, cohérente
+            // avec le vrai Rasputin de Boney M) a été identifié par SongRec comme "Some L.A.
+            // N****z" de Dr. Dre — une empreinte de 15 secondes suffit parfois à matcher le
+            // mauvais morceau (rythme/sample partagé), et ce faux positif n'avait aucune fiche
+            // MusicBrainz avec durée pour être rattrapé par isDurationMismatch. Un vrai morceau
+            // correctement reconnu se reconfirme presque toujours sur un second extrait pris
+            // ailleurs dans le fichier ; un faux positif isolé, beaucoup plus rarement. N'annule
+            // QUE si le second extrait pointe vers un AUTRE morceau (désaccord net) — un second
+            // extrait sans résultat (silence, parole, générique...) ne prouve rien et ne doit pas
+            // invalider une identification par ailleurs correcte.
+            int secondOffset = -1;
+            for (int o : offsets) if (o != firstOffset) { secondOffset = o; break; }
+            if (secondOffset < 0 && duration > 30) {
+                int mid = (int) (duration / 2);
+                if (Math.abs(mid - firstOffset) > 5) secondOffset = mid;
+            }
+            if (secondOffset >= 0) {
+                TagInfo second = recognizeAt(bin, audioFile, secondOffset, duration);
+                if (second != null && !sameTrack(first, second)) {
+                    LAST_FAILURE_REASON.set("confirmation contredite : \"" + first.artist + " - " + first.title
+                        + "\" (" + firstOffset + "s) vs \"" + second.artist + " - " + second.title
+                        + "\" (" + secondOffset + "s) — rejeté par prudence");
+                    return null;
+                }
+            }
+
+            LAST_FAILURE_REASON.remove();
+            return first;
         } finally {
             DiskIoThrottle.release(gate);
         }
+    }
+
+    /** Même morceau à la ponctuation/casse près, et en ignorant un qualificatif entre parenthèses
+     *  en fin de titre (Shazam renvoie parfois "(Explicit)"/"(Radio Edit)" de façon inconsistante
+     *  d'un extrait à l'autre du même vrai morceau — voir le même traitement dans TaggingWorker
+     *  pour le "titre nettoyé"). */
+    private static boolean sameTrack(TagInfo a, TagInfo b) {
+        return normalize(a.artist).equals(normalize(b.artist))
+            && normalizeTitle(a.title).equals(normalizeTitle(b.title));
+    }
+
+    private static String normalize(String s) {
+        return s == null ? "" : s.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String normalizeTitle(String s) {
+        return normalize(s).replaceAll("\\s*\\([^)]*\\)\\s*$", "");
     }
 
     private TagInfo recognizeAt(String bin, File audioFile, int offsetSec, double duration) throws Exception {

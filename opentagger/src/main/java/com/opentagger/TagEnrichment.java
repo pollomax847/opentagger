@@ -200,7 +200,8 @@ public final class TagEnrichment {
     /** Résultat de {@link #saveEntry}. {@code cover} : pochette réellement résolue (ou null si
      *  aucune trouvée) — les appelants qui construisent des suggestions à l'utilisateur (ex.
      *  "Pochette non trouvée") ne peuvent le savoir qu'ICI, pas pendant l'identification. */
-    public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError) {}
+    public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError,
+                              boolean durationMismatchMoved) {}
 
     /**
      * Étape "Enregistrer" partagée (façon Picard : le disque n'est touché qu'ici, jamais pendant
@@ -329,7 +330,32 @@ public final class TagEnrichment {
                 renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             }
         }
-        return new SaveResult(written, cover, finalPath, renameError);
+
+        // Filet de sécurité APRÈS coup, pas avant : TaggingWorker bloque déjà en SKIPPED tout
+        // candidat dont la durée ne correspond pas à MusicBrainz (voir FileEntry.isDurationMismatch)
+        // avant même de proposer un taguage automatique — mais un match MANUEL (MatchDialog) passe
+        // par ce même saveEntry() sans jamais avoir traversé cette porte, puisque l'utilisateur a
+        // délibérément choisi ce candidat. On ne bloque donc jamais ici (le fichier reste TAGGED,
+        // ses tags sont écrits normalement) : on se contente de le sortir de la bibliothèque
+        // organisée vers le dossier de vérification dédié, pour qu'un écart réel (mauvais rip,
+        // mauvaise édition) saute aux yeux sans jamais avoir empêché ou annulé un choix explicite.
+        // Sans copie de la durée réelle sur le TagInfo choisi (MatchDialog ne le fait pas,
+        // contrairement à TaggingWorker.processEntry() — voir son commentaire), written.durationSec
+        // reste à 0 pour un match manuel : isDurationMismatch() renvoie alors toujours false, donc
+        // ce filet n'agit jamais sur un choix humain explicite, uniquement sur les cas automatiques
+        // qui auraient tout de même échappé à la porte amont (ex. CLI, historique de cache).
+        boolean durationMismatchMoved = false;
+        if (Config.get().durationMismatchMoveEnabled()
+                && com.opentagger.model.FileEntry.isDurationMismatch(written.durationSec, written.mbDurationSec)) {
+            String folder = Config.get().durationMismatchMoveFolder();
+            if (!folder.isBlank()) {
+                try {
+                    Path moved = FileRenamer.moveToFolder(finalPath, java.nio.file.Paths.get(folder));
+                    if (moved != null) { finalPath = moved; durationMismatchMoved = true; }
+                } catch (Exception ignored) {}
+            }
+        }
+        return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved);
     }
 
     /**

@@ -131,6 +131,9 @@ public class MainFrame extends JFrame {
     private JButton btnUndo, btnRedo;
     private JCheckBoxMenuItem chkForceAcoustId;
     private JCheckBoxMenuItem chkAutoGroupCompilations;
+    private JCheckBoxMenuItem chkMoveSkippedMenu;
+    private JCheckBoxMenuItem chkMoveDurationMismatchMenu;
+    private JCheckBoxMenuItem chkUseLibraryRootMenu;
 
     // ── Barre de statut ───────────────────────────────────────────────────────
     private JLabel       lblStatus;
@@ -278,6 +281,15 @@ public class MainFrame extends JFrame {
         // défaut de FlatLaf, en désaccord avec les boutons "Ouvrir dossier"/"Tout tagger" etc.
         UIManager.put("Component.accentColor", ACCENT);
         UIManager.put("Component.focusColor",  new Color(0x4DB6AC, true));
+
+        // FlatLaf mappe par défaut la coche des JCheckBoxMenuItem sur "@buttonArrowColor" — la
+        // même teinte grise très discrète (à peine plus sombre que le texte) utilisée pour les
+        // petites flèches de ComboBox/Spinner/ScrollBar. Adaptée à une flèche décorative, illisible
+        // pour une coche censée dire "activé" au premier coup d'œil (signalé en direct : "impossible
+        // de savoir que c'est des cases à cocher"). Couleur d'accent déjà utilisée partout ailleurs
+        // dans l'appli pour "sélectionné/actif" — cohérent, et bien plus contrasté sur fond sombre.
+        UIManager.put("CheckBoxMenuItem.icon.checkmarkColor", ACCENT);
+        UIManager.put("CheckBoxMenuItem.icon.disabledCheckmarkColor", ACCENT.darker());
 
         // Angles arrondis uniformes (boutons, champs, combos, spinners) — FlatLaf par défaut est
         // presque à angle droit (arc=4), ce qui lit "utilitaire des années 2010" plutôt que
@@ -779,6 +791,30 @@ public class MainFrame extends JFrame {
      * une case à cocher oubliée cochée risquerait de redétruire l'identification de toute une
      * bibliothèque au prochain "Tout tagger" ; reste une action séparée avec sa confirmation).
      */
+    /**
+     * JCheckBoxMenuItem qui ne referme pas le menu déroulant au clic — Swing referme n'importe
+     * quel menu au clic sur n'importe quel item par défaut (MenuSelectionManager.clearSelectedPath()
+     * dans BasicMenuItemUI, avant même l'appel à doClick()), gênant pour cocher plusieurs réglages
+     * d'affilée (ex. le sous-menu "Déplacement" ci-dessous) sans devoir rouvrir le menu à chaque
+     * case. Technique standard : mémoriser le chemin de sélection pendant que l'item est armé, le
+     * ré-appliquer juste après le doClick() qui l'a fait fermer — usage volontairement limité au
+     * menu Tagger (voir buildMenuTagger()), pas une refonte globale des menus à cocher de l'appli.
+     */
+    private static class StayOpenCheckBoxMenuItem extends JCheckBoxMenuItem {
+        private static MenuElement[] path;
+        StayOpenCheckBoxMenuItem(String text) {
+            super(text);
+            getModel().addChangeListener(e -> {
+                if (getModel().isArmed() && isShowing())
+                    path = MenuSelectionManager.defaultManager().getSelectedPath();
+            });
+        }
+        @Override public void doClick(int pressTime) {
+            super.doClick(pressTime);
+            MenuSelectionManager.defaultManager().setSelectedPath(path);
+        }
+    }
+
     private JMenu buildMenuTagger() {
         JMenu m = new JMenu(I18n.t("Tagger"));
         m.setMnemonic('T');
@@ -786,7 +822,7 @@ public class MainFrame extends JFrame {
         m.add(mitem(I18n.t("Tagger la sélection"),     "F7",  e -> startTagging(true)));
         m.add(mitem(I18n.t("Enregistrer tout (cochés)"), "F8", e -> saveAll()));
         m.addSeparator();
-        chkForceAcoustId = new JCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
+        chkForceAcoustId = new StayOpenCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
         chkForceAcoustId.setSelected(Config.get().bool("tagging.force_acoustid_ui", false));
         chkForceAcoustId.addActionListener(e -> {
             Config.get().set("tagging.force_acoustid_ui", String.valueOf(chkForceAcoustId.isSelected()));
@@ -831,11 +867,36 @@ public class MainFrame extends JFrame {
         // cases ci-dessus) : les fichiers ne passent à TAGGED (recordingMbid fiable, condition de
         // CompilationClusterWorker) qu'à l'Enregistrement, jamais juste après l'identification
         // (façon Picard) — voir le hook sur saveWorker plus bas plutôt que onTaggingDone().
-        chkAutoGroupCompilations = new JCheckBoxMenuItem(I18n.t("Grouper par compilations automatiquement après l'enregistrement"));
+        chkAutoGroupCompilations = new StayOpenCheckBoxMenuItem(I18n.t("Grouper par compilations automatiquement après l'enregistrement"));
         chkAutoGroupCompilations.setSelected(Config.get().bool("tagging.auto_group_compilations", false));
         chkAutoGroupCompilations.addActionListener(e ->
                 Config.get().set("tagging.auto_group_compilations", String.valueOf(chkAutoGroupCompilations.isSelected())));
         m.add(chkAutoGroupCompilations);
+
+        // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
+        // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
+        // le dossier cible lui-même (chemin texte) reste configuré dans Préférences, un menu
+        // n'étant pas un bon endroit pour saisir un chemin de dossier.
+        JMenu moveMenu = new JMenu(I18n.t("Déplacement"));
+        chkUseLibraryRootMenu = new StayOpenCheckBoxMenuItem(I18n.t("Utiliser un dossier racine de bibliothèque dédié"));
+        chkUseLibraryRootMenu.setSelected(Config.get().useLibraryRootEnabled());
+        chkUseLibraryRootMenu.addActionListener(e ->
+                Config.get().set("rename.use_library_root", String.valueOf(chkUseLibraryRootMenu.isSelected())));
+        moveMenu.add(chkUseLibraryRootMenu);
+
+        chkMoveSkippedMenu = new StayOpenCheckBoxMenuItem(I18n.t("Déplacer les fichiers non tagués (ignorés/erreurs)"));
+        chkMoveSkippedMenu.setSelected(Config.get().skippedMoveEnabled());
+        chkMoveSkippedMenu.addActionListener(e ->
+                Config.get().set("skipped.move_enabled", String.valueOf(chkMoveSkippedMenu.isSelected())));
+        moveMenu.add(chkMoveSkippedMenu);
+
+        chkMoveDurationMismatchMenu = new StayOpenCheckBoxMenuItem(I18n.t("Déplacer les fichiers à durée incohérente"));
+        chkMoveDurationMismatchMenu.setSelected(Config.get().durationMismatchMoveEnabled());
+        chkMoveDurationMismatchMenu.addActionListener(e ->
+                Config.get().set("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatchMenu.isSelected())));
+        moveMenu.add(chkMoveDurationMismatchMenu);
+        m.add(moveMenu);
+
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> stopAll()));
         m.addSeparator();
@@ -2371,12 +2432,23 @@ public class MainFrame extends JFrame {
                     pending.add(new PendingWrite(e, mr, snap, ti));
                 }
                 setStatus(I18n.t("Sauvegarde de %d fichier(s)…", pending.size()));
+                // Erreurs accumulées (fichier + raison séparés, pas une seule chaîne concaténée)
+                // plutôt que remontées via showError() à chaque échec : un lot de N fichiers en
+                // échec (permissions, verrou...) ouvrait N popups modaux JOptionPane consécutifs,
+                // chacun bloquant jusqu'à fermeture manuelle — un seul résumé structuré en fin de
+                // lot (voir showBatchSaveErrors()) est bien plus lisible qu'un mur de popups ou
+                // qu'une seule ligne "fichier : erreur" par échec bout à bout.
+                record WriteError(String filename, String reason) {}
+                List<WriteError> errors = new ArrayList<>();
+                int total = pending.size();
                 new SwingWorker<Integer, PendingWrite>() {
                     @Override protected Integer doInBackground() {
                         int saved = 0;
                         for (PendingWrite w : pending) {
                             recordFieldCorrections(correctionsCache, w.entry(), w.snap(), w.ti());
-                            if (writeTagsSafe(w.entry(), w.ti())) { saved++; publish(w); }
+                            String err = writeTags(w.entry(), w.ti());
+                            if (err == null) { saved++; publish(w); }
+                            else errors.add(new WriteError(w.entry().filename(), err));
                         }
                         return saved;
                     }
@@ -2388,6 +2460,10 @@ public class MainFrame extends JFrame {
                         int saved = 0;
                         try { saved = get(); } catch (Exception ignored) {}
                         setStatus(I18n.t("Tags sauvegardés — %d fichier(s).", saved));
+                        if (!errors.isEmpty()) {
+                            showBatchSaveErrors(saved, total,
+                                    errors.stream().map(er -> new String[]{er.filename(), er.reason()}).toList());
+                        }
                     }
                 }.execute();
                 return; // le finally ci-dessous fermerait correctionsCache avant la fin du worker
@@ -2484,13 +2560,21 @@ public class MainFrame extends JFrame {
     }
 
     private boolean writeTagsSafe(FileEntry e, TagInfo ti) {
+        String err = writeTags(e, ti);
+        if (err != null) { showError(I18n.t("Erreur écriture %s : %s", e.filename(), err)); return false; }
+        return true;
+    }
+
+    /** Comme {@link #writeTagsSafe} mais sans popup — retourne le message d'erreur (ou null si
+     *  succès) pour que l'appelant décide comment le restituer (voir applyDetail(), édition en
+     *  lot : les erreurs sont accumulées et résumées en un seul popup plutôt qu'un par fichier). */
+    private String writeTags(FileEntry e, TagInfo ti) {
         try {
             File target = e.currentPath != null ? e.currentPath.toFile() : e.file;
             new com.opentagger.TagWriter().write(target, ti);
-            return true;
+            return null;
         } catch (Exception ex) {
-            showError(I18n.t("Erreur écriture %s : %s", e.filename(), ex.getMessage()));
-            return false;
+            return ex.getMessage();
         }
     }
 
@@ -3344,6 +3428,7 @@ public class MainFrame extends JFrame {
             return;
         }
         List<FileEntry> toTag = new ArrayList<>();
+        int alreadyTaggedSkipped = 0;
         if (selOnly) {
             for (int r : table.getSelectedRows())
                 toTag.add(tableModel.get(table.convertRowIndexToModel(r)));
@@ -3361,9 +3446,9 @@ public class MainFrame extends JFrame {
                 // transitoires et donc légitimement retentés par "Tout tagger", un fichier à 0 octet
                 // reste à 0 octet tant que personne ne remplace son contenu — le retenter en boucle ne
                 // ferait que regaspiller des requêtes MB pour rien à chaque campagne de taguage.
-                if (e.selected && e.status != FileEntry.Status.TAGGED
-                        && e.status != FileEntry.Status.IDENTIFIED
-                        && e.file.length() > 0) toTag.add(e);
+                if (!e.selected) continue;
+                if (e.status == FileEntry.Status.TAGGED) { alreadyTaggedSkipped++; continue; }
+                if (e.status != FileEntry.Status.IDENTIFIED && e.file.length() > 0) toTag.add(e);
             }
         }
         if (toTag.isEmpty()) {
@@ -3374,6 +3459,15 @@ public class MainFrame extends JFrame {
                 setStatus(I18n.t("Aucun fichier à taguer (tous déjà tagués — utilisez « Forcer le re-taguage » pour les re-traiter)."));
             }
             return;
+        }
+        // Lot mixte : contrairement au cas ci-dessus (100 % déjà tagués), l'exclusion silencieuse
+        // des fichiers déjà TAGGED passait inaperçue ici — journalisée pour rester visible même
+        // quand le run démarre normalement sur le reste du lot (ex. pour ré-appliquer un script
+        // tagger sur une bibliothèque déjà taguée, voir TaggerScript).
+        if (alreadyTaggedSkipped > 0) {
+            appendLogLine(I18n.t(
+                "%d fichier(s) déjà tagué(s) ignoré(s) dans ce lot — utilisez « Forcer le re-taguage » pour les re-traiter.",
+                alreadyTaggedSkipped), FileEntry.Status.SKIPPED, null);
         }
 
         btnTagAll.setEnabled(false);
@@ -3424,22 +3518,33 @@ public class MainFrame extends JFrame {
     }
 
     /**
-     * Revérifie périodiquement (tant qu'un scan tourne encore) s'il y a de nouveaux fichiers à
-     * taguer, et relance automatiquement "Tout tagger" dessus — voir le commentaire d'appel dans
-     * startTagging(). S'arrête de lui-même dès que plus aucun scan n'est actif (activeScanWorkers
-     * vide) ; ne fait rien si un taguage est déjà en cours par un autre biais (ex. reclic manuel
-     * pendant l'intervalle d'attente) pour ne jamais en superposer deux.
+     * Revérifie périodiquement s'il y a de nouveaux fichiers PENDING à taguer, et relance
+     * automatiquement "Tout tagger" dessus — voir le commentaire d'appel dans startTagging().
+     *
+     * AVANT ce correctif : la boucle s'arrêtait dès que plus aucun scan n'était actif
+     * (activeScanWorkers vide), MÊME s'il restait des fichiers PENDING jamais tentés à cet instant
+     * précis — trouvé en direct (2026-08-01) : ~4600 fichiers restaient indéfiniment "En attente"
+     * après la fin d'un scan, jamais repris automatiquement, tant que l'utilisateur ne recliquait
+     * pas lui-même sur "Tout tagger". Le scan et le taguage ne se terminent pas forcément au même
+     * instant — un scan fini ne veut pas dire "plus rien à taguer".
+     *
+     * Ne considère QUE le statut PENDING (pas SKIPPED/ERROR) pour décider de relancer
+     * automatiquement — contrairement au filtre de startTagging() (qui, lui, retente aussi
+     * SKIPPED/ERROR une fois qu'on tague réellement) : reproposer indéfiniment en boucle des
+     * fichiers déjà SKIPPED/ERROR tant qu'un scan tourne encore gaspillerait des requêtes MB/
+     * AcoustID sans fin pour des fichiers qui ne passeront pas plus la deuxième fois. Seuls un
+     * nouveau scan (qui ramène du PENDING) ou un reclic manuel ("Forcer le re-taguage") les
+     * représentent.
      */
     private void scheduleAutoTaggingFollowUp() {
         javax.swing.Timer t = new javax.swing.Timer(5000, null);
         t.addActionListener(e -> {
             t.stop();
-            if (activeScanWorkers.isEmpty()) return;
             if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) return;
-            boolean hasWork = tableModel.allEntries().stream().anyMatch(fe ->
-                    fe.selected && fe.status != FileEntry.Status.TAGGED && fe.status != FileEntry.Status.IDENTIFIED);
-            if (hasWork) startTagging(false);
-            else scheduleAutoTaggingFollowUp(); // rien de neuf pour l'instant — on réessaiera
+            boolean hasPending = tableModel.allEntries().stream().anyMatch(fe ->
+                    fe.selected && fe.status == FileEntry.Status.PENDING);
+            if (hasPending) { startTagging(false); return; }
+            if (!activeScanWorkers.isEmpty()) scheduleAutoTaggingFollowUp(); // rien de neuf pour l'instant — on réessaiera
         });
         t.setRepeats(false);
         t.start();
@@ -3625,26 +3730,31 @@ public class MainFrame extends JFrame {
     }
 
     /**
-     * Hook optionnel (Config.postTagCommand(), réglages → Démarrage) exécuté une fois à la fin
-     * d'un "Enregistrer tout" — pas par fichier, une bibliothèque de 100k+ fichiers rendrait un
-     * hook par fichier ingérable. Comparaison avec OneTagger (docs/files/) : équivalent de son
-     * "postCommand", en version fin-de-run plutôt que par-piste pour cette raison de volumétrie.
-     * Fire-and-forget (comme le "Ouvrir le dossier" du menu contextuel juste au-dessus) : on ne
-     * bloque pas l'EDT à attendre une commande arbitraire qui peut très bien ne jamais terminer
-     * (ex. déclencher un scan Plex en tâche de fond).
+     * Hook(s) optionnel(s) (PostTagCommands, réglages → Script) exécutés une fois, dans l'ordre,
+     * à la fin d'un "Enregistrer tout" — pas par fichier, une bibliothèque de 100k+ fichiers
+     * rendrait un hook par fichier ingérable. Comparaison avec OneTagger (docs/files/) :
+     * équivalent de son "postCommand", en version fin-de-run plutôt que par-piste pour cette
+     * raison de volumétrie, étendu en liste pour en enchaîner plusieurs (ex. scan Plex puis
+     * rebalance mergerfs). Fire-and-forget par commande (comme le "Ouvrir le dossier" du menu
+     * contextuel juste au-dessus) : on ne bloque pas l'EDT à attendre une commande arbitraire qui
+     * peut très bien ne jamais terminer.
      */
     private void runPostTagCommand() {
-        String cmd = Config.get().postTagCommand();
-        if (cmd.isBlank()) return;
-        try {
-            new ProcessBuilder("sh", "-c", cmd)
-                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start();
-            setStatus(I18n.t("Commande post-taguage lancée."));
-        } catch (Exception ex) {
-            setStatus(I18n.t("Commande post-taguage : échec du lancement — %s", ex.getMessage()));
+        java.util.List<String> cmds = com.opentagger.PostTagCommands.load();
+        int launched = 0;
+        for (String cmd : cmds) {
+            if (cmd == null || cmd.isBlank()) continue;
+            try {
+                new ProcessBuilder("sh", "-c", cmd)
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .redirectError(ProcessBuilder.Redirect.DISCARD)
+                        .start();
+                launched++;
+            } catch (Exception ex) {
+                setStatus(I18n.t("Commande post-taguage : échec du lancement — %s", ex.getMessage()));
+            }
         }
+        if (launched > 0) setStatus(I18n.t("%d commande(s) post-taguage lancée(s).", launched));
     }
 
     /**
@@ -4291,7 +4401,15 @@ public class MainFrame extends JFrame {
             int[] done = {0};
             com.opentagger.MetadataCache cache = new com.opentagger.MetadataCache();
 
-            SwingWorker<String, FileEntry> worker = new SwingWorker<>() {
+            // Publié : FileEntry + description de l'issue (pour le Journal) — ce pipeline n'écrivait
+            // JUSQU'ICI aucune trace persistante (ni console ni Journal), contrairement à
+            // Enregistrer/Transcoder/Compilations déjà corrigés aujourd'hui pour la même raison :
+            // aucun moyen de vérifier après coup ce qui a réellement été renommé/sauté/échoué sur
+            // un lot de plusieurs dizaines de milliers de fichiers. Trouvé en direct 2026-07-29
+            // ("ne renomme pas les audios, vérifie les logs" — rien à vérifier, le trou était là).
+            record RenameLog(FileEntry entry, String text, FileEntry.Status status) {}
+
+            SwingWorker<String, RenameLog> worker = new SwingWorker<>() {
                 int renamed = 0, skipped = 0, errors = 0;
 
                 @Override
@@ -4311,6 +4429,7 @@ public class MainFrame extends JFrame {
                         Path oldPath = e.currentPath;
                         Path root = destRoot != null ? destRoot
                                   : (e.scanRoot != null ? e.scanRoot : oldPath.getParent());
+                        String oldName = e.filename();
                         try {
                             Path newPath = renamer.rename(e.currentPath, e.activeTags(), maskIndex, root);
                             if (newPath != null) {
@@ -4339,31 +4458,43 @@ public class MainFrame extends JFrame {
                                     cache.deleteFileHistory(oldAbs);
                                     cache.recordFileTagging(newPath.toFile().getAbsolutePath(), mbid);
                                 }
+                                publish(new RenameLog(e, "✓ " + I18n.t("Renommé") + " : " + oldName
+                                        + " → " + newPath.getFileName(), FileEntry.Status.TAGGED));
                             } else {
                                 skipped++;
+                                publish(new RenameLog(e, "⚠ " + I18n.t("Déjà au bon nom") + " : " + oldName,
+                                        FileEntry.Status.SKIPPED));
                             }
                         } catch (Exception ex) {
                             errors++;
                             String msg = I18n.t("Renommage : %s", ex.getMessage() != null ? ex.getMessage() : I18n.t("erreur"));
                             SwingUtilities.invokeLater(() -> e.message = msg);
+                            publish(new RenameLog(e, "✗ " + I18n.t("Erreur") + " : " + oldName + " — " + msg,
+                                    FileEntry.Status.ERROR));
                         }
-                        publish(e);
                     }
                     return I18n.t("Renommage — ✓ %d  déjà OK %d  ✗ %d erreur(s)",
                         renamed, skipped, errors);
                 }
 
                 @Override
-                protected void process(List<FileEntry> chunks) {
+                protected void process(List<RenameLog> chunks) {
                     done[0] += chunks.size();
-                    for (FileEntry e : chunks) tableModel.update(e);
+                    for (RenameLog r : chunks) {
+                        tableModel.update(r.entry());
+                        appendLogLine(r.text(), r.status(), r.entry());
+                    }
                     onProgress.accept(done[0]);
                 }
 
                 @Override
                 protected void done() {
                     cache.close();
-                    try { setStatus(get()); } catch (Exception ignore) {}
+                    try {
+                        String summary = get();
+                        setStatus(summary);
+                        appendLogLine(summary, FileEntry.Status.TAGGED, null);
+                    } catch (Exception ignore) {}
                     onDone.run();
                 }
             };
@@ -4665,6 +4796,12 @@ public class MainFrame extends JFrame {
                 updateMaskLabel();
             }
         }
+        // Resynchronise les cases du menu Tagger → Déplacement avec Préférences (même Config
+        // sous-jacent des deux côtés, voir buildMenuTagger()) — sans ça, changer la case ici
+        // n'aurait affiché l'état à jour qu'au redémarrage de l'appli.
+        if (chkUseLibraryRootMenu != null) chkUseLibraryRootMenu.setSelected(Config.get().useLibraryRootEnabled());
+        if (chkMoveSkippedMenu != null) chkMoveSkippedMenu.setSelected(Config.get().skippedMoveEnabled());
+        if (chkMoveDurationMismatchMenu != null) chkMoveDurationMismatchMenu.setSelected(Config.get().durationMismatchMoveEnabled());
     }
 
     private void updateMaskLabel() {
@@ -5454,6 +5591,39 @@ public class MainFrame extends JFrame {
             return;
         }
         JOptionPane.showMessageDialog(this, msg, I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+    }
+
+    /** Résumé structuré des échecs d'une édition en lot (voir applyDetail()) — une seule ligne
+     *  "fichier : message" bout à bout par showError() devenait illisible dès que le message
+     *  d'exception était long ou qu'il y avait plusieurs fichiers : impossible de voir d'un coup
+     *  d'œil où finit le nom de fichier et où commence la raison. Ici chaque entrée occupe sa
+     *  propre ligne visuelle (nom, puis raison en retrait sur la ligne suivante), dans une zone
+     *  défilante bornée en taille pour qu'un gros lot n'ouvre pas un popup plus grand que l'écran. */
+    private void showBatchSaveErrors(int saved, int total, List<String[]> errors) {
+        JLabel header = new JLabel(I18n.t(
+                "<html><b>%d / %d fichier(s) sauvegardés</b> — %d en erreur :</html>",
+                saved, total, errors.size()));
+        header.setBorder(BorderFactory.createEmptyBorder(0, 0, 8, 0));
+
+        StringBuilder sb = new StringBuilder();
+        for (String[] err : errors) {
+            sb.append("▸ ").append(err[0]).append('\n')
+              .append("    → ").append(err[1]).append("\n\n");
+        }
+        JTextArea area = new JTextArea(sb.toString().stripTrailing());
+        area.setEditable(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        area.setCaretPosition(0);
+        JScrollPane scroll = new JScrollPane(area);
+        scroll.setPreferredSize(new Dimension(560, Math.min(320, 40 + errors.size() * 45)));
+
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.add(header, BorderLayout.NORTH);
+        panel.add(scroll, BorderLayout.CENTER);
+
+        JOptionPane.showMessageDialog(this, panel, I18n.t("Erreurs de sauvegarde"), JOptionPane.ERROR_MESSAGE);
     }
 
     private static final java.util.prefs.Preferences PREFS =

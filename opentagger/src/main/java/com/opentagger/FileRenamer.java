@@ -164,6 +164,17 @@ public class FileRenamer {
                 int n = 2;
                 do {
                     cible = rootDir.resolve(chemin + " (" + n++ + ")" + ext).normalize();
+                    // Le candidat de collision retombe sur le fichier LUI-MÊME (cas fréquent : deux
+                    // copies identiques déjà présentes, l'une déjà au nom canonique, l'autre déjà
+                    // au premier suffixe "(2)" — exactement le nom que cette boucle vient de
+                    // proposer) — trouvé en direct 2026-08-01 : sans ce contrôle, la boucle ne
+                    // remarque jamais qu'elle vient de reproduire le nom actuel du fichier, continue
+                    // au suffixe suivant, et "renomme" (2) en (3) — un déplacement réel sur le
+                    // disque qui ne corrige rien, incrémente d'un cran de plus à chaque nouvelle
+                    // passe, et gonflait le total annoncé par RenamePreviewDialog sans réorganiser
+                    // quoi que ce soit. Déjà à la meilleure place possible compte tenu de la
+                    // collision : rien à faire, même verdict que le cas canonique de la ligne 157.
+                    if (cible.equals(fichier)) return null;
                     if (cible.getParent() != null) Files.createDirectories(cible.getParent());
                 } while (Files.exists(cible) && n < 100);
                 if (Files.exists(cible))
@@ -183,6 +194,34 @@ public class FileRenamer {
     /** Prévisualise le résultat d'un masque sans déplacer le fichier. */
     public String preview(TagInfo info, int maskIndex, String extension) {
         return evaluate(maskIndex, info) + extension;
+    }
+
+    /** Simule la résolution de collision de {@link #rename} SANS toucher au disque — même logique
+     *  de suffixe (2), (3)… et même détection "retombe sur le fichier lui-même" (voir son
+     *  commentaire), pour que {@code RenamePreviewDialog.compute()} annonce un total fidèle à ce
+     *  que rename() fera réellement une fois appliqué (avant ce correctif, l'aperçu comparait
+     *  seulement le nom canonique brut et annonçait "sera renommé" pour des doublons qui, en
+     *  réalité, ne bougent pas — ou pire, avant le correctif de rename() lui-même, se faisaient
+     *  incrémenter en boucle sans jamais se ranger). Pas de verrou (lockFor) ici — une simulation
+     *  en lecture seule n'a pas besoin de la garantie anti-course de rename(), et peut légitimement
+     *  être périmée d'ici l'Appliquer si d'autres fichiers bougent entre-temps, exactement comme
+     *  n'importe quel aperçu. {@code cheminSansExt} : le nom déjà évalué par {@link #preview}
+     *  MOINS l'extension — pas ré-évalué ici pour ne pas payer deux fois le coût du moteur
+     *  Nashorn (synchronized) sur un aperçu de plusieurs milliers de fichiers.
+     *  @return null si rien à faire (déjà au bon nom, ou variante de collision déjà occupée par ce
+     *          fichier lui-même) — même contrat que rename(). */
+    public static Path previewTarget(Path fichier, Path rootDir, String cheminSansExt, String ext) {
+        Path cible = rootDir.resolve(cheminSansExt + ext).normalize();
+        if (cible.equals(fichier)) return null;
+        if (Files.exists(cible)) {
+            int n = 2;
+            do {
+                cible = rootDir.resolve(cheminSansExt + " (" + n++ + ")" + ext).normalize();
+                if (cible.equals(fichier)) return null;
+            } while (Files.exists(cible) && n < 100);
+            if (Files.exists(cible)) return null; // 98 collisions — rename() lèvera la vraie erreur si on applique quand même
+        }
+        return cible;
     }
 
     // ── Évaluation JavaScript (Nashorn) ───────────────────────────────────────
@@ -342,6 +381,15 @@ public class FileRenamer {
                 int n = 2;
                 do {
                     cible = targetFolder.resolve(stem + " (" + n++ + ")" + ext).normalize();
+                    // Même bug que celui corrigé dans rename() le 2026-08-01 (voir son commentaire
+                    // ligne ~167) : moveToFolder() partage exactement la même boucle de résolution
+                    // de collision, et sert au même genre de ré-exécution répétée — un fichier déjà
+                    // en quarantaine (SKIPPED/ERROR, ou déplacement durée incohérente) qui se
+                    // retrouve rescanné retombe ici avec fichier == sa propre cible candidate ; sans
+                    // ce contrôle, Files.exists(cible) reste vrai (c'est le fichier lui-même), la
+                    // boucle continue au suffixe suivant et "déplace" (2) en (3) à chaque nouveau
+                    // passage, sans jamais rien corriger.
+                    if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
                 } while (Files.exists(cible) && n < 100);
                 if (Files.exists(cible))
                     throw new IOException("Impossible de déplacer '" + nom

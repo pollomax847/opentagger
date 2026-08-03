@@ -41,10 +41,33 @@ public class FileEntry {
     public boolean forceReidentify = false;
 
     /** SKIPPED spécifiquement parce que la durée du fichier ne correspond pas à celle déclarée par
-     *  MusicBrainz pour l'enregistrement identifié (voir TaggingWorker.isDurationMismatch()) — pas
+     *  MusicBrainz pour l'enregistrement identifié (voir {@link #isDurationMismatch}) — pas
      *  une simple non-identification. Distingue ce cas pour le déplacement optionnel dédié (voir
      *  Config.durationMismatchMoveEnabled()), séparé du déplacement générique SKIPPED/ERROR. */
     public boolean durationMismatch = false;
+
+    /** Écart significatif entre durée réelle du fichier et durée MusicBrainz de l'enregistrement
+     *  identifié — seuil 20s ET 20% relatif pour ne pas confondre avec un simple radio edit/
+     *  remaster (quelques secondes d'écart légitimes). 0 = non renseigné (MB ou fichier), jamais
+     *  considéré comme un écart. Seule source de vérité pour ce calcul — utilisé à la fois avant
+     *  taguage (TaggingWorker, bloque en SKIPPED) et après (TagEnrichment.saveEntry(), déplace pour
+     *  vérification sans bloquer, seul filet de sécurité pour les chemins qui contournent le
+     *  premier — matching manuel via MatchDialog excepté : durationSec y reste à 0 par absence de
+     *  copie depuis entry.current, donc jamais faussement signalé pour un choix humain explicite).
+     *  ATTENTION : fileSec<=0 seul ne doit JAMAIS être traité comme "forcément vide/corrompu" ici —
+     *  tenté une fois (2026-07-18), reverté en urgence : entry.current.durationSec peut encore
+     *  valoir 0 simplement parce que la phase 2 du scan (lecture des tags, voir MainFrame.
+     *  readTags()) n'est pas encore passée sur ce fichier au moment où le taguage (qui peut
+     *  démarrer avant la fin du scan) l'examine — pas parce que le fichier est réellement vide.
+     *  Constaté en direct : des centaines de faux positifs sur des fichiers dont la Durée
+     *  s'affichait correctement (4:19, 5:07...) une fois le scan rattrapé. La vraie détection des
+     *  fichiers 0 octet reste le scan lui-même (voir MainFrame.readTags()/AudioDuration fallback),
+     *  pas cette comparaison. */
+    public static boolean isDurationMismatch(int fileSec, int mbSec) {
+        if (fileSec <= 0 || mbSec <= 0) return false;
+        int diff = Math.abs(fileSec - mbSec);
+        return diff > 20 && diff > mbSec * 0.20;
+    }
 
     /**
      * Racine du dossier scanné — le renommage par masque est relatif à cette racine.

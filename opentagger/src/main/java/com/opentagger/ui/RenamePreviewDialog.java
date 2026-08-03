@@ -217,16 +217,25 @@ public class RenamePreviewDialog extends JDialog {
 
             try {
                 String newName = renamer.preview(e.activeTags(), maskIndex, ext);
-                Path newPath   = root.resolve(newName).normalize();
                 if (newName.isBlank()) {
                     result.add(new PreviewRow(e, current.toString(), "—", "—",
                         RowState.ERROR, I18n.t("Masque vide — tags incomplets ?")));
-                } else if (newPath.equals(current)) {
-                    result.add(new PreviewRow(e, current.toString(), curName,
-                        current.toString(), RowState.ALREADY_OK, ""));
                 } else {
-                    result.add(new PreviewRow(e, current.toString(), newName,
-                        newPath.toString(), RowState.WILL_RENAME, ""));
+                    // Simulation de la même résolution de collision que rename() (voir
+                    // FileRenamer.previewTarget()) — sans ça, un doublon déjà présent (une copie
+                    // au nom canonique, l'autre "(2)") s'annonçait "sera renommé" ici alors qu'en
+                    // réalité rename() ne fait rien pour lui (déjà à la meilleure place possible
+                    // compte tenu de la collision) : le total annoncé ne correspondait pas à ce qui
+                    // se passait vraiment une fois "Appliquer" cliqué — trouvé en direct 2026-08-01.
+                    String cheminSansExt = newName.substring(0, newName.length() - ext.length());
+                    Path resolved = FileRenamer.previewTarget(current, root, cheminSansExt, ext);
+                    if (resolved == null) {
+                        result.add(new PreviewRow(e, current.toString(), curName,
+                            current.toString(), RowState.ALREADY_OK, ""));
+                    } else {
+                        result.add(new PreviewRow(e, current.toString(), resolved.getFileName().toString(),
+                            resolved.toString(), RowState.WILL_RENAME, ""));
+                    }
                 }
             } catch (Exception ex) {
                 result.add(new PreviewRow(e, curName, "—", "—",

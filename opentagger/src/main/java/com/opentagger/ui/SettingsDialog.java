@@ -5,6 +5,7 @@ import com.opentagger.FileRenamer;
 import com.opentagger.FpcalcInstaller;
 import com.opentagger.I18n;
 import com.opentagger.MusicBrainzOAuth;
+import com.opentagger.PostTagCommands;
 import com.opentagger.TaggerScript;
 
 import javax.swing.*;
@@ -53,6 +54,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkAutoRename;
     private JCheckBox  chkDeleteEmptyDirs;
     private JCheckBox  chkFollowLog;
+    private JCheckBox  chkUseLibraryRoot;
     private JTextField tfLibraryRoot;
     private JTextField tfPodcastLibraryRoot;
     private JCheckBox  chkMoveSkipped;
@@ -122,6 +124,10 @@ public class SettingsDialog extends JDialog {
     private DefaultListModel<String> lstScriptsModel = new DefaultListModel<>();
     private JList<String>            lstScripts;
     private int                      currentScriptIndex = -1;
+    private JCheckBox                chkScriptsEnabled;
+    private java.util.List<String> postTagCommands = new java.util.ArrayList<>();
+    private DefaultListModel<String> lstPostTagCommandsModel = new DefaultListModel<>();
+    private JList<String>            lstPostTagCommands;
 
     // ── Onglet Barre d'outils — actions secondaires personnalisables ────────────────
     @SuppressWarnings("unchecked")
@@ -133,7 +139,6 @@ public class SettingsDialog extends JDialog {
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JCheckBox  chkReplayGainEnabled;
     private JCheckBox  chkCamelotKey;
-    private JTextField tfPostTagCommand;
 
     // ── Onglet Transcodage ────────────────────────────────────────────────────
     private JCheckBox               chkTranscodeAuto;
@@ -246,6 +251,12 @@ public class SettingsDialog extends JDialog {
     // ── Recherche de réglages (10 onglets / ~75 réglages — pas de refonte, juste
     //    un accès direct à un champ sans devoir deviner son onglet) ────────────
     private JTabbedPane tabs;
+    // Statique (survit à une nouvelle instance de SettingsDialog, pas à un redémarrage de
+    // l'appli) : sans ça, rouvrir Préférences retombait systématiquement sur le premier onglet
+    // ("Démarrage") même en venant de fermer sur "Script" ou "Renommage" l'instant d'avant —
+    // signalé en direct comme gênant pour itérer sur un même onglet (OK/Annuler/simple
+    // réouverture, peu importe comment on a quitté le dialogue précédemment).
+    private static int lastTabIndex = 0;
     private JTextField  tfSettingsSearch;
     private final java.util.List<SearchTarget> searchIndex = new java.util.ArrayList<>();
     private record SearchTarget(int tabIndex, String text, JComponent component) {}
@@ -275,6 +286,8 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
         tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
         buildSearchIndex();
+        if (lastTabIndex >= 0 && lastTabIndex < tabs.getTabCount()) tabs.setSelectedIndex(lastTabIndex);
+        tabs.addChangeListener(e -> lastTabIndex = tabs.getSelectedIndex());
 
         JButton btnOk     = new JButton(I18n.t("OK"));
         JButton btnCancel = new JButton(I18n.t("Annuler"));
@@ -410,25 +423,15 @@ public class SettingsDialog extends JDialog {
                 BorderFactory.createEtchedBorder(), I18n.t("Fermeture de la fenêtre")));
         closePanel.add(chkCloseMinimizes);
 
-        tfPostTagCommand = tf();
-        JPanel postTagPanel = new JPanel(new BorderLayout(6, 4));
-        postTagPanel.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), I18n.t("Commande après un run de taguage")));
-        postTagPanel.add(tfPostTagCommand, BorderLayout.CENTER);
-        JLabel postTagHint = new JLabel(I18n.t(
-            "<html><i>Exécutée une seule fois à la fin d'un \"Tout tagger\"/\"Enregistrer tout\" "
-            + "(pas par fichier) — ex : déclencher un scan Plex, un rebalance mergerfs. "
-            + "Vide = désactivé.</i></html>"));
-        postTagHint.setBorder(new EmptyBorder(4, 0, 0, 0));
-        postTagHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
-        postTagPanel.add(postTagHint, BorderLayout.SOUTH);
+        // La commande après taguage vit désormais dans l'onglet Script (voir buildScriptPanel()),
+        // avec les scripts JS — un seul endroit pour "ce qui s'exécute après le taguage", et
+        // extension en liste de plusieurs commandes (PostTagCommands) au passage.
 
         JPanel topPanels = new JPanel();
         topPanels.setLayout(new BoxLayout(topPanels, BoxLayout.Y_AXIS));
         topPanels.add(langPanel);
         topPanels.add(updatePanel);
         topPanels.add(closePanel);
-        topPanels.add(postTagPanel);
 
         JPanel outer = new JPanel(new BorderLayout());
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
@@ -1133,6 +1136,7 @@ public class SettingsDialog extends JDialog {
         updatePreview.run();
 
         // ── Dossier racine de la bibliothèque ──────────────────────────────────
+        chkUseLibraryRoot = new JCheckBox(I18n.t("Utiliser un dossier racine de bibliothèque dédié"));
         tfLibraryRoot = tf();
         tfLibraryRoot.setToolTipText(I18n.t("Dossier racine où tous les fichiers seront déplacés/organisés. Laisser vide = utiliser le dossier scanné."));
         JButton btnBrowseRoot = new JButton("…");
@@ -1224,16 +1228,39 @@ public class SettingsDialog extends JDialog {
         skipSongRecScorePanel.add(new JLabel("%"));
 
         JPanel p = form(
-            new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
+            new String[]{"", "Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
                     "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
-            new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
+            new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
                     chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
                     chkVideoAutoRecover, chkSkipSongRecOnConfidentMb, skipSongRecScorePanel},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
         p.add(previewScroll, BorderLayout.CENTER);
+
+        // Case à cocher qui grise/dégrise son champ dossier associé — pattern Picard
+        // move_files → move_files_to (confirmé dans Picard.ini) : décoché = champ + bouton
+        // parcourir désactivés, mais la valeur reste affichée (pas effacée) pour ne rien perdre
+        // si l'utilisateur recoche ensuite.
+        bindGate(chkUseLibraryRoot,      rootPanel);
+        bindGate(chkMoveSkipped,         skippedFolderPanel);
+        bindGate(chkMoveDurationMismatch, durationMismatchFolderPanel);
         return p;
+    }
+
+    /** Active/désactive récursivement {@code fields} (et leurs enfants directs, pour les JPanel
+     *  contenant un JTextField + bouton "…") selon l'état de {@code chk} — appelé une fois à la
+     *  construction et une fois dans loadSettings() pour l'état initial. Voir buildRenamePanel(). */
+    private void bindGate(JCheckBox chk, JComponent... fields) {
+        Runnable apply = () -> {
+            boolean on = chk.isSelected();
+            for (JComponent f : fields) {
+                f.setEnabled(on);
+                for (Component child : f.getComponents()) child.setEnabled(on);
+            }
+        };
+        chk.addItemListener(e -> apply.run());
+        apply.run();
     }
 
     private JPanel buildAudioPanel() {
@@ -1434,6 +1461,13 @@ public class SettingsDialog extends JDialog {
     }
 
     private JPanel buildScriptPanel() {
+        // Case globale façon Picard ("Enable Tagger Script(s)", voir Picard.ini
+        // enable_tagger_scripts) : coupe tous les scripts activés d'un coup, sans avoir à
+        // décocher chacun individuellement — vérifiée dans TaggerScript.apply().
+        chkScriptsEnabled = new JCheckBox(I18n.t("Activer les scripts"));
+        chkScriptsEnabled.setToolTipText(I18n.t(
+                "Décoché, aucun script (même activé individuellement ci-dessous) ne s'exécute."));
+
         taTaggerScript = new JTextArea(18, 60);
         taTaggerScript.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         taTaggerScript.setLineWrap(false);
@@ -1609,10 +1643,62 @@ public class SettingsDialog extends JDialog {
         centerSplit.add(scriptsListPanel, BorderLayout.WEST);
         centerSplit.add(scriptBox,        BorderLayout.CENTER);
 
+        // ── Commande(s) après taguage — déplacée depuis l'onglet Démarrage, étendue en liste
+        // (voir PostTagCommands, remplace l'ancien champ texte unique hooks.post_tag_command) ────
+        lstPostTagCommands = new JList<>(lstPostTagCommandsModel);
+        lstPostTagCommands.setVisibleRowCount(4);
+        JScrollPane postTagScroll = new JScrollPane(lstPostTagCommands);
+
+        JButton btnAddCmd    = new JButton("+ " + I18n.t("Ajouter"));
+        JButton btnEditCmd   = new JButton(I18n.t("Modifier…"));
+        JButton btnRemoveCmd = new JButton("− " + I18n.t("Supprimer"));
+        for (JButton b : new JButton[]{btnAddCmd, btnEditCmd, btnRemoveCmd}) b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnAddCmd.addActionListener(e -> {
+            String cmd = JOptionPane.showInputDialog(this, I18n.t("Commande shell :"), I18n.t("Nouvelle commande"));
+            if (cmd == null || cmd.isBlank()) return;
+            postTagCommands.add(cmd.trim());
+            lstPostTagCommandsModel.addElement(cmd.trim());
+        });
+        btnEditCmd.addActionListener(e -> {
+            int sel = lstPostTagCommands.getSelectedIndex();
+            if (sel < 0) return;
+            String cmd = JOptionPane.showInputDialog(this, I18n.t("Commande shell :"), postTagCommands.get(sel));
+            if (cmd == null || cmd.isBlank()) return;
+            postTagCommands.set(sel, cmd.trim());
+            lstPostTagCommandsModel.set(sel, cmd.trim());
+        });
+        btnRemoveCmd.addActionListener(e -> {
+            int sel = lstPostTagCommands.getSelectedIndex();
+            if (sel < 0) return;
+            postTagCommands.remove(sel);
+            lstPostTagCommandsModel.remove(sel);
+        });
+
+        JPanel postTagBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        for (JButton b : new JButton[]{btnAddCmd, btnEditCmd, btnRemoveCmd}) postTagBtns.add(b);
+
+        JPanel postTagPanel = new JPanel(new BorderLayout(0, 4));
+        postTagPanel.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(),
+                I18n.t("Commande(s) après taguage")));
+        JLabel postTagHint = new JLabel(I18n.t(
+                "<html><i>Exécutées une fois, dans l'ordre, à la fin d'un run de taguage complet " +
+                "(pas par fichier).</i></html>"));
+        postTagHint.setFont(postTagHint.getFont().deriveFont(11f));
+        postTagHint.putClientProperty("FlatLaf.style", "foreground: #888888");
+        postTagPanel.add(postTagHint,  BorderLayout.NORTH);
+        postTagPanel.add(postTagScroll, BorderLayout.CENTER);
+        postTagPanel.add(postTagBtns,  BorderLayout.SOUTH);
+
+        JPanel south = new JPanel(new BorderLayout(0, 10));
+        south.add(exBox,       BorderLayout.NORTH);
+        south.add(postTagPanel, BorderLayout.SOUTH);
+
         JPanel outer = new JPanel(new BorderLayout(0, 10));
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
+        outer.add(chkScriptsEnabled, BorderLayout.NORTH);
         outer.add(centerSplit, BorderLayout.CENTER);
-        outer.add(exBox, BorderLayout.SOUTH);
+        outer.add(south, BorderLayout.SOUTH);
         return outer;
     }
 
@@ -1859,7 +1945,7 @@ public class SettingsDialog extends JDialog {
         cmbLanguage.setSelectedIndex("en".equals(cfg.uiLanguage()) ? 1 : 0);
         chkUpdateCheck.setSelected(cfg.updateCheckEnabled());
         chkCloseMinimizes.setSelected(cfg.closeMinimizesToTaskbar());
-        tfPostTagCommand.setText(cfg.postTagCommand());
+        chkScriptsEnabled.setSelected(cfg.scriptsEnabled());
         tfMbUserAgent      .setText(cfg.str("musicbrainz.user_agent",   "OpenTagger/1.0 (bain.paul24@gmail.com)"));
         tfAcoustIdKey      .setText(cfg.str("acoustid.api_key",         ""));
         tfAcoustIdUserToken.setText(cfg.str("acoustid.user_token",      ""));
@@ -1875,6 +1961,7 @@ public class SettingsDialog extends JDialog {
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
+        chkUseLibraryRoot    .setSelected(cfg.useLibraryRootEnabled());
         tfLibraryRoot        .setText(cfg.str("rename.library_root",  ""));
         tfPodcastLibraryRoot .setText(cfg.str("podcast.library_root", ""));
         cmbDefaultMask    .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
@@ -2010,6 +2097,9 @@ public class SettingsDialog extends JDialog {
         scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
         currentScriptIndex = -1;
         refreshScriptsList();
+        postTagCommands = new java.util.ArrayList<>(PostTagCommands.load());
+        lstPostTagCommandsModel.clear();
+        for (String c : postTagCommands) lstPostTagCommandsModel.addElement(c);
         if (!scriptDefs.isEmpty()) {
             lstScripts.setSelectedIndex(0);
         } else {
@@ -2043,7 +2133,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("ui.language", newLanguage);
         p.setProperty("update.check_enabled", String.valueOf(chkUpdateCheck.isSelected()));
         p.setProperty("ui.close_minimizes",   String.valueOf(chkCloseMinimizes.isSelected()));
-        p.setProperty("hooks.post_tag_command", tfPostTagCommand.getText().trim());
+        // hooks.post_tag_command n'est plus jamais écrite ici — remplacée par PostTagCommands
+        // (liste), voir save() plus bas et PostTagCommands.load() pour la migration.
         p.setProperty("update.last_check_ms", String.valueOf(Config.get().lastUpdateCheckMs()));
 
         p.setProperty("musicbrainz.user_agent",        tfMbUserAgent.getText().trim());
@@ -2062,6 +2153,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
+        p.setProperty("rename.use_library_root", String.valueOf(chkUseLibraryRoot.isSelected()));
         p.setProperty("rename.library_root",   tfLibraryRoot.getText().trim());
         p.setProperty("podcast.library_root",  tfPodcastLibraryRoot.getText().trim());
         p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
@@ -2182,8 +2274,10 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
         p.setProperty("batch.threads",                 String.valueOf(spBatchThreads.getValue()));
 
+        p.setProperty("scripts.enabled", String.valueOf(chkScriptsEnabled.isSelected()));
         flushCurrentScriptEdits();
         TaggerScript.saveScripts(scriptDefs);
+        PostTagCommands.save(postTagCommands);
 
         p.setProperty("toolbar.actions", String.join(",", toolbarActionIds));
         // Marque la migration "refreshFolders" (voir Config.toolbarActions()) comme faite : à

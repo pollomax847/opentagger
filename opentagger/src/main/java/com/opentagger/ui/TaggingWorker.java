@@ -364,7 +364,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             for (TagInfo candidate : results) {
                 if (candidate.score < seuil) break; // triés par score décroissant : la suite ne fera que pire
                 candidate.durationSec = entry.current.durationSec;
-                if (!isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
+                if (!FileEntry.isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
                     durationOk = candidate;
                     break;
                 }
@@ -1169,24 +1169,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * Génère une liste de suggestions d'amélioration pour un fichier tagué.
      * Chaque suggestion décrit un point qui mérite vérification manuelle.
      */
-    /** Voir l'appel dans processEntry() : écart jugé significatif seulement au-delà de 20s ET 20%
-     *  relatif (évite de confondre avec un radio edit/remaster légitime). 0 des deux côtés = pas
-     *  de comparaison possible.
-     *  ATTENTION : fileSec<=0 seul ne doit JAMAIS être traité comme "forcément vide/corrompu" ici —
-     *  tenté une fois (2026-07-18), reverté en urgence : entry.current.durationSec peut encore
-     *  valoir 0 simplement parce que la phase 2 du scan (lecture des tags, voir MainFrame.
-     *  readTags()) n'est pas encore passée sur ce fichier au moment où le taguage (qui peut
-     *  démarrer avant la fin du scan) l'examine — pas parce que le fichier est réellement vide.
-     *  Constaté en direct : des centaines de faux positifs sur des fichiers dont la Durée
-     *  s'affichait correctement (4:19, 5:07...) une fois le scan rattrapé. La vraie détection des
-     *  fichiers 0 octet reste le scan lui-même (voir MainFrame.readTags()/AudioDuration fallback),
-     *  pas cette comparaison. */
-    static boolean isDurationMismatch(int fileSec, int mbSec) {
-        if (fileSec <= 0 || mbSec <= 0) return false;
-        int diff = Math.abs(fileSec - mbSec);
-        return diff > 20 && diff > mbSec * 0.20;
-    }
-
     private static List<String> buildSuggestions(TagInfo best, int seuil) {
         List<String> s = new java.util.ArrayList<>();
         if (best.score > 0 && best.score < seuil + 20)

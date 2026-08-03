@@ -21,7 +21,7 @@ Disponible en français et en anglais (Préférences → Démarrage → Langue).
 - **BPM** — détection automatique via ffmpeg
 - **Essentia** — clé musicale, mode, danceability (si installé)
 - **Paroles** — téléchargement automatique
-- **FanArt TV** — pochettes haute résolution
+- **FanArt TV + Deezer** — pochettes haute résolution, plusieurs fournisseurs en cascade (Deezer sans clé API requise)
 
 #### Niveaux de confiance des sources
 
@@ -40,8 +40,11 @@ Disponible en français et en anglais (Préférences → Démarrage → Langue).
   - `[Lidarr/Plex]` — `AlbumArtist/Album (Année)/Track - Title` (natif Lidarr)
   - `Fichier seul` — renomme sans déplacer
   - `[Podcast]` — `Podcasts/Show/Season 02/S02E14 Titre`
-- **Aperçu live** des 4 masques avant d'appliquer (Ctrl+R)
-- **Dossier racine bibliothèque** — tous les fichiers organisés vers un chemin configurable
+- **Aperçu live** des 5 masques avant d'appliquer (**Ctrl+R** renomme les fichiers déjà tagués, **Ctrl+G** organise vers un dossier choisi explicitement)
+- **Dossier racine bibliothèque** — tous les fichiers organisés vers un chemin configurable, activable/désactivable par case à cocher (Préférences → Renommage, ou menu **Tagger → Déplacement** pour un accès rapide sans ouvrir les Préférences)
+- **Déplacement des fichiers non tagués / à durée incohérente** — vers des dossiers dédiés distincts de la bibliothèque organisée, chacun avec sa propre case à cocher ; rien n'est jamais supprimé
+- **Grouper par compilations** — relie automatiquement les pistes déjà taguées appartenant à des séries de compilation connues (Stars 80, NRJ, Fun Radio, RFM…), liste configurable, dialogue de revue avant écriture
+- **Forcer le re-taguage** — remet des fichiers déjà tagués en attente (cache + MBID effacés) pour les réidentifier ou leur réappliquer un script tagger mis à jour
 - **Compatibilité NAS / MergerFS** — copie+vérification de taille avant suppression de la source (pas d'`ATOMIC_MOVE` cross-device)
 
 ### Podcasts *(nouveau en v0.9.0, fix M4A en v0.9.1)*
@@ -71,7 +74,9 @@ Tags podcast écrits (compatibles iTunes / Plex / Jellyfin) :
 - **Détection de doublons** — 4 niveaux de confiance (MBID exact, AcoustID exact, empreinte brute exacte, heuristique titre+artiste). Sélection intelligente du meilleur fichier par qualité (FLAC > ALAC > M4A > OGG > MP3) puis taille.
 - **Album Completion** — complète les fichiers SKIPPED d'un album en se basant sur les fichiers déjà identifiés par source fiable (pas SOURCE_TEXT)
 - **Transcodage audio** (via ffmpeg) — convertit vers MP3/AAC/FLAC/Opus/etc. avec bitrate configurable, suppression optionnelle de la source (ne supprime qu'après confirmation que la conversion a réussi)
-- **Script utilisateur** (JavaScript/Nashorn) — règles personnalisées appliquées à chaque fichier avant écriture (Préférences → Scripts), plusieurs scripts activables en parallèle
+- **Récupération audio depuis des vidéos** — détecte les `.webm/.vob/.mpg/.mpeg/.avi/.mkv` au scan d'un dossier, tente de les identifier et de les convertir en MP3 tagué automatiquement ; reconnues → `Convertis/`, non reconnues → `Non identifié/` — rien n'est jamais supprimé
+- **Scripts tagger** (JavaScript/Nashorn) — plusieurs scripts nommés, activables individuellement, avec une case globale pour tout couper d'un coup (Préférences → Script) ; transformations personnalisées sur les tags appliquées à chaque fichier juste avant l'écriture
+- **Commande(s) après taguage** — une ou plusieurs commandes shell exécutées une fois en fin de run complet (ex. déclencher un scan Plex), configurables au même endroit que les scripts
 - **Suppression des fichiers illisibles/corrompus**
 - **Export CSV**, export/import historique JSON
 - **Drag & drop** de dossiers et fichiers
@@ -87,7 +92,9 @@ Tags podcast écrits (compatibles iTunes / Plex / Jellyfin) :
 ### Interface
 
 - Layout **table à gauche / détail à droite** avec pochette 140×140
+- **3 modes d'affichage** (menu Affichage) — Liste à plat, Arborescence par album, ou Cover Flow (bêta)
 - **Chips de statut cliquables** (Total / Tagués / Non identifiés / Erreurs / En attente) — cliquer filtre directement la table par statut, recliquer désactive ; recherche texte + sélecteur de champ juste à côté
+- **Recherche dans les Préférences** — ~75 réglages répartis sur 9 onglets, un champ en haut du dialogue saute directement au bon onglet/champ sans avoir à deviner où il se trouve
 - **Indicateur RAM en direct** (bas de fenêtre) — utile pour surveiller une session longue sur une grosse bibliothèque
 - Thème dark FlatLaf, accent teal
 - **Journal de correction** généré après chaque session
@@ -221,9 +228,9 @@ Au premier lancement, **Préférences** (Ctrl+,) :
 
 1. **Ouvrir un dossier** (Ctrl+O ou drag & drop)
 2. Cocher **AcoustID** si les fichiers sont peu tagués
-3. **Tout tagger** (F5) ou **Tagger la sélection** (F6)
-4. Filtre **⚠ Non identifiés** → lancer **Passe complète** (Ctrl+P) pour compléter l'album
-5. **Ctrl+R** → aperçu renommage → appliquer
+3. **Tout tagger** (F6) ou **Tagger la sélection** (F7), puis **Enregistrer tout** (F8)
+4. Filtre **Non identifiés** → **Tagger → Compléter les albums…** (Ctrl+L) pour compléter à partir des pistes déjà identifiées du même album
+5. **Ctrl+R** (renommer les fichiers tagués) ou **Ctrl+G** (organiser vers un dossier choisi, avec aperçu)
 
 ### Podcasts
 
@@ -253,7 +260,7 @@ Au premier lancement, **Préférences** (Ctrl+,) :
 | JSON | Jackson |
 | Cache | SQLite (Xerial) |
 | Identification | AcoustID, SongRec (Shazam), AudD |
-| Métadonnées | MusicBrainz, Discogs, Last.fm, FanArt TV |
+| Métadonnées | MusicBrainz, Discogs, Last.fm, FanArt TV, Deezer |
 | Podcasts | iTunes Search API + RSS (javax.xml) |
 
 ---

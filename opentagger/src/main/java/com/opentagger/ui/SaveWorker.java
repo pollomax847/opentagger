@@ -153,17 +153,21 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
 
             String message = res.renameError() != null
                     ? I18n.t("Enregistré, renommage échoué : %s", res.renameError())
-                    : "";
+                    : res.durationMismatchMoved()
+                        ? I18n.t("Durée incohérente avec MusicBrainz — déplacé pour vérification")
+                        : "";
 
             final TagInfo      writtenFinal = res.written();
             final java.nio.file.Path pathFinal = res.finalPath();
             final List<String> suggFinal = sugg;
+            final boolean      durationMismatchMoved = res.durationMismatchMoved();
             SwingUtilities.invokeLater(() -> {
-                entry.result      = writtenFinal;
-                entry.status      = FileEntry.Status.TAGGED;
-                entry.currentPath = pathFinal;
-                entry.suggestions = suggFinal.isEmpty() ? null : suggFinal;
-                entry.message     = message;
+                entry.result           = writtenFinal;
+                entry.status           = FileEntry.Status.TAGGED;
+                entry.currentPath      = pathFinal;
+                entry.suggestions      = suggFinal.isEmpty() ? null : suggFinal;
+                entry.message          = message;
+                entry.durationMismatch = durationMismatchMoved;
             });
             log(I18n.t("  ✔ ENREGISTRÉ %s", fichier.getName()));
             saved.incrementAndGet();

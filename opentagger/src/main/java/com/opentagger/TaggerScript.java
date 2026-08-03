@@ -104,6 +104,7 @@ public class TaggerScript {
      */
     public synchronized boolean apply(TagInfo info) {
         if (engine == null) return false;
+        if (!Config.get().scriptsEnabled()) return false;
         List<ScriptDef> scripts = loadScripts();
         if (scripts.isEmpty()) return false;
         engine.put("tags", info);

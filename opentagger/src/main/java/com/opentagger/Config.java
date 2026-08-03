@@ -141,6 +141,10 @@ public class Config {
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
     public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
     public String libraryRoot()                    { return str ("rename.library_root",            ""); }
+    // Case à cocher UI qui grise/dégrise tfLibraryRoot dans SettingsDialog (voir bindGate()) —
+    // défaut true pour ne rien changer au comportement des utilisateurs ayant déjà configuré ce
+    // dossier avant l'ajout de cette case.
+    public boolean useLibraryRootEnabled()         { return bool("rename.use_library_root",       true); }
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
     public String  skippedMoveFolder()             { return str ("skipped.move_folder",              ""); }
@@ -327,7 +331,15 @@ public class Config {
     // Exécutée une fois à la fin d'un run de taguage complet (pas par fichier — bibliothèques de
     // 100k+ fichiers, un hook par fichier serait ingérable) — ex: déclencher un scan Plex, un
     // rebalance mergerfs. Chaîne vide = désactivé.
+    // Conservée uniquement pour la migration automatique vers PostTagCommands (liste) — ne plus
+    // écrire cette clé après la migration, voir PostTagCommands.load().
     public String  postTagCommand()    { return str ("hooks.post_tag_command",   ""); }
+
+    // --- Scripts tagger (TaggerScript) ---
+    // Case globale "Activer les scripts" façon Picard (enable_tagger_scripts) — coupe tous les
+    // scripts d'un coup sans avoir à décocher chacun individuellement. Défaut true : ne change
+    // rien pour qui avait déjà des scripts actifs avant l'ajout de cette case.
+    public boolean scriptsEnabled()    { return bool("scripts.enabled",          true); }
 
     // --- Translittération artistes ---
     public boolean translateArtists()  { return bool("metadata.translate_artists", false); }
