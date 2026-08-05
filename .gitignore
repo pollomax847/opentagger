@@ -26,3 +26,10 @@ Thumbs.db
 config.properties
 docs/screenshots/main_table.png
 .gitignore
+
+# Scripts de publication de release — internes, pas destinés au dépôt source public
+# (install-opentagger.sh et opentagger.sh restent publics : ce sont eux que les
+# utilisateurs finaux utilisent, contrairement à ceux-ci qui ne servent qu'au mainteneur).
+publish-release.sh
+package-deb.sh
+build-apt-repo.sh

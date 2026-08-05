@@ -6,7 +6,7 @@
 
   <groupId>com.opentagger</groupId>
   <artifactId>opentagger</artifactId>
-  <version>0.9.9.1</version>
+  <version>0.9.10</version>
 
   <name>OpenTagger</name>
   <description>Alternative open-source à Jaikoz pour taguer les fichiers audio</description>
