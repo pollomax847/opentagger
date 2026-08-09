@@ -3427,31 +3427,69 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de taguer.", String.join(", ", blockers)));
             return;
         }
-        List<FileEntry> toTag = new ArrayList<>();
-        int alreadyTaggedSkipped = 0;
         if (selOnly) {
+            List<FileEntry> toTag = new ArrayList<>();
             for (int r : table.getSelectedRows())
                 toTag.add(tableModel.get(table.convertRowIndexToModel(r)));
-        } else {
-            // allEntries() : "Tout tagger" doit couvrir toute la bibliothèque chargée, pas
-            // seulement la vue déjà filtrée (recherche, chip de statut cliqué) — un filtre resté
-            // actif sans rapport avec le taguage masquait sinon silencieusement une partie des
-            // fichiers cochés, sans le moindre avertissement.
-            for (FileEntry e : tableModel.allEntries()) {
-                // IDENTIFIED exclu comme TAGGED : déjà identifié avec succès, juste pas encore
-                // enregistré — le re-identifier ici referait le même travail réseau pour rien
-                // (voir FileEntry.Status.IDENTIFIED). Utilisez "Enregistrer tout" pour ces fichiers.
-                // Coquille vide (0 octet, voir le marquage ERROR fait au scan ci-dessus) exclue elle
-                // aussi : contrairement aux autres ERROR (network, jaudiotagger...) potentiellement
-                // transitoires et donc légitimement retentés par "Tout tagger", un fichier à 0 octet
-                // reste à 0 octet tant que personne ne remplace son contenu — le retenter en boucle ne
-                // ferait que regaspiller des requêtes MB pour rien à chaque campagne de taguage.
-                if (!e.selected) continue;
-                if (e.status == FileEntry.Status.TAGGED) { alreadyTaggedSkipped++; continue; }
-                if (e.status != FileEntry.Status.IDENTIFIED && e.file.length() > 0) toTag.add(e);
-            }
+            continueStartTagging(toTag, 0, true);
+            return;
         }
+
+        // "Tout tagger" : le filtrage ci-dessous appelle file.length() par fichier (une E/S disque
+        // bloquante) sur potentiellement TOUTE la bibliothèque chargée (100k+ fichiers) — fait ici
+        // en arrière-plan pour ne jamais geler l'interface, même si un disque est lent/très
+        // sollicité au moment du clic (mergerfs/USB/réseau...). Gel total de l'UI reproduit et
+        // confirmé en direct (2026-08-09) via jstack : la pile de l'EDT bloquée montrait exactement
+        // File.length() appelé depuis cette boucle. bouton désactivé immédiatement pour empêcher un
+        // second clic pendant la préparation (qui lancerait deux lots en parallèle avant que
+        // WorkerHub n'ait pu enregistrer le premier).
+        btnTagAll.setEnabled(false);
+        setStatus(I18n.t("Préparation du lot à tagger…"));
+        List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
+        new SwingWorker<List<FileEntry>, Void>() {
+            int skipped = 0;
+            @Override protected List<FileEntry> doInBackground() {
+                List<FileEntry> result = new ArrayList<>();
+                // allEntries() (snapshot ci-dessus) : "Tout tagger" doit couvrir toute la
+                // bibliothèque chargée, pas seulement la vue déjà filtrée (recherche, chip de
+                // statut cliqué) — un filtre resté actif sans rapport avec le taguage masquait
+                // sinon silencieusement une partie des fichiers cochés, sans le moindre
+                // avertissement.
+                for (FileEntry e : snapshot) {
+                    // IDENTIFIED exclu comme TAGGED : déjà identifié avec succès, juste pas
+                    // encore enregistré — le re-identifier ici referait le même travail réseau
+                    // pour rien (voir FileEntry.Status.IDENTIFIED). Utilisez "Enregistrer tout"
+                    // pour ces fichiers. Coquille vide (0 octet, voir le marquage ERROR fait au
+                    // scan ci-dessus) exclue elle aussi : contrairement aux autres ERROR (network,
+                    // jaudiotagger...) potentiellement transitoires et donc légitimement retentés
+                    // par "Tout tagger", un fichier à 0 octet reste à 0 octet tant que personne ne
+                    // remplace son contenu — le retenter en boucle ne ferait que regaspiller des
+                    // requêtes MB pour rien à chaque campagne de taguage.
+                    if (!e.selected) continue;
+                    if (e.status == FileEntry.Status.TAGGED) { skipped++; continue; }
+                    if (e.status != FileEntry.Status.IDENTIFIED && e.file.length() > 0) result.add(e);
+                }
+                return result;
+            }
+            @Override protected void done() {
+                List<FileEntry> toTag;
+                try {
+                    toTag = get();
+                } catch (Exception ex) {
+                    btnTagAll.setEnabled(true);
+                    setStatus(I18n.t("Erreur pendant la préparation du taguage : %s", ex.getMessage()));
+                    return;
+                }
+                continueStartTagging(toTag, skipped, false);
+            }
+        }.execute();
+    }
+
+    /** Suite de startTagging() une fois le lot filtré (toujours sur l'EDT) — voir son commentaire
+     *  pour pourquoi ce filtrage est désormais fait en arrière-plan avant d'arriver ici. */
+    private void continueStartTagging(List<FileEntry> toTag, int alreadyTaggedSkipped, boolean selOnly) {
         if (toTag.isEmpty()) {
+            btnTagAll.setEnabled(true);
             if (Config.get().postTagCompletion() != Config.PostTagCompletion.NONE) {
                 setStatus(I18n.t("Aucun nouveau fichier à taguer — recherche des fichiers incomplets…"));
                 autoCompleteIncomplete(() -> setStatus(I18n.t("Complétion terminée.")));
@@ -3470,7 +3508,7 @@ public class MainFrame extends JFrame {
                 alreadyTaggedSkipped), FileEntry.Status.SKIPPED, null);
         }
 
-        btnTagAll.setEnabled(false);
+        btnTagAll.setEnabled(false); // no-op si déjà désactivé (lot "Tout tagger" ci-dessus)
         btnCancel.setEnabled(true);
         progress.setValue(0); progress.setString(""); progress.setVisible(true);
 
@@ -5276,13 +5314,13 @@ public class MainFrame extends JFrame {
     // ── Détection de doublons ─────────────────────────────────────────────────
 
     private void detectDuplicates() {
-        // La détection elle-même ne fait que lire — le vrai risque est la suppression définitive
-        // (DuplicatesDialog.deleteSelected()) pendant qu'un autre worker écrit encore sur les mêmes
-        // fichiers. Le dialogue étant modal, vérifier ICI (avant l'ouverture) suffit : aucune
-        // nouvelle opération ne peut démarrer depuis MainFrame tant qu'il reste ouvert.
-        java.util.List<String> ops = activeOperations();
-        if (!ops.isEmpty()) {
-            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de détecter les doublons.", String.join(", ", ops)));
+        // Blockers PRÉCIS (WorkerHub.conflictsWith), pas activeOperations() — même logique que
+        // groupByCompilations() : le vrai risque est la suppression/déplacement fait ensuite par
+        // l'utilisateur (DuplicatesDialog) pendant qu'un autre worker écrirait encore sur les mêmes
+        // fichiers, pas un scan de dossier ou une synchro ListenBrainz en parallèle.
+        java.util.List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.DUPLICATE_DETECT);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de détecter les doublons.", String.join(", ", blockers)));
             return;
         }
         // allEntries() (TOUTE la bibliothèque), pas getRowCount()/get(i) (la vue déjà filtrée par
@@ -5291,18 +5329,48 @@ public class MainFrame extends JFrame {
         // détection — un vrai doublon dont une seule copie passe le filtre n'était jamais signalé.
         if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Aucun fichier chargé.")); return; }
         List<FileEntry> all = new ArrayList<>(tableModel.allEntries());
-        List<DuplicateDetector.DuplicateGroup> groups = DuplicateDetector.detect(all);
-        if (groups.isEmpty()) { setStatus(I18n.t("Aucun doublon détecté.")); LOG.info("[Doublons] Aucun doublon parmi " + all.size() + " fichiers."); return; }
-        int total = groups.stream().mapToInt(g -> g.files().size()).sum();
-        LOG.info("[Doublons] " + groups.size() + " groupe(s), " + total + " fichier(s) sur " + all.size() + " analysés.");
-        for (DuplicateDetector.DuplicateGroup g : groups) {
-            LOG.info("[Doublons] Groupe " + g.confidence().badge + ": " + g.files().stream()
-                .map(e -> (e.currentPath != null ? e.currentPath : e.file.toPath()).getFileName().toString())
-                .collect(java.util.stream.Collectors.joining(" | ")));
-        }
-        setStatus(I18n.t("%d groupe(s) de doublons, %d fichier(s) concerné(s).", groups.size(), total));
-        new DuplicatesDialog(this, groups, tableModel).setVisible(true);
-        refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture
+        setStatus(I18n.t("Recherche de doublons…"));
+        // Poussé en SwingWorker : DuplicateDetector.detect() seul est déjà coûteux sur une grosse
+        // bibliothèque (des centaines de milliers de fichiers ici), mais le vrai gel venait de
+        // computeBestMap()/qualityScore(), qui ouvre chaque fichier .m4a via jaudiotagger pour
+        // départager ALAC/AAC — une E/S disque par fichier, auparavant refaite sur l'EDT à la
+        // construction MÊME de DuplicatesDialog (et une seconde fois à chaque clic sur "Sélection
+        // intelligente"). Retour utilisateur : "recherche audio en double [...] fige l'application".
+        SwingWorker<DuplicateDetector.DetectionResult, Void> w = new SwingWorker<>() {
+            @Override protected DuplicateDetector.DetectionResult doInBackground() {
+                List<DuplicateDetector.DuplicateGroup> groups = DuplicateDetector.detect(all);
+                java.util.Map<DuplicateDetector.DuplicateGroup, FileEntry> bestByGroup = DuplicateDetector.computeBestMap(groups);
+                return new DuplicateDetector.DetectionResult(groups, bestByGroup);
+            }
+            @Override protected void done() {
+                if (isCancelled()) return;
+                DuplicateDetector.DetectionResult result;
+                try {
+                    result = get();
+                } catch (Exception e) {
+                    setStatus(I18n.t("Erreur pendant la détection de doublons : %s", e.getMessage()));
+                    return;
+                }
+                List<DuplicateDetector.DuplicateGroup> groups = result.groups();
+                if (groups.isEmpty()) {
+                    setStatus(I18n.t("Aucun doublon détecté."));
+                    LOG.info("[Doublons] Aucun doublon parmi " + all.size() + " fichiers.");
+                    return;
+                }
+                int total = groups.stream().mapToInt(g -> g.files().size()).sum();
+                LOG.info("[Doublons] " + groups.size() + " groupe(s), " + total + " fichier(s) sur " + all.size() + " analysés.");
+                for (DuplicateDetector.DuplicateGroup g : groups) {
+                    LOG.info("[Doublons] Groupe " + g.confidence().badge + ": " + g.files().stream()
+                        .map(e -> (e.currentPath != null ? e.currentPath : e.file.toPath()).getFileName().toString())
+                        .collect(java.util.stream.Collectors.joining(" | ")));
+                }
+                setStatus(I18n.t("%d groupe(s) de doublons, %d fichier(s) concerné(s).", groups.size(), total));
+                new DuplicatesDialog(MainFrame.this, groups, result.bestByGroup(), tableModel).setVisible(true);
+                refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture
+            }
+        };
+        WorkerHub.get().submit(WorkerHub.TaskKind.DUPLICATE_DETECT,
+                I18n.t("Détection de doublons"), w, () -> w.cancel(true));
     }
 
     private void deleteErrorFiles() {

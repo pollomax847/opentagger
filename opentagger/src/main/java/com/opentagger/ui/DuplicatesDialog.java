@@ -35,15 +35,21 @@ public class DuplicatesDialog extends JDialog {
 
     private final FileTableModel        tableModel;
     private final List<DuplicateGroup>  groups;
+    /** Meilleur fichier de chaque groupe, précalculé en arrière-plan avant l'ouverture du dialogue
+     *  (voir DuplicateDetector.computeBestMap) — ne JAMAIS rappeler bestInGroup() depuis l'EDT ici,
+     *  c'est justement ce qui gelait l'appli (E/S disque par fichier .m4a, répétée par groupe). */
+    private final Map<DuplicateGroup, FileEntry> bestByGroup;
     /** Correspondance parallèle : allBoxes[i] ↔ allEntries[i] */
     private final List<JCheckBox>  allBoxes   = new ArrayList<>();
     private final List<FileEntry>  allEntries = new ArrayList<>();
     private JCheckBox chkCleanDirs;
 
-    public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups, FileTableModel tableModel) {
+    public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups,
+                             Map<DuplicateGroup, FileEntry> bestByGroup, FileTableModel tableModel) {
         super(owner, I18n.t("Doublons détectés — %d groupe(s)", groups.size()), true);
-        this.groups     = groups;
-        this.tableModel = tableModel;
+        this.groups      = groups;
+        this.bestByGroup = bestByGroup;
+        this.tableModel  = tableModel;
         setSize(900, 600);
         setMinimumSize(new Dimension(660, 400));
         setLocationRelativeTo(owner);
@@ -84,7 +90,7 @@ public class DuplicatesDialog extends JDialog {
     }
 
     private JPanel buildGroup(DuplicateGroup group) {
-        FileEntry best   = DuplicateDetector.bestInGroup(group.files());
+        FileEntry best   = bestByGroup.get(group);
         String    label  = DuplicateDetector.groupLabel(group);
         Color     badgeColor = switch (group.confidence()) {
             case MBID_EXACT        -> new Color(0x1b5e20); // vert foncé
@@ -229,7 +235,7 @@ public class DuplicatesDialog extends JDialog {
         // Pour chaque groupe : cocher tous SAUF le meilleur
         int idx = 0;
         for (DuplicateGroup group : groups) {
-            FileEntry best = DuplicateDetector.bestInGroup(group.files());
+            FileEntry best = bestByGroup.get(group);
             for (FileEntry e : group.files()) {
                 if (e != best) allBoxes.get(idx).setSelected(true);
                 idx++;

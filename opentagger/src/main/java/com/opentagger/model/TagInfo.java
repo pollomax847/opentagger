@@ -162,6 +162,13 @@ public class TagInfo {
     public String roonTrackTag        = "";
     public String acoustidId          = "";
     public String acoustidFingerprint = "";
+    // Score de confiance AcoustID (0.0-1.0) du candidat ayant produit ce résultat — PAS un tag
+    // fichier (aucun FieldKey, jamais écrit sur disque), seulement transitoire en mémoire pour que
+    // TaggingWorker.acoustIdResultPlausible() puisse faire confiance à un match très fort même s'il
+    // ne ressemble pas aux tags déjà présents (qui peuvent eux-mêmes être faux à la source — voir
+    // AcoustIdClient.fetchBestFromMusicBrainz(), qui calculait déjà ce score puis le jetait avant
+    // ce correctif, 2026-08-09).
+    public double acoustidConfidence  = 0;
 
     // Marqueur "déjà tagué par OpenTagger" écrit directement dans le fichier (tag custom
     // OT_TAGGEDDATE, date ISO — voir TagWriter), en plus du suivi par MetadataCache (SQLite
@@ -222,6 +229,7 @@ public class TagInfo {
             c.score = this.score;
             c.durationSec = this.durationSec;
             c.mbDurationSec = this.mbDurationSec;
+            c.acoustidConfidence = this.acoustidConfidence;
             for (java.lang.reflect.Field f : TagInfo.class.getFields()) {
                 if (f.getType() == String.class) f.set(c, f.get(this));
             }

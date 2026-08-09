@@ -144,6 +144,7 @@ public class AcoustIdClient {
                 if (info != null && !info.title.isBlank()) {
                     if (candidate.acoustidScore() > bestAcoustidScore) {
                         bestAcoustidScore = candidate.acoustidScore();
+                        info.acoustidConfidence = candidate.acoustidScore();
                         best = info;
                     }
                     if (candidate.acoustidScore() >= 0.9) break; // confiance déjà excellente, inutile d'essayer les autres

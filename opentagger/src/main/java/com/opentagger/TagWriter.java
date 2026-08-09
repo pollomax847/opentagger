@@ -228,6 +228,21 @@ public class TagWriter {
             // chaîne de repli ci-dessous : sans ça, runFfmpegRepair()/AtomicParsley repartiraient
             // d'un fichier potentiellement déjà tronqué/vide plutôt que de l'original intact.
             if (earlyBackup != null) restoreBackup(fichier, earlyBackup);
+
+            // AudioScanner traite tous les .mp4 comme candidats audio (voir sa Javadoc) — un vrai
+            // clip vidéo échoue donc systématiquement ici et n'a de toute façon AUCUNE chance de
+            // réussir dans la chaîne de repli ci-dessous (repair/AtomicParsley/ffmpeg direct
+            // produisent tous un conteneur audio-only). Sans ce contrôle, chacune des 3 étapes
+            // suivantes tentait quand même sa chance avec son propre timeout de 120s — jusqu'à 6
+            // minutes brûlées PAR FICHIER PAR TENTATIVE D'ENREGISTREMENT sur une vidéo qui ne sera
+            // jamais taguable, constaté en direct (2026-08-08) sur des dizaines de clips musicaux
+            // dans le journal ("timeout | timeout | timeout" à répétition). AudioFormatCheck.
+            // hasVideoStream() existait déjà pour ce diagnostic mais n'était jusqu'ici appelé qu'
+            // après coup (TaggingWorker), jamais avant d'engager cette chaîne coûteuse à l'écriture.
+            if (fichier.getName().toLowerCase().endsWith(".mp4") && AudioFormatCheck.hasVideoStream(fichier)) {
+                throw new Exception("fichier vidéo (pas audio) — écriture de tags audio impossible, "
+                    + "voir la fonctionnalité de récupération vidéo");
+            }
         }
 
         // Deuxième sauvegarde pour la chaîne de repli elle-même (repair ffmpeg/AtomicParsley/ffmpeg

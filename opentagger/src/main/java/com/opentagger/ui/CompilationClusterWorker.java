@@ -116,6 +116,20 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
                 }
             }
 
+            // Rien à proposer si le fichier a déjà exactement ces 4 champs — sans ce contrôle,
+            // une compilation déjà correctement reliée lors d'un run précédent (ou par ce run
+            // lui-même, ré-évaluée) remontait quand même comme "correspondance trouvée" avec la
+            // MÊME valeur des deux côtés de la flèche dans le dialogue de revue : bruit inutile
+            // dans une liste de 1500+ entrées, et laissait croire qu'il restait du travail à
+            // faire alors que non. Trouvé en direct (2026-08-06) : un second passage sur une
+            // bibliothèque déjà largement reliée proposait très majoritairement des "correspondances"
+            // qui étaient en réalité déjà en place.
+            boolean unchanged = match.releaseTitle().equals(entry.result.album)
+                    && Config.get().vaName().equals(entry.result.albumArtist)
+                    && "1".equals(entry.result.isCompilation)
+                    && match.releaseId().equals(entry.result.releaseMbid);
+            if (unchanged) return null;
+
             String foundMsg = I18n.t("  trouvé : %s → %s", entry.filename(), match.releaseTitle());
             publish(foundMsg);
             if (logLine != null) logLine.accept(foundMsg);

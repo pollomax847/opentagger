@@ -37,14 +37,21 @@ public final class WorkerHub {
 
     public enum TaskKind {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
-        COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, PODCAST_TAG
+        COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, PODCAST_TAG,
+        DUPLICATE_DETECT
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,
-     *  sauf l'exception Enregistrer/Tagger gérée à part dans conflictsWith(). */
+     *  sauf l'exception Enregistrer/Tagger gérée à part dans conflictsWith(). DUPLICATE_DETECT
+     *  n'écrit rien elle-même (voir DuplicateDetector/DuplicatesDialog), mais rejoint ce groupe
+     *  pour la même raison que COMPILATION_CLUSTER : le vrai risque est la suppression/déplacement
+     *  fait par l'utilisateur juste après (DuplicatesDialog), pendant qu'un autre worker écrirait
+     *  encore sur les mêmes fichiers — d'où l'exclusion mutuelle dès la phase de détection plutôt
+     *  qu'au moment du clic sur "Supprimer". */
     private static final Set<TaskKind> LIBRARY_WRITE = EnumSet.of(
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
-            TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG);
+            TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
+            TaskKind.DUPLICATE_DETECT);
 
     public static final class TaskHandle {
         private final TaskKind kind;

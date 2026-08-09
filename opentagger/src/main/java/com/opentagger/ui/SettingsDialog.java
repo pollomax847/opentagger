@@ -574,6 +574,10 @@ public class SettingsDialog extends JDialog {
     @SuppressWarnings("unchecked")
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(85, 0, 100, 5));
+        spMinScore.setToolTipText(I18n.t(
+            "Niveau de confiance minimum (en %) pour accepter automatiquement une correspondance "
+            + "trouvée sur MusicBrainz par recherche texte (titre/artiste). En dessous de ce seuil, "
+            + "le résultat est ignoré plutôt que d'appliquer un mauvais match au hasard."));
         // Seuil du score composite pondéré fichier↔piste (TrackMatcher, modèle Picard) — distinct
         // du score MB texte ci-dessus (spMinScore) : celui-ci s'applique quand on choisit la
         // meilleure piste DANS une tracklist déjà connue (album-first, groupement d'albums).
@@ -583,9 +587,47 @@ public class SettingsDialog extends JDialog {
             + "l'appariement d'un fichier à une piste d'un album déjà identifié. Même valeur par "
             + "défaut que MusicBrainz Picard (40%)."));
         chkOnlyOfficial  = new JCheckBox(I18n.t("Uniquement les releases officielles"));
+        chkOnlyOfficial.setToolTipText(I18n.t(
+            "Une \"release\" MusicBrainz = une édition précise d'un album (CD original, réédition, "
+            + "promo, bootleg…). Cocher ceci ignore les éditions bootleg/promo/non officielles lors "
+            + "de la recherche de correspondance."));
         chkUseAcoustId   = new JCheckBox(I18n.t("Activer l'identification par empreinte AcoustID (plus précis, plus lent)"));
+        chkUseAcoustId.setToolTipText(I18n.t(
+            "AcoustID identifie un morceau à partir du son lui-même (comme une empreinte digitale "
+            + "audio), pas de son nom de fichier — fonctionne même si le fichier n'a aucun tag ou "
+            + "un nom bizarre. Plus lent que la recherche par texte, activé automatiquement en dernier "
+            + "recours si un fichier reste non identifié."));
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
+        spResultsLimit.setToolTipText(I18n.t(
+            "Nombre maximum de résultats demandés à MusicBrainz (la base de données musicale en "
+            + "ligne utilisée pour identifier vos morceaux) à chaque recherche."));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
+        spCacheDays.setToolTipText(I18n.t(
+            "Les réponses de MusicBrainz sont gardées en mémoire locale ce nombre de jours pour "
+            + "aller plus vite et éviter de re-demander la même chose. Passé ce délai, la prochaine "
+            + "recherche re-vérifie auprès de MusicBrainz au cas où l'info aurait changé."));
+
+        // ── Compromis vitesse : sauter SongRec quand MB texte est déjà confiant ────
+        // Déplacé depuis l'onglet Renommage (2026-08-09, retour utilisateur "je ne comprend pas la
+        // section songrec") : ce réglage concerne l'IDENTIFICATION du morceau (comme AcoustID
+        // juste au-dessus), pas le renommage de fichiers — sa présence dans l'onglet Renommage
+        // n'avait aucun rapport avec les autres options qui l'entouraient.
+        chkSkipSongRecOnConfidentMb = new JCheckBox(I18n.t(
+            "Éviter SongRec quand MusicBrainz (recherche texte) est déjà confiant"));
+        chkSkipSongRecOnConfidentMb.setToolTipText(I18n.t(
+            "SongRec (reconnaissance audio type Shazam) reste la source principale par défaut — plus "
+            + "lent mais fiable même avec des tags faux. En activant ceci : si le fichier a un "
+            + "artiste+titre exploitables dans ses tags (pas génériques, pas déduits du nom de "
+            + "dossier), une recherche MusicBrainz texte rapide est tentée D'ABORD ; si son score "
+            + "dépasse le seuil ci-dessous, SongRec est sauté pour ce fichier. Accélère les "
+            + "bibliothèques déjà bien taguées ET réduit le nombre d'appels au service Shazam "
+            + "(utile si vous voyez des erreurs \"Too Many Requests\"/blocage dans le journal), au "
+            + "prix d'un peu moins de vérification audio sur ces fichiers-là."));
+        spnSkipSongRecMinScore = new JSpinner(new SpinnerNumberModel(90, 50, 100, 1));
+        JPanel skipSongRecScorePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        skipSongRecScorePanel.add(new JLabel(I18n.t("Score MB minimum pour sauter SongRec :")));
+        skipSongRecScorePanel.add(spnSkipSongRecMinScore);
+        skipSongRecScorePanel.add(new JLabel("%"));
 
         cmbDiscogsGenreSource = new JComboBox<>(new String[]{
             I18n.t("Style puis Genre"), I18n.t("Genre puis Style"), I18n.t("Genre uniquement")});
@@ -595,7 +637,12 @@ public class SettingsDialog extends JDialog {
         tfPreferredFormats   = tf();
         tfPreferredFormats.setToolTipText(I18n.t("ex: CD,Digital Media,Vinyl — priorité décroissante"));
         tfVaName             = tf();
-        chkStandardizeArtists = new JCheckBox(I18n.t("Utiliser les noms MB standardisés (ex: The Beatles vs Beatles, The)"));
+        chkStandardizeArtists = new JCheckBox(I18n.t("Utiliser les noms MusicBrainz standardisés (ex: \"The Beatles\" plutôt que \"Beatles, The\")"));
+        chkStandardizeArtists.setToolTipText(I18n.t(
+            "MusicBrainz = la base de données musicale en ligne (collaborative, gratuite) utilisée "
+            + "pour identifier vos morceaux et récupérer leurs infos. Elle connaît le nom \"officiel\" "
+            + "de chaque artiste ; cocher ceci l'utilise tel quel plutôt qu'une variante trouvée "
+            + "ailleurs (Shazam, nom de fichier…)."));
 
         // ── Sélecteur de pays ISO ──────────────────────────────────────────────
         // Remplir le combo : "(Sélectionner...)" puis tous les pays triés
@@ -660,11 +707,14 @@ public class SettingsDialog extends JDialog {
             "Releases officielles seulement :",
             "",
             "Nb résultats MusicBrainz :",
-            "Durée cache (jours) :"
+            "Durée cache (jours) :",
+            "",
+            ""
         }, new JComponent[]{
             spMinScore, spTrackMatchThreshold, chkOnlyOfficial,
             chkUseAcoustId,
-            spResultsLimit, spCacheDays
+            spResultsLimit, spCacheDays,
+            chkSkipSongRecOnConfidentMb, skipSongRecScorePanel
         }, "Critères de correspondance MusicBrainz");
 
         JPanel releasesPanel = form(new String[]{
@@ -686,21 +736,36 @@ public class SettingsDialog extends JDialog {
         }, "Sources de genres (Discogs / Last.fm)");
 
         // MB genres + filtre partagé (s'applique aussi à Discogs/Last.fm, voir GenreFilter)
-        chkMbUseGenres    = new JCheckBox(I18n.t("Utiliser les genres folksonomy MusicBrainz"));
+        chkMbUseGenres    = new JCheckBox(I18n.t("Utiliser les genres proposés par les utilisateurs MusicBrainz"));
+        chkMbUseGenres.setToolTipText(I18n.t(
+            "MusicBrainz permet à ses utilisateurs de \"voter\" des genres sur chaque morceau (terme "
+            + "technique : \"folksonomy\", une étiquette communautaire plutôt qu'une catégorie fixe). "
+            + "Ce sont ces votes qu'on utilise ici, en plus des genres Discogs/Last.fm."));
         spMbMinGenreUsage = new JSpinner(new SpinnerNumberModel(50, 1, 500, 10));
+        spMbMinGenreUsage.setToolTipText(I18n.t(
+            "Nombre minimum de votes qu'un genre doit avoir reçu sur MusicBrainz pour être retenu — "
+            + "évite les étiquettes rares ou farfelues ajoutées par une seule personne."));
         spMbMaxGenres     = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
         taGenresFilter    = new JTextArea(4, 20);
         taGenresFilter.setLineWrap(true);
-        taGenresFilter.setToolTipText(I18n.t("Un genre par ligne. Préfixe - pour exclure (ex: -seen live)"));
+        taGenresFilter.setToolTipText(I18n.t(
+            "Un genre à exclure par ligne, précédé d'un tiret (ex: -seen live). S'applique à toutes "
+            + "les sources de genres (Discogs, Last.fm, MusicBrainz) pour filtrer les étiquettes "
+            + "inutiles ou hors-sujet (ex: \"seen live\", \"favorites\")."));
         JPanel mbGenrePanel = form(new String[]{
-            "Genres folksonomy MusicBrainz :", "Popularité minimale (MB) :",
-            "Max genres MB :", "Filtre de genres (- = exclure, s'applique à Discogs/Last.fm/MB) :"
+            "Genres votés par les utilisateurs MusicBrainz :", "Popularité minimale requise :",
+            "Nombre max de genres retenus :", "Genres à exclure (un par ligne, préfixe -) :"
         }, new JComponent[]{
             chkMbUseGenres, spMbMinGenreUsage, spMbMaxGenres, new JScrollPane(taGenresFilter)
         }, "Filtre de genres");
 
         // ── Translittération artistes ──────────────────────────────────────────
-        chkTranslateArtists = new JCheckBox(I18n.t("Translittérer les noms d'artiste non-Latin via alias MB"));
+        chkTranslateArtists = new JCheckBox(I18n.t("Convertir les noms d'artiste écrits en alphabet non-latin (ex: japonais, cyrillique)"));
+        chkTranslateArtists.setToolTipText(I18n.t(
+            "\"Translittérer\" = réécrire un nom dans un autre alphabet en gardant sa prononciation "
+            + "(ex: \"BTS\" plutôt que \"방탄소년단\"). Utilise les noms alternatifs déjà connus de "
+            + "MusicBrainz pour chaque langue listée ci-dessous, dans l'ordre — la première langue "
+            + "qui donne un résultat est utilisée."));
         String[] localeItems = new String[TRANSLATE_LOCALES.length];
         for (int i = 0; i < TRANSLATE_LOCALES.length; i++)
             localeItems[i] = TRANSLATE_LOCALES[i][0] + " — " + I18n.t(TRANSLATE_LOCALES[i][1]);
@@ -893,15 +958,48 @@ public class SettingsDialog extends JDialog {
     @SuppressWarnings("unchecked")
     private JPanel buildTagsPanel() {
         cmbId3Version              = new JComboBox<>(new String[]{I18n.t("Garder version existante"), I18n.t("ID3v2.3 (compatible)"), I18n.t("ID3v2.4 (standard)")});
+        cmbId3Version.setToolTipText(I18n.t(
+            "ID3v2 = le format des tags (titre, artiste…) écrits dans un MP3. Deux variantes "
+            + "existent : 2.3 (plus ancienne, compatible avec presque tous les lecteurs, même très "
+            + "vieux) et 2.4 (plus récente, gère mieux certains caractères spéciaux). En cas de "
+            + "doute, laissez \"Garder version existante\"."));
         chkPreserveTimestamps      = new JCheckBox(I18n.t("Préserver la date de modification du fichier"));
+        chkPreserveTimestamps.setToolTipText(I18n.t(
+            "Écrire des tags modifie normalement la date \"modifié le\" du fichier. Cocher ceci la "
+            + "remet à sa valeur d'avant après l'écriture, comme si le fichier n'avait pas bougé."));
         chkClearExistingTags       = new JCheckBox(I18n.t("Effacer les tags existants avant écriture (repartir de zéro)"));
+        chkClearExistingTags.setToolTipText(I18n.t(
+            "Supprime TOUS les tags déjà présents sur le fichier avant d'écrire les nouveaux — utile "
+            + "si d'anciens tags mal renseignés par un autre outil traînent et faussent l'affichage. "
+            + "Déconseillé si vous avez des tags personnalisés que vous tenez à garder."));
         chkPreserveImages          = new JCheckBox(I18n.t("Conserver la pochette existante si aucune nouvelle"));
-        chkPreserveCompilation     = new JCheckBox(I18n.t("Conserver le nom d'album des compilations (Various Artists / IS_COMPILATION=1)"));
-        chkTrustExistingMbTags     = new JCheckBox(I18n.t("Faire confiance aux tags MB existants (releaseMbid présent = skip ré-identification)"));
-        chkCorrectPunctuation      = new JCheckBox(I18n.t("Normaliser la ponctuation (‘ ’ “ ” – … → ASCII)"));
-        chkRemoveId3v1             = new JCheckBox(I18n.t("Supprimer le tag ID3v1 des MP3 (footer 128 octets inutile)"));
-        chkSaveAcoustidFingerprints   = new JCheckBox(I18n.t("Sauvegarder l'empreinte AcoustID dans les tags"));
-        chkIgnoreExistingFingerprints = new JCheckBox(I18n.t("Forcer le re-fingerprint (même si AcoustID déjà présent)"));
+        chkPreserveCompilation     = new JCheckBox(I18n.t("Conserver le nom d'album des compilations (\"Various Artists\")"));
+        chkPreserveCompilation.setToolTipText(I18n.t(
+            "Pour un album compilé de plusieurs artistes (ex: une compilation radio), garde le titre "
+            + "d'album déjà écrit sur le fichier plutôt que de le remplacer par celui trouvé sur "
+            + "MusicBrainz — utile quand vous avez déjà organisé vos compilations à votre façon."));
+        chkTrustExistingMbTags     = new JCheckBox(I18n.t("Faire confiance à une identification MusicBrainz déjà confirmée sur le fichier"));
+        chkTrustExistingMbTags.setToolTipText(I18n.t(
+            "Si le fichier a déjà un identifiant MusicBrainz écrit dedans (preuve qu'il a déjà été "
+            + "identifié avec certitude, par OpenTagger ou un autre outil), ne pas chercher à "
+            + "re-identifier le morceau — juste compléter ce qui manque. Accélère les bibliothèques "
+            + "déjà bien taguées."));
+        chkCorrectPunctuation      = new JCheckBox(I18n.t("Normaliser la ponctuation \"fantaisie\" en caractères simples (guillemets, tirets, points de suspension)"));
+        chkRemoveId3v1             = new JCheckBox(I18n.t("Supprimer l'ancien format de tags ID3v1 des MP3 (128 octets obsolètes, inutiles à côté d'ID3v2)"));
+        chkRemoveId3v1.setToolTipText(I18n.t(
+            "ID3v1 est l'ancêtre du format de tags actuel (années 90), limité à 128 caractères, "
+            + "remplacé depuis longtemps par ID3v2 (voir ci-dessus). Le garder en plus ne sert plus "
+            + "à rien et peut semer la confusion avec certains lecteurs."));
+        chkSaveAcoustidFingerprints   = new JCheckBox(I18n.t("Enregistrer l'empreinte audio AcoustID dans les tags du fichier"));
+        chkSaveAcoustidFingerprints.setToolTipText(I18n.t(
+            "AcoustID identifie un morceau à partir du son lui-même (voir l'onglet Matching). "
+            + "Sauvegarder cette empreinte dans le fichier permet de la réutiliser plus tard sans "
+            + "avoir à la recalculer (recalcul = plus lent, consomme du CPU)."));
+        chkIgnoreExistingFingerprints = new JCheckBox(I18n.t("Toujours recalculer l'empreinte AcoustID, même si le fichier en a déjà une"));
+        chkIgnoreExistingFingerprints.setToolTipText(I18n.t(
+            "Une empreinte déjà présente peut avoir été écrite par un autre outil et être fausse ou "
+            + "obsolète (ex: fichier ré-encodé depuis). Cocher ceci ignore l'ancienne et repart d'un "
+            + "calcul frais à chaque fois — plus lent, mais plus fiable en cas de doute."));
         spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
         spBatchThreads             = new JSpinner(new SpinnerNumberModel(6, 1, 16, 1));
         spBatchThreads.setToolTipText(I18n.t("Fichiers traités en parallèle pendant le taguage (GUI et CLI/--dossier). "
@@ -947,9 +1045,14 @@ public class SettingsDialog extends JDialog {
             tagInner.add((JComponent) rows[i][1], fc);
         }
 
+        spFpcalcThreads.setToolTipText(I18n.t(
+            "Nombre de fichiers dont l'empreinte audio AcoustID est calculée EN MÊME TEMPS. Plus "
+            + "haut = plus rapide mais plus de charge CPU ; inutile de dépasser le nombre de cœurs "
+            + "de votre processeur."));
+
         JPanel fpInner = new JPanel(new GridBagLayout());
         fpInner.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), "AcoustID / Fingerprint"));
+                BorderFactory.createEtchedBorder(), I18n.t("AcoustID / Empreinte audio")));
         JComponent[][] fpRows = {
             { new JLabel(""), chkSaveAcoustidFingerprints },
             { new JLabel(""), chkIgnoreExistingFingerprints },
@@ -969,7 +1072,11 @@ public class SettingsDialog extends JDialog {
 
         // ── Tags préservés ────────────────────────────────────────────────────────
         tfPreservedTags = tf();
-        tfPreservedTags.setToolTipText(I18n.t("Noms FieldKey séparés par | — ex: RATING|COMMENT  (laisser vide = aucun)"));
+        tfPreservedTags.setToolTipText(I18n.t(
+            "Champs qu'OpenTagger ne doit JAMAIS modifier ni effacer, même si une nouvelle valeur "
+            + "est trouvée — utile pour une note personnelle (COMMENT) ou une note sur 5 étoiles "
+            + "(RATING) que vous avez mise vous-même. Noms séparés par | (ex: RATING|COMMENT), "
+            + "vide = rien de préservé."));
         JPanel preserveInner = form(new String[]{"Tags à ne jamais écraser :"},
                 new JComponent[]{tfPreservedTags}, "Tags préservés");
 
@@ -1083,11 +1190,26 @@ public class SettingsDialog extends JDialog {
         }
         cmbDefaultMask = new JComboBox<>(maskItems);
         cmbDefaultMask.setMaximumRowCount(maskCount);
+        cmbDefaultMask.setToolTipText(I18n.t(
+            "Le \"masque\" définit comment un fichier taguée est renommé/rangé — par exemple "
+            + "Artiste/Album/NuméroPiste - Titre. Voir les exemples de résultat en bas de cet onglet."));
 
-        chkAutoRename      = new JCheckBox(I18n.t("Renommer automatiquement après le taguage"));
+        chkAutoRename      = new JCheckBox(I18n.t("Renommer/ranger automatiquement les fichiers après le taguage"));
+        chkAutoRename.setToolTipText(I18n.t(
+            "Décoché : les tags sont écrits mais le fichier garde son nom et son emplacement "
+            + "actuels. Coché : le fichier est en plus renommé et rangé selon le masque choisi "
+            + "ci-dessous, juste après l'écriture des tags."));
         chkAutoRename.addActionListener(e -> cmbDefaultMask.setEnabled(chkAutoRename.isSelected()));
-        chkDeleteEmptyDirs = new JCheckBox(I18n.t("Supprimer les dossiers vides après déplacement"));
-        chkFollowLog       = new JCheckBox(I18n.t("Mettre à jour le log avec le nouveau chemin (suivi après renommage)"));
+        chkDeleteEmptyDirs = new JCheckBox(I18n.t("Supprimer les dossiers devenus vides après un déplacement"));
+        chkDeleteEmptyDirs.setToolTipText(I18n.t(
+            "Quand un renommage déplace un fichier vers un nouveau dossier, l'ancien dossier peut se "
+            + "retrouver vide (plus aucun fichier dedans) — cocher ceci le supprime automatiquement "
+            + "plutôt que de laisser traîner des dossiers vides dans la bibliothèque."));
+        chkFollowLog       = new JCheckBox(I18n.t("Garder le panneau Journal synchronisé sur le fichier en cours de traitement"));
+        chkFollowLog.setToolTipText(I18n.t(
+            "Fait défiler automatiquement le panneau Journal (en bas de la fenêtre principale) pour "
+            + "toujours montrer la dernière ligne concernant le fichier actuellement traité, plutôt "
+            + "que de devoir faire défiler vous-même pour suivre la progression."));
 
         // ── Exemples en temps réel ──────────────────────────────────────────────
         com.opentagger.model.TagInfo ex1 = new com.opentagger.model.TagInfo();
@@ -1211,28 +1333,12 @@ public class SettingsDialog extends JDialog {
             + "les convertir en MP3 tagué, sans dialogue à ouvrir. Reconnues → sous-dossier \"Convertis\" ; "
             + "non reconnues → \"Non identifié\". Rien n'est jamais supprimé."));
 
-        // ── Compromis vitesse : sauter SongRec quand MB texte est déjà confiant ────
-        chkSkipSongRecOnConfidentMb = new JCheckBox(I18n.t(
-            "Éviter SongRec quand MusicBrainz (recherche texte) est déjà confiant"));
-        chkSkipSongRecOnConfidentMb.setToolTipText(I18n.t(
-            "SongRec (empreinte audio) reste la source principale par défaut — plus lent mais fiable "
-            + "même avec des tags faux. En activant ceci : si le fichier a un artiste+titre exploitables "
-            + "dans ses tags (pas génériques, pas déduits du nom de dossier), une recherche MusicBrainz "
-            + "texte rapide est tentée D'ABORD ; si son score dépasse le seuil ci-dessous, SongRec est "
-            + "sauté pour ce fichier. Accélère les bibliothèques déjà bien taguées, au prix d'un peu moins "
-            + "de vérification audio sur ces fichiers-là."));
-        spnSkipSongRecMinScore = new JSpinner(new SpinnerNumberModel(90, 50, 100, 1));
-        JPanel skipSongRecScorePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        skipSongRecScorePanel.add(new JLabel(I18n.t("Score MB minimum pour sauter SongRec :")));
-        skipSongRecScorePanel.add(spnSkipSongRecMinScore);
-        skipSongRecScorePanel.add(new JLabel("%"));
-
         JPanel p = form(
             new String[]{"", "Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
+                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", ""},
             new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
                     chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
-                    chkVideoAutoRecover, chkSkipSongRecOnConfidentMb, skipSongRecScorePanel},
+                    chkVideoAutoRecover},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -1265,12 +1371,39 @@ public class SettingsDialog extends JDialog {
 
     private JPanel buildAudioPanel() {
         tfFfmpegPath        = tf();
+        tfFfmpegPath.setToolTipText(I18n.t(
+            "ffmpeg est l'outil qui lit/convertit l'audio en coulisses (transcodage, calcul du "
+            + "volume, extraction d'un extrait pour la reconnaissance...). Laisser vide utilise la "
+            + "version déjà installée sur votre système ; ne remplir que si vous en avez une copie "
+            + "spécifique ailleurs."));
         tfEssentiaPath      = tf();
+        tfEssentiaPath.setToolTipText(I18n.t(
+            "Essentia est un outil optionnel qui analyse le son pour en déduire des caractéristiques "
+            + "avancées (ambiance, dansabilité, genre probable…). Non installé par défaut — laisser "
+            + "vide si vous ne savez pas ce que c'est, ça n'empêche rien de fonctionner."));
         tfFpcalcPath        = tf();
+        tfFpcalcPath.setToolTipText(I18n.t(
+            "fpcalc calcule l'empreinte audio utilisée par AcoustID (voir l'onglet Matching) pour "
+            + "identifier un morceau à partir du son. Requis pour qu'AcoustID fonctionne — le bouton "
+            + "\"Télécharger fpcalc…\" ci-dessous l'installe automatiquement si absent."));
         chkLyricsEnabled    = new JCheckBox(I18n.t("Activer la récupération des paroles"));
-        chkSaveLrc          = new JCheckBox(I18n.t("Écrire un fichier .lrc (paroles synchronisées, si trouvées sur lrclib.net)"));
-        chkReplayGainEnabled= new JCheckBox(I18n.t("Calculer et écrire le ReplayGain (via ffmpeg, lent)"));
-        chkCamelotKey       = new JCheckBox(I18n.t("Écrire la clé au format Camelot (8A/8B…) plutôt qu'en notation standard"));
+        chkSaveLrc          = new JCheckBox(I18n.t("Écrire un fichier .lrc à côté (paroles synchronisées avec le son, si trouvées)"));
+        chkSaveLrc.setToolTipText(I18n.t(
+            "Un fichier .lrc contient les paroles avec un horodatage par ligne, pour un affichage "
+            + "synchronisé pendant la lecture (comme un karaoké) — supporté par la plupart des "
+            + "lecteurs audio modernes. Cherché sur lrclib.net, une base de paroles gratuite."));
+        chkReplayGainEnabled= new JCheckBox(I18n.t("Égaliser automatiquement le volume entre morceaux (ReplayGain)"));
+        chkReplayGainEnabled.setToolTipText(I18n.t(
+            "ReplayGain calcule de combien monter/baisser le volume de chaque morceau pour qu'ils "
+            + "sonnent tous à peu près aussi fort en lecture aléatoire (certains albums sont "
+            + "enregistrés bien plus fort que d'autres). N'écrase pas le fichier audio lui-même, "
+            + "juste une information de volume que le lecteur applique — nécessite ffmpeg, plus lent."));
+        chkCamelotKey       = new JCheckBox(I18n.t("Écrire la tonalité au format Camelot (8A/8B…) — utilisé par les DJ pour le mixage harmonique"));
+        chkCamelotKey.setToolTipText(I18n.t(
+            "La tonalité musicale d'un morceau (do majeur, la mineur…) peut s'écrire en notation "
+            + "classique ou en \"roue Camelot\" (un code court comme 8A), un système utilisé par les "
+            + "DJ pour repérer facilement quels morceaux s'enchaînent bien harmoniquement. Sans "
+            + "rapport avec le mixage/DJing si vous n'en faites pas — laissez décoché sinon."));
         lblFpcalcStatus     = new JLabel();
 
         refreshFpcalcStatus();
@@ -1389,11 +1522,19 @@ public class SettingsDialog extends JDialog {
      *  buildAudioPanel()) — plus un onglet séparé, juste une 2e carte dans le même onglet. */
     @SuppressWarnings("unchecked")
     private JPanel buildTranscodeSection() {
-        chkTranscodeAuto = new JCheckBox(I18n.t("Transcoder automatiquement avant le taguage"));
+        chkTranscodeAuto = new JCheckBox(I18n.t("Convertir automatiquement le format audio avant le taguage"));
+        chkTranscodeAuto.setToolTipText(I18n.t(
+            "\"Transcoder\" = convertir un fichier audio d'un format à un autre (ex: FLAC → MP3). "
+            + "Cocher ceci convertit automatiquement chaque fichier vers le format choisi ci-dessous "
+            + "avant de le taguer — pratique pour uniformiser une bibliothèque aux formats mélangés."));
         cmbTranscodeFormat = new JComboBox<>(new String[]{"MP3", "FLAC", "AAC (M4A)", "OGG", "OPUS"});
         spTranscodeBitrate = new JSpinner(new SpinnerNumberModel(320, 64, 320, 32));
-        chkTranscodeDeleteSource = new JCheckBox(I18n.t("Supprimer le fichier source après transcodage"));
-        lblTranscodeBitrate = new JLabel(I18n.t("Débit (kbps) :"));
+        chkTranscodeDeleteSource = new JCheckBox(I18n.t("Supprimer le fichier d'origine après conversion réussie"));
+        chkTranscodeDeleteSource.setToolTipText(I18n.t(
+            "Décoché (par défaut) : garde les deux fichiers (original + converti). Coché : supprime "
+            + "l'original une fois la conversion confirmée réussie — irréversible, à activer seulement "
+            + "si vous êtes sûr de ne pas vouloir revenir au format d'origine."));
+        lblTranscodeBitrate = new JLabel(I18n.t("Débit (kbps) — qualité/taille, ignoré pour le FLAC sans perte :"));
 
         // Masquer le débit pour les formats sans débit (FLAC)
         cmbTranscodeFormat.addActionListener(e -> {
@@ -1813,7 +1954,12 @@ public class SettingsDialog extends JDialog {
     private JPanel buildMbOAuthPanel() {
         lblMbAccount     = new JLabel();
         cmbMbOAuthMode   = new JComboBox<>(new String[]{
-            I18n.t("scheme (URL handler)"), I18n.t("localhost (port 8484)"), I18n.t("oob (copier-coller)")});
+            I18n.t("Automatique (recommandé)"), I18n.t("Automatique via navigateur local"), I18n.t("Manuel (copier-coller le code)")});
+        cmbMbOAuthMode.setToolTipText(I18n.t(
+            "Façon dont OpenTagger récupère l'autorisation après que vous l'ayez donnée dans le "
+            + "navigateur, lors du clic sur \"Se connecter à MusicBrainz\" ci-dessous. \"Automatique\" "
+            + "fonctionne dans la grande majorité des cas — ne changer que si la connexion échoue "
+            + "systématiquement ; \"Manuel\" demande de copier un code affiché par le navigateur."));
         tfMbCollectionId = tf();
         tfMbCollectionId.setToolTipText(I18n.t("MBID de votre collection MusicBrainz (visible dans l'URL de la "
                 + "page de la collection sur musicbrainz.org) — les releases taguées y seront ajoutées "

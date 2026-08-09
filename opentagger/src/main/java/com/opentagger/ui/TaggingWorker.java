@@ -859,6 +859,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Détection hors FR/EN : si les tags contiennent du japonais, coréen, arabe,
         // cyrillique, etc. → inutile de chercher dans MB avec ces termes, SongRec en priorité
         boolean nonLatinInput = TagEnrichment.hasNonLatinChars(artist) || TagEnrichment.hasNonLatinChars(title);
+        // true si artist/title viennent d'un split brut du nom de fichier sur " - " (voir plus bas)
+        // — parseFilename() suppose l'ordre "Artiste - Titre", mais certains rips (constaté en
+        // direct, ex. "J en ai mis du temps - Patrick Fiori.mp3") utilisent l'ordre inverse
+        // "Titre - Artiste". Contrairement aux vrais tags ID3 (dont on connaît le sens de chaque
+        // champ), un nom de fichier découpé sur "-" est fondamentalement ambigu — seul un second
+        // essai avec les deux termes échangés permet de lever le doute si le premier échoue.
+        boolean filenameSplitAmbiguous = false;
         if (nonLatinInput) {
             log(I18n.t("  tags non-Latin → SongRec en priorité"));
             artist = ""; title = "";
@@ -877,6 +884,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     artist = fn[0]; title = fn[1];
                     // Appliquer isGenericTag sur l'artiste du nom de fichier aussi ("0", "01", etc.)
                     if (isGenericTag(artist)) artist = "";
+                    filenameSplitAmbiguous = !artist.isBlank() && !title.isBlank();
                     log(I18n.t("  → infos du nom de fichier: artiste='%s' titre='%s'", artist, title));
                 }
             } else if (artist.isBlank() && !title.isBlank()) {
@@ -953,6 +961,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     return results;
                 }
             }
+
+            // 5b-bis-2. Fallback: ordre inversé "Titre - Artiste" — uniquement si artist/title
+            // viennent d'un split de nom de fichier (voir filenameSplitAmbiguous plus haut), jamais
+            // pour de vrais tags ID3 (dont on connaît déjà le sens de chaque champ, l'inverser n'
+            // aurait aucun sens). Vérifié en direct (2026-08-09) : "03 J en ai mis du temps -
+            // Patrick Fiori.mp3" cherchait artiste="J en ai mis du temps"/titre="Patrick Fiori" (0
+            // résultat), alors que l'inverse trouve Patrick Fiori à 100% sur MusicBrainz.
+            if (filenameSplitAmbiguous) {
+                log(I18n.t("  MB fallback ordre inversé: '%s' / '%s'", title, artist));
+                String hashSwap = MetadataCache.queryHash(title, artist);
+                results = mb.searchRecording(title, artist);
+                log(I18n.t("  MB ordre inversé → %s résultat(s)", results.size()));
+                if (!results.isEmpty()) {
+                    cache.putRecordingSearch(hashSwap, mb.lastRawJson());
+                    return results;
+                }
+            }
         }
 
         // NOTE: Le fallback "titre seul" est désactivé — trop de faux positifs.
@@ -970,68 +995,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        // 5c. SongRec — étape 1 : reconnaissance audio (empreinte Shazam gratuite)
-        //              étape 2 : MB complète ce que SongRec a trouvé
-        if (SongRecClient.isAvailable()) {
-            log(nonLatinInput ? I18n.t("  SongRec (non-Latin)...") : I18n.t("  SongRec fallback..."));
-            try {
-                TagInfo sr = songRec.recognize(fichier);
-                if (sr != null) {
-                    log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
-                } else if (SongRecClient.lastFailureReason() != null) {
-                    log(I18n.t("  SongRec ✗ %s", SongRecClient.lastFailureReason()));
-                }
-                if (sr != null) {
-                    // MB complète : MBID, album complet, track#, disc#, albumArtist, année…
-                    List<TagInfo> mbResults = mb.searchRecording(sr.artist, sr.title);
-                    if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
-                        TagInfo mbr = mbResults.get(0);
-                        // SongRec comble ce que MB n'a pas
-                        if (mbr.album.isBlank()   && !sr.album.isBlank())   mbr.album   = sr.album;
-                        if (mbr.year.isBlank()     && !sr.year.isBlank())    mbr.year    = sr.year;
-                        if (mbr.genre.isBlank()    && !sr.genre.isBlank())   mbr.genre   = sr.genre;
-                        if (mbr.isrc.isBlank()     && !sr.isrc.isBlank())    mbr.isrc    = sr.isrc;
-                        if (mbr.track.isBlank()    && !sr.track.isBlank())   mbr.track   = sr.track;
-                        if (mbr.comment.isBlank()  && !sr.comment.isBlank()) mbr.comment = sr.comment;
-                        mbr.score = 90;
-                        log(I18n.t("  SongRec+MB → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
-                        return List.of(mbr);
-                    }
-                    // MB échoue avec titre complet → réessayer sans qualificatif entre parenthèses
-                    // ex: "Song Name (Home Demos)" → "Song Name"
-                    String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
-                    if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
-                        log(I18n.t("  SongRec+MB (titre nettoyé): '%s'", cleanTitle));
-                        List<TagInfo> mbClean = mb.searchRecording(sr.artist, cleanTitle);
-                        if (!mbClean.isEmpty() && mbClean.get(0).score >= 50) {
-                            TagInfo mbr = mbClean.get(0);
-                            if (mbr.album.isBlank()   && !sr.album.isBlank())   mbr.album   = sr.album;
-                            if (mbr.year.isBlank()     && !sr.year.isBlank())    mbr.year    = sr.year;
-                            if (mbr.genre.isBlank()    && !sr.genre.isBlank())   mbr.genre   = sr.genre;
-                            if (mbr.isrc.isBlank()     && !sr.isrc.isBlank())    mbr.isrc    = sr.isrc;
-                            if (mbr.track.isBlank()    && !sr.track.isBlank())   mbr.track   = sr.track;
-                            if (mbr.comment.isBlank()  && !sr.comment.isBlank()) mbr.comment = sr.comment;
-                            if (!sr.title.equals(cleanTitle)) mbr.title = sr.title;
-                            mbr.score = 85;
-                            log(I18n.t("  SongRec+MB(nettoyé) → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
-                            return List.of(mbr);
-                        }
-                    }
-                    // MB ne confirme pas → garder les données SongRec + chercher artistMbid pour la pochette
-                    if (sr.artistMbid.isBlank()) {
-                        try {
-                            String amid = mb.searchArtistMbid(sr.artist);
-                            if (!amid.isBlank()) { sr.artistMbid = amid; log(I18n.t("  artistMbid←MB: %s", amid)); }
-                        } catch (Exception ignored) {}
-                    }
-                    sr.score = 85;
-                    log(I18n.t("  SongRec seul (MB non confirmé) → %s – %s", sr.artist, sr.title));
-                    return List.of(sr);
-                }
-            } catch (Exception e) {
-                log(I18n.t("  SongRec erreur: %s", e.getMessage()));
-            }
-        }
+        // 5c. (SongRec) supprimé — était un second appel à songRec.recognize(fichier), IDENTIQUE à
+        // celui de l'étape 1 en tout début de méthode (même fichier, même appel, aucun paramètre
+        // différent). L'étape 1 retourne TOUJOURS dès qu'elle obtient un résultat exploitable
+        // (srOk) ; ce point du code n'est donc atteint que si l'étape 1 a déjà échoué — et Shazam
+        // étant un service déterministe, un second appel ne pouvait que reproduire le même échec.
+        // Un aller-retour réseau (jusqu'à 30s × plusieurs offsets) gaspillé sur CHAQUE fichier non
+        // trouvé par SongRec, en plus d'aggraver inutilement le débit de requêtes vers Shazam —
+        // trouvé en creusant le blocage "429 Too Many Requests" du 2026-08-09.
 
         // 5d. AcoustID en dernier recours (lent mais très précis par empreinte audio)
         if (!useAcoustId && !Config.get().acoustidKey().isBlank()) {
@@ -1114,6 +1085,16 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      */
     private boolean acoustIdResultPlausible(File fichier, TagInfo candidate, boolean forceReidentify) {
         if (forceReidentify) return true;
+        // Empreinte très forte (même seuil "confiance excellente" qu'AcoustIdClient.
+        // fetchBestFromMusicBrainz()) : on fait confiance à l'audio plutôt qu'au tag déjà présent,
+        // qui peut lui-même être faux à la source (constaté en direct 2026-08-09 : un fichier tagué
+        // "Double Vision - Knockin" par un outil tiers, dont l'empreinte AcoustID — confirmée
+        // identique avant/après par une ré-analyse indépendante — pointait en réalité vers "Le
+        // Manège Enchanté - Remix 93" ; la comparaison ci-dessous rejetait ce match correct
+        // uniquement parce qu'il ne ressemblait pas au tag existant erroné). En dessous de ce
+        // seuil, on garde la vérification par similarité : elle reste utile contre un vrai faux
+        // positif à confiance faible/moyenne (cf. le cas "Rasputin" de SongRec, même session).
+        if (candidate.acoustidConfidence >= 0.9) return true;
         String existingArtist = readTag(fichier, FieldKey.ARTIST);
         if (existingArtist.isBlank()) return true; // rien à comparer
 

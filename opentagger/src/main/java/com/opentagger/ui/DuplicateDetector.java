@@ -44,6 +44,11 @@ public class DuplicateDetector {
     /** Un groupe de fichiers potentiellement en double. */
     public record DuplicateGroup(List<FileEntry> files, Confidence confidence) {}
 
+    /** Résultat complet d'une passe detect() : les groupes, plus le meilleur fichier de chacun déjà
+     *  calculé (voir computeBestMap ci-dessous — évite de refaire ce calcul, coûteux en E/S, sur
+     *  l'EDT lors de la construction de DuplicatesDialog). */
+    public record DetectionResult(List<DuplicateGroup> groups, Map<DuplicateGroup, FileEntry> bestByGroup) {}
+
     /** Retourne une liste de groupes, chaque groupe contenant ≥ 2 fichiers. */
     public static List<DuplicateGroup> detect(List<FileEntry> entries) {
         Map<String, List<FileEntry>> byMbid        = new LinkedHashMap<>();
@@ -169,6 +174,20 @@ public class DuplicateDetector {
         return files.stream()
             .max(Comparator.comparingInt(DuplicateDetector::qualityScore))
             .orElse(files.get(0));
+    }
+
+    /** Précalcule bestInGroup() pour chaque groupe en une seule passe — à appeler UNIQUEMENT en
+     *  arrière-plan (doInBackground d'un SwingWorker), jamais sur l'EDT : qualityScore() ouvre et
+     *  parse chaque fichier .m4a via jaudiotagger (isActuallyAlac) pour départager ALAC/AAC, une
+     *  vraie E/S disque par fichier. Sur une grosse bibliothèque avec beaucoup de groupes/M4A, ce
+     *  calcul répété (une fois à l'ouverture du dialogue, une fois de plus à chaque clic sur
+     *  "Sélection intelligente") gelait l'appli entière — retour utilisateur ("recherche audio en
+     *  double [...] fige l'application"). Calculé une seule fois ici et réutilisé ensuite par
+     *  DuplicatesDialog (buildGroup ET smartSelect) au lieu de rappeler bestInGroup(). */
+    public static Map<DuplicateGroup, FileEntry> computeBestMap(List<DuplicateGroup> groups) {
+        Map<DuplicateGroup, FileEntry> map = new LinkedHashMap<>();
+        for (DuplicateGroup g : groups) map.put(g, bestInGroup(g.files()));
+        return map;
     }
 
     private static boolean isActuallyAlac(File f) {
