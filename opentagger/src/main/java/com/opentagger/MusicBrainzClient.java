@@ -16,7 +16,9 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class MusicBrainzClient {
 
-    private static final String BASE_URL    = "https://musicbrainz.org/ws/2";
+    // Miroir MusicBrainz configurable (Config.mbServer()) — était codé en dur sur musicbrainz.org
+    // jusqu'ici malgré l'existence de la clé de config musicbrainz.server, jamais réellement lue.
+    private static String mbBaseUrl() { return Config.get().mbServer(); }
     // 3 → 1 (2026-07-27) : avec l'intervalle de cadence MB (1,1s, incompressible — voir
     // MB_MIN_INTERVAL_MS, à ne jamais réduire sous peine de bannissement IP) et le timeout par
     // requête (HttpTimeouts.apiCall(), 20s par défaut), un appel qui échoue systématiquement coûtait
@@ -38,11 +40,17 @@ public class MusicBrainzClient {
     // appelant (un sleep approximatif par fichier dans TaggingWorker, un appel manuel unique dans
     // BatchProcessor.findTags()), et cadence désormais chaque requête réseau réelle individuellement.
     private static final AtomicLong LAST_MB_REQUEST_MS = new AtomicLong(0);
-    private static final long       MB_MIN_INTERVAL_MS = 1100;
-
+    // Intervalle configurable (Config.mbRateLimitMs(), défaut 1100 = valeur d'origine) — NE JAMAIS
+    // descendre en dessous sur la vraie API publique musicbrainz.org, risque de bannissement IP.
+    // À réduire (voire 0) UNIQUEMENT si mbServer() pointe vers un miroir tiers avec sa propre
+    // capacité (ex. musicbrainz.codeshy.com, même logique que sleepytime=0 dans le mb.py de
+    // Headphones pour ce même miroir) — la responsabilité de ne changer les deux ensemble revient
+    // à l'utilisateur, voir l'infobulle dans les Préférences.
     private static synchronized void mbRateLimit() {
+        long minInterval = Config.get().mbRateLimitMs();
+        if (minInterval <= 0) return;
         long now  = System.currentTimeMillis();
-        long wait = MB_MIN_INTERVAL_MS - (now - LAST_MB_REQUEST_MS.get());
+        long wait = minInterval - (now - LAST_MB_REQUEST_MS.get());
         if (wait > 0) {
             try { Thread.sleep(wait); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
@@ -114,7 +122,7 @@ public class MusicBrainzClient {
         String query = buildQuery(artist, title);
         if (query.isBlank()) return List.of();
 
-        String url = BASE_URL + "/recording?query="
+        String url = mbBaseUrl() + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
                 + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels+labels";
@@ -131,7 +139,7 @@ public class MusicBrainzClient {
         String query = buildQuery(artist, title, album);
         if (query.isBlank()) return List.of();
 
-        String url = BASE_URL + "/recording?query="
+        String url = mbBaseUrl() + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
                 + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels+labels";
@@ -196,12 +204,22 @@ public class MusicBrainzClient {
                 Thread.sleep(delayMs);
                 delayMs = Math.min(delayMs * 2, 30_000);
             }
-            HttpRequest request = HttpRequest.newBuilder()
+            HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("User-Agent", Config.get().userAgent())
                     .timeout(HttpTimeouts.apiCall())
-                    .GET()
-                    .build();
+                    .GET();
+            // Authentification HTTP Basic optionnelle — miroir tiers type musicbrainz.codeshy.com
+            // (Headphones Indexer VIP), voir Config.mbAuthUser()/mbAuthPass(). Vide par défaut =
+            // aucun header, comportement identique à avant sur l'API publique.
+            String authUser = Config.get().mbAuthUser();
+            String authPass = Config.get().mbAuthPass();
+            if (!authUser.isBlank() && !authPass.isBlank()) {
+                String basic = java.util.Base64.getEncoder().encodeToString(
+                        (authUser + ":" + authPass).getBytes(StandardCharsets.UTF_8));
+                reqBuilder.header("Authorization", "Basic " + basic);
+            }
+            HttpRequest request = reqBuilder.build();
             mbRateLimit();
             HttpResponse<String> response;
             try {
@@ -550,7 +568,7 @@ public class MusicBrainzClient {
                 && !Config.get().vaName().equalsIgnoreCase(artistHint)) {
             q.append(" AND artist:\"").append(escapeLucene(artistHint)).append("\"");
         }
-        String url = BASE_URL + "/release?query="
+        String url = mbBaseUrl() + "/release?query="
                 + URLEncoder.encode(q.toString(), StandardCharsets.UTF_8)
                 + "&limit=5&fmt=json";
         HttpResponse<String> resp = getWithRetry(url);
@@ -582,7 +600,7 @@ public class MusicBrainzClient {
         // JSON déjà récupéré ici, juste jamais lu pour ces champs avant ce correctif (comparé à
         // Picard sur un même fichier : pays/code-barres/statut/label/catalogue/script/MBID artiste
         // release manquaient systématiquement alors que MusicBrainz les fournit bel et bien).
-        String url = BASE_URL + "/release/" + releaseMbid.trim()
+        String url = mbBaseUrl() + "/release/" + releaseMbid.trim()
                 + "?fmt=json&inc=recordings+artist-credits+release-groups+labels";
 
         HttpResponse<String> response = getWithRetry(url);
@@ -678,7 +696,7 @@ public class MusicBrainzClient {
         // jamais reçu la moindre donnée. Contrepartie : label-info reste indisponible via cette
         // méthode (comme lookupRelease(), qui ne l'a jamais eu non plus) — pas un problème nouveau,
         // juste pas rattrapable ici sans casser l'appel entier pour tout le reste.
-        String url = BASE_URL + "/recording/" + mbid.trim()
+        String url = mbBaseUrl() + "/recording/" + mbid.trim()
                 + "?fmt=json&inc=releases+artist-credits+release-groups+isrcs"
                 + (mbGenres ? "+genres" : "")
                 + "+artist-rels+recording-rels+work-rels";
@@ -764,7 +782,7 @@ public class MusicBrainzClient {
      */
     public List<RecordingRelease> lookupRecordingReleases(String recordingMbid) throws Exception {
         if (recordingMbid == null || recordingMbid.isBlank()) return List.of();
-        String url = BASE_URL + "/recording/" + recordingMbid.trim()
+        String url = mbBaseUrl() + "/recording/" + recordingMbid.trim()
                 + "?fmt=json&inc=releases+release-groups";
 
         HttpResponse<String> response = getWithRetry(url);
@@ -948,7 +966,7 @@ public class MusicBrainzClient {
         String cached = cache.getLookup(cacheKey);
         if (cached != null) return mapper.readTree(cached);
 
-        String url = BASE_URL + "/work/" + workMbid.trim() + "?fmt=json&inc=work-rels";
+        String url = mbBaseUrl() + "/work/" + workMbid.trim() + "?fmt=json&inc=work-rels";
         HttpResponse<String> resp = getWithRetry(url);
         if (resp == null) return null;
         cache.putLookup(cacheKey, resp.body());
@@ -1021,7 +1039,7 @@ public class MusicBrainzClient {
      */
     public String lookupArtistAlias(String artistMbid, String[] preferredLocales) throws Exception {
         if (artistMbid == null || artistMbid.isBlank()) return "";
-        String url = BASE_URL + "/artist/" + artistMbid.trim() + "?fmt=json&inc=aliases";
+        String url = mbBaseUrl() + "/artist/" + artistMbid.trim() + "?fmt=json&inc=aliases";
         HttpResponse<String> resp = getWithRetry(url);
         if (resp == null) return "";
         JsonNode root = mapper.readTree(resp.body());
@@ -1093,7 +1111,7 @@ public class MusicBrainzClient {
 
     public String searchArtistMbid(String artistName) throws Exception {
         if (artistName == null || artistName.isBlank()) return "";
-        String url = BASE_URL + "/artist?query=artist:"
+        String url = mbBaseUrl() + "/artist?query=artist:"
                 + URLEncoder.encode(escapeLucene(artistName), StandardCharsets.UTF_8)
                 + "&limit=1&fmt=json";
         HttpResponse<String> resp = getWithRetry(url);

@@ -249,6 +249,29 @@ public final class TagEnrichment {
                         java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 } catch (Exception ignored) {}
             }
+
+            // Portrait d'artiste (artist.jpg à côté de cover.jpg dans le dossier album) — opt-in,
+            // voir Config.artistPhotoEnabled(). Pas de case "overwrite" séparée (contrairement à la
+            // pochette) : un fichier déjà présent suffit, évite un re-téléchargement à chaque piste
+            // du même artiste/album.
+            if (Config.get().artistPhotoEnabled() && fanArt != null) {
+                Path artistPhoto = null;
+                try {
+                    artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
+                    if (artistPhoto != null) {
+                        String fname = Config.get().artistPhotoFilename();
+                        String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                        Path dest = fichier.toPath().resolveSibling(fname + ext);
+                        if (!java.nio.file.Files.exists(dest))
+                            java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (artistPhoto != null) {
+                        try { java.nio.file.Files.deleteIfExists(artistPhoto); } catch (Exception ignored) {}
+                    }
+                }
+            }
         } finally {
             // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
             // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien

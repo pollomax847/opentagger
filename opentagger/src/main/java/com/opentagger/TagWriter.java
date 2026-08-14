@@ -26,10 +26,12 @@ import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -74,6 +76,7 @@ public class TagWriter {
             // effet pour tout fichier Opus/AAC/WV/APE/WAV, contrairement au chemin jaudiotagger
             // natif et aux fallbacks M4A.
             applyPreservedToTagInfo(copy, readPreservedTagsViaFfmpeg(fichier));
+            applyNeverModify(copy, readNeverModifyTagsViaFfmpeg(fichier));
             copy.taggedDate = java.time.LocalDate.now().toString();
             FfmpegTagIO.write(fichier, copy, coverImage);
             if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
@@ -93,6 +96,10 @@ public class TagWriter {
                 merged = Config.get().clearExistingTags()
                         ? info.copy()
                         : mergeWithExisting(info, tag);
+                // tags.never_modify : appliqué APRÈS le choix clearExistingTags/mergeWithExisting
+                // ci-dessus, dans les deux cas — un champ figé le reste même en mode "effacer les
+                // tags existants", qui sinon le perdrait purement et simplement.
+                applyNeverModify(merged, readNeverModifyTags(tag));
             } else {
                 merged = info.copy();
             }
@@ -1138,11 +1145,18 @@ public class TagWriter {
 
     // ── Merge et preserved — lecture jaudiotagger ─────────────────────────────
 
+    // Champs d'identité où une valeur existante "1", "0", "Unknown"... ne doit JAMAIS être
+    // recopiée en secours — contrairement à TRACK/DISC_NO/YEAR où un court nombre est légitime.
+    // Voir TagInfo.isGenericIdentityValue() pour le pourquoi (bug réel trouvé le 2026-08-13).
+    private static final Set<FieldKey> IDENTITY_FIELDS = EnumSet.of(
+            FieldKey.ARTIST, FieldKey.ALBUM_ARTIST, FieldKey.TITLE, FieldKey.ALBUM);
+
     private TagInfo mergeWithExisting(TagInfo info, Tag tag) {
         TagInfo m = info.copy();
         for (FieldKey key : FieldKey.values()) {
             String existing = getTagFirst(tag, key);
             if (existing == null || existing.isBlank()) continue;
+            if (IDENTITY_FIELDS.contains(key) && TagInfo.isGenericIdentityValue(existing)) continue;
             try {
                 Field f = fieldFor(key);
                 if (f == null) continue;
@@ -1157,6 +1171,60 @@ public class TagWriter {
             } catch (Exception ignored) {}
         }
         return m;
+    }
+
+    /** Champs listés dans tags.never_modify : capture leur valeur ACTUELLE sur le tag existant,
+     *  même si elle est vide — contrairement à readPreservedTags(), rien n'est filtré ici, le champ
+     *  doit rester figé tel quel, y compris "figé à vide" si c'était déjà le cas. */
+    private Map<String, String> readNeverModifyTags(Tag tag) {
+        String raw = Config.get().neverModifyTags();
+        Map<String, String> result = new LinkedHashMap<>();
+        if (raw.isBlank()) return result;
+        for (String name : raw.split("\\|")) {
+            name = name.trim();
+            if (name.isBlank()) continue;
+            try {
+                FieldKey key = FieldKey.valueOf(name.toUpperCase());
+                result.put(key.name(), getTagFirst(tag, key));
+            } catch (IllegalArgumentException ignored) {}
+        }
+        return result;
+    }
+
+    /** Équivalent de {@link #readNeverModifyTags(Tag)} pour Opus/AAC/WV/APE/WAV — même raison que
+     *  {@link #readPreservedTagsViaFfmpeg(File)} : pas de Tag jaudiotagger disponible sur ces
+     *  formats, relecture de l'ancien fichier via FfmpegTagIO.read(). */
+    private Map<String, String> readNeverModifyTagsViaFfmpeg(File fichier) {
+        String raw = Config.get().neverModifyTags();
+        Map<String, String> result = new LinkedHashMap<>();
+        if (raw.isBlank()) return result;
+        TagInfo old;
+        try { old = FfmpegTagIO.read(fichier); } catch (Exception e) { return result; }
+        for (String name : raw.split("\\|")) {
+            name = name.trim();
+            if (name.isBlank()) continue;
+            try {
+                FieldKey key = FieldKey.valueOf(name.toUpperCase());
+                Field f = fieldFor(key);
+                if (f == null) continue;
+                String val = (String) f.get(old);
+                result.put(key.name(), val == null ? "" : val);
+            } catch (Exception ignored) {}
+        }
+        return result;
+    }
+
+    /** Force en place, sur une TagInfo pas encore écrite, les valeurs figées de
+     *  {@link #readNeverModifyTags(Tag)}/{@link #readNeverModifyTagsViaFfmpeg(File)} —
+     *  inconditionnel (contrairement à applyPreservedToTagInfo()) : le champ garde sa valeur
+     *  d'origine même si le taguage venait d'y écrire quelque chose de nouveau et non vide. */
+    private void applyNeverModify(TagInfo target, Map<String, String> frozen) {
+        for (Map.Entry<String, String> e : frozen.entrySet()) {
+            try {
+                Field f = fieldFor(FieldKey.valueOf(e.getKey()));
+                if (f != null) f.set(target, e.getValue());
+            } catch (Exception ignored) {}
+        }
     }
 
     private Map<String, String> readPreservedTags(Tag tag) {

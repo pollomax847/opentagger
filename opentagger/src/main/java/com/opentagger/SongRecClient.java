@@ -190,7 +190,15 @@ public class SongRecClient {
                 ProcessBuilder pb = new ProcessBuilder(bin, "audio-file-to-recognized-song",
                         segment.getAbsolutePath());
                 pb.redirectErrorStream(false);
-                String json = ProcessUtils.readStringWithTimeout(pb, 30);
+                // 15s (au lieu de 30s auparavant) : un appel Shazam normal répond en 1-5s, ce
+                // plafond n'est qu'un filet de sécurité contre un vrai blocage, jamais censé être
+                // atteint en usage courant. Recalibré le même jour que SHAZAM_GATE (2026-08-10) —
+                // avant, un plafond élevé ne coûtait qu'à 1 thread sur 6 ; avec un seul appel Shazam
+                // autorisé à la fois, ce même plafond pénalise maintenant TOUTE la chaîne
+                // d'identification derrière lui à chaque fois qu'il est atteint (jusqu'à 4 appels
+                // par fichier non reconnu, voir recognize()) — recalibrage manqué la première fois,
+                // repéré par l'utilisateur en observant le comportement réel plutôt qu'anticipé.
+                String json = ProcessUtils.readStringWithTimeout(pb, 15);
                 if (json == null || json.isBlank()) {
                     LAST_FAILURE_REASON.set("binaire songrec sans réponse à " + offsetSec
                         + "s (timeout 30s ou binaire indisponible)");
@@ -287,7 +295,7 @@ public class SongRecClient {
                 String name = meta.path("title").asText("").trim();
                 String text = meta.path("text").asText("").trim();
                 switch (name) {
-                    case "Album"    -> ti.album = text;
+                    case "Album"    -> { if (!isNoAlbumPlaceholder(text)) ti.album = text; }
                     case "Released" -> ti.year  = text.length() >= 4 ? text.substring(0, 4) : text;
                     // Écrivait auparavant "Label: " + text dans ti.comment (faute d'un champ
                     // dédié) — comment sert à la désambiguïsation MusicBrainz (voir son
@@ -299,5 +307,23 @@ public class SongRecClient {
             }
         }
         return ti;
+    }
+
+    // Shazam renvoie parfois "Sans correspondance"/"Sans Correspondence" (mélange FR/EN, casse
+    // incohérente selon l'appel) littéralement comme VALEUR du champ metadata "Album" — pas une
+    // erreur réseau/JSON (le parsing réussit), juste leur propre texte de repli quand le morceau
+    // n'appartient à aucun album canonique connu d'eux (single, ou juste absent de leur base). Sans
+    // ce filtre, ti.album prenait ce texte tel quel comme si c'était un vrai titre d'album — repéré
+    // en direct (2026-08-12) : des dizaines de morceaux d'artistes totalement différents (Cerrone,
+    // Taio Cruz, Pat Martino, Uniting Nations…), tous par ailleurs correctement identifiés (artiste/
+    // titre corrects), partageant ce même "album" absurde — jusqu'à finir renommés dans un dossier
+    // ".../<Artiste>/Sans Correspondence/..." par le masque de renommage. Ni ce code Java ni le
+    // binaire songrec (vérifié : `strings songrec | grep -i correspondanc` ne trouve rien) ne
+    // produisent ce texte — il vient bien des serveurs Shazam eux-mêmes.
+    private static boolean isNoAlbumPlaceholder(String text) {
+        if (text == null || text.isBlank()) return false;
+        String norm = text.trim().toLowerCase(Locale.ROOT);
+        return norm.equals("sans correspondance") || norm.equals("sans correspondence")
+            || norm.equals("no correspondence")   || norm.equals("no match");
     }
 }

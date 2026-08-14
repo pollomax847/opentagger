@@ -127,6 +127,13 @@ public class AudDClient {
     private TagInfo parse(String json) throws Exception {
         JsonNode root   = mapper.readTree(json);
         String   status = root.path("status").asText("");
+        if ("error".equals(status)) {
+            // AudD répond en HTTP 200 même en cas d'erreur (jeton invalide/inactif, quota, etc.) —
+            // sans ce check, une vraie erreur de compte était confondue avec "rien trouvé" et
+            // disparaissait silencieusement du journal (cf. bug SongRec identique, déjà corrigé).
+            String msg = root.path("error").path("error_message").asText("");
+            throw new Exception(msg.isBlank() ? "AudD status=error" : msg);
+        }
         if (!"success".equals(status)) return null;
 
         JsonNode result = root.path("result");

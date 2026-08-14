@@ -222,6 +222,27 @@ public class TagInfo {
     // ── Statistiques d'écoute ────────────────────────────────────────────────
     public String listenbrainzPlayCount = "";  // nombre d'écoutes ListenBrainz (TXXX:LISTENBRAINZ_PLAYCOUNT)
 
+    /** Vrai si `s` ressemble à un placeholder générique plutôt qu'à une vraie valeur d'identité
+     *  (artiste/titre/album) — trop court pour être un nom réel ("1", "0", "-"), ou un des libellés
+     *  par défaut classiques d'un encodeur/outil de rip ("Unknown Artist", "Various", "Track 01"...).
+     *  Volontairement plus restreint que TaggingWorker.isGenericTag() (motifs de nom de fichier
+     *  hors de propos ici) — utilisé par TagWriter.mergeWithExisting() et InfoCompleterWorker pour
+     *  ne jamais faire confiance/perpétuer une valeur déjà cassée lue sur un fichier existant.
+     *  Repéré en direct (2026-08-13) : TPE1=ARTIST="1" sur un fichier par ailleurs parfaitement
+     *  identifié (TPE2/genre/ISRC/sort-names tous corrects) — recopié tel quel par
+     *  InfoCompleterWorker faute de validation, jamais corrigé depuis. */
+    public static boolean isGenericIdentityValue(String s) {
+        if (s == null) return true;
+        String low = s.trim().toLowerCase();
+        // <= 1 caractère (pas 2) : "U2" est un vrai nom d'artiste à 2 caractères, ne pas le
+        // rejeter sur la seule longueur. En revanche un très court nombre PUR ("1", "01") n'est
+        // quasiment jamais un vrai nom — "311" (3 chiffres) reste accepté, lui.
+        if (low.length() <= 1) return true;
+        if (low.length() <= 2 && low.matches("\\d+")) return true;
+        return low.matches("unknown artist|unknown|artist|artiste|various|various artists|"
+                          + "no artist|inconnu|track \\d+|piste \\d+|untitled|titre|title");
+    }
+
     /** Copie superficielle — tous les champs String sont indépendants (immutables). */
     public TagInfo copy() {
         try {

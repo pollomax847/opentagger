@@ -45,6 +45,12 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final List<File> videos;
     private final Path       scanRoot;
     private final Consumer<String> onProgress;
+    // Compteur numérique séparé du texte (onProgress ci-dessus) — pour la barre de progression
+    // partagée (bas-droite de MainFrame), absente jusqu'ici sur le déclenchement AUTOMATIQUE de ce
+    // worker (après chaque scan de dossier, voir MainFrame) alors que fileIdx/total étaient déjà
+    // connus ici (déjà utilisés dans le message texte "[fileIdx/total] nom"). Retour utilisateur,
+    // 2026-08-10.
+    private final java.util.function.BiConsumer<Integer, Integer> onNumericProgress;
 
     private final SongRecClient    songRec = new SongRecClient();
     private final AudDClient       audd     = new AudDClient();
@@ -65,9 +71,15 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private volatile ExecutorService pool;
 
     public VideoRecoveryWorker(List<File> videos, Path scanRoot, Consumer<String> onProgress) {
-        this.videos     = videos;
-        this.scanRoot   = scanRoot;
-        this.onProgress = onProgress;
+        this(videos, scanRoot, onProgress, null);
+    }
+
+    public VideoRecoveryWorker(List<File> videos, Path scanRoot, Consumer<String> onProgress,
+                                java.util.function.BiConsumer<Integer, Integer> onNumericProgress) {
+        this.videos            = videos;
+        this.scanRoot          = scanRoot;
+        this.onProgress        = onProgress;
+        this.onNumericProgress = onNumericProgress;
     }
 
     /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final) — voir
@@ -104,6 +116,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private void processOne(File video, int fileIdx, int total, int maskIndex) {
         if (isCancelled()) return;
         publish(I18n.t("[%s/%s] %s", fileIdx, total, video.getName()));
+        if (onNumericProgress != null) onNumericProgress.accept(fileIdx, total);
 
         TagInfo ti;
         try {

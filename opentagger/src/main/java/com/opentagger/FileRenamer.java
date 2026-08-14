@@ -183,8 +183,33 @@ public class FileRenamer {
             }
 
             moveFile(fichier, cible);
+            moveMatchingLrc(fichier, nom, cible);
         }
         return cible;
+    }
+
+    /**
+     * Déplace le fichier ".lrc" associé (même nom de base que l'audio) s'il existe, pour qu'il
+     * suive l'audio jusqu'à sa nouvelle destination — sans ça, il reste orphelin dans l'ancien
+     * dossier une fois l'audio renommé/déplacé. TagEnrichment.saveEntry() écrit ce fichier AVANT
+     * le renommage (lyrics.save_lrc) mais ne le déplace jamais lui-même ; repéré en direct
+     * (2026-08-13). Pas de perte silencieuse en cas d'échec ici — deleteEmptyAncestors() (voir son
+     * commentaire) refuse déjà de supprimer un dossier contenant encore un ".lrc" non déplacé, donc
+     * un échec ne fait "que" laisser le fichier dans l'ancien dossier, jamais le perdre — un échec
+     * ne doit donc jamais faire échouer le renommage audio, déjà réussi à ce stade.
+     */
+    private static void moveMatchingLrc(Path origFichier, String origNom, Path cible) {
+        int dot = origNom.lastIndexOf('.');
+        if (dot <= 0 || origFichier.getParent() == null || cible.getParent() == null) return;
+        Path origLrc = origFichier.getParent().resolve(origNom.substring(0, dot) + ".lrc");
+        if (!Files.exists(origLrc)) return;
+        String cibleNom = cible.getFileName().toString();
+        int cibleDot = cibleNom.lastIndexOf('.');
+        String cibleStem = cibleDot > 0 ? cibleNom.substring(0, cibleDot) : cibleNom;
+        Path destLrc = cible.getParent().resolve(cibleStem + ".lrc");
+        try {
+            if (!Files.exists(destLrc)) moveFile(origLrc, destLrc);
+        } catch (IOException ignored) {}
     }
 
     public Path rename(Path fichier, TagInfo info, int maskIndex) throws IOException {
@@ -393,6 +418,43 @@ public class FileRenamer {
                 } while (Files.exists(cible) && n < 100);
                 if (Files.exists(cible))
                     throw new IOException("Impossible de déplacer '" + nom
+                            + "' : 98 fichiers en collision existent déjà.");
+            }
+
+            moveFile(fichier, cible);
+        }
+        return cible;
+    }
+
+    /**
+     * Renomme un fichier dans SON PROPRE dossier (contrairement à {@link #moveToFolder}, qui
+     * change de dossier mais garde le nom) — utilisé pour nettoyer le nom d'un fichier "Non
+     * identifié" (retirer un préfixe d'identifiant de catalogue, etc.) sans le déplacer. Mêmes
+     * garanties de collision ((2), (3)…) que {@link #rename}/{@link #moveToFolder}.
+     * @return le nouveau chemin, ou {@code null} si {@code newStem} donne le même nom qu'actuellement.
+     */
+    public static Path renameInPlace(Path fichier, String newStem) throws IOException {
+        Path parent = fichier.getParent();
+        String nom  = fichier.getFileName().toString();
+        int dot      = nom.lastIndexOf('.');
+        String ext   = dot > 0 ? nom.substring(dot) : "";
+        String stem  = dot > 0 ? nom.substring(0, dot) : nom;
+        if (newStem.isBlank() || newStem.equals(stem)) return null;
+
+        Path cible = parent.resolve(newStem + ext).normalize();
+        if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
+
+        synchronized (lockFor(cible)) {
+            if (Files.exists(cible)) {
+                int n = 2;
+                do {
+                    cible = parent.resolve(newStem + " (" + n++ + ")" + ext).normalize();
+                    // Même garde que rename()/moveToFolder() (voir leurs commentaires) : si le
+                    // candidat de collision retombe sur le fichier lui-même, rien à faire.
+                    if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
+                } while (Files.exists(cible) && n < 100);
+                if (Files.exists(cible))
+                    throw new IOException("Impossible de renommer '" + nom
                             + "' : 98 fichiers en collision existent déjà.");
             }
 

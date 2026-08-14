@@ -44,8 +44,14 @@ Disponible en français et en anglais (Préférences → Démarrage → Langue).
 - **Dossier racine bibliothèque** — tous les fichiers organisés vers un chemin configurable, activable/désactivable par case à cocher (Préférences → Renommage, ou menu **Tagger → Déplacement** pour un accès rapide sans ouvrir les Préférences)
 - **Déplacement des fichiers non tagués / à durée incohérente** — vers des dossiers dédiés distincts de la bibliothèque organisée, chacun avec sa propre case à cocher ; rien n'est jamais supprimé
 - **Grouper par compilations** — relie automatiquement les pistes déjà taguées appartenant à des séries de compilation connues (Stars 80, NRJ, Fun Radio, RFM…), liste configurable, dialogue de revue avant écriture
-- **Forcer le re-taguage** — remet des fichiers déjà tagués en attente (cache + MBID effacés) pour les réidentifier ou leur réappliquer un script tagger mis à jour
 - **Compatibilité NAS / MergerFS** — copie+vérification de taille avant suppression de la source (pas d'`ATOMIC_MOVE` cross-device)
+
+### Re-traitement (Outils → Re-traitement)
+
+- **Forcer le re-taguage** — remet des fichiers déjà tagués en attente (cache + MBID effacés) pour les réidentifier ou leur réappliquer un script tagger mis à jour
+- **Ré-identifier par empreinte audio (Non identifiés)** — façon "Identify and Fix Any Tags" de SongKong : reprend les fichiers "Non identifié" et tente de les retrouver par empreinte audio seule (SongRec puis AcoustID), sans tenir compte des tags ou du nom de fichier existants ; chaque résultat passe par une fenêtre de revue dédiée (accepter/rejeter) avant d'être conservé — rien n'est appliqué silencieusement. Déclenchable automatiquement après chaque taguage via une case dédiée (menu Tagger)
+- **Nettoyer les noms (Non identifiés)** — corrige les noms de fichiers corrompus (préfixe numérique/catalogue, suffixe temporaire, marqueur de copie "(2)", identifiant long, segments dupliqués) pour les fichiers non identifiés, avec une variante enchaînant directement une ré-identification par empreinte
+- **Marquer la sélection comme déjà taggée** — bascule manuellement des fichiers vers l'état Taggé sans passer par la chaîne d'identification
 
 ### Podcasts *(nouveau en v0.9.0, fix M4A en v0.9.1)*
 

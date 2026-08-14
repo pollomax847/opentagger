@@ -43,13 +43,26 @@ public class DuplicatesDialog extends JDialog {
     private final List<JCheckBox>  allBoxes   = new ArrayList<>();
     private final List<FileEntry>  allEntries = new ArrayList<>();
     private JCheckBox chkCleanDirs;
+    /** Journal principal (panneau du bas) et barre de progression (bas-droite) de MainFrame —
+     *  avant ce correctif, suppression/déplacement de doublons n'écrivaient RIEN dans le journal
+     *  visible pendant l'opération (seulement un résumé dans le log fichier via LOG.info(), jamais
+     *  affiché à l'écran) et n'avançaient aucune barre de progression, contrairement à
+     *  renommage/déplacement/groupement par compilations qui font tous les deux. Retour
+     *  utilisateur (2026-08-10). Appelés directement depuis doInBackground() (pas via publish()) —
+     *  même convention déjà utilisée par CompilationClusterWorker pour logLine. */
+    private final java.util.function.BiConsumer<String, FileEntry.Status> journalLine;
+    private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
     public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups,
-                             Map<DuplicateGroup, FileEntry> bestByGroup, FileTableModel tableModel) {
+                             Map<DuplicateGroup, FileEntry> bestByGroup, FileTableModel tableModel,
+                             java.util.function.BiConsumer<String, FileEntry.Status> journalLine,
+                             java.util.function.BiConsumer<Integer, Integer> onProgress) {
         super(owner, I18n.t("Doublons détectés — %d groupe(s)", groups.size()), true);
         this.groups      = groups;
         this.bestByGroup = bestByGroup;
         this.tableModel  = tableModel;
+        this.journalLine = journalLine;
+        this.onProgress  = onProgress;
         setSize(900, 600);
         setMinimumSize(new Dimension(660, 400));
         setLocationRelativeTo(owner);
@@ -300,15 +313,22 @@ public class DuplicatesDialog extends JDialog {
                 // même raison que MainFrame.buildRenameJob(), remonter sans borne peut geler
                 // l'appli sur une bibliothèque multi-racines).
                 Map<File, Path> deletedParents = new LinkedHashMap<>();
+                int processed = 0;
                 for (FileEntry e : toDelete) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
                     boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    processed++;
+                    if (onProgress != null) onProgress.accept(processed, toDelete.size());
                     if (moved) {
                         publish(e);
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  🗑 %s → corbeille (doublon)", f.getName()), FileEntry.Status.TAGGED);
                         if (chkCleanDirs.isSelected() && f.getParentFile() != null)
                             deletedParents.put(f.getParentFile(), e.scanRoot);
                         deleted++;
                     } else {
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  ✗ %s → échec de suppression", f.getName()), FileEntry.Status.ERROR);
                         errors++;
                     }
                 }
@@ -389,8 +409,11 @@ public class DuplicatesDialog extends JDialog {
 
             @Override protected Void doInBackground() {
                 Map<File, Path> oldParents = new LinkedHashMap<>();
+                int processed = 0;
                 for (FileEntry e : toMove) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    processed++;
+                    if (onProgress != null) onProgress.accept(processed, toMove.size());
                     try {
                         java.nio.file.Path srcPath = f.toPath();
                         java.nio.file.Path targetDir = srcPath.getParent().resolve("Doublons");
@@ -404,10 +427,14 @@ public class DuplicatesDialog extends JDialog {
                         java.nio.file.Files.move(srcPath, dest);
                         e.currentPath = dest;
                         publish(e);
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  📦 %s → Doublons/ (doublon)", f.getName()), FileEntry.Status.TAGGED);
                         if (chkCleanDirs.isSelected() && f.getParentFile() != null)
                             oldParents.put(f.getParentFile(), e.scanRoot);
                         moved++;
                     } catch (Exception ex) {
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  ✗ %s → échec du déplacement : %s", f.getName(), ex.getMessage()), FileEntry.Status.ERROR);
                         errors++;
                     }
                 }

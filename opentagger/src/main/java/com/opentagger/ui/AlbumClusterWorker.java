@@ -49,6 +49,9 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
     private final Consumer<String> statusCallback;
     private final Consumer<FileEntry> onUpdate;
     private final Runnable         doneCallback;
+    // Barre de progression partagée (bas-droite de MainFrame) — absente jusqu'ici, même trou que
+    // AlbumCompletionWorker/CompilationClusterWorker (retour utilisateur, 2026-08-10).
+    private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
     private final TagWriter writer = new TagWriter();
     private final boolean rgEnabled = Config.get().replayGainEnabled() && ReplayGainAnalyzer.isAvailable();
@@ -59,10 +62,18 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
     public AlbumClusterWorker(FileTableModel tableModel,
                                Consumer<String> statusCallback, Consumer<FileEntry> onUpdate,
                                Runnable doneCallback) {
+        this(tableModel, statusCallback, onUpdate, doneCallback, null);
+    }
+
+    public AlbumClusterWorker(FileTableModel tableModel,
+                               Consumer<String> statusCallback, Consumer<FileEntry> onUpdate,
+                               Runnable doneCallback,
+                               java.util.function.BiConsumer<Integer, Integer> onProgress) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
         this.onUpdate       = onUpdate;
         this.doneCallback   = doneCallback;
+        this.onProgress     = onProgress;
     }
 
     @Override
@@ -81,10 +92,14 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
         }
 
         MetadataCache cache = new MetadataCache();
+        int total = groups.size();
+        int done  = 0;
         try {
             for (Map.Entry<String, List<FileEntry>> group : groups.entrySet()) {
                 if (isCancelled()) break;
                 List<FileEntry> albumFiles = group.getValue();
+                done++;
+                if (onProgress != null) onProgress.accept(done, total);
                 if (albumFiles.size() < 2) continue;
                 processAlbum(group.getKey(), albumFiles, cache, new MusicBrainzClient());
             }

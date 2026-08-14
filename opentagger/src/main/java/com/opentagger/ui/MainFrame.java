@@ -101,6 +101,18 @@ public class MainFrame extends JFrame {
     // Menu "Affichage" (pas sur l'écran principal, voir buildMenuAffichage()) — retour utilisateur.
     private JRadioButtonMenuItem rbViewFlat, rbViewGrouped, rbViewCoverFlow;
     private JMenuItem            miExpandAllGroups, miCollapseAllGroups;
+    // Panneau Journal repliable (voir buildLogPanel()/applyJournalVisibility()) — retour
+    // utilisateur (2026-08-10) : le bouton-titre "Journal" reste toujours visible dans son propre
+    // header même replié (sinon plus aucun moyen de rouvrir) ; seul journalScroll (le contenu) se
+    // masque. withLog/logPanel gardés en champs (pas des variables locales de l'ancien init())
+    // pour rester accessibles depuis le toggle.
+    private JSplitPane        withLog;
+    private JPanel            logPanel;
+    private JComponent        journalHeader;
+    private JScrollPane       journalScroll;
+    private JToggleButton     btnToggleJournal;
+    private JCheckBoxMenuItem chkShowJournal;
+    private int               savedJournalDividerLocation = -1;
     // Cover Flow intégré à la place du tableau (CardLayout, voir buildMainSplit()) — pas une
     // fenêtre séparée : retour utilisateur explicite, la première version (CoverFlowDialog,
     // supprimée) dupliquait inutilement le panneau de détail déjà visible à droite.
@@ -131,13 +143,27 @@ public class MainFrame extends JFrame {
     private JButton btnUndo, btnRedo;
     private JCheckBoxMenuItem chkForceAcoustId;
     private JCheckBoxMenuItem chkAutoGroupCompilations;
+    private JCheckBoxMenuItem chkAutoReidentifyUnmatched;
+    private JCheckBoxMenuItem chkAutoTagOnScan;
     private JCheckBoxMenuItem chkMoveSkippedMenu;
     private JCheckBoxMenuItem chkMoveDurationMismatchMenu;
     private JCheckBoxMenuItem chkUseLibraryRootMenu;
 
     // ── Barre de statut ───────────────────────────────────────────────────────
     private JLabel       lblStatus;
-    private JProgressBar progress;
+    // Une barre par type de tâche plutôt qu'un JProgressBar unique partagé — depuis que TAGGING/
+    // INFO_COMPLETER (et TAGGING/SAVE) peuvent tourner en parallèle (voir WorkerHub.conflictsWith()),
+    // un composant unique se faisait marcher dessus par deux workers concurrents : l'un masquait/
+    // réinitialisait la barre pendant que l'autre l'utilisait encore, donnant une barre vide/
+    // invisible sans rapport avec l'avancement réel. Repéré en direct (2026-08-14, signalé par
+    // l'utilisateur). Une barre dédiée par ProgressSlot élimine le problème à la racine (plus de
+    // ressource partagée à protéger) plutôt qu'un compteur de référence sur un composant unique.
+    private enum ProgressSlot {
+        TAGGING, SAVE, INFO_COMPLETER, TRANSCODE, ALBUM_COMPLETION, ALBUM_CLUSTER,
+        COMPILATION_CLUSTER, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, DUPLICATE_DETECT
+    }
+    private final java.util.Map<ProgressSlot, JProgressBar> progressBars = new java.util.EnumMap<>(ProgressSlot.class);
+    private JPanel progressPanel;
     private long          runStartMillis;
 
     // ── Journal (persiste les résultats par fichier pendant/après un run) ────
@@ -172,6 +198,17 @@ public class MainFrame extends JFrame {
     // voir le commentaire de scheduleAutoSaveFollowUp() pour le pourquoi de cette relance depuis
     // onTaggingDone().
     private boolean autoSaveWatchPending = false;
+
+    // Accumulateur pour groupByCompilations(true) (déclenchement automatique après CHAQUE vague
+    // d'Enregistrer, voir scheduleAutoSaveFollowUp()) — sur une grosse session (plusieurs centaines
+    // de fichiers), le suivi automatique relance "Enregistrer tout" en plusieurs vagues successives
+    // tant que le taguage continue d'en produire de nouveaux ; chaque vague déclenchait jusqu'ici sa
+    // PROPRE CompilationMatchDialog dès qu'elle trouvait des correspondances — jusqu'à 3 popups
+    // distincts pour une seule session ressentie comme continue par l'utilisateur (signalé en direct
+    // 2026-08-13). Les correspondances de chaque vague s'accumulent ici au lieu d'être affichées
+    // tout de suite ; une seule fenêtre les regroupe à la toute fin réelle de la chaîne (voir
+    // flushPendingCompilationMatches(), appelée aux deux points où runPostTagCommand() l'est déjà).
+    private final List<CompilationClusterWorker.CompilationMatch> pendingCompilationMatches = new ArrayList<>();
 
     // Budget PARTAGÉ (tous scans confondus, tout le lancement) de relectures forcées pour rattraper
     // les entrées scan_cache sans durée (voir la boucle de scan) — évite qu'une bibliothèque de
@@ -317,6 +354,27 @@ public class MainFrame extends JFrame {
         // Un peu plus d'air dans les boutons — le texte touchait presque les bords par défaut,
         // perceptible sur les gros boutons de la barre d'outils principale (police en gras 12).
         UIManager.put("Button.margin", new Insets(4, 12, 4, 12));
+
+        // Relief 3D global (retour utilisateur, 2026-08-10) : jusqu'ici seuls headerBtn()/
+        // secondaryBtn()/le bouton "Journal" avaient une bordure/fond explicites — chaque nouveau
+        // bouton découvert ailleurs (accentBtn "Ouvrir dossier", "Appliquer les modifications" du
+        // panneau détail, "Vider" du journal, et tout autre bouton "nu" dans les dialogues restés
+        // sur le fond FlatLaf par défaut) semblait plat, un par un, à chaque fois signalé. Réglé ici
+        // au niveau du LAF entier plutôt qu'en repérant chaque bouton individuellement : tout futur
+        // JButton (y compris dans un dialogue pas encore audité) hérite maintenant du même relief,
+        // sans avoir à toucher son code — un putClientProperty("FlatLaf.style", ...) local (comme
+        // headerBtn/accentBtn) continue de primer sur ces valeurs par défaut là où il existe déjà.
+        UIManager.put("Button.borderWidth",     1);
+        UIManager.put("Button.background",      new Color(0x3A3A3E));
+        UIManager.put("Button.borderColor",     new Color(0x4A4A4E));
+        UIManager.put("Button.hoverBackground", new Color(0x45454A));
+        UIManager.put("Button.pressedBackground", new Color(0x2E2E32));
+        UIManager.put("ToggleButton.borderWidth",     1);
+        UIManager.put("ToggleButton.background",      new Color(0x3A3A3E));
+        UIManager.put("ToggleButton.borderColor",     new Color(0x4A4A4E));
+        UIManager.put("ToggleButton.hoverBackground", new Color(0x45454A));
+        UIManager.put("ToggleButton.pressedBackground", new Color(0x2E2E32));
+        UIManager.put("ToggleButton.selectedBackground", ACCENT);
     }
 
     public MainFrame() {
@@ -366,8 +424,20 @@ public class MainFrame extends JFrame {
                 // Vérifier que ce fichier n'est pas déjà dans la table — allEntries() (ici et pour
                 // la résolution du scanRoot juste en dessous) : sinon un fichier déjà présent mais
                 // masqué par un filtre actif pouvait être réajouté en double.
+                //
+                // fe.currentPath EN PLUS de fe.file (pas fe.file seul) : fe.file est le chemin
+                // D'ORIGINE, figé pour toute la vie de l'entrée (final) — après "Enregistrer tout"
+                // avec renommage/déplacement actif (rename.auto_enabled + library_root, un des
+                // dossiers surveillés par ce watcher), le fichier déplacé déclenche ENTRY_CREATE à
+                // sa NOUVELLE localisation. fe.file.equals(f) comparait alors l'ancien chemin au
+                // nouveau — TOUJOURS faux — donc cette garde anti-doublon échouait à chaque coup
+                // sur un fichier venant d'être tagué+déplacé : une DEUXIÈME entrée était créée pour
+                // le même fichier physique, avec un TagInfo vierge, PENDING, retraitée depuis zéro
+                // (perçu par l'utilisateur comme "un fichier déjà sauvegardé repasse Non identifié
+                // dans la file d'attente"). Repéré en direct (2026-08-14, signalé par l'utilisateur).
+                Path fp = f.toPath();
                 for (com.opentagger.model.FileEntry fe : tableModel.allEntries()) {
-                    if (fe.file.equals(f)) return;
+                    if (fe.file.toPath().equals(fp) || fp.equals(fe.currentPath)) return;
                 }
                 com.opentagger.model.FileEntry e = new com.opentagger.model.FileEntry(f, new com.opentagger.model.TagInfo());
                 // Déterminer la racine : trouver le scanRoot du dossier parent
@@ -402,13 +472,17 @@ public class MainFrame extends JFrame {
 
         // ── Split horizontal : table gauche | détail droit ──────────────────
         // ── Split vertical : (table|détail) en haut, journal en bas ─────────
-        JPanel logPanel = buildLogPanel();
+        logPanel = buildLogPanel();
         logPanel.setPreferredSize(new Dimension(10, 140)); // hauteur initiale du journal
-        JSplitPane withLog = new JSplitPane(JSplitPane.VERTICAL_SPLIT, buildMainSplit(), logPanel);
+        withLog = new JSplitPane(JSplitPane.VERTICAL_SPLIT, buildMainSplit(), logPanel);
         withLog.setResizeWeight(1.0);   // le journal garde sa hauteur, le reste absorbe le redimensionnement
         withLog.setDividerSize(4);
         withLog.setBorder(null);
         add(withLog, BorderLayout.CENTER);
+        // Visibilité restaurée APRÈS ajout au conteneur (setDividerLocation exige que le
+        // JSplitPane soit déjà affichable/dimensionné pour avoir un effet fiable) — voir
+        // applyJournalVisibility(), appelé aussi depuis le menu Affichage.
+        SwingUtilities.invokeLater(() -> applyJournalVisibility(PREFS.getBoolean("journal.visible", true)));
         add(buildStatusBar(), BorderLayout.SOUTH);
 
         table.getSelectionModel().addListSelectionListener(e -> {
@@ -873,6 +947,51 @@ public class MainFrame extends JFrame {
                 Config.get().set("tagging.auto_group_compilations", String.valueOf(chkAutoGroupCompilations.isSelected())));
         m.add(chkAutoGroupCompilations);
 
+        // Retour utilisateur (2026-08-10) : ne pas être obligé de cliquer sur "Ré-identifier par
+        // empreinte audio…" à chaque fois — si activé, se déclenche tout seul juste après CHAQUE
+        // "Tout tagger"/"Forcer le re-taguage" sur les seuls fichiers restés "Non identifié" de CE
+        // run précis (pas tout l'historique "Sans_correspondance" à chaque fois, voir
+        // onTaggingDone()) — la revue groupée (ReidentifyReviewDialog) reste obligatoire, ce
+        // réglage automatise seulement le déclenchement, jamais l'application silencieuse.
+        chkAutoReidentifyUnmatched = new StayOpenCheckBoxMenuItem(I18n.t("Ré-identifier par empreinte audio automatiquement après chaque taguage"));
+        chkAutoReidentifyUnmatched.setSelected(Config.get().bool("tagging.auto_reidentify_unmatched", false));
+        // Confirmation demandée le 2026-08-12 seulement à l'ACTIVATION (jamais à la désactivation,
+        // qui ne fait que couper un déclenchement automatique, sans risque) : cette option efface
+        // le cache et les MBID des fichiers restés "Non identifié" pour forcer une nouvelle
+        // tentative (voir reidentifyUnmatched()/resetForReidentification()) — l'utilisateur avait
+        // été surpris de voir ce comportement de "Forcer le re-taguage" se déclencher tout seul
+        // sans se rappeler avoir explicitement demandé cette conséquence en cochant la case.
+        chkAutoReidentifyUnmatched.addActionListener(e -> {
+            if (chkAutoReidentifyUnmatched.isSelected()) {
+                int confirm = JOptionPane.showConfirmDialog(this,
+                    I18n.t("<html>Cette option efface le cache et les identifiants MusicBrainz<br>"
+                         + "des fichiers restés « Non identifié » après CHAQUE taguage, pour forcer<br>"
+                         + "une nouvelle tentative par empreinte audio (SongRec/AcoustID) — un peu<br>"
+                         + "comme « Forcer le re-taguage », mais uniquement sur ces fichiers-là.<br><br>"
+                         + "Une fenêtre de revue s'ouvrira à chaque fois pour valider les résultats ;<br>"
+                         + "rien n'est jamais appliqué automatiquement sur le disque.<br><br>"
+                         + "Activer cette option ?</html>"),
+                    I18n.t("Ré-identifier automatiquement"), JOptionPane.YES_NO_OPTION);
+                if (confirm != JOptionPane.YES_OPTION) {
+                    chkAutoReidentifyUnmatched.setSelected(false);
+                    return;
+                }
+            }
+            Config.get().set("tagging.auto_reidentify_unmatched", String.valueOf(chkAutoReidentifyUnmatched.isSelected()));
+        });
+        m.add(chkAutoReidentifyUnmatched);
+
+        // Demandé le 2026-08-12 : le taguage ne reprend jamais tout seul après un redémarrage (ou
+        // l'ajout d'un dossier), obligeant à recliquer "Tagger"/F6 à chaque fois — uniquement
+        // l'IDENTIFICATION se déclenche automatiquement ici (fichiers PENDING seulement, voir
+        // scheduleAutoTaggingFollowUp()), jamais l'enregistrement sur disque, qui reste un geste
+        // manuel dans tous les cas (façon Picard, voir FileEntry.Status.IDENTIFIED).
+        chkAutoTagOnScan = new StayOpenCheckBoxMenuItem(I18n.t("Tagger automatiquement après chaque scan de dossier"));
+        chkAutoTagOnScan.setSelected(Config.get().autoTagOnScan());
+        chkAutoTagOnScan.addActionListener(e ->
+                Config.get().set("tagging.auto_start_on_scan", String.valueOf(chkAutoTagOnScan.isSelected())));
+        m.add(chkAutoTagOnScan);
+
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
         // le dossier cible lui-même (chemin texte) reste configuré dans Préférences, un menu
@@ -945,7 +1064,41 @@ public class MainFrame extends JFrame {
         miCollapseAllGroups.setEnabled(viewMode == ViewMode.GROUPED);
         m.add(miExpandAllGroups);
         m.add(miCollapseAllGroups);
+        m.addSeparator();
+
+        // Retour utilisateur (2026-08-10) : pouvoir masquer le panneau Journal pour gagner de la
+        // place, en particulier sur un petit écran ou quand on ne surveille pas le journal en
+        // continu. Coché par défaut (comportement historique inchangé) ; état retenu d'une session
+        // à l'autre — voir applyJournalVisibility() et PREFS "journal.visible".
+        chkShowJournal = new JCheckBoxMenuItem(I18n.t("Afficher le journal"), PREFS.getBoolean("journal.visible", true));
+        chkShowJournal.addActionListener(e -> applyJournalVisibility(chkShowJournal.isSelected()));
+        m.add(chkShowJournal);
         return m;
+    }
+
+    /** Affiche/masque le CONTENU du panneau Journal (pas son header — voir buildLogPanel(), le
+     *  bouton-titre "Journal" doit rester cliquable même replié) et retient le choix pour la
+     *  prochaine ouverture. Repliage : le diviseur est ramené juste sous le header (sa hauteur
+     *  propre ne dépend pas du contenu du journal, donc stable), pour ne laisser dépasser que la
+     *  barre de titre — pas 0 pur, sinon le bouton lui-même disparaîtrait avec le reste. */
+    private void applyJournalVisibility(boolean visible) {
+        if (chkShowJournal != null)   chkShowJournal.setSelected(visible);
+        if (btnToggleJournal != null) {
+            btnToggleJournal.setSelected(visible);
+            btnToggleJournal.setText(visible ? I18n.t("▾ Journal") : I18n.t("▸ Journal"));
+        }
+        PREFS.putBoolean("journal.visible", visible);
+        if (visible) {
+            journalScroll.setVisible(true);
+            if (savedJournalDividerLocation > 0) withLog.setDividerLocation(savedJournalDividerLocation);
+        } else {
+            if (withLog.getHeight() > 0) savedJournalDividerLocation = withLog.getDividerLocation();
+            journalScroll.setVisible(false);
+            int headerH = journalHeader.getPreferredSize().height;
+            withLog.setDividerLocation(Math.max(0, withLog.getHeight() - headerH - withLog.getDividerSize()));
+        }
+        logPanel.revalidate();
+        withLog.revalidate();
     }
 
     /**
@@ -964,6 +1117,10 @@ public class MainFrame extends JFrame {
 
         JMenu retraitement = new JMenu(I18n.t("Re-traitement"));
         retraitement.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
+        retraitement.add(mitem(I18n.t("Ré-identifier par empreinte audio (Non identifiés)…"), null, e -> reidentifyUnmatched()));
+        retraitement.add(mitem(I18n.t("Corriger l'encodage des tags…"), null, e -> fixEncoding()));
+        retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNamesOnly()));
+        retraitement.add(mitem(I18n.t("Nettoyer les noms + Ré-identifier (Non identifiés)…"), null, e -> cleanNamesAndReidentifyUnmatched()));
         retraitement.add(mitem(I18n.t("Marquer la sélection comme déjà taggée…"), null, e -> markAsAlreadyTagged()));
         retraitement.add(mitem(I18n.t("Synchroniser ListenBrainz…"), null,    e -> syncListenBrainz()));
         m.add(retraitement);
@@ -1042,8 +1199,8 @@ public class MainFrame extends JFrame {
         // sélection/coché que startTagging(selOnly) gère déjà en interne. F6 (tout)/F7 (sélection)
         // et les entrées de menu correspondantes restent inchangés pour qui veut forcer l'un ou
         // l'autre explicitement ; ce bouton n'est qu'un raccourci visuel pour le cas courant.
-        btnTagAll    = headerBtn(I18n.t("Tagger"), I18n.t(
-                "Tagger la sélection si des lignes sont surlignées dans le tableau, "
+        btnTagAll    = headerBtn(I18n.t("Analyser"), I18n.t(
+                "Analyser la sélection si des lignes sont surlignées dans le tableau, "
                 + "sinon tous les fichiers cochés (F6 = tout, F7 = sélection)"), ToolbarIcon.Kind.TAG);
         btnSaveAll   = headerBtn(I18n.t("Enregistrer tout"), I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"), ToolbarIcon.Kind.SAVE);
         btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"), ToolbarIcon.Kind.STOP);
@@ -1052,7 +1209,7 @@ public class MainFrame extends JFrame {
         btnCancel.addActionListener(e -> stopAll());
         btnCancel.setEnabled(false);
 
-        JPanel actionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 6));
+        JPanel actionsPanel = new JPanel(new WrapLayout(FlowLayout.CENTER, 6, 6));
         actionsPanel.setBackground(HEADER_BG);
         actionsPanel.add(btnOpen);
         actionsPanel.add(vSep());
@@ -1067,7 +1224,7 @@ public class MainFrame extends JFrame {
         // sans risque. Dans un panneau à part (secondaryToolbarPanel) plutôt que directement dans
         // actionsPanel : permet de tout reconstruire en un removeAll()/repopulate depuis
         // populateSecondaryToolbar() (rappelée après Préférences) sans toucher aux boutons fixes.
-        secondaryToolbarPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 6));
+        secondaryToolbarPanel = new JPanel(new WrapLayout(FlowLayout.CENTER, 6, 6));
         secondaryToolbarPanel.setBackground(HEADER_BG);
         actionsPanel.add(secondaryToolbarPanel);
         populateSecondaryToolbar();
@@ -1254,7 +1411,12 @@ public class MainFrame extends JFrame {
         JButton b = new JButton(text);
         b.setToolTipText(tip);
         b.setFocusPainted(false);
-        b.putClientProperty("FlatLaf.style", "foreground: #CFD8DC");
+        // Relief 3D plus marqué (retour utilisateur, 2026-08-10) : le rendu FlatLaf par défaut
+        // (bordure/dégradé très subtils) ne se voyait pas assez à son goût — bordure explicite +
+        // fond légèrement plus clair que l'arrière-plan pour un bouton net, nettement "en relief".
+        b.putClientProperty("FlatLaf.style",
+            "foreground: #CFD8DC; borderWidth: 1; borderColor: #4A4A4E; background: #3A3A3E; "
+            + "hoverBackground: #45454A; pressedBackground: #2E2E32; arc: 6");
         if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0xCFD8DC))); b.setIconTextGap(7); }
         return b;
     }
@@ -1270,7 +1432,11 @@ public class MainFrame extends JFrame {
         JButton b = new JButton(text);
         b.setToolTipText(tip);
         b.setFocusPainted(false);
-        b.putClientProperty("FlatLaf.style", "foreground: #90A4AE; font: 11 $defaultFont");
+        // Même relief 3D explicite que headerBtn() (voir son commentaire), en plus discret —
+        // cohérent avec le rôle "action secondaire" de ce bouton (police déjà plus petite/atténuée).
+        b.putClientProperty("FlatLaf.style",
+            "foreground: #90A4AE; font: 11 $defaultFont; borderWidth: 1; borderColor: #424246; "
+            + "background: #333336; hoverBackground: #3D3D41; pressedBackground: #29292C; arc: 6");
         if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0x90A4AE), 14)); b.setIconTextGap(6); }
         return b;
     }
@@ -1314,7 +1480,7 @@ public class MainFrame extends JFrame {
     // ── Bande de statistiques live ────────────────────────────────────────────
 
     private JPanel buildStatsStrip() {
-        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 5));
+        JPanel p = new JPanel(new WrapLayout(FlowLayout.LEFT, 6, 5));
         p.setBackground(new Color(0x252527));
         p.setBorder(new MatteBorder(0, 0, 1, 0, new Color(0x3A3B3E)));
 
@@ -1399,9 +1565,15 @@ public class MainFrame extends JFrame {
         Color translucent = new Color(color.getRed(), color.getGreen(), color.getBlue(), 90);
         chip.setForeground(active ? Color.WHITE : color);
         chip.setBackground(active ? blend(new Color(0x252527), translucent) : new Color(0x252527));
+        // Relief 3D (retour utilisateur, 2026-08-10) : la LineBorder colorée seule restait plate,
+        // aucun jeu d'ombre/lumière — un BevelBorder (clair en haut/gauche, foncé en bas/droite,
+        // dérivé de la couleur du chip) ajoute un vrai relief sans changer la couleur ni la logique
+        // active/inactive existantes, juste enveloppé autour d'elles.
         chip.setBorder(new CompoundBorder(
             new LineBorder(color.darker(), active ? 2 : 1, true),
-            new EmptyBorder(2, 7, 2, 7)));
+            new CompoundBorder(
+                new BevelBorder(BevelBorder.RAISED, color.brighter(), color.darker()),
+                new EmptyBorder(1, 5, 1, 5))));
     }
 
     private JLabel sep3() {
@@ -1509,6 +1681,17 @@ public class MainFrame extends JFrame {
         JScrollPane scroll = new JScrollPane(table);
         scroll.setBorder(null);
         scroll.setMinimumSize(new Dimension(200, 0)); // filet de sécurité : jamais écrasée à ~0px
+
+        // AUTO_RESIZE_OFF (configureTable()) garde les colonnes à largeur fixe pour éviter
+        // l'écrasement en fenêtre étroite — mais laisse alors un vide vide à droite de la dernière
+        // colonne (Statut) dès que la fenêtre dépasse la somme des largeurs de colonnes, ex. plein
+        // écran : signalé par l'utilisateur (2026-08-12). On étire la dernière colonne pour combler
+        // cet espace UNIQUEMENT quand il y en a — recalculé à chaque redimensionnement (pas cumulé),
+        // donc rétrécit tout aussi bien la colonne si la fenêtre se réduit ensuite, jusqu'à ce que le
+        // défilement horizontal reprenne naturellement (comportement normal d'AUTO_RESIZE_OFF).
+        scroll.getViewport().addComponentListener(new java.awt.event.ComponentAdapter() {
+            @Override public void componentResized(java.awt.event.ComponentEvent e) { adjustLastColumnToFillViewport(); }
+        });
 
         // ── Cover Flow (alternative à la table, même emplacement) ────────────
         coverFlowPanel = new CoverFlowPanel();
@@ -1645,6 +1828,15 @@ public class MainFrame extends JFrame {
     // ── Configuration de la table ─────────────────────────────────────────────
 
     private void configureTable() {
+        // AUTO_RESIZE_OFF (au lieu du défaut AUTO_RESIZE_SUBSEQUENT_COLUMNS) : sans ça, une fenêtre
+        // réduite en largeur écrase PROGRESSIVEMENT toutes les colonnes vers leurs minimums (colWidth()
+        // ci-dessous, ex. Artiste=70px, Genre=50px) avant même de faire apparaître le défilement
+        // horizontal du JScrollPane — le texte (Artiste, Album, Titre…) devient illisible plutôt que
+        // simplement défiler. OFF garde chaque colonne à sa largeur configurée/sauvegardée en
+        // permanence ; le JScrollPane (déjà présent) prend le relais avec une barre horizontale dès
+        // que la somme dépasse la largeur visible — signalé par l'utilisateur (2026-08-11) : colonnes
+        // tronquées à taille de fenêtre réduite.
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         table.setRowHeight(26);
         // Sans ça, un JTable avec 0 ligne (ou moins de lignes que la hauteur du viewport) ne
         // remplit que sa hauteur de contenu réelle — le grand rectangle vide sous l'en-tête est
@@ -1930,6 +2122,31 @@ public class MainFrame extends JFrame {
         int saved = PREFS.getInt("col." + i + ".w", p);
         c.setMinWidth(mn); c.setMaxWidth(mx);
         c.setPreferredWidth(Math.max(mn, Math.min(mx, saved)));
+    }
+
+    /** Étire la dernière colonne visible pour combler l'espace vide à droite du tableau quand la
+     *  fenêtre est plus large que la somme des colonnes (AUTO_RESIZE_OFF, voir configureTable()) —
+     *  appelée au redimensionnement du viewport. Relève temporairement le maxWidth de la colonne
+     *  (colWidth() la borne normalement à 220px pour Statut, bien en-deçà de ce qu'un plein écran
+     *  peut laisser comme espace restant) : un peu de vide DANS la colonne reste préférable à une
+     *  bande vide et sans nom à sa droite. */
+    private void adjustLastColumnToFillViewport() {
+        if (table == null) return;
+        TableColumnModel cm = table.getColumnModel();
+        int n = cm.getColumnCount();
+        if (n == 0) return;
+        Container vp = table.getParent();
+        if (!(vp instanceof JViewport)) return;
+        int viewportWidth = vp.getWidth();
+        int sumOthers = 0;
+        for (int i = 0; i < n - 1; i++) sumOthers += cm.getColumn(i).getWidth();
+        TableColumn last = cm.getColumn(n - 1);
+        int target = Math.max(last.getMinWidth(), viewportWidth - sumOthers);
+        if (target > last.getMaxWidth()) last.setMaxWidth(target);
+        if (target != last.getWidth()) {
+            last.setPreferredWidth(target);
+            last.setWidth(target);
+        }
     }
 
     /** "3:32" → 212 (secondes) — pour trier numériquement la colonne Durée. "" ou illisible → 0,
@@ -2616,12 +2833,66 @@ public class MainFrame extends JFrame {
 
     // ── Barre de statut ───────────────────────────────────────────────────────
 
+    private static String progressSlotLabel(ProgressSlot slot) {
+        return switch (slot) {
+            case TAGGING             -> I18n.t("Taguage");
+            case SAVE                -> I18n.t("Enregistrement");
+            case INFO_COMPLETER      -> I18n.t("Complétion");
+            case TRANSCODE           -> I18n.t("Transcodage");
+            case ALBUM_COMPLETION    -> I18n.t("Complétion albums");
+            case ALBUM_CLUSTER       -> I18n.t("Groupement albums");
+            case COMPILATION_CLUSTER -> I18n.t("Compilations");
+            case VIDEO_RECOVERY      -> I18n.t("Récupération vidéo");
+            case LISTENBRAINZ_SYNC   -> I18n.t("ListenBrainz");
+            case DUPLICATE_DETECT    -> I18n.t("Doublons");
+        };
+    }
+
+    /** À appeler au DÉBUT du worker propriétaire de ce slot, à la place de l'ancien
+     *  "progress.setValue(0); progress.setString(\"\"); progress.setVisible(true);" — chaque slot a
+     *  sa propre barre, donc aucun risque de conflit avec un autre worker concurrent (voir le
+     *  commentaire sur ProgressSlot). */
+    private void beginProgress(ProgressSlot slot) {
+        JProgressBar bar = progressBars.get(slot);
+        bar.setValue(0);
+        bar.setString("");
+        bar.setVisible(true);
+        progressPanel.revalidate();
+    }
+
+    /** À appeler à la FIN du worker propriétaire de ce slot, à la place de l'ancien
+     *  "progress.setVisible(false);". Idempotent (comme l'ancien code) : rien à clamper, deux appels
+     *  successifs (ex. stopAll() suivi du listener DONE du worker annulé) sont sans risque. */
+    private void endProgress(ProgressSlot slot) {
+        progressBars.get(slot).setVisible(false);
+        progressPanel.revalidate();
+    }
+
+    /** stopAll()/"Arrêter" annule TOUS les workers actifs (WorkerHub.cancelAll()), pas seulement le
+     *  taguage — masquer uniquement la barre TAGGING via resetBtns() en laissait d'autres visibles
+     *  (Enregistrement, Complétion...) alors que leur worker vient, lui aussi, d'être annulé. */
+    private void endAllProgress() {
+        for (ProgressSlot slot : ProgressSlot.values()) endProgress(slot);
+    }
+
     private JPanel buildStatusBar() {
         lblStatus = new JLabel(I18n.t(" Prêt"));
-        progress  = new JProgressBar(0, 100);
-        progress.setPreferredSize(new Dimension(220, 14));
-        progress.setStringPainted(true);
-        progress.setVisible(false);
+
+        // Une barre par ProgressSlot, empilées verticalement, chacune invisible tant que son
+        // worker ne tourne pas (BoxLayout ignore les enfants invisibles — aucune place prise).
+        progressPanel = new JPanel();
+        progressPanel.setLayout(new BoxLayout(progressPanel, BoxLayout.Y_AXIS));
+        progressPanel.setOpaque(false);
+        for (ProgressSlot slot : ProgressSlot.values()) {
+            JProgressBar bar = new JProgressBar(0, 100);
+            bar.setPreferredSize(new Dimension(220, 14));
+            bar.setMaximumSize(new Dimension(220, 14));
+            bar.setStringPainted(true);
+            bar.setVisible(false);
+            bar.setToolTipText(progressSlotLabel(slot));
+            progressBars.put(slot, bar);
+            progressPanel.add(bar);
+        }
 
         // Indicateur RAM en bas à droite — utile pour surveiller une session de plusieurs jours
         // sur une grosse bibliothèque (demandé explicitement par l'utilisateur).
@@ -2634,7 +2905,7 @@ public class MainFrame extends JFrame {
         JPanel eastPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         eastPanel.setOpaque(false);
         eastPanel.add(lblMemory);
-        eastPanel.add(progress);
+        eastPanel.add(progressPanel);
 
         JPanel bar = new JPanel(new BorderLayout(8, 0));
         bar.setBorder(new CompoundBorder(
@@ -2719,17 +2990,37 @@ public class MainFrame extends JFrame {
         JButton btnClearLog = new JButton(I18n.t("Vider"));
         btnClearLog.addActionListener(e -> { logHistory.clear(); logModel.clear(); });
 
-        JLabel lblTitle = new JLabel(I18n.t("  Journal"));
-        lblTitle.setFont(lblTitle.getFont().deriveFont(Font.BOLD));
+        // Bouton-titre (au lieu d'un simple JLabel) : cliquer sur "Journal" replie/déplie le
+        // panneau — retour utilisateur (2026-08-10), voulait un déclencheur visuel évident ("un
+        // peu d'ombres... en relief"), pas juste une case dans le menu Affichage. JToggleButton
+        // (pas JButton) pour son état "enfoncé"/coloré natif FlatLaf quand sélectionné = le
+        // changement de couleur demandé, sans peinture personnalisée. Reste TOUJOURS dans le
+        // header (jamais masqué avec le contenu, voir applyJournalVisibility()) : sinon, une fois
+        // le journal replié, plus aucun moyen de recliquer dessus pour le rouvrir.
+        // Style FlatLaf par défaut d'un JToggleButton = déjà un bouton net avec bordure/relief
+        // (pas de JLabel plat) — seule surcharge nécessaire : la couleur à l'état "sélectionné"
+        // (journal visible), pour le changement de couleur demandé.
+        btnToggleJournal = new JToggleButton(I18n.t("▾ Journal"), true);
+        btnToggleJournal.setFocusPainted(false);
+        btnToggleJournal.putClientProperty("FlatLaf.style",
+            "font: bold $defaultFont; arc: 6; selectedBackground: #1a6030; selectedForeground: #ffffff");
+        btnToggleJournal.setToolTipText(I18n.t("Afficher/masquer le journal"));
+        btnToggleJournal.addActionListener(e -> {
+            btnToggleJournal.setText(btnToggleJournal.isSelected() ? I18n.t("▾ Journal") : I18n.t("▸ Journal"));
+            applyJournalVisibility(btnToggleJournal.isSelected());
+        });
         JPanel headerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
         headerRight.add(chkLogErrorsOnly);
         headerRight.add(btnClearLog);
         JPanel header = new JPanel(new BorderLayout());
-        header.add(lblTitle,     BorderLayout.WEST);
-        header.add(headerRight,  BorderLayout.EAST);
+        header.setBorder(new EmptyBorder(3, 6, 3, 0));
+        header.add(btnToggleJournal, BorderLayout.WEST);
+        header.add(headerRight,      BorderLayout.EAST);
+        journalHeader = header;
 
         JScrollPane scroll = new JScrollPane(logList);
         scroll.setBorder(new MatteBorder(1, 0, 0, 0, sep()));
+        journalScroll = scroll;
 
         JPanel panel = new JPanel(new BorderLayout());
         panel.add(header, BorderLayout.NORTH);
@@ -3386,6 +3677,7 @@ public class MainFrame extends JFrame {
                     refreshStats();
                     completeScanEntry(scanRow, dirName, r[0], r[1], null);
                     if (Config.get().videoAutoRecover()) autoRecoverVideos(dir);
+                    if (Config.get().autoTagOnScan()) scheduleAutoTaggingFollowUp();
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
@@ -3409,6 +3701,21 @@ public class MainFrame extends JFrame {
     }
 
     private void startTagging(boolean selOnly) {
+        // btnTagAll reste désactivé du tout premier instant de la préparation (ligne ~3590) jusqu'à
+        // la toute fin du run (resetBtns()) — un signal "déjà en cours" disponible IMMÉDIATEMENT,
+        // contrairement à WorkerHub.current(TAGGING) qui ne se remplit qu'après coup (voir
+        // continueStartTagging(), le submit() n'arrive qu'une fois le filtrage "Tout tagger" en
+        // arrière-plan terminé). Sans ce garde-fou précoce : deux dossiers de startup.folders qui
+        // terminent leur scan à quelques centaines de ms d'écart déclenchent chacun
+        // scheduleAutoTaggingFollowUp() (voir chkAutoTagOnScan) → startTagging(false), et les DEUX
+        // passent le contrôle WorkerHub ci-dessous (encore vide, aucun des deux n'a fini sa
+        // préparation) avant qu'aucun n'ait pu s'enregistrer — repéré en direct 2026-08-12, deux
+        // lots "Tout tagger" démarrés à 1s d'écart (62633 puis 65629 fichiers) juste après avoir
+        // activé l'auto-taguage sur une bibliothèque à 4 dossiers de démarrage.
+        if (!btnTagAll.isEnabled()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
         // blockerLabels(TAGGING) couvre d'un coup complétion/passe complète/transcodage/groupement
         // (course jstack confirmée entre Taguage et Transcodage/Complétion, d'où ces gardes à
         // l'origine) — voir WorkerHub.conflictsWith(). Pas de garde sur l'Enregistrement : Tagger
@@ -3510,7 +3817,7 @@ public class MainFrame extends JFrame {
 
         btnTagAll.setEnabled(false); // no-op si déjà désactivé (lot "Tout tagger" ci-dessus)
         btnCancel.setEnabled(true);
-        progress.setValue(0); progress.setString(""); progress.setVisible(true);
+        beginProgress(ProgressSlot.TAGGING);
 
         lastStatsRefreshMs = 0; // réinitialiser le throttle à chaque nouveau taguage
         final int totalFiles = toTag.size();
@@ -3535,9 +3842,10 @@ public class MainFrame extends JFrame {
         w.addPropertyChangeListener(evt -> {
             if ("progress".equals(evt.getPropertyName())) {
                 int pct = (Integer) evt.getNewValue();
-                progress.setValue(pct);
+                JProgressBar bar = progressBars.get(ProgressSlot.TAGGING);
+                bar.setValue(pct);
                 int fileDone = (int) Math.round(pct * totalFiles / 100.0);
-                progress.setString(fileDone + " / " + totalFiles + etaText(fileDone, totalFiles));
+                bar.setString(fileDone + " / " + totalFiles + etaText(fileDone, totalFiles));
                 // Refresher les chips à chaque % de progression (≤101 appels au total)
                 // plutôt qu'à chaque fichier — évite O(n²) sur 100k+ fichiers.
                 refreshStats();
@@ -3573,15 +3881,41 @@ public class MainFrame extends JFrame {
      * AcoustID sans fin pour des fichiers qui ne passeront pas plus la deuxième fois. Seuls un
      * nouveau scan (qui ramène du PENDING) ou un reclic manuel ("Forcer le re-taguage") les
      * représentent.
+     *
+     * BUG CORRIGÉ le 2026-08-12 : malgré le paragraphe ci-dessus (déjà présent depuis 2026-08-01),
+     * cette méthode appelait quand même startTagging(false) une fois hasPending détecté —
+     * startTagging() applique SON PROPRE filtre bien plus large ("tout sauf TAGGED/IDENTIFIED",
+     * donc SKIPPED/ERROR compris), recréant exactement le problème que ce paragraphe dit vouloir
+     * éviter. Resté sans conséquence visible tant que ce follow-up ne se déclenchait que rarement
+     * (uniquement pendant un taguage déjà en cours) — mais chkAutoTagOnScan (2026-08-12) l'appelle
+     * désormais après CHAQUE scan de dossier, donc à chaque redémarrage sur une bibliothèque à
+     * plusieurs dossiers de démarrage : repéré en direct quand un seul fichier PENDING a suffi à
+     * redéclencher un lot de 62029 fichiers englobant tout l'historique SKIPPED/ERROR jamais
+     * résolu. Construit maintenant sa propre liste strictement PENDING et appelle
+     * continueStartTagging() directement, sans repasser par le filtre large de startTagging().
      */
     private void scheduleAutoTaggingFollowUp() {
         javax.swing.Timer t = new javax.swing.Timer(5000, null);
         t.addActionListener(e -> {
             t.stop();
             if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) return;
-            boolean hasPending = tableModel.allEntries().stream().anyMatch(fe ->
-                    fe.selected && fe.status == FileEntry.Status.PENDING);
-            if (hasPending) { startTagging(false); return; }
+            // WorkerHub.submit(TAGGING) lève IllegalStateException si une tâche EN CONFLIT (ex.
+            // Transcodage) tourne déjà — startTagging() se protégeait déjà via ce même appel avant
+            // de continuer, mais le correctif du 2026-08-12 (appeler continueStartTagging()
+            // directement pour éviter le double-lancement, voir plus haut) a supprimé ce garde-fou
+            // au passage. Exception NON rattrapée sur l'EDT trouvée en direct (2026-08-13) :
+            // bloquait tout taguage automatique sans qu'aucun fichier ne soit jamais traité après un
+            // redémarrage, tant qu'une tâche en conflit restait enregistrée — on réessaie plus tard
+            // au lieu de planter.
+            if (!WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING).isEmpty()) {
+                scheduleAutoTaggingFollowUp();
+                return;
+            }
+            if (!btnTagAll.isEnabled()) return; // même garde que startTagging() — évite un lancement concurrent
+            List<FileEntry> pending = new ArrayList<>();
+            for (FileEntry fe : tableModel.allEntries())
+                if (fe.selected && fe.status == FileEntry.Status.PENDING) pending.add(fe);
+            if (!pending.isEmpty()) { continueStartTagging(pending, 0, false); return; }
             if (!activeScanWorkers.isEmpty()) scheduleAutoTaggingFollowUp(); // rien de neuf pour l'instant — on réessaiera
         });
         t.setRepeats(false);
@@ -3609,7 +3943,10 @@ public class MainFrame extends JFrame {
             }
         }
         refreshStats();
-        setStatus(I18n.t("Arrêté.")); resetBtns();
+        setStatus(I18n.t("Arrêté."));
+        btnTagAll.setEnabled(true);
+        btnCancel.setEnabled(false);
+        endAllProgress();
     }
 
     // ── Enregistrement ("Enregistrer tout") ───────────────────────────────────
@@ -3666,7 +4003,7 @@ public class MainFrame extends JFrame {
         }
 
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
-        progress.setValue(0); progress.setString(""); progress.setVisible(true);
+        beginProgress(ProgressSlot.SAVE);
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Enregistrement"), toSave.size());
         setStatus(I18n.t("Enregistrement de %d fichier(s)…", toSave.size()));
@@ -3680,22 +4017,23 @@ public class MainFrame extends JFrame {
                 refreshStats();
             }),
             (doneCount, total) -> SwingUtilities.invokeLater(() -> {
-                progress.setValue(doneCount);
-                progress.setString(doneCount + "/" + total + etaText(doneCount, total));
+                JProgressBar bar = progressBars.get(ProgressSlot.SAVE);
+                bar.setValue(doneCount);
+                bar.setString(doneCount + "/" + total + etaText(doneCount, total));
             })
         );
         w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
-                    progress.setVisible(false);
+                    endProgress(ProgressSlot.SAVE);
                     refreshStats();
                     // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
                     // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
                     // qu'à l'Enregistrement. groupByCompilations() garde ses propres gardes
                     // (activeOperations, etc.) ; si quelque chose bloque, la recherche est juste
                     // sautée cette fois-ci, sans forcer.
-                    if (chkAutoGroupCompilations.isSelected()) groupByCompilations();
+                    //
                     // Même suivi automatique que "Tout tagger" (scheduleAutoTaggingFollowUp,
                     // même raison) : tant qu'un scan/taguage encore actif continue à produire des
                     // IDENTIFIED, Enregistrer se relance tout seul dessus plutôt que de les laisser
@@ -3706,10 +4044,25 @@ public class MainFrame extends JFrame {
                     // (voir scheduleAutoSaveFollowUp) : sinon un hook pensé pour "une fois à la fin
                     // d'un run complet" (scan Plex...) se déclencherait à chaque relance
                     // intermédiaire sur une grosse bibliothèque.
-                    boolean stillFeeding = !activeScanWorkers.isEmpty()
-                            || WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent();
-                    if (!w.isCancelled() && stillFeeding) scheduleAutoSaveFollowUp();
-                    else runPostTagCommand();
+                    //
+                    // Cette suite (stillFeeding + relance/runPostTagCommand) est repoussée APRÈS que
+                    // groupByCompilations(true, ...) ait fini d'accumuler ses correspondances (voir
+                    // son onDone) — pas exécutée en parallèle du worker encore en cours, sinon la
+                    // toute DERNIÈRE vague de la chaîne pouvait déclencher le flush AVANT d'avoir
+                    // fini d'y ajouter ses propres résultats. stillFeeding est réévalué à l'intérieur
+                    // (pas capturé avant), le groupement pouvant prendre un temps non négligeable
+                    // pendant lequel un nouveau scan/taguage a pu démarrer entre-temps.
+                    Runnable afterCompilationGrouping = () -> {
+                        boolean stillFeeding = !activeScanWorkers.isEmpty()
+                                || WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent();
+                        if (!w.isCancelled() && stillFeeding) scheduleAutoSaveFollowUp();
+                        else runPostTagCommand();
+                    };
+                    if (chkAutoGroupCompilations.isSelected()) {
+                        groupByCompilations(true, afterCompilationGrouping);
+                    } else {
+                        afterCompilationGrouping.run();
+                    }
                 });
             }
         });
@@ -3778,6 +4131,10 @@ public class MainFrame extends JFrame {
      * peut très bien ne jamais terminer.
      */
     private void runPostTagCommand() {
+        // Toujours appelé exactement à la toute fin réelle de la chaîne Enregistrer (voir les deux
+        // points d'appel), jamais entre deux vagues intermédiaires — l'endroit naturel pour afficher
+        // la revue de compilations accumulée par groupByCompilations(true), voir son commentaire.
+        flushPendingCompilationMatches();
         java.util.List<String> cmds = com.opentagger.PostTagCommands.load();
         int launched = 0;
         for (String cmd : cmds) {
@@ -3961,8 +4318,8 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        progress.setVisible(true);
-        progress.setIndeterminate(true);
+        beginProgress(ProgressSlot.LISTENBRAINZ_SYNC);
+        progressBars.get(ProgressSlot.LISTENBRAINZ_SYNC).setIndeterminate(true);
         setStatus(I18n.t("Synchronisation ListenBrainz…"));
 
         ListenBrainzSyncWorker w = new ListenBrainzSyncWorker(
@@ -3974,8 +4331,8 @@ public class MainFrame extends JFrame {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
-                    progress.setIndeterminate(false);
-                    progress.setVisible(false);
+                    progressBars.get(ProgressSlot.LISTENBRAINZ_SYNC).setIndeterminate(false);
+                    endProgress(ProgressSlot.LISTENBRAINZ_SYNC);
                     refreshStats();
                 });
             }
@@ -4021,6 +4378,257 @@ public class MainFrame extends JFrame {
         if (confirm != JOptionPane.OK_OPTION) return;
 
         resetForReidentification(targets, () -> launchForcedTagging(targets, Config.get().useAcoustId()));
+    }
+
+    /**
+     * "Identify and Fix Any Tags" façon SongKong (retour utilisateur, 2026-08-10, après un tour
+     * d'horizon Jaikoz/Picard/SongKong) : reprend tous les fichiers "Non identifié" et tente de les
+     * retrouver PAR EMPREINTE AUDIO SEULE (SongRec puis AcoustID, voir FileEntry.forceReidentify),
+     * sans tenir compte des tags ou du nom de fichier existants — contrairement à "Forcer le
+     * re-taguage" ci-dessus, qui cible les fichiers déjà TAGGED (pour corriger un mauvais tag),
+     * cette action cible le cas inverse : les fichiers jamais identifiés du tout. Chaque résultat
+     * trouvé passe par ReidentifyReviewDialog avant de rejoindre le flux normal — jamais silencieux.
+     */
+    private void reidentifyUnmatched() {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de ré-identifier.",
+                    String.join(", ", blockers)));
+            return;
+        }
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        List<FileEntry> targets = new ArrayList<>();
+        if (sel.length > 0) {
+            for (int r : sel) {
+                FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
+        } else {
+            // allEntries() : couvre toute la bibliothèque chargée, pas juste la vue filtrée —
+            // même raison que partout ailleurs dans ce fichier (forceRetag(), startTagging()...).
+            for (FileEntry e : tableModel.allEntries()) {
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
+        }
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier \"Non identifié\" à ré-identifier.")); return; }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            I18n.t("<html>Retenter %d fichier(s) \"Non identifié\" par empreinte audio seule<br>"
+                 + "(SongRec/AcoustID) — tags et nom de fichier existants ignorés.<br><br>"
+                 + "Une fenêtre de revue s'ouvrira ensuite pour confirmer les résultats trouvés,<br>"
+                 + "rien n'est appliqué automatiquement.</html>", targets.size()),
+            I18n.t("Ré-identifier par empreinte audio"), JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        reidentifyUnmatched(targets);
+    }
+
+    /** Cœur partagé entre le déclenchement manuel (menu, avec confirmation) et le déclenchement
+     *  automatique après taguage (chkAutoReidentifyUnmatched, sans confirmation — l'utilisateur a
+     *  déjà donné son accord une fois pour toutes en cochant la case). La revue groupée
+     *  (ReidentifyReviewDialog) reste systématique dans les deux cas — seul le lancement change. */
+    private void reidentifyUnmatched(List<FileEntry> targets) {
+        for (FileEntry e : targets) e.forceReidentify = true;
+        resetForReidentification(targets, () -> launchForcedTagging(targets, true, true));
+    }
+
+    /**
+     * Détecte et propose de corriger un encodage cassé (mojibake — voir {@link
+     * com.opentagger.EncodingFixer}) sur titre/artiste/artiste album/album/commentaire — un texte
+     * UTF-8 écrit par un autre outil puis relu en Latin-1 par celui-ci ou un précédent, typique sur
+     * une bibliothèque agrégée de sources hétérogènes. Lit le tag RÉEL sur disque (comme
+     * {@link #forceRetag}), indépendamment du statut/résultat déjà en mémoire — s'applique aussi
+     * bien à des fichiers déjà TAGGED qu'à d'autres. Aucune écriture avant confirmation explicite
+     * dans {@link EncodingFixReviewDialog}.
+     */
+    private void fixEncoding() {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de corriger l'encodage.",
+                    String.join(", ", blockers)));
+            return;
+        }
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        List<FileEntry> targets = new ArrayList<>();
+        if (sel.length > 0) {
+            for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
+        } else {
+            targets.addAll(tableModel.allEntries());
+        }
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier à analyser.")); return; }
+
+        setStatus(I18n.t("Recherche d'encodage cassé sur %d fichier(s)…", targets.size()));
+        btnTagAll.setEnabled(false);
+        new SwingWorker<List<EncodingFixReviewDialog.Candidate>, Void>() {
+            @Override protected List<EncodingFixReviewDialog.Candidate> doInBackground() {
+                List<EncodingFixReviewDialog.Candidate> found = new ArrayList<>();
+                for (FileEntry e : targets) {
+                    if (isCancelled()) break;
+                    File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    if (!fichier.exists()) continue;
+                    TagInfo before;
+                    try { before = readTags(fichier); } catch (Exception ex) { continue; }
+                    TagInfo after = before.copy();
+                    boolean changed = fixTextField(() -> after.title,       v -> after.title = v);
+                    changed = fixTextField(() -> after.artist,      v -> after.artist = v)      || changed;
+                    changed = fixTextField(() -> after.albumArtist, v -> after.albumArtist = v) || changed;
+                    changed = fixTextField(() -> after.album,       v -> after.album = v)       || changed;
+                    changed = fixTextField(() -> after.comment,     v -> after.comment = v)     || changed;
+                    if (changed) found.add(new EncodingFixReviewDialog.Candidate(fichier, e, before, after));
+                }
+                return found;
+            }
+            @Override protected void done() {
+                btnTagAll.setEnabled(true);
+                List<EncodingFixReviewDialog.Candidate> found;
+                try { found = get(); } catch (Exception ex) { found = List.of(); }
+                if (found.isEmpty()) {
+                    setStatus(I18n.t("Aucun encodage cassé détecté."));
+                    return;
+                }
+                setStatus(I18n.t("%d fichier(s) avec encodage cassé détecté(s).", found.size()));
+                new EncodingFixReviewDialog(MainFrame.this, found, tableModel).setVisible(true);
+            }
+        }.execute();
+    }
+
+    /** Corrige `getter` en place via `setter` si {@link com.opentagger.EncodingFixer#isSuspect}
+     *  détecte un encodage cassé — utilisé par {@link #fixEncoding()} pour chaque champ texte
+     *  candidat, un à la fois (pattern getter/setter plutôt que réflexion : ces champs sont publics
+     *  et peu nombreux, pas besoin de la machinerie de TagWriter.fieldFor()). */
+    private static boolean fixTextField(java.util.function.Supplier<String> getter,
+                                         java.util.function.Consumer<String> setter) {
+        String val = getter.get();
+        if (val != null && com.opentagger.EncodingFixer.isSuspect(val)) {
+            setter.accept(com.opentagger.EncodingFixer.fix(val));
+            return true;
+        }
+        return false;
+    }
+
+    /** Nettoie le nom RÉEL du fichier sur disque des pistes "Non identifié" (retire un préfixe
+     *  d'identifiant de catalogue/téléchargement — voir {@link TaggingWorker#stripLeadingNumericPrefix},
+     *  la même règle qui corrige déjà l'analyse interne du nom de fichier dans
+     *  TaggingWorker.parseFilename() — et un suffixe "-temp-NNNNN" résiduel d'un outil externe,
+     *  voir {@link TaggingWorker#stripTrailingTempSuffix}), SANS retenter l'identification.
+     *  Séparée de {@link #cleanNamesAndReidentifyUnmatched()} car demandé explicitement le
+     *  2026-08-11 : nettoyer le nom seul reste utile même quand on ne veut pas relancer tout de
+     *  suite une identification (comparer d'abord le résultat, ou laisser la ré-identification
+     *  automatique s'en charger plus tard via chkAutoReidentifyUnmatched). */
+    private void cleanNamesOnly() { cleanNames(false); }
+
+    /** Variante qui, une fois le nettoyage terminé, retente aussi l'identification par empreinte
+     *  audio (même flux que {@link #reidentifyUnmatched()}) sur les fichiers renommés. Demandé le
+     *  2026-08-11 après avoir trouvé qu'un grand nombre de pistes "Non identifié" portent un
+     *  identifiant à 4-5 chiffres en tête ("16741 - Dr. Dre - What's The Difference.mp3") qui
+     *  pollue déjà l'analyse interne. */
+    private void cleanNamesAndReidentifyUnmatched() { cleanNames(true); }
+
+    private void cleanNames(boolean reidentifyAfter) {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de nettoyer les noms.",
+                    String.join(", ", blockers)));
+            return;
+        }
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        List<FileEntry> targets = new ArrayList<>();
+        if (sel.length > 0) {
+            for (int r : sel) {
+                FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
+        } else {
+            for (FileEntry e : tableModel.allEntries()) {
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
+        }
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier \"Non identifié\" à nettoyer.")); return; }
+
+        String msg = reidentifyAfter
+            ? I18n.t("<html>Nettoyer le nom de fichier de %d piste(s) \"Non identifié\"<br>"
+                 + "(retire un préfixe d'identifiant de catalogue/téléchargement, ex. \"16741 - \")<br>"
+                 + "puis retenter l'identification par empreinte audio.<br><br>"
+                 + "Renommage sur disque (jamais d'écrasement d'un fichier existant).<br>"
+                 + "Une fenêtre de revue s'ouvrira ensuite pour confirmer les résultats trouvés,<br>"
+                 + "rien n'est appliqué automatiquement.</html>", targets.size())
+            : I18n.t("<html>Nettoyer le nom de fichier de %d piste(s) \"Non identifié\"<br>"
+                 + "(retire un préfixe d'identifiant de catalogue/téléchargement, ex. \"16741 - \")<br>"
+                 + "sans retenter l'identification.<br><br>"
+                 + "Renommage sur disque uniquement (jamais d'écrasement d'un fichier existant).</html>", targets.size());
+        int confirm = JOptionPane.showConfirmDialog(this, msg,
+            I18n.t(reidentifyAfter ? "Nettoyer les noms + Ré-identifier" : "Nettoyer les noms"),
+            JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        if (reidentifyAfter) {
+            cleanFilenames(targets, () -> reidentifyUnmatched(targets));
+        } else {
+            cleanFilenames(targets, () -> {}); // cleanFilenames.done() affiche déjà le compte renommé
+        }
+    }
+
+    /** Renomme sur disque (sans déplacer) chaque fichier de {@code targets} dont le nom nettoyé
+     *  diffère du nom actuel — voir {@link #cleanNamesAndReidentifyUnmatched()}. En arrière-plan
+     *  (SwingWorker) : renommage = I/O disque par fichier, même raison que
+     *  {@link #resetForReidentification} juste en dessous. */
+    private void cleanFilenames(List<FileEntry> targets, Runnable onDone) {
+        setStatus(I18n.t("Nettoyage des noms de %d fichier(s)…", targets.size()));
+        btnTagAll.setEnabled(false);
+        new SwingWorker<Void, Object[]>() {
+            int renamed = 0;
+            @Override protected Void doInBackground() {
+                for (FileEntry e : targets) {
+                    java.nio.file.Path cur = e.currentPath != null ? e.currentPath : e.file.toPath();
+                    String nom = cur.getFileName().toString();
+                    int dot = nom.lastIndexOf('.');
+                    String stem = dot > 0 ? nom.substring(0, dot) : nom;
+                    String cleaned = TaggingWorker.stripTrailingTempSuffix(stem);
+                    cleaned = TaggingWorker.stripTrailingCopyMarker(cleaned);
+                    cleaned = TaggingWorker.stripTrailingLongId(cleaned);
+                    cleaned = TaggingWorker.stripLeadingNumericPrefix(cleaned);
+                    if (cleaned.equals(stem) || cleaned.isBlank()) continue;
+                    try {
+                        java.nio.file.Path np = FileRenamer.renameInPlace(cur, cleaned);
+                        if (np != null) publish(new Object[]{ e, np, nom });
+                    } catch (Exception ex) {
+                        publish(new Object[]{ e, null, nom + " : " + ex.getMessage() });
+                    }
+                }
+                return null;
+            }
+            @Override protected void process(List<Object[]> chunk) {
+                for (Object[] item : chunk) {
+                    FileEntry e = (FileEntry) item[0];
+                    java.nio.file.Path np = (java.nio.file.Path) item[1];
+                    String oldName = (String) item[2];
+                    if (np != null) {
+                        e.currentPath = np;
+                        tableModel.update(e);
+                        renamed++;
+                        appendLogLine("  ✎ " + oldName + " → " + np.getFileName(), FileEntry.Status.TAGGED, e);
+                    } else {
+                        appendLogLine("  ✗ renommage échoué : " + oldName, FileEntry.Status.ERROR, e);
+                    }
+                }
+            }
+            @Override protected void done() {
+                setStatus(I18n.t("%d fichier(s) renommé(s).", renamed));
+                onDone.run();
+            }
+        }.execute();
     }
 
     /**
@@ -4191,10 +4799,19 @@ public class MainFrame extends JFrame {
 
     /** Lance le taguage immédiatement sur les fichiers réinitialisés par forceRetag(). */
     private void launchForcedTagging(List<FileEntry> forcedTargets, boolean useAcoustId) {
+        launchForcedTagging(forcedTargets, useAcoustId, false);
+    }
+
+    /** openReviewOnDone : utilisé par reidentifyUnmatched() — au lieu du onTaggingDone() normal
+     *  (qui déclenche des suites automatiques pensées pour des fichiers déjà TAGGED, comme la
+     *  complétion d'albums), ouvre ReidentifyReviewDialog sur les fichiers retrouvés pour
+     *  confirmation explicite avant qu'ils ne rejoignent le flux normal (Enregistrer tout). */
+    private void launchForcedTagging(List<FileEntry> forcedTargets, boolean useAcoustId, boolean openReviewOnDone) {
         lastStatsRefreshMs = 0;
         final int forcedTotal = forcedTargets.size();
+        String runLabel = openReviewOnDone ? I18n.t("Ré-identification par empreinte") : I18n.t("Re-taguage forcé");
         runStartMillis = System.currentTimeMillis();
-        logRunStart(I18n.t("Re-taguage forcé"), forcedTotal);
+        logRunStart(runLabel, forcedTotal);
         TaggingWorker w = new TaggingWorker(forcedTargets, useAcoustId,
             msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
             entry -> {
@@ -4206,18 +4823,35 @@ public class MainFrame extends JFrame {
         w.addPropertyChangeListener(evt -> {
             if ("progress".equals(evt.getPropertyName())) {
                 int pct = (Integer) evt.getNewValue();
-                progress.setValue(pct);
+                JProgressBar bar = progressBars.get(ProgressSlot.TAGGING);
+                bar.setValue(pct);
                 int fileDone = (int) Math.round(pct * forcedTotal / 100.0);
-                progress.setString(fileDone + " / " + forcedTotal + etaText(fileDone, forcedTotal));
+                bar.setString(fileDone + " / " + forcedTotal + etaText(fileDone, forcedTotal));
                 refreshStats();
             }
-            if (SwingWorker.StateValue.DONE.equals(evt.getNewValue()))
-                onTaggingDone(forcedTargets);
+            if (SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                if (openReviewOnDone) {
+                    resetBtns();
+                    refreshStats();
+                    List<FileEntry> found = new ArrayList<>();
+                    for (FileEntry e : forcedTargets)
+                        if (e.status == FileEntry.Status.IDENTIFIED) found.add(e);
+                    if (found.isEmpty()) {
+                        setStatus(I18n.t("Ré-identification terminée — aucun des %d fichier(s) n'a été retrouvé.", forcedTotal));
+                    } else {
+                        setStatus(I18n.t("%d / %d fichier(s) retrouvé(s) — revue…", found.size(), forcedTotal));
+                        new ReidentifyReviewDialog(this, found, tableModel).setVisible(true);
+                        refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture
+                    }
+                } else {
+                    onTaggingDone(forcedTargets);
+                }
+            }
         });
         btnTagAll.setEnabled(false);
         btnCancel.setEnabled(true);
-        progress.setValue(0); progress.setString(""); progress.setVisible(true);
-        WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Re-taguage forcé"), w, w::stopNow);
+        beginProgress(ProgressSlot.TAGGING);
+        WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, runLabel, w, w::stopNow);
     }
 
     private void onTaggingDone(List<FileEntry> done) {
@@ -4254,6 +4888,19 @@ public class MainFrame extends JFrame {
             SwingUtilities.invokeLater(() -> autoCompleteIncomplete(autoAlbums ? this::completeAlbums : () -> {}));
         } else if (autoAlbums) {
             SwingUtilities.invokeLater(this::completeAlbums);
+        } else if (chkAutoReidentifyUnmatched != null && chkAutoReidentifyUnmatched.isSelected()) {
+            // else if (pas juste if) : évite de soumettre TAGGING (ce déclenchement) en même temps
+            // qu'ALBUM_COMPLETION/ALBUM_CLUSTER ci-dessus au même tour d'EDT — les deux sont dans
+            // WorkerHub.LIBRARY_WRITE et se bloqueraient mutuellement (submit() lèverait
+            // IllegalStateException). Ne cible QUE les fichiers restés "Non identifié" de CE run
+            // précis (done), jamais tout l'historique "Sans_correspondance" — sinon chaque taguage
+            // re-tenterait aussi tous les échecs des runs précédents, de plus en plus lent au fil
+            // du temps.
+            List<FileEntry> justSkipped = new ArrayList<>();
+            for (FileEntry e : done) if (e.status == FileEntry.Status.SKIPPED) justSkipped.add(e);
+            if (!justSkipped.isEmpty()) {
+                SwingUtilities.invokeLater(() -> reidentifyUnmatched(justSkipped));
+            }
         }
         // Lien manquant entre les deux boucles auto : scheduleAutoTaggingFollowUp() (Tout tagger)
         // et scheduleAutoSaveFollowUp() (Enregistrer tout) sont chacune auto-suffisantes une fois
@@ -4313,10 +4960,8 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        progress.setVisible(true);
-        progress.setMaximum(targets.size());
-        progress.setValue(0);
-        progress.setString("");
+        beginProgress(ProgressSlot.INFO_COMPLETER);
+        progressBars.get(ProgressSlot.INFO_COMPLETER).setMaximum(targets.size());
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Passe complète"), targets.size());
         setStatus(I18n.t("Complétion de %d fichier(s) incomplet(s)…", targets.size()));
@@ -4331,15 +4976,16 @@ public class MainFrame extends JFrame {
                 refreshStats();
             }),
             (doneCount, total) -> SwingUtilities.invokeLater(() -> {
-                progress.setValue(doneCount);
-                progress.setString(doneCount + "/" + total + etaText(doneCount, total));
+                JProgressBar bar = progressBars.get(ProgressSlot.INFO_COMPLETER);
+                bar.setValue(doneCount);
+                bar.setString(doneCount + "/" + total + etaText(doneCount, total));
             })
         );
         w.addPropertyChangeListener(evt -> {
             if ("state".equals(evt.getPropertyName())
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
-                    progress.setVisible(false);
+                    endProgress(ProgressSlot.INFO_COMPLETER);
                     refreshStats();
                     onDone.run();
                 });
@@ -4413,7 +5059,8 @@ public class MainFrame extends JFrame {
 
     private void resetBtns() {
         btnTagAll.setEnabled(true);
-        btnCancel.setEnabled(false); progress.setVisible(false);
+        btnCancel.setEnabled(false);
+        endProgress(ProgressSlot.TAGGING);
     }
 
     private void renameTagged() {
@@ -4600,10 +5247,18 @@ public class MainFrame extends JFrame {
         int[] done = {0};
         if (btnTranscode != null) btnTranscode.setEnabled(false);
         setStatus("⏳ " + I18n.t("Transcodage… 0 / %d", toTranscode.size()));
+        beginProgress(ProgressSlot.TRANSCODE);
 
         TranscodeWorker w = new TranscodeWorker(toTranscode, tableModel,
             pr -> {
                 setStatus("⏳ " + I18n.t("Transcodage %d / %d", pr.done(), pr.total()));
+                // Barre de progression bas-droite jamais mise à jour ici jusqu'ici, alors que
+                // done()/total() étaient déjà disponibles (juste utilisés pour le texte de la
+                // barre de statut) — même trou que les autres pipelines audités aujourd'hui.
+                JProgressBar bar = progressBars.get(ProgressSlot.TRANSCODE);
+                bar.setMaximum(Math.max(pr.total(), 1));
+                bar.setValue(pr.done());
+                bar.setString(pr.done() + " / " + pr.total() + etaText(pr.done(), pr.total()));
                 // Absent du Journal jusqu'ici — même trou que les autres pipelines audités
                 // aujourd'hui : le résultat par fichier (converti/déjà bon format/erreur)
                 // n'existait qu'un instant dans la barre de statut, écrasé au fichier suivant.
@@ -4621,6 +5276,7 @@ public class MainFrame extends JFrame {
                 }
             },
             summary -> {
+                endProgress(ProgressSlot.TRANSCODE);
                 setStatus(summary);
                 if (btnTranscode != null) btnTranscode.setEnabled(true);
             }
@@ -4647,11 +5303,21 @@ public class MainFrame extends JFrame {
             return;
         }
         setStatus(I18n.t("Complétion des albums en cours…"));
+        beginProgress(ProgressSlot.ALBUM_COMPLETION);
         AlbumCompletionWorker w = new AlbumCompletionWorker(
             tableModel,
             this::setStatus,
             this::appendLog,
-            () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Complétion albums terminée.")))
+            () -> SwingUtilities.invokeLater(() -> {
+                endProgress(ProgressSlot.ALBUM_COMPLETION);
+                setStatus(I18n.t("Complétion albums terminée."));
+            }),
+            (done, total) -> SwingUtilities.invokeLater(() -> {
+                JProgressBar bar = progressBars.get(ProgressSlot.ALBUM_COMPLETION);
+                bar.setMaximum(Math.max(total, 1));
+                bar.setValue(done);
+                bar.setString(done + " / " + total + etaText(done, total));
+            })
         );
         WorkerHub.get().submit(WorkerHub.TaskKind.ALBUM_COMPLETION,
                 I18n.t("Complétion des albums"), w, w::stopNow);
@@ -4684,11 +5350,21 @@ public class MainFrame extends JFrame {
             return;
         }
         setStatus(I18n.t("Groupement des albums en cours…"));
+        beginProgress(ProgressSlot.ALBUM_CLUSTER);
         AlbumClusterWorker w = new AlbumClusterWorker(
             tableModel,
             this::setStatus,
             this::appendLog,
-            () -> SwingUtilities.invokeLater(() -> setStatus(I18n.t("Groupement des albums terminé.")))
+            () -> SwingUtilities.invokeLater(() -> {
+                endProgress(ProgressSlot.ALBUM_CLUSTER);
+                setStatus(I18n.t("Groupement des albums terminé."));
+            }),
+            (done, total) -> SwingUtilities.invokeLater(() -> {
+                JProgressBar bar = progressBars.get(ProgressSlot.ALBUM_CLUSTER);
+                bar.setMaximum(Math.max(total, 1));
+                bar.setValue(done);
+                bar.setString(done + " / " + total + etaText(done, total));
+            })
         );
         WorkerHub.get().submit(WorkerHub.TaskKind.ALBUM_CLUSTER,
                 I18n.t("Groupement des albums"), w, () -> w.cancel(true));
@@ -4696,11 +5372,32 @@ public class MainFrame extends JFrame {
 
     // ── Grouper par compilations (Stars 80, NRJ, Fun Radio, RFM…) ─────────────
 
-    private void groupByCompilations() {
+    private void groupByCompilations() { groupByCompilations(false, () -> {}); }
+
+    /** Affiche la fenêtre de revue unique accumulée par groupByCompilations(true, ...) (voir son
+     *  commentaire) — à appeler uniquement à la toute fin réelle de la chaîne Enregistrer, jamais
+     *  entre deux vagues intermédiaires. No-op si rien n'a été accumulé (cas normal quand
+     *  chkAutoGroupCompilations est désactivé). */
+    private void flushPendingCompilationMatches() {
+        if (pendingCompilationMatches.isEmpty()) return;
+        new CompilationMatchDialog(this, new ArrayList<>(pendingCompilationMatches), tableModel).setVisible(true);
+        pendingCompilationMatches.clear();
+    }
+
+    /** onDone : exécuté sur l'EDT une fois cette passe de groupement TERMINÉE (dialogue affiché ou
+     *  correspondances accumulées) — permet à l'appelant de repousser sa propre suite (relance
+     *  automatique / runPostTagCommand()) après que cette passe ait fini d'accumuler, au lieu de
+     *  l'exécuter immédiatement en parallèle du worker encore en cours. Sans ça, la toute DERNIÈRE
+     *  vague de la chaîne Enregistrer pouvait déclencher runPostTagCommand() (donc
+     *  flushPendingCompilationMatches()) AVANT que son propre CompilationClusterWorker n'ait fini
+     *  d'ajouter ses correspondances — perdant ou dédoublant le dernier lot. Repéré en direct
+     *  (2026-08-13) via le symptôme inverse (3 popups au lieu d'un). */
+    private void groupByCompilations(boolean deferDialog, Runnable onDone) {
         Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.COMPILATION_CLUSTER);
         if (running.isPresent()) {
             running.get().cancel();
             setStatus(I18n.t("Groupement par compilations annulé."));
+            onDone.run();
             return;
         }
         // Blockers PRÉCIS (WorkerHub.conflictsWith), pas activeOperations() (bloquait sur
@@ -4711,6 +5408,7 @@ public class MainFrame extends JFrame {
         List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.COMPILATION_CLUSTER);
         if (!blockers.isEmpty()) {
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de grouper par compilations.", String.join(", ", blockers)));
+            onDone.run();
             return;
         }
         // L'exigence "bibliothèque taguée à 100 %" (héritée de clusterAlbums()) est retirée : cette
@@ -4720,16 +5418,28 @@ public class MainFrame extends JFrame {
         // taguage. Bloquer ici empêchait justement de lancer les deux passes ensemble (retour
         // utilisateur : "vérifie si on peut améliorer que les deux tournent ensemble").
         setStatus(I18n.t("Recherche de correspondances de compilations…"));
+        beginProgress(ProgressSlot.COMPILATION_CLUSTER);
         CompilationClusterWorker w = new CompilationClusterWorker(
             tableModel,
             this::setStatus,
             s -> appendLogLine(s, FileEntry.Status.IDENTIFIED, null),
             matches -> SwingUtilities.invokeLater(() -> {
+                endProgress(ProgressSlot.COMPILATION_CLUSTER);
                 if (matches.isEmpty()) {
                     setStatus(I18n.t("Aucune correspondance de compilation trouvée."));
+                } else if (deferDialog) {
+                    pendingCompilationMatches.addAll(matches);
+                    setStatus(I18n.t("%d correspondance(s) de compilation en attente (fin de session).", pendingCompilationMatches.size()));
                 } else {
                     new CompilationMatchDialog(this, matches, tableModel).setVisible(true);
                 }
+                onDone.run();
+            }),
+            (done, total) -> SwingUtilities.invokeLater(() -> {
+                JProgressBar bar = progressBars.get(ProgressSlot.COMPILATION_CLUSTER);
+                bar.setMaximum(Math.max(total, 1));
+                bar.setValue(done);
+                bar.setString(done + " / " + total + etaText(done, total));
             })
         );
         // Cette migration comble au passage le seul vrai trou de comportement qui existait ici :
@@ -5286,6 +5996,7 @@ public class MainFrame extends JFrame {
                 // chaque scan de dossier, sans fenêtre ouverte) ne laissait aucune trace du
                 // résultat au-delà de la barre de statut, écrasée au message suivant — ajouté au
                 // Journal en plus, avec une couleur déduite du contenu du message.
+                beginProgress(ProgressSlot.VIDEO_RECOVERY);
                 VideoRecoveryWorker w = new VideoRecoveryWorker(videos, dir.toPath(), msg -> {
                     setStatus(msg);
                     FileEntry.Status st = msg.contains("✔") ? FileEntry.Status.TAGGED
@@ -5293,10 +6004,16 @@ public class MainFrame extends JFrame {
                             : msg.contains("non reconnu") ? FileEntry.Status.SKIPPED
                             : null;
                     if (st != null) appendLogLine(msg.strip(), st, null);
-                });
+                }, (done, total) -> SwingUtilities.invokeLater(() -> {
+                    JProgressBar bar = progressBars.get(ProgressSlot.VIDEO_RECOVERY);
+                    bar.setMaximum(Math.max(total, 1));
+                    bar.setValue(done);
+                    bar.setString(done + " / " + total + etaText(done, total));
+                }));
                 w.addPropertyChangeListener(evt -> {
                     if ("state".equals(evt.getPropertyName())
                             && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                        endProgress(ProgressSlot.VIDEO_RECOVERY);
                         setStatus(I18n.t("Vidéos (%s) — %d converti(s), %d non reconnu(s), %d erreur(s).",
                                 dir.getName(), w.getConverted(), w.getUnrecognized(), w.getErrors()));
                     }
@@ -5365,7 +6082,32 @@ public class MainFrame extends JFrame {
                         .collect(java.util.stream.Collectors.joining(" | ")));
                 }
                 setStatus(I18n.t("%d groupe(s) de doublons, %d fichier(s) concerné(s).", groups.size(), total));
-                new DuplicatesDialog(MainFrame.this, groups, result.bestByGroup(), tableModel).setVisible(true);
+                lastStatsRefreshMs = 0; // réinitialiser le throttle avant ce nouveau run
+                // started[0] : ce callback est appelé à CHAQUE fichier (pas juste une fois au
+                // début/à la fin comme les autres workers) — beginProgress()/endProgress() ne
+                // doivent donc s'exécuter qu'une seule fois chacun sur toute la séquence — sinon
+                // beginProgress() réinitialiserait la barre (value=0/string vide) à CHAQUE fichier.
+                boolean[] started = {false};
+                new DuplicatesDialog(MainFrame.this, groups, result.bestByGroup(), tableModel,
+                    (s, status) -> appendLogLine(s, status, null),
+                    (done, dtotal) -> SwingUtilities.invokeLater(() -> {
+                        if (!started[0]) { started[0] = true; beginProgress(ProgressSlot.DUPLICATE_DETECT); }
+                        JProgressBar bar = progressBars.get(ProgressSlot.DUPLICATE_DETECT);
+                        bar.setValue(dtotal > 0 ? done * 100 / dtotal : 0);
+                        bar.setString(done + " / " + dtotal);
+                        // Chips (Total/Identifiés/Tagués/...) pas mis à jour pendant la suppression
+                        // avant ce correctif — seulement à la fermeture du dialogue (voir plus bas),
+                        // donc figés en plein milieu d'une suppression de 60k+ fichiers. Même
+                        // throttle 300ms que le taguage (lastStatsRefreshMs) pour ne pas recalculer
+                        // à chaque fichier sur un très gros lot. Retour utilisateur (2026-08-10).
+                        long now = System.currentTimeMillis();
+                        if (done >= dtotal || now - lastStatsRefreshMs >= 300) {
+                            lastStatsRefreshMs = now;
+                            refreshStats();
+                        }
+                        if (done >= dtotal) endProgress(ProgressSlot.DUPLICATE_DETECT);
+                    })
+                ).setVisible(true);
                 refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture
             }
         };

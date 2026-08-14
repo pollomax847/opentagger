@@ -93,4 +93,21 @@ public class FanArtClient {
     private Path download(String imageUrl, MetadataCache cache) throws Exception {
         return ImageDownloader.downloadToTempFile(imageUrl, cache);
     }
+
+    /**
+     * Photo de l'artiste (distincte de la pochette album) — réutilise fetchArtistData()/
+     * extractBestImage(), déjà appelées par downloadCover() ci-dessus comme repli de dernier
+     * recours sur "artistthumb" ; ici exposée comme sa propre sortie, sans dépendre d'un échec de
+     * pochette album. Aucun nouvel appel réseau : fetchArtistData() est déjà mise en cache
+     * ("fanart:artist:<mbid>"), un fichier avec pochette ET portrait d'artiste ne coûte donc pas
+     * une deuxième requête HTTP.
+     */
+    public Path downloadArtistPhoto(TagInfo info, MetadataCache cache) throws Exception {
+        if (info.artistMbid.isBlank()) return null;
+        if (Config.get().fanartKey().isBlank()) return null;
+        JsonNode data = fetchArtistData(info.artistMbid, cache);
+        if (data == null) return null;
+        String url = extractBestImage(data.path("artistthumb"));
+        return url != null ? download(url, cache) : null;
+    }
 }

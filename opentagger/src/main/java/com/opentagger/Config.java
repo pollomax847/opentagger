@@ -112,7 +112,18 @@ public class Config {
     public boolean updateCheckEnabled() { return bool("update.check_enabled", true); }
     public long    lastUpdateCheckMs()  { try { return Long.parseLong(str("update.last_check_ms", "0")); } catch (Exception e) { return 0; } }
     public void    setLastUpdateCheckMs(long ms) { set("update.last_check_ms", String.valueOf(ms)); }
-    public boolean useAcoustId()       { return bool("acoustid.use_acoustid", true); }
+    // "match.use_acoustid" est un ALIAS de "acoustid.use_acoustid" (même réglage, deux noms) —
+    // la clé "match.use_acoustid" existait dans settings.properties depuis longtemps SANS être lue
+    // par aucun code, purement décorative (source de confusion signalée par l'utilisateur,
+    // 2026-08-11 : "je ne suis pas sûr que l'AcoustID n'est pas utilisé de partout", en la voyant à
+    // false dans son fichier alors qu'AcoustID était bien actif). "acoustid.use_acoustid" reste la
+    // clé canonique et prioritaire si les deux sont présentes ; sinon la clé présente, quel que
+    // soit son nom, est respectée — pour qu'aucune des deux ne redevienne un piège silencieux.
+    public boolean useAcoustId() {
+        if (props.getProperty("acoustid.use_acoustid") != null) return bool("acoustid.use_acoustid", true);
+        if (props.getProperty("match.use_acoustid")    != null) return bool("match.use_acoustid",    true);
+        return true;
+    }
     public String acoustidKey()        { return str("acoustid.api_key"); }
     public String discogsKey()         { return str("discogs.consumer_key"); }
     public String discogsSecret()      { return str("discogs.consumer_secret"); }
@@ -125,6 +136,20 @@ public class Config {
     public double trackMatchingThreshold() { return dbl("match.track_matching_threshold", 0.4); }
     public int    mbResultsLimit()     { return num("musicbrainz.results_limit", 5); }
     public boolean mbOnlyOfficial()    { return bool("musicbrainz.only_official", true); }
+
+    // --- Serveur MusicBrainz personnalisé (miroir) --- la clé musicbrainz.server existait déjà
+    // dans settings.properties mais n'était en réalité JAMAIS lue par MusicBrainzClient (BASE_URL
+    // y était codé en dur sur musicbrainz.org) — corrigé pour permettre un vrai miroir tiers (ex.
+    // service payant type Headphones Indexer, musicbrainz.codeshy.com, qui élimine les erreurs 503
+    // de contention en heure de pointe). Authentification HTTP Basic optionnelle (vide = aucune,
+    // comme pour l'API publique). mbRateLimitMs() reste à 1100 par défaut (voir le commentaire
+    // MB_MIN_INTERVAL_MS dans MusicBrainzClient — NE JAMAIS descendre en dessous sur la vraie API
+    // publique musicbrainz.org, risque de bannissement IP) ; à réduire/désactiver UNIQUEMENT si le
+    // serveur configuré est un miroir tiers avec sa propre capacité, jamais sur l'API publique.
+    public String  mbServer()          { return str("musicbrainz.server", "https://musicbrainz.org/ws/2"); }
+    public String  mbAuthUser()        { return str("musicbrainz.auth_user", ""); }
+    public String  mbAuthPass()        { return str("musicbrainz.auth_pass", ""); }
+    public int     mbRateLimitMs()     { return num("musicbrainz.rate_limit_ms", 1100); }
     public String discogsGenreSource() { return str("discogs.genre_source", "style_then_genre"); }
     public int    discogsMaxGenres()   { return num("discogs.max_genres", 3); }
     public boolean fanartEnabled()     { return bool("fanart.download_cover", true); }
@@ -158,6 +183,13 @@ public class Config {
     // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop
     // pénible à déclencher lui-même à chaque fois.
     public boolean videoAutoRecover()              { return bool("video.auto_recover",           true); }
+    // Lance automatiquement l'identification (PAS l'enregistrement, qui reste toujours manuel —
+    // façon Picard, voir FileEntry.Status.IDENTIFIED) sur les fichiers PENDING dès qu'un scan de
+    // dossier se termine (manuel "Ouvrir dossier" ou dossiers de startup.folders au lancement) —
+    // désactivé par défaut, comme les autres auto-déclenchements du menu Tagger. Demandé le
+    // 2026-08-12 : après un redémarrage, le taguage ne reprenait jamais tout seul, obligeant à
+    // recliquer "Tagger" à chaque fois.
+    public boolean autoTagOnScan()                 { return bool("tagging.auto_start_on_scan",  false); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source
@@ -243,6 +275,28 @@ public class Config {
 
     // --- Tags préservés ---
     public String  preservedTags()     { return str ("tags.preserved_tags",  ""); }
+
+    // --- Tags jamais modifiés --- différent de preservedTags ci-dessus (qui ne restaure l'ancienne
+    // valeur QUE si la nouvelle est vide) : ici le champ garde SA valeur d'origine quoi qu'il arrive,
+    // même si le taguage a trouvé une nouvelle valeur non vide (ex. protéger une RATING/COMMENT
+    // éditée à la main d'un écrasement silencieux — voir TagWriter.readNeverModifyTags()).
+    public String  neverModifyTags()   { return str ("tags.never_modify",    ""); }
+
+    // --- Auto-capitalisation --- opt-in (désactivée par défaut : des artistes/titres stylisés
+    // intentionnellement — "will.i.am", "MC5", "iamamiwhoami" — seraient sinon cassés sans que
+    // l'utilisateur l'ait demandé). Voir TitleCaseFixer.fix(), appelé depuis TaggingWorker une fois
+    // toutes les autres mutations (script, genre, translittération...) déjà appliquées.
+    public boolean capitalizeEnabled()        { return bool("capitalize.enabled", false); }
+    public String  capitalizeLowercaseWords() { return str("capitalize.lowercase_words",
+            "de,le,la,les,du,des,et,ou,à,au,aux,the,of,and,or,in,on,at,to,vs"); }
+    public String  capitalizeUppercaseWords() { return str("capitalize.uppercase_words", ""); }
+    public String  capitalizeKeepPrefixes()   { return str("capitalize.keep_prefixes", "Mc,Mac,O'"); }
+
+    // --- Portrait d'artiste --- opt-in, désactivé par défaut (même esprit que cover.save_to_file).
+    // Sidecar dans le dossier ALBUM (pas le dossier artiste, qui varie selon le masque de
+    // renommage actif — remonter d'un niveau serait fragile) — voir TagEnrichment.saveEntry().
+    public boolean artistPhotoEnabled()  { return bool("artist_photo.enabled",  false); }
+    public String  artistPhotoFilename() { return str ("artist_photo.filename", "artist"); }
 
     // --- Ponctuation & nettoyage ---
     public boolean correctPunctuation(){ return bool("tags.correct_punctuation", false); }
@@ -458,9 +512,13 @@ public class Config {
     // --- Chargement ---
 
     private void loadDefaults() {
-        try (InputStream in = getClass().getResourceAsStream("/settings.properties")) {
-            if (in != null) props.load(in);
-        } catch (IOException e) {
+        // Reader (pas InputStream) : props.load(InputStream) impose TOUJOURS ISO-8859-1 quel que
+        // soit le contenu réel du fichier — voir le commentaire détaillé de loadUserConfig()
+        // juste en dessous, même bug, même correctif.
+        try (Reader r = new java.io.InputStreamReader(
+                getClass().getResourceAsStream("/settings.properties"), java.nio.charset.StandardCharsets.UTF_8)) {
+            props.load(r);
+        } catch (Exception e) {
             System.err.println("[Config] Impossible de charger les defauts : " + e.getMessage());
         }
     }
@@ -468,8 +526,16 @@ public class Config {
     private void loadUserConfig() {
         Path path = Paths.get(CONFIG_FILE);
         if (!Files.exists(path)) return;
-        try (InputStream in = Files.newInputStream(path)) {
-            props.load(in);
+        // Reader en UTF-8 (pas Files.newInputStream + props.load(InputStream)) : la surcharge
+        // InputStream de Properties.load() est contractuellement figée en ISO-8859-1 (documenté
+        // dans le Javadoc de Properties), alors que SettingsDialog.save() écrit via
+        // Files.newBufferedWriter() — UTF-8 par défaut sous NIO.2. Résultat avant ce correctif :
+        // toute valeur accentuée sauvegardée depuis les Préférences (ex. "à" dans une liste de
+        // mots) revenait mojibake au chargement suivant ("Ã " au lieu de "à ", exactement le motif
+        // que corrige EncodingFixer sur les tags). Repéré en direct (2026-08-14) sur
+        // capitalize.lowercase_words juste après son premier enregistrement depuis l'UI.
+        try (Reader r = Files.newBufferedReader(path, java.nio.charset.StandardCharsets.UTF_8)) {
+            props.load(r);
         } catch (IOException e) {
             System.err.println("[Config] Impossible de charger " + CONFIG_FILE + " : " + e.getMessage());
         }

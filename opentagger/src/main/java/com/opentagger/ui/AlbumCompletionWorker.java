@@ -55,6 +55,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     private final Consumer<String>  statusCallback;
     private final Consumer<FileEntry> onUpdate;
     private final Runnable          doneCallback;
+    // Barre de progression partagée (bas-droite de MainFrame) — absente jusqu'ici, contrairement à
+    // TaggingWorker/SaveWorker/InfoCompleterWorker (retour utilisateur, 2026-08-10 : "verrifie les
+    // logs pas de journal... et on ne sait pas combien il reste"). Unité = release/album traité
+    // (pas piste individuelle) : c'est déjà l'unité de parallélisation (voir la Javadoc de la
+    // classe) et celle du résumé final ("X album(s) analysé(s)"), cohérent avec le reste du worker.
+    private final java.util.function.BiConsumer<Integer, Integer> onProgress;
+    private volatile int totalReleases = 0;
 
     // Genre (Discogs/Last.fm) — la tracklist MB n'en fournit pas, donc "ancre MB fiable" ne
     // dispensait pas de cet enrichissement ; jusqu'ici absent, les fichiers complétés par ce
@@ -78,10 +85,18 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
     public AlbumCompletionWorker(FileTableModel tableModel,
                                  Consumer<String> statusCallback, Consumer<FileEntry> onUpdate,
                                  Runnable doneCallback) {
+        this(tableModel, statusCallback, onUpdate, doneCallback, null);
+    }
+
+    public AlbumCompletionWorker(FileTableModel tableModel,
+                                 Consumer<String> statusCallback, Consumer<FileEntry> onUpdate,
+                                 Runnable doneCallback,
+                                 java.util.function.BiConsumer<Integer, Integer> onProgress) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
         this.onUpdate       = onUpdate;
         this.doneCallback   = doneCallback;
+        this.onProgress     = onProgress;
     }
 
     /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final) — voir
@@ -153,6 +168,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             return null;
         }
 
+        totalReleases = releaseGroups.size();
         publish(I18n.t("Analyse de %d album(s) — %d fichier(s) à récupérer possible(s)…",
                 releaseGroups.size(), candidates.size()));
 
@@ -221,7 +237,8 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
 
         ReleaseTracklist tl = fetchTracklist(cache, relMbid, mb);
         if (tl == null) return;
-        releases.incrementAndGet();
+        int done = releases.incrementAndGet();
+        if (onProgress != null) onProgress.accept(done, totalReleases);
 
         publish(I18n.t("Album : %s (%d piste(s) trouvée(s) / %d au total)",
                 tl.album(), found.size(), tl.tracks().size()));

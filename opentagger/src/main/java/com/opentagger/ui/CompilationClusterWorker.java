@@ -49,6 +49,12 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
     private final Consumer<String> statusCallback;
     private final Consumer<String> logLine;
     private final Consumer<List<CompilationMatch>> doneCallback;
+    // Barre de progression partagée (bas-droite de MainFrame) — absente jusqu'ici, même trou que
+    // AlbumCompletionWorker/AlbumClusterWorker (retour utilisateur, 2026-08-10). Unité = fichier
+    // TAGGED réellement examiné par checkEntry() (pas allEntries() en entier, qui inclut aussi
+    // tout ce qui n'est pas encore tagué — le dénominateur doit refléter le vrai travail restant,
+    // pas la taille totale de la bibliothèque chargée).
+    private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
     /** logLine : ajoute une ligne PERSISTANTE au panneau Journal (contrairement à statusCallback,
      *  écrasé à chaque nouveau message) — avant ce correctif, cette passe n'avait aucune trace
@@ -58,10 +64,18 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
     public CompilationClusterWorker(FileTableModel tableModel, Consumer<String> statusCallback,
                                      Consumer<String> logLine,
                                      Consumer<List<CompilationMatch>> doneCallback) {
+        this(tableModel, statusCallback, logLine, doneCallback, null);
+    }
+
+    public CompilationClusterWorker(FileTableModel tableModel, Consumer<String> statusCallback,
+                                     Consumer<String> logLine,
+                                     Consumer<List<CompilationMatch>> doneCallback,
+                                     java.util.function.BiConsumer<Integer, Integer> onProgress) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
         this.logLine        = logLine;
         this.doneCallback   = doneCallback;
+        this.onProgress     = onProgress;
     }
 
     @Override
@@ -70,12 +84,19 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
         List<CompilationMatch> matches = new ArrayList<>();
         MetadataCache cache = new MetadataCache();
         try {
+            List<FileEntry> candidates = new ArrayList<>();
             for (FileEntry entry : tableModel.allEntries()) {
+                if (entry.status == FileEntry.Status.TAGGED && entry.result != null
+                        && !entry.result.recordingMbid.isBlank()) candidates.add(entry);
+            }
+            int total = candidates.size();
+            int done  = 0;
+            for (FileEntry entry : candidates) {
                 if (isCancelled()) break;
-                if (entry.status != FileEntry.Status.TAGGED || entry.result == null
-                        || entry.result.recordingMbid.isBlank()) continue;
                 CompilationMatch match = checkEntry(entry, seriesNames, cache, new MusicBrainzClient());
                 if (match != null) matches.add(match);
+                done++;
+                if (onProgress != null) onProgress.accept(done, total);
             }
         } finally {
             cache.close();

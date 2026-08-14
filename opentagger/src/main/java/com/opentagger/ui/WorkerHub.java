@@ -192,6 +192,22 @@ public final class WorkerHub {
         // le 2026-07-28 après un retour utilisateur ("ça bloque le taguage pour rien").
         if ((a == TaskKind.TAGGING && b == TaskKind.COMPILATION_CLUSTER)
                 || (a == TaskKind.COMPILATION_CLUSTER && b == TaskKind.TAGGING)) return false;
+        // INFO_COMPLETER (InfoCompleterWorker, "▶ COMPLÉTER") : ne cible QUE les fichiers déjà
+        // status==TAGGED||IDENTIFIED (autoCompleteIncomplete(), snapshot figé passé au constructeur,
+        // jamais de relecture live de tableModel) — disjoint par construction de la cible de Tagger
+        // (PENDING/SKIPPED/ERROR), même exception que Enregistrer/Tagger juste au-dessus. SANS ce
+        // correctif : une passe de complétion sur plusieurs milliers de fichiers déjà tagués (réseau,
+        // peut prendre des heures) affamait indéfiniment le taguage de nouveaux fichiers — la boucle
+        // de relance automatique (scheduleAutoTaggingFollowUp) se contentait de se reprogrammer en
+        // silence sans jamais aboutir, sans même prévenir l'utilisateur — repéré en direct
+        // (2026-08-13) : 3971 fichiers PENDING jamais repris après 2h+ de complétion ininterrompue.
+        // ALBUM_COMPLETION (différent d'INFO_COMPLETER malgré le nom proche) reste volontairement
+        // EXCLU de cette exception : il pioche AUSSI dans les candidats SKIPPED/PENDING en lecture
+        // live (AlbumCompletionWorker.doInBackground()), un vrai chevauchement avec Tagger sans
+        // verrou croisé — le débloquer causerait une vraie course de données (perte de mise à jour),
+        // pas juste résoudre la famine.
+        if ((a == TaskKind.TAGGING && b == TaskKind.INFO_COMPLETER)
+                || (a == TaskKind.INFO_COMPLETER && b == TaskKind.TAGGING)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction

@@ -139,6 +139,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             return;
         }
 
+        CURRENT_FILE.set(fichier.getName());
         log(I18n.t("▶ COMPLÉTER %s", fichier.getName()));
 
         try {
@@ -385,10 +386,18 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             Tag tag = af.getTag();
             if (tag == null) return null;
             TagInfo ti = new TagInfo();
-            ti.artist          = tag.getFirst(FieldKey.ARTIST);
-            ti.title           = tag.getFirst(FieldKey.TITLE);
-            ti.album           = tag.getFirst(FieldKey.ALBUM);
-            ti.albumArtist     = tag.getFirst(FieldKey.ALBUM_ARTIST);
+            // isGenericIdentityValue() : ne jamais faire confiance à un artiste/titre/album déjà
+            // cassé sur le fichier ("1", "Unknown Artist"...) — sans ce garde, une valeur poubelle
+            // déjà présente se recopiait telle quelle à chaque complétion, indéfiniment (bug réel
+            // trouvé le 2026-08-13 : TPE1=ARTIST="1" sur un fichier par ailleurs bien identifié).
+            String rawArtist      = tag.getFirst(FieldKey.ARTIST);
+            String rawTitle       = tag.getFirst(FieldKey.TITLE);
+            String rawAlbum       = tag.getFirst(FieldKey.ALBUM);
+            String rawAlbumArtist = tag.getFirst(FieldKey.ALBUM_ARTIST);
+            ti.artist          = TagInfo.isGenericIdentityValue(rawArtist)      ? "" : rawArtist;
+            ti.title           = TagInfo.isGenericIdentityValue(rawTitle)       ? "" : rawTitle;
+            ti.album           = TagInfo.isGenericIdentityValue(rawAlbum)       ? "" : rawAlbum;
+            ti.albumArtist     = TagInfo.isGenericIdentityValue(rawAlbumArtist) ? "" : rawAlbumArtist;
             ti.year            = tag.getFirst(FieldKey.YEAR);
             ti.track           = tag.getFirst(FieldKey.TRACK);
             ti.genre           = tag.getFirst(FieldKey.GENRE);
@@ -431,8 +440,17 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         for (FileEntry e : chunks) onUpdate.accept(e);
     }
 
+    // Même raison que TaggingWorker.CURRENT_FILE (préfixe de traçabilité par fichier malgré
+    // plusieurs threads parallèles partageant ce même log() static) — ajouté ici aussi le
+    // 2026-08-12 en repérant un cas suspect ("Or Songwriting Process...mp3", un titre de podcast,
+    // suivi d'une ligne "MB trouvé: James Blunt..." impossible à rattacher avec certitude à CE
+    // fichier précis sans préfixe, à cause de l'entrelacement des threads).
+    private static final ThreadLocal<String> CURRENT_FILE = new ThreadLocal<>();
+
     private static void log(String msg) {
-        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg);
+        String ctx = CURRENT_FILE.get();
+        String prefix = ctx != null ? "[" + ctx + "] " : "";
+        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + prefix + msg);
         System.out.flush();
     }
 }

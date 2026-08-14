@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.ApiKeyTester;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
 import com.opentagger.FpcalcInstaller;
@@ -98,6 +99,10 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spFpcalcThreads;
     private JSpinner   spBatchThreads;
     private JTextField tfPreservedTags;
+    private JCheckBox  chkCapitalize;
+    private JTextField tfCapitalizeLowercase, tfCapitalizeUppercase, tfCapitalizePrefixes;
+    private JCheckBox  chkArtistPhoto;
+    private JTextField tfArtistPhotoFilename;
     private JCheckBox  chkMbUseGenres;
     private JSpinner   spMbMinGenreUsage;
     private JSpinner   spMbMaxGenres;
@@ -189,6 +194,11 @@ public class SettingsDialog extends JDialog {
     private static final String[] SECONDARY_TYPES = {"Compilation", "Live", "Soundtrack", "Greatest Hits", "Remix", "Demo", "DJ-mix", "Mixtape/Street"};
     private JCheckBox[] chkPrimaryTypes   = new JCheckBox[PRIMARY_TYPES.length];
     private JCheckBox[] chkExcludedSecondary = new JCheckBox[SECONDARY_TYPES.length];
+    private static final String[] NEVER_MODIFY_FIELDS = {
+        "ARTIST", "ALBUM", "ALBUM_ARTIST", "TITLE", "GENRE", "YEAR", "COMMENT",
+        "TRACK", "DISC_NO", "RATING", "LYRICS", "BPM", "KEY"
+    };
+    private JCheckBox[] chkNeverModify = new JCheckBox[NEVER_MODIFY_FIELDS.length];
 
     // Codes ISO → Nom complet (pour affichage dans le sélecteur). Noms obtenus dynamiquement via
     // Locale.getDisplayCountry() dans la langue de l'UI plutôt qu'une map français codée en dur —
@@ -229,6 +239,10 @@ public class SettingsDialog extends JDialog {
     private JTextField tfMbCollectionId;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbMbOAuthMode;
+    private JTextField     tfMbServer;
+    private JTextField     tfMbAuthUser;
+    private JPasswordField tfMbAuthPass;
+    private JSpinner        spMbRateLimitMs;
 
     // ── Onglet Démarrage ──────────────────────────────────────────────────────
     private DefaultListModel<String> startupFolderModel;
@@ -473,24 +487,36 @@ public class SettingsDialog extends JDialog {
         inner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), I18n.t("Clés d'accès aux services en ligne")));
 
+        // 4e élément par ligne : fournisseur du test "Tester" (null = pas de vérification
+        // possible — MusicBrainz User-Agent n'est qu'un en-tête, pas un identifiant ; RapidAPI
+        // n'est en réalité utilisé par AUCUN chemin de code actuel, testerait dans le vide).
         Object[][] rows = {
-            { "MusicBrainz User-Agent :",   tfMbUserAgent,        null },
-            { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/new-application" },
-            { "AcoustID User Token :",      tfAcoustIdUserToken,  "https://acoustid.org/api-key" },
-            { "Discogs Consumer Key :",     tfDiscogsKey,         "https://www.discogs.com/settings/developers" },
-            { "Discogs Consumer Secret :",  tfDiscogsSecret,      "https://www.discogs.com/settings/developers" },
-            { "Last.fm API Key :",          tfLastFmKey,          "https://www.last.fm/api/account/create" },
-            { "FanArt.tv API Key :",        tfFanArtKey,          "https://fanart.tv/get-an-api-key/" },
-            { "RapidAPI Key (Shazam) :",    tfRapidApiKey,        "https://rapidapi.com/apidojo/api/shazam" },
-            { "AudD API Token :",           tfAudDToken,          "https://dashboard.audd.io/" },
-            { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/" },
-            { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null },
+            { "MusicBrainz User-Agent :",   tfMbUserAgent,        null, null },
+            { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/new-application",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAcoustId(tfAcoustIdKey.getText().trim()) },
+            { "AcoustID User Token :",      tfAcoustIdUserToken,  "https://acoustid.org/api-key", null },
+            { "Discogs Consumer Key :",     tfDiscogsKey,         "https://www.discogs.com/settings/developers", null },
+            { "Discogs Consumer Secret :",  tfDiscogsSecret,      "https://www.discogs.com/settings/developers",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testDiscogs(tfDiscogsKey.getText().trim(), tfDiscogsSecret.getText().trim()) },
+            { "Last.fm API Key :",          tfLastFmKey,          "https://www.last.fm/api/account/create",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFm(tfLastFmKey.getText().trim()) },
+            { "FanArt.tv API Key :",        tfFanArtKey,          "https://fanart.tv/get-an-api-key/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testFanArt(tfFanArtKey.getText().trim()) },
+            { "RapidAPI Key (Shazam) :",    tfRapidApiKey,        "https://rapidapi.com/apidojo/api/shazam", null },
+            { "AudD API Token :",           tfAudDToken,          "https://dashboard.audd.io/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAudD(tfAudDToken.getText().trim()) },
+            { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testListenBrainz(tfListenBrainzUsername.getText().trim()) },
+            { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null, null },
         };
 
         for (int i = 0; i < rows.length; i++) {
             String     label  = I18n.t((String) rows[i][0]);
             JComponent field  = (JComponent) rows[i][1];
             String     url    = (String)     rows[i][2];
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<ApiKeyTester.Result> testFn =
+                    (java.util.function.Supplier<ApiKeyTester.Result>) rows[i][3];
 
             GridBagConstraints lc = new GridBagConstraints();
             lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST;
@@ -501,6 +527,13 @@ public class SettingsDialog extends JDialog {
             fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL;
             fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 4);
             inner.add(field, fc);
+
+            if (testFn != null) {
+                GridBagConstraints tc = new GridBagConstraints();
+                tc.gridx = 3; tc.gridy = i; tc.anchor = GridBagConstraints.WEST;
+                tc.insets = new Insets(3, 0, 3, 4);
+                inner.add(testBtnPanel(testFn), tc);
+            }
 
             GridBagConstraints bc = new GridBagConstraints();
             bc.gridx = 2; bc.gridy = i; bc.anchor = GridBagConstraints.WEST;
@@ -548,6 +581,39 @@ public class SettingsDialog extends JDialog {
         p.setBorder(new EmptyBorder(8, 8, 8, 8));
         p.add(inner,       BorderLayout.CENTER);
         p.add(enrichInner, BorderLayout.SOUTH);
+        return p;
+    }
+
+    /** Bouton "Tester" + statut coloré à côté — appel réseau minimal (voir ApiKeyTester) validant
+     *  la clé/l'identifiant ACTUELLEMENT TAPÉ dans le champ, sans avoir à cliquer sur Enregistrer
+     *  d'abord. En arrière-plan (SwingWorker) : ce sont de vrais appels réseau, jamais sur l'EDT. */
+    private JPanel testBtnPanel(java.util.function.Supplier<ApiKeyTester.Result> testFn) {
+        JButton btn = new JButton(I18n.t("Tester"));
+        btn.putClientProperty("FlatLaf.style", "font: 10 $defaultFont; arc: 6");
+        JLabel status = new JLabel();
+        status.putClientProperty("FlatLaf.style", "font: 10 $defaultFont");
+        btn.addActionListener(e -> {
+            btn.setEnabled(false);
+            status.setText(I18n.t("Test en cours…"));
+            status.setToolTipText(null);
+            status.putClientProperty("FlatLaf.style", "font: 10 $defaultFont; foreground: #888888");
+            new SwingWorker<ApiKeyTester.Result, Void>() {
+                @Override protected ApiKeyTester.Result doInBackground() { return testFn.get(); }
+                @Override protected void done() {
+                    btn.setEnabled(true);
+                    ApiKeyTester.Result r;
+                    try { r = get(); } catch (Exception ex) { r = new ApiKeyTester.Result(false, ex.getMessage()); }
+                    status.setText(r.ok() ? "✓ " + I18n.t("OK") : "✗ " + I18n.t("Échec"));
+                    status.setToolTipText(r.message());
+                    status.putClientProperty("FlatLaf.style",
+                        "font: 10 $defaultFont; foreground: " + (r.ok() ? "#4caf50" : "#f44336"));
+                }
+            }.execute();
+        });
+        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        p.setOpaque(false);
+        p.add(btn);
+        p.add(status);
         return p;
     }
 
@@ -1073,12 +1139,49 @@ public class SettingsDialog extends JDialog {
         // ── Tags préservés ────────────────────────────────────────────────────────
         tfPreservedTags = tf();
         tfPreservedTags.setToolTipText(I18n.t(
-            "Champs qu'OpenTagger ne doit JAMAIS modifier ni effacer, même si une nouvelle valeur "
-            + "est trouvée — utile pour une note personnelle (COMMENT) ou une note sur 5 étoiles "
-            + "(RATING) que vous avez mise vous-même. Noms séparés par | (ex: RATING|COMMENT), "
-            + "vide = rien de préservé."));
-        JPanel preserveInner = form(new String[]{"Tags à ne jamais écraser :"},
+            "Si le taguage ne trouve RIEN pour ce champ (résultat vide), l'ancienne valeur du "
+            + "fichier est conservée au lieu d'être effacée. N'empêche PAS un écrasement si une "
+            + "nouvelle valeur non vide est trouvée — pour ça, voir « Champs verrouillés » "
+            + "ci-dessous. Noms séparés par | (ex: RATING|COMMENT), vide = rien de préservé."));
+        JPanel preserveInner = form(new String[]{"Tags à ne jamais écraser (si vide) :"},
                 new JComponent[]{tfPreservedTags}, "Tags préservés");
+
+        // ── Champs verrouillés (jamais modifiés, même si une nouvelle valeur non vide est
+        // trouvée) — distinct de "Tags préservés" ci-dessus, voir Config.neverModifyTags() /
+        // TagWriter.readNeverModifyTags().
+        for (int i = 0; i < NEVER_MODIFY_FIELDS.length; i++)
+            chkNeverModify[i] = new JCheckBox(NEVER_MODIFY_FIELDS[i]);
+        JPanel neverModifyRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        for (JCheckBox c : chkNeverModify) neverModifyRow.add(c);
+        JPanel neverModifyInner = new JPanel(new BorderLayout());
+        neverModifyInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Champs verrouillés (jamais modifiés)")));
+        neverModifyInner.add(neverModifyRow, BorderLayout.CENTER);
+        JLabel neverModifyHint = new JLabel(I18n.t(
+            "<html><i>Le champ garde sa valeur actuelle quoi qu'il arrive, même si le taguage trouve "
+            + "une valeur différente et non vide — protège par ex. une note (RATING) ou un commentaire "
+            + "édités à la main.</i></html>"));
+        neverModifyHint.setBorder(new EmptyBorder(2, 4, 4, 4));
+        neverModifyInner.add(neverModifyHint, BorderLayout.SOUTH);
+
+        // ── Auto-capitalisation (opt-in) ─────────────────────────────────────────
+        chkCapitalize = new JCheckBox(I18n.t("Capitaliser automatiquement titre/artiste/album"));
+        chkCapitalize.setToolTipText(I18n.t(
+            "Désactivé par défaut : peut casser un nom stylisé intentionnellement (ex. \"will.i.am\", "
+            + "\"MC5\"). Appliqué en tout dernier, après script et enrichissement."));
+        tfCapitalizeLowercase = tf();
+        tfCapitalizeLowercase.setToolTipText(I18n.t(
+            "Mots gardés en minuscule sauf en début/fin (ex: de,le,la,the,of,and), séparés par virgule."));
+        tfCapitalizeUppercase = tf();
+        tfCapitalizeUppercase.setToolTipText(I18n.t(
+            "Mots toujours en majuscule tels quels (ex: U2,MC5), séparés par virgule."));
+        tfCapitalizePrefixes = tf();
+        tfCapitalizePrefixes.setToolTipText(I18n.t(
+            "Préfixes de nom capitalisés à part (ex: Mc,Mac,O' → \"McDonald\", \"O'Brien\"), séparés par virgule."));
+        JPanel capitalizeInner = form(
+            new String[]{"", "Mots en minuscule :", "Mots en majuscule :", "Préfixes préservés :"},
+            new JComponent[]{chkCapitalize, tfCapitalizeLowercase, tfCapitalizeUppercase, tfCapitalizePrefixes},
+            "Capitalisation automatique");
 
         // ── Pochette fichier ──────────────────────────────────────────────────────
         // "Utiliser folder.jpg/cover.jpg local" a déménagé dans la liste des fournisseurs de
@@ -1091,6 +1194,19 @@ public class SettingsDialog extends JDialog {
         }, new JComponent[]{
             chkCoverSaveToFile, chkCoverOverwriteFile, tfCoverFilename
         }, "Pochette en fichier (cover.jpg / folder.jpg)");
+
+        // ── Portrait d'artiste (distinct de la pochette album, via FanArt.tv) ──────
+        chkArtistPhoto = new JCheckBox(I18n.t("Sauvegarder un portrait de l'artiste"));
+        chkArtistPhoto.setToolTipText(I18n.t(
+            "Désactivé par défaut. Nécessite une clé FanArt.tv (onglet APIs). Écrit un fichier à "
+            + "côté de la pochette, dans le dossier de l'album (pas remonté au dossier artiste, qui "
+            + "dépend du masque de renommage actif)."));
+        tfArtistPhotoFilename = tf();
+        JPanel artistPhotoInner = form(new String[]{
+            "", "Nom du fichier (sans extension) :"
+        }, new JComponent[]{
+            chkArtistPhoto, tfArtistPhotoFilename
+        }, "Portrait d'artiste");
 
         // ── Fournisseurs de pochette : ordre + activation (pas d'ajout/suppression,
         // l'ensemble des 4 fournisseurs est fixe, contrairement aux pays ou aux scripts) ──
@@ -1157,9 +1273,12 @@ public class SettingsDialog extends JDialog {
         JPanel pw  = new JPanel(new BorderLayout()); pw.setBorder(new EmptyBorder(8,8,0,8)); pw.add(tagInner,       BorderLayout.CENTER);
         JPanel fw  = new JPanel(new BorderLayout()); fw.setBorder(new EmptyBorder(8,8,0,8)); fw.add(fpInner,        BorderLayout.CENTER);
         JPanel prw = new JPanel(new BorderLayout()); prw.setBorder(new EmptyBorder(8,8,0,8));prw.add(preserveInner, BorderLayout.CENTER);
+        JPanel nmw = new JPanel(new BorderLayout()); nmw.setBorder(new EmptyBorder(8,8,0,8));nmw.add(neverModifyInner, BorderLayout.CENTER);
+        JPanel capw = new JPanel(new BorderLayout()); capw.setBorder(new EmptyBorder(8,8,0,8));capw.add(capitalizeInner, BorderLayout.CENTER);
         JPanel cfw = new JPanel(new BorderLayout()); cfw.setBorder(new EmptyBorder(8,8,0,8));cfw.add(coverFileInner,BorderLayout.CENTER);
+        JPanel apw = new JPanel(new BorderLayout()); apw.setBorder(new EmptyBorder(8,8,0,8));apw.add(artistPhotoInner, BorderLayout.CENTER);
         JPanel cpw = new JPanel(new BorderLayout()); cpw.setBorder(new EmptyBorder(8,8,8,8));cpw.add(coverProvidersBox, BorderLayout.CENTER);
-        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(cfw); combined.add(cpw);
+        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(nmw); combined.add(capw); combined.add(cfw); combined.add(apw); combined.add(cpw);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -2056,12 +2175,63 @@ public class SettingsDialog extends JDialog {
         // d'aide (visible à l'écran : la légende flottait au milieu d'une zone vide au lieu de
         // suivre directement le formulaire). `inner` et `hint` regroupés dans une même boîte
         // verticale collée en NORTH : l'espace restant va sous les deux, pas entre eux.
+        // ── Serveur MusicBrainz (miroir) ────────────────────────────────────────
+        // musicbrainz.server existait déjà comme clé de config mais n'était jamais réellement lue
+        // par MusicBrainzClient (URL codée en dur) — corrigé pour permettre un vrai miroir tiers
+        // (ex. service payant type Headphones Indexer, musicbrainz.codeshy.com avec identifiants
+        // HTTP Basic, qui élimine les 503 de contention en heure de pointe). Volontairement séparé
+        // du compte OAuth ci-dessus : deux mécanismes indépendants (lecture vs contribution).
+        tfMbServer   = tf();
+        tfMbAuthUser = tf();
+        tfMbAuthPass = new JPasswordField();
+        spMbRateLimitMs = new JSpinner(new SpinnerNumberModel(1100, 0, 30000, 100));
+        tfMbServer.setToolTipText(I18n.t(
+            "URL de base de l'API MusicBrainz (défaut : https://musicbrainz.org/ws/2). Changer "
+            + "uniquement pour un miroir tiers de confiance. Utilisez directement https:// si le "
+            + "miroir en a besoin — une redirection http→https ferait perdre l'authentification "
+            + "(Java retire l'en-tête Authorization lors d'une redirection, constaté en direct avec "
+            + "musicbrainz.codeshy.com qui redirige silencieusement)."));
+        tfMbAuthPass.setToolTipText(I18n.t(
+            "Mot de passe HTTP Basic pour le miroir ci-dessus, si requis. Vide = aucune "
+            + "authentification envoyée (cas normal pour l'API publique)."));
+        spMbRateLimitMs.setToolTipText(I18n.t(
+            "<html>Délai minimum (ms) entre deux requêtes MusicBrainz. <b>Ne JAMAIS descendre sous "
+            + "1100 sur la vraie API publique musicbrainz.org — risque de bannissement IP.</b> À "
+            + "réduire (voire 0) UNIQUEMENT si le serveur ci-dessus est un miroir tiers avec sa "
+            + "propre capacité (ex. le miroir codeshy applique 0 de son côté).</html>"));
+
+        JPanel serverInner = new JPanel(new GridBagLayout());
+        serverInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Serveur MusicBrainz (miroir)")));
+        String[] serverLabels = {"URL du serveur :", "Utilisateur (HTTP Basic) :", "Mot de passe :", "Délai entre requêtes (ms) :"};
+        JComponent[] serverFields = {tfMbServer, tfMbAuthUser, tfMbAuthPass, spMbRateLimitMs};
+        for (int i = 0; i < serverLabels.length; i++) {
+            GridBagConstraints lc = new GridBagConstraints();
+            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(4,10,4,8);
+            serverInner.add(new JLabel(I18n.t(serverLabels[i])), lc);
+            GridBagConstraints fc = new GridBagConstraints();
+            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL; fc.weightx = 1; fc.insets = new Insets(4,0,4,10);
+            serverInner.add(serverFields[i], fc);
+        }
+        GridBagConstraints linkC = new GridBagConstraints();
+        linkC.gridx = 1; linkC.gridy = serverLabels.length; linkC.anchor = GridBagConstraints.WEST; linkC.insets = new Insets(2,0,4,10);
+        JPanel serverLinkRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        serverLinkRow.add(new JLabel(I18n.t("Miroir VIP payant (compte + identifiants ci-dessus) :")));
+        serverLinkRow.add(apiLinkBtn("https://headphones.codeshy.com/vip/"));
+        serverLinkRow.add(testBtnPanel(() -> ApiKeyTester.testMusicBrainz(
+                tfMbServer.getText().trim(), tfMbAuthUser.getText().trim(),
+                new String(tfMbAuthPass.getPassword()))));
+        serverInner.add(serverLinkRow, linkC);
+
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         inner.setAlignmentX(Component.LEFT_ALIGNMENT);
         hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        serverInner.setAlignmentX(Component.LEFT_ALIGNMENT);
         top.add(inner);
         top.add(hint);
+        top.add(Box.createVerticalStrut(10));
+        top.add(serverInner);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBorder(new EmptyBorder(12, 12, 12, 12));
@@ -2202,9 +2372,18 @@ public class SettingsDialog extends JDialog {
 
         // ─ Tags (onglet Tags) ─
         tfPreservedTags      .setText(cfg.preservedTags());
+        java.util.Set<String> neverModifySet = java.util.Set.of(cfg.neverModifyTags().split("\\|"));
+        for (int i = 0; i < NEVER_MODIFY_FIELDS.length; i++)
+            chkNeverModify[i].setSelected(neverModifySet.contains(NEVER_MODIFY_FIELDS[i]));
+        chkCapitalize        .setSelected(cfg.capitalizeEnabled());
+        tfCapitalizeLowercase.setText(cfg.capitalizeLowercaseWords());
+        tfCapitalizeUppercase.setText(cfg.capitalizeUppercaseWords());
+        tfCapitalizePrefixes .setText(cfg.capitalizeKeepPrefixes());
         chkCoverSaveToFile   .setSelected(cfg.coverSaveToFile());
         chkCoverOverwriteFile.setSelected(cfg.coverOverwriteFile());
         tfCoverFilename      .setText(cfg.coverFilename());
+        chkArtistPhoto       .setSelected(cfg.artistPhotoEnabled());
+        tfArtistPhotoFilename.setText(cfg.artistPhotoFilename());
 
         // ─ Fournisseurs de pochette : ordre + activation ─
         coverProviderOrder.clear();
@@ -2239,6 +2418,10 @@ public class SettingsDialog extends JDialog {
         cmbMbOAuthMode.setSelectedIndex(
             "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
         tfMbCollectionId.setText(cfg.mbCollectionId());
+        tfMbServer      .setText(cfg.mbServer());
+        tfMbAuthUser    .setText(cfg.mbAuthUser());
+        tfMbAuthPass    .setText(cfg.mbAuthPass());
+        spMbRateLimitMs .setValue(cfg.mbRateLimitMs());
 
         scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
         currentScriptIndex = -1;
@@ -2264,7 +2447,33 @@ public class SettingsDialog extends JDialog {
         refreshToolbarActionsList();
     }
 
+    /** Tous les JSpinner du dialogue — utilisé uniquement pour forcer la validation d'une saisie
+     *  clavier en cours avant lecture (voir commitAllSpinnerEdits()). */
+    private JSpinner[] allSpinners() {
+        return new JSpinner[]{
+            spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays, spDiscogsMaxGenres,
+            spLastfmMaxGenres, spnSkipSongRecMinScore, spListenBrainzMaxTracks, spFpcalcThreads,
+            spBatchThreads, spMbMinGenreUsage, spMbMaxGenres, spTranscodeBitrate, spMbRateLimitMs
+        };
+    }
+
+    /** JSpinner.getValue() renvoie l'ancienne valeur COMMISE, pas ce qui est tapé dans le champ
+     *  texte tant que l'édition n'a pas été validée (Tab/Entrée, ou perte de focus) — sans appel
+     *  explicite à commitEdit() avant de lire les valeurs dans save(), une valeur tapée au clavier
+     *  puis "Enregistrer" cliqué directement (sans quitter le champ au clavier) était perdue
+     *  silencieusement, le fichier de config gardant l'ancienne valeur sans aucune erreur visible.
+     *  Repéré en direct (2026-08-14) : batch.threads réglé à 12 dans l'UI, resté à 6 dans le
+     *  fichier après "Enregistrer". Erreur de parsing (chiffre incomplet, etc.) ignorée : on garde
+     *  alors la dernière valeur commise plutôt que de bloquer toute la sauvegarde pour ce détail. */
+    private void commitAllSpinnerEdits() {
+        for (JSpinner sp : allSpinners()) {
+            if (sp == null) continue;
+            try { sp.commitEdit(); } catch (java.text.ParseException ignored) {}
+        }
+    }
+
     private void save() {
+        commitAllSpinnerEdits();
         // Partir du fichier utilisateur existant pour préserver les clés non affichées dans le formulaire
         // (discogs.genre_source, lastfm.max_genres, mb.oauth.mode configurées manuellement, etc.)
         Properties p = new Properties();
@@ -2393,6 +2602,14 @@ public class SettingsDialog extends JDialog {
 
         // ─ Onglet Tags ─
         p.setProperty("tags.preserved_tags",       tfPreservedTags.getText().trim());
+        java.util.List<String> selNeverModify = new java.util.ArrayList<>();
+        for (int i = 0; i < NEVER_MODIFY_FIELDS.length; i++)
+            if (chkNeverModify[i].isSelected()) selNeverModify.add(NEVER_MODIFY_FIELDS[i]);
+        p.setProperty("tags.never_modify",         String.join("|", selNeverModify));
+        p.setProperty("capitalize.enabled",         String.valueOf(chkCapitalize.isSelected()));
+        p.setProperty("capitalize.lowercase_words", tfCapitalizeLowercase.getText().trim());
+        p.setProperty("capitalize.uppercase_words", tfCapitalizeUppercase.getText().trim());
+        p.setProperty("capitalize.keep_prefixes",   tfCapitalizePrefixes.getText().trim());
 
         // ─ Fournisseurs de pochette : ordre + activation ─
         p.setProperty("cover.provider_order",             String.join(",", coverProviderOrder));
@@ -2406,6 +2623,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("cover.save_to_file",        String.valueOf(chkCoverSaveToFile.isSelected()));
         p.setProperty("cover.overwrite_file",      String.valueOf(chkCoverOverwriteFile.isSelected()));
         p.setProperty("cover.filename",            tfCoverFilename.getText().trim().isEmpty() ? "cover" : tfCoverFilename.getText().trim());
+        p.setProperty("artist_photo.enabled",      String.valueOf(chkArtistPhoto.isSelected()));
+        p.setProperty("artist_photo.filename",     tfArtistPhotoFilename.getText().trim().isEmpty() ? "artist" : tfArtistPhotoFilename.getText().trim());
         p.setProperty("tags.correct_punctuation",  String.valueOf(chkCorrectPunctuation.isSelected()));
         p.setProperty("tags.remove_id3v1",         String.valueOf(chkRemoveId3v1.isSelected()));
         String[] id3Versions = {"keep", "2.3", "2.4"};
@@ -2450,6 +2669,11 @@ public class SettingsDialog extends JDialog {
         String[] oauthModes = {"scheme", "localhost", "oob"};
         p.setProperty("mb.oauth.mode", oauthModes[cmbMbOAuthMode.getSelectedIndex()]);
         p.setProperty("mb.oauth.collection_id",       tfMbCollectionId.getText().trim());
+        p.setProperty("musicbrainz.server",           tfMbServer.getText().trim().isEmpty()
+                ? "https://musicbrainz.org/ws/2" : tfMbServer.getText().trim());
+        p.setProperty("musicbrainz.auth_user",        tfMbAuthUser.getText().trim());
+        p.setProperty("musicbrainz.auth_pass",        new String(tfMbAuthPass.getPassword()));
+        p.setProperty("musicbrainz.rate_limit_ms",    String.valueOf(spMbRateLimitMs.getValue()));
 
         // Mémoriser les dossiers déjà connus avant la sauvegarde
         java.util.Set<String> alreadyKnown = new java.util.HashSet<>(
