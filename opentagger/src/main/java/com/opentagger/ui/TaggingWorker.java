@@ -43,6 +43,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final boolean             useAcoustId;
     private final Consumer<String>    onProgress;
     private final Consumer<FileEntry> onUpdate;
+    // (doneCount, total) à chaque fichier — bug trouvé en direct (2026-08-15) : la seule mise à jour
+    // existante passait par setProgress()/le pourcentage 0-100 de SwingWorker, qui ne déclenche un
+    // événement "progress" QUE quand la valeur ENTIÈRE change. Sur un lot de 144k fichiers, un point
+    // de pourcentage représente ~1445 fichiers — à ~500 fichiers/h, ça pouvait rester des HEURES sans
+    // le moindre événement, la barre restant visuellement figée à "0 / 144492" (vide) tout ce temps.
+    // Ce callback, lui, se déclenche à CHAQUE fichier, indépendamment du pourcentage arrondi.
+    private final java.util.function.BiConsumer<Integer, Integer> onFileProgress;
 
     private final MusicBrainzClient        mb               = new MusicBrainzClient();
     private final AcoustIdClient           acoustId         = new AcoustIdClient();
@@ -87,10 +94,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     public TaggingWorker(List<FileEntry> entries, boolean useAcoustId,
                          Consumer<String> onProgress, Consumer<FileEntry> onUpdate) {
-        this.entries     = entries;
-        this.useAcoustId = useAcoustId;
-        this.onProgress  = onProgress;
-        this.onUpdate    = onUpdate;
+        this(entries, useAcoustId, onProgress, onUpdate, (done, total) -> {});
+    }
+
+    public TaggingWorker(List<FileEntry> entries, boolean useAcoustId, Consumer<String> onProgress,
+                         Consumer<FileEntry> onUpdate,
+                         java.util.function.BiConsumer<Integer, Integer> onFileProgress) {
+        this.entries        = entries;
+        this.useAcoustId    = useAcoustId;
+        this.onProgress     = onProgress;
+        this.onUpdate       = onUpdate;
+        this.onFileProgress = onFileProgress;
     }
 
     /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final, donc pas
@@ -215,7 +229,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     }
                 }
 
-                setProgress((done.incrementAndGet() * 100) / total);
+                int doneCount = done.incrementAndGet();
+                setProgress((doneCount * 100) / total);
+                onFileProgress.accept(doneCount, total);
                 publish(entry);
             }));
         }
@@ -294,7 +310,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             // Vérifier que le fichier existe avant tout traitement
             if (!fichier.exists()) {
-                entry.status  = FileEntry.Status.ERROR;
+                entry.status     = FileEntry.Status.ERROR;
+                entry.skipReason = com.opentagger.model.SkipReason.FILE_MISSING;
                 entry.message = I18n.t("Fichier introuvable");
                 log(I18n.t("▶ SKIP   %s (fichier introuvable)", fichier.getName()));
                 return;
@@ -334,7 +351,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             int seuil = Config.get().minScoreAuto();
 
             if (results.isEmpty()) {
-                entry.status  = FileEntry.Status.SKIPPED;
+                entry.status     = FileEntry.Status.SKIPPED;
+                entry.skipReason = com.opentagger.model.SkipReason.NOT_IDENTIFIED;
                 entry.message = I18n.t("Non identifié") + videoHintIfAny(fichier);
                 log(I18n.t("  SKIPPED (non identifié)"));
                 return;
@@ -351,7 +369,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             if (best.score < seuil) {
                 entry.candidates = results;
-                entry.status  = FileEntry.Status.SKIPPED;
+                entry.status     = FileEntry.Status.SKIPPED;
+                entry.skipReason = com.opentagger.model.SkipReason.LOW_SCORE;
                 entry.message = I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size())
                         + videoHintIfAny(fichier);
                 log(I18n.t("  SKIPPED score trop bas"));
@@ -388,6 +407,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 entry.candidates = results;
                 entry.status = FileEntry.Status.SKIPPED;
                 entry.durationMismatch = true;
+                entry.skipReason = com.opentagger.model.SkipReason.DURATION_MISMATCH;
                 entry.message = I18n.t("Durée incohérente : fichier %s vs MusicBrainz %s (%s)",
                     FileTableModel.formatDuration(entry.current.durationSec),
                     FileTableModel.formatDuration(best.mbDurationSec), best.title)
@@ -601,7 +621,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 sugg.isEmpty() ? "" : I18n.t(" (%s suggestion(s))", sugg.size())));
 
         } catch (Exception ex) {
-            entry.status  = FileEntry.Status.ERROR;
+            entry.status     = FileEntry.Status.ERROR;
+            entry.skipReason = com.opentagger.model.SkipReason.ERROR_GENERIC;
             File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
             entry.message = (ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName())
                     + videoHintIfAny(f);
@@ -770,8 +791,65 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        // 1. SongRec (Shazam) — empreinte audio, identifie la musique commerciale même avec
-        //    de faux tags existants. Placé AVANT AcoustID pour être la source principale.
+        // 1. AcoustID (fingerprint) — rapide et parallélisable (aucune limite de débit globale,
+        //    contrairement à SongRec/SHAZAM_GATE ci-dessous) : tenté en premier pour cette raison.
+        //    Auparavant après SongRec ("source principale" pour la précision) — réorganisé le
+        //    2026-08-15 : SongRec sérialise TOUT appel à un seul à la fois dans toute l'appli
+        //    (evite le 429 Shazam du 2026-08-09), donc le placer en premier faisait payer ce
+        //    goulot sur CHAQUE fichier, même ceux qu'AcoustID aurait suffi à identifier seul. Rien
+        //    n'est perdu en théorie : un fichier qu'AcoustID ne reconnaît pas retombe exactement
+        //    sur SongRec comme avant, juste dans l'autre ordre.
+        if (useAcoustId) {
+            // ignore_existing : si un AcoustID est déjà dans les tags et qu'on ne force pas, on skip
+            boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
+            if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
+                List<TagInfo> r = acoustId.identify(fichier);
+                if (!r.isEmpty() && acoustIdResultPlausible(fichier, r.get(0), forceReidentify)) {
+                    if (existingTags.durationSec > 0
+                            && FileEntry.isDurationMismatch(existingTags.durationSec, r.get(0).mbDurationSec)) {
+                        // Même garde-fou que pour SongRec plus bas dans cette méthode : une
+                        // empreinte AcoustID à confiance élevée (le bypass juste au-dessus, ou une
+                        // similarité d'artiste acceptable) peut malgré tout pointer vers le mauvais
+                        // enregistrement — repéré en direct 2026-08-11 sur "1-08 Crank It Up.mp3"
+                        // (tags existants corrects : David Guetta Feat. Akon – Crank It Up),
+                        // matché par AcoustID à "Dreams", rejeté par la durée mais qui s'arrêtait
+                        // là avant ce correctif au lieu de tenter la recherche texte ci-dessous —
+                        // pourtant la meilleure chance ici, les tags existants étant fiables.
+                        log(I18n.t("  AcoustID : durée incohérente (%ds vs %ds, %s – %s) → poursuite vers le texte",
+                                existingTags.durationSec, r.get(0).mbDurationSec, r.get(0).artist, r.get(0).title));
+                    } else {
+                        lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
+                        return r;
+                    }
+                }
+            }
+        }
+
+        // 1bis. MB Recording ID déjà présent → lookup direct (rapide + précis)
+        String existingMbid = readTag(fichier, FieldKey.MUSICBRAINZ_TRACK_ID);
+        if (!existingMbid.isBlank()) {
+            TagInfo t = null;
+            String cached = cache.getLookup(existingMbid);
+            if (cached != null) t = mb.parseFromCacheLookup(cached);
+            if (t == null) {
+                t = mb.lookupRecording(existingMbid);
+                if (t != null) cache.putLookup(existingMbid, mb.lastRawJson());
+            }
+            // Valider : ignorer si artiste ET titre vides (lookup MB incomplet)
+            if (t != null && (!t.artist.isBlank() || !t.title.isBlank())) {
+                log(I18n.t("  MBID lookup: %s – %s", t.artist, t.title));
+                t.score = 100;
+                lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
+                return List.of(t);
+            } else if (t != null) {
+                log(I18n.t("  MBID lookup IGNORÉ (artiste+titre vides) mbid=%s", existingMbid));
+            }
+        }
+
+        // 2. SongRec (Shazam) — repli si AcoustID n'a rien trouvé : empreinte audio, identifie la
+        //    musique commerciale même avec de faux tags existants, mais sérialisée à un seul appel
+        //    à la fois dans toute l'appli (SHAZAM_GATE, voir plus haut) — volontairement en second
+        //    maintenant pour ne payer ce goulot que sur les fichiers qu'AcoustID n'a pas su résoudre.
         if (SongRecClient.isAvailable()) {
             try {
                 log(I18n.t("  SongRec..."));
@@ -782,9 +860,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 } else if (SongRecClient.lastFailureReason() != null) {
                     // Jusqu'à ce correctif : un échec SongRec (timeout ffmpeg, aucun match
                     // Shazam, réponse illisible...) ne laissait ABSOLUMENT aucune trace dans le
-                    // journal — le fichier passait directement à l'étape suivante (AcoustID) sans
-                    // que rien n'explique pourquoi, restant PENDING sans indice si les étapes
-                    // suivantes échouaient aussi.
+                    // journal — le fichier passait directement à l'étape suivante sans que rien
+                    // n'explique pourquoi, restant PENDING sans indice si les étapes suivantes
+                    // échouaient aussi.
                     log(I18n.t("  SongRec ✗ %s", SongRecClient.lastFailureReason()));
                 }
                 if (srOk) {
@@ -823,12 +901,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         // fiable sur un passage court/dégradé, mauvais enregistrement matché malgré
                         // un bon score texte — ex. un extrait DJ-pool de 1min30 reconnu comme un
                         // morceau totalement différent) : ne PAS s'arrêter ici comme avant (l'appelant
-                        // finissait alors "Durée incohérente" sans jamais tenter AcoustID ni la
-                        // recherche texte basée sur le nom de fichier/tags, alors que CEUX-LÀ auraient
-                        // pu trouver le bon enregistrement — repéré en direct 2026-08-11 sur
-                        // "16741 - Dr. Dre - What's The Difference.mp3", matché à tort à "Breathe" de
-                        // Blu Cantrell). On laisse tomber vers les étapes suivantes (titre nettoyé,
-                        // AcoustID, texte) au lieu de rendre ce résultat.
+                        // finissait alors "Durée incohérente" sans jamais tenter la recherche texte
+                        // basée sur le nom de fichier/tags, alors que CELLE-CI aurait pu trouver le
+                        // bon enregistrement — repéré en direct 2026-08-11 sur "16741 - Dr. Dre -
+                        // What's The Difference.mp3", matché à tort à "Breathe" de Blu Cantrell). On
+                        // laisse tomber vers les étapes suivantes (titre nettoyé, texte) au lieu de
+                        // rendre ce résultat.
                         log(I18n.t("  SongRec→MB : durée incohérente (%ds vs %ds) → poursuite vers les autres méthodes",
                                 existingTags.durationSec, srMb.get(0).mbDurationSec));
                         songRecDurationSuspect = true;
@@ -875,60 +953,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         return List.of(sr);
                     }
                     // songRecDurationSuspect : ne pas retourner sr non plus (voir son commentaire
-                    // plus haut) — on laisse tomber vers AcoustID puis la recherche texte ci-dessous.
+                    // plus haut) — on laisse tomber vers la recherche texte ci-dessous (AcoustID a
+                    // déjà été tenté avant SongRec, voir plus haut dans cette méthode).
                 } else {
                     log(I18n.t("  SongRec → rien trouvé"));
                 }
             } catch (Exception e) {
                 log(I18n.t("  SongRec WARN: %s", e.getMessage()));
-            }
-        }
-
-        // 1. MB Recording ID déjà présent → lookup direct (rapide + précis)
-        String existingMbid = readTag(fichier, FieldKey.MUSICBRAINZ_TRACK_ID);
-        if (!existingMbid.isBlank()) {
-            TagInfo t = null;
-            String cached = cache.getLookup(existingMbid);
-            if (cached != null) t = mb.parseFromCacheLookup(cached);
-            if (t == null) {
-                t = mb.lookupRecording(existingMbid);
-                if (t != null) cache.putLookup(existingMbid, mb.lastRawJson());
-            }
-            // Valider : ignorer si artiste ET titre vides (lookup MB incomplet)
-            if (t != null && (!t.artist.isBlank() || !t.title.isBlank())) {
-                log(I18n.t("  MBID lookup: %s – %s", t.artist, t.title));
-                t.score = 100;
-                lastFindTagsSource.set(MetadataCache.SOURCE_MBID);
-                return List.of(t);
-            } else if (t != null) {
-                log(I18n.t("  MBID lookup IGNORÉ (artiste+titre vides) mbid=%s", existingMbid));
-            }
-        }
-
-        // 2. AcoustID (fingerprint)
-        if (useAcoustId) {
-            // ignore_existing : si un AcoustID est déjà dans les tags et qu'on ne force pas, on skip
-            boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
-            if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
-                List<TagInfo> r = acoustId.identify(fichier);
-                if (!r.isEmpty() && acoustIdResultPlausible(fichier, r.get(0), forceReidentify)) {
-                    if (existingTags.durationSec > 0
-                            && FileEntry.isDurationMismatch(existingTags.durationSec, r.get(0).mbDurationSec)) {
-                        // Même garde-fou que pour SongRec plus haut dans cette méthode : une
-                        // empreinte AcoustID à confiance élevée (le bypass juste au-dessus, ou une
-                        // similarité d'artiste acceptable) peut malgré tout pointer vers le mauvais
-                        // enregistrement — repéré en direct 2026-08-11 sur "1-08 Crank It Up.mp3"
-                        // (tags existants corrects : David Guetta Feat. Akon – Crank It Up),
-                        // matché par AcoustID à "Dreams", rejeté par la durée mais qui s'arrêtait
-                        // là avant ce correctif au lieu de tenter la recherche texte ci-dessous —
-                        // pourtant la meilleure chance ici, les tags existants étant fiables.
-                        log(I18n.t("  AcoustID : durée incohérente (%ds vs %ds, %s – %s) → poursuite vers le texte",
-                                existingTags.durationSec, r.get(0).mbDurationSec, r.get(0).artist, r.get(0).title));
-                    } else {
-                        lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
-                        return r;
-                    }
-                }
             }
         }
 

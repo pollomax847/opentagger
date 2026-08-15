@@ -46,6 +46,11 @@ public class FileEntry {
      *  Config.durationMismatchMoveEnabled()), séparé du déplacement générique SKIPPED/ERROR. */
     public boolean durationMismatch = false;
 
+    /** Catégorie de {@link #message} pour un statut SKIPPED/ERROR — voir {@link SkipReason}. Null
+     *  pour tout fichier traité avant l'introduction de ce champ (session antérieure), ou tant que
+     *  le statut n'est ni SKIPPED ni ERROR. Alimente le rapport "Non identifiés" par cause. */
+    public SkipReason skipReason = null;
+
     /** Écart significatif entre durée réelle du fichier et durée MusicBrainz de l'enregistrement
      *  identifié — seuil 20s ET 20% relatif pour ne pas confondre avec un simple radio edit/
      *  remaster (quelques secondes d'écart légitimes). 0 = non renseigné (MB ou fichier), jamais

@@ -286,6 +286,13 @@ public class FileRenamer {
         engine.put("genre",           safe(info.genre));
         engine.put("composer",        safe(info.composer));
         engine.put("conductor",       safe(info.conductor));
+        // overallWork prime sur work (mouvement d'une œuvre parente vs pièce autonome) — même
+        // logique que ClassicalDisplay.summarize(), voir son commentaire pour le détail des champs.
+        engine.put("work",            safe(info.overallWork.isBlank() ? info.work : info.overallWork));
+        engine.put("movement",        safe(info.titleMovement.isBlank() ? info.movement : info.titleMovement));
+        engine.put("movementno",      safe(info.movementNo));
+        engine.put("opus",            safe(info.opus.isBlank() ? info.classicalCatalog : info.opus));
+        engine.put("classicalcatalog",safe(info.classicalCatalog));
         engine.put("artistsort",      safe(info.artistSort));
         engine.put("albumartistsort", safe(info.albumArtistSort));
         engine.put("mb_comment",      safe(info.comment));

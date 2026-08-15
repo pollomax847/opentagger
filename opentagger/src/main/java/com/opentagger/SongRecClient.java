@@ -190,18 +190,20 @@ public class SongRecClient {
                 ProcessBuilder pb = new ProcessBuilder(bin, "audio-file-to-recognized-song",
                         segment.getAbsolutePath());
                 pb.redirectErrorStream(false);
-                // 15s (au lieu de 30s auparavant) : un appel Shazam normal répond en 1-5s, ce
-                // plafond n'est qu'un filet de sécurité contre un vrai blocage, jamais censé être
-                // atteint en usage courant. Recalibré le même jour que SHAZAM_GATE (2026-08-10) —
-                // avant, un plafond élevé ne coûtait qu'à 1 thread sur 6 ; avec un seul appel Shazam
-                // autorisé à la fois, ce même plafond pénalise maintenant TOUTE la chaîne
-                // d'identification derrière lui à chaque fois qu'il est atteint (jusqu'à 4 appels
-                // par fichier non reconnu, voir recognize()) — recalibrage manqué la première fois,
-                // repéré par l'utilisateur en observant le comportement réel plutôt qu'anticipé.
-                String json = ProcessUtils.readStringWithTimeout(pb, 15);
+                // 8s (15s, puis 30s auparavant) : un appel Shazam normal répond en 1-5s, ce plafond
+                // n'est qu'un filet de sécurité contre un vrai blocage, jamais censé être atteint en
+                // usage courant. Recalibré une première fois le même jour que SHAZAM_GATE
+                // (2026-08-10) — avec un seul appel Shazam autorisé à la fois, ce plafond pénalise
+                // TOUTE la chaîne d'identification derrière lui à chaque fois qu'il est atteint
+                // (jusqu'à 4 appels par fichier non reconnu, voir recognize()). Rebaissé une seconde
+                // fois (2026-08-15, avec le passage d'AcoustID avant SongRec dans TaggingWorker) :
+                // mesuré en direct sur 1441 appels réels cette nuit-là, la moyenne était de 51s avec
+                // le plafond à 15s — largement dominée par les tentatives qui n'aboutissent pas et
+                // consomment le plafond en entier plutôt que par de vraies réponses lentes.
+                String json = ProcessUtils.readStringWithTimeout(pb, 8);
                 if (json == null || json.isBlank()) {
                     LAST_FAILURE_REASON.set("binaire songrec sans réponse à " + offsetSec
-                        + "s (timeout 30s ou binaire indisponible)");
+                        + "s (timeout 8s ou binaire indisponible)");
                     return null;
                 }
                 if (!json.contains("\"track\"")) {

@@ -61,6 +61,7 @@ public class MainFrame extends JFrame {
     private static final Color CHIP_SKIPPED    = new Color(0xFFA726);
     private static final Color CHIP_ERROR      = new Color(0xEF5350);
     private static final Color CHIP_PENDING    = new Color(0x90A4AE);
+    private static final Color CHIP_THROUGHPUT = new Color(0xAB47BC);
 
     // ── État ─────────────────────────────────────────────────────────────────
     private final FileTableModel tableModel = new FileTableModel();
@@ -84,7 +85,21 @@ public class MainFrame extends JFrame {
     private static final int FILTER_ALL = 0, FILTER_PENDING = 1, FILTER_TAGGED = 2,
                               FILTER_SKIPPED = 3, FILTER_ERROR = 4, FILTER_IDENTIFIED = 5;
     private int activeStatusFilter = FILTER_ALL;
+    // Filtre supplémentaire, indépendant des chips ci-dessus — activé depuis NonIdentifiedReportDialog
+    // (double-clic sur une catégorie), combiné (.and()) avec les filtres texte/statut dans
+    // applyFilter(). Réinitialisé par le bouton "Effacer les filtres" et par tout clic sur un chip.
+    private com.opentagger.model.SkipReason activeSkipReasonFilter = null;
     private JLabel lblMemory;
+
+    // ── Débit/ETA global (chip informatif, pas un filtre) ────────────────────────────────────
+    // Échantillonné dans refreshStats() (déjà appelé partout, déjà throttlé à 300ms) — fenêtre
+    // glissante plutôt qu'un calcul depuis le début du run (voir etaText()/runStartMillis
+    // ci-dessous, qui restent scopés à UNE opération) : reflète le débit RÉEL et global, cohérent
+    // avec ce qu'un utilisateur observe en pratique (plusieurs opérations s'enchaînent/se
+    // chevauchent au fil d'une session d'endurance).
+    private final java.util.ArrayDeque<long[]> pendingHistory = new java.util.ArrayDeque<>(); // {tsMs, pending}
+    private static final long THROUGHPUT_WINDOW_MS = 12 * 60_000; // 12 min
+    private JLabel lblThroughput;
 
     // ── Table + tri/filtre ────────────────────────────────────────────────────
     private JTable                          table;
@@ -145,6 +160,7 @@ public class MainFrame extends JFrame {
     private JCheckBoxMenuItem chkAutoGroupCompilations;
     private JCheckBoxMenuItem chkAutoReidentifyUnmatched;
     private JCheckBoxMenuItem chkAutoTagOnScan;
+    private JCheckBoxMenuItem chkAutoSaveEnabled;
     private JCheckBoxMenuItem chkMoveSkippedMenu;
     private JCheckBoxMenuItem chkMoveDurationMismatchMenu;
     private JCheckBoxMenuItem chkUseLibraryRootMenu;
@@ -984,13 +1000,26 @@ public class MainFrame extends JFrame {
         // Demandé le 2026-08-12 : le taguage ne reprend jamais tout seul après un redémarrage (ou
         // l'ajout d'un dossier), obligeant à recliquer "Tagger"/F6 à chaque fois — uniquement
         // l'IDENTIFICATION se déclenche automatiquement ici (fichiers PENDING seulement, voir
-        // scheduleAutoTaggingFollowUp()), jamais l'enregistrement sur disque, qui reste un geste
-        // manuel dans tous les cas (façon Picard, voir FileEntry.Status.IDENTIFIED).
+        // scheduleAutoTaggingFollowUp()), l'enregistrement sur disque restant par défaut un geste
+        // manuel façon Picard (voir FileEntry.Status.IDENTIFIED) — SAUF si chkAutoSaveEnabled
+        // ci-dessous est actif (défaut : oui, voir Config.autoSaveEnabled() pour le pourquoi).
         chkAutoTagOnScan = new StayOpenCheckBoxMenuItem(I18n.t("Tagger automatiquement après chaque scan de dossier"));
         chkAutoTagOnScan.setSelected(Config.get().autoTagOnScan());
         chkAutoTagOnScan.addActionListener(e ->
                 Config.get().set("tagging.auto_start_on_scan", String.valueOf(chkAutoTagOnScan.isSelected())));
         m.add(chkAutoTagOnScan);
+
+        // Interrupteur pour scheduleAutoSaveFollowUp() (voir son commentaire) — actif par défaut.
+        // Quand actif, le bouton "Enregistrer tout" de l'écran principal est masqué (retour
+        // utilisateur, 2026-08-15) : redondant/prêtant à confusion si tout s'enregistre déjà tout
+        // seul ; réapparaît si l'utilisateur repasse en contrôle manuel.
+        chkAutoSaveEnabled = new StayOpenCheckBoxMenuItem(I18n.t("Enregistrer automatiquement après taguage"));
+        chkAutoSaveEnabled.setSelected(Config.get().autoSaveEnabled());
+        chkAutoSaveEnabled.addActionListener(e -> {
+            Config.get().set("tagging.auto_save_enabled", String.valueOf(chkAutoSaveEnabled.isSelected()));
+            if (btnSaveAll != null) btnSaveAll.setVisible(!chkAutoSaveEnabled.isSelected());
+        });
+        m.add(chkAutoSaveEnabled);
 
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
@@ -1131,6 +1160,8 @@ public class MainFrame extends JFrame {
         bibliotheque.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
         bibliotheque.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
         bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
+        bibliotheque.add(mitem(I18n.t("Rapport Non identifiés…"), null,
+            e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
         m.add(bibliotheque);
 
         JMenu musicbrainz = new JMenu("MusicBrainz");
@@ -1203,6 +1234,11 @@ public class MainFrame extends JFrame {
                 "Analyser la sélection si des lignes sont surlignées dans le tableau, "
                 + "sinon tous les fichiers cochés (F6 = tout, F7 = sélection)"), ToolbarIcon.Kind.TAG);
         btnSaveAll   = headerBtn(I18n.t("Enregistrer tout"), I18n.t("Écrire sur le disque les fichiers identifiés, cochés (F8)"), ToolbarIcon.Kind.SAVE);
+        // Masqué par défaut : l'auto-enregistrement (chkAutoSaveEnabled, actif par défaut) s'en
+        // charge déjà — bouton redondant tant qu'il l'est. Réapparaît si désactivé dans le menu
+        // Tagger. F8 (raccourci clavier) reste fonctionnel dans les deux cas, juste le bouton
+        // visuel qui se masque.
+        btnSaveAll.setVisible(!Config.get().autoSaveEnabled());
         btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"), ToolbarIcon.Kind.STOP);
         btnTagAll.addActionListener(e -> startTagging(table.getSelectedRowCount() > 0));
         btnSaveAll.addActionListener(e -> saveAll());
@@ -1497,6 +1533,9 @@ public class MainFrame extends JFrame {
         lblStatSkipped    = statChip(I18n.t("Non identifiés"),"0",  CHIP_SKIPPED, FILTER_SKIPPED);
         lblStatError      = statChip(I18n.t("Erreurs"),       "0",  CHIP_ERROR,   FILTER_ERROR);
         lblStatPending    = statChip(I18n.t("En attente"),    "0",  CHIP_PENDING, FILTER_PENDING);
+        // Non cliquable (pas de statut à filtrer dessus) — débit/ETA globaux, calculés sur une
+        // fenêtre glissante dans refreshStats(), voir throughputText().
+        lblThroughput     = infoChip("…", CHIP_THROUGHPUT);
 
         p.add(new JLabel("  "));
         p.add(lblStatTotal);
@@ -1506,6 +1545,8 @@ public class MainFrame extends JFrame {
         p.add(lblStatSkipped);
         p.add(lblStatError);
         p.add(lblStatPending);
+        p.add(sep3());
+        p.add(lblThroughput);
 
         // Recherche + champ ciblé — regroupés ici avec les chips plutôt que sur une 2e ligne
         // séparée (l'ancienne "barre de filtre" faisait doublon visuel avec les chips juste
@@ -1529,6 +1570,7 @@ public class MainFrame extends JFrame {
         btnClearFilter.addActionListener(e -> {
             tfFilter.setText("");
             activeStatusFilter = FILTER_ALL;
+            activeSkipReasonFilter = null;
             applyFilter();
         });
 
@@ -1553,9 +1595,22 @@ public class MainFrame extends JFrame {
             @Override public void mouseClicked(java.awt.event.MouseEvent e) {
                 activeStatusFilter = (filterIndex == FILTER_ALL) ? FILTER_ALL
                     : (activeStatusFilter == filterIndex ? FILTER_ALL : filterIndex);
+                activeSkipReasonFilter = null;
                 applyFilter();
             }
         });
+        styleChip(l, color, false);
+        return l;
+    }
+
+    /** Variante non cliquable de {@link #statChip} — pas de MouseListener/curseur main, pas de
+     *  sémantique active/inactive (toujours rendu dans son style "inactif", il n'y a pas de filtre
+     *  associé à activer/désactiver) : réservé aux chips purement informatifs comme le débit/ETA. */
+    private JLabel infoChip(String val, Color color) {
+        JLabel l = new JLabel(val);
+        l.putClientProperty("FlatLaf.style", "font: bold 11 $defaultFont");
+        l.setOpaque(true);
+        l.setToolTipText(I18n.t("Débit et temps restant estimé, sur les ~12 dernières minutes"));
         styleChip(l, color, false);
         return l;
     }
@@ -1628,6 +1683,14 @@ public class MainFrame extends JFrame {
         lblStatSkipped   .setText(I18n.t("Non identifiés  %d", skipped));
         lblStatError     .setText(I18n.t("Erreurs  %d", error));
         lblStatPending   .setText(I18n.t("En attente  %d", pending));
+
+        // Échantillon débit/ETA — voir throughputText(). O(1), aucune passe supplémentaire sur la
+        // table (pending déjà calculé ci-dessus).
+        long nowMs = System.currentTimeMillis();
+        pendingHistory.addLast(new long[]{nowMs, pending});
+        while (!pendingHistory.isEmpty() && nowMs - pendingHistory.peekFirst()[0] > THROUGHPUT_WINDOW_MS)
+            pendingHistory.removeFirst();
+        lblThroughput.setText(throughputText(pending));
 
         // Chip actif = celui qui correspond au filtre statut actuellement appliqué.
         styleChip(lblStatTotal,      CHIP_TOTAL,      activeStatusFilter == FILTER_ALL);
@@ -1897,12 +1960,10 @@ public class MainFrame extends JFrame {
         colWidth(cm, 8, 56,  36,  70);   // Piste
         colWidth(cm, 9, 130, 80,  220);  // Statut
         colWidth(cm, 10, 56,  40,  90);  // Durée
-        // Colonne masquée de la VUE (pas du modèle — FileTableModel/AlbumTreeTableModel gardent
-        // COL_DURATION=10 intact, tout comme le comparateur de tri juste au-dessus) : trop de
-        // fichiers affichaient encore "0:00" malgré le rattrapage en arrière-plan (bibliothèque
-        // scannée bien avant l'ajout de la colonne, cache pas encore reconverti partout) pour que
-        // cette colonne reste utile à l'affichage tant que ce rattrapage n'a pas convergé.
-        cm.removeColumn(cm.getColumn(10));
+        // Ré-affichée (2026-08-15, retour utilisateur) après avoir été masquée le temps que le
+        // rattrapage en arrière-plan de la durée (bibliothèque scannée avant l'ajout de la colonne)
+        // converge — COL_DURATION=10 et son comparateur de tri (juste au-dessus) n'ont jamais cessé
+        // d'être à jour côté modèle, seule la visibilité changeait.
 
         // Renderer coloré — mode-aware : en vue arborescence (viewMode == GROUPED), une ligne
         // d'en-tête de groupe n'a pas de FileEntry.Status unique (voir AlbumTreeTableModel.
@@ -3137,6 +3198,26 @@ public class MainFrame extends JFrame {
         return I18n.t(" · ~%s restantes", formatDuration(remainingMs / 1000));
     }
 
+    /** Chip "⚡ débit/h · ETA" — débit RÉEL et global (pas scopé à une seule opération, contrairement
+     *  à etaText() ci-dessus) : mesuré sur la baisse de `pending` (toutes causes confondues —
+     *  taguage, sauvegarde, tout ce qui fait progresser la file) sur une fenêtre glissante de
+     *  {@link #THROUGHPUT_WINDOW_MS}. "…" tant que la fenêtre est trop jeune/vide ou que `pending`
+     *  ne baisse pas encore (ex. juste après l'ajout d'un gros dossier) — mieux qu'un chiffre
+     *  absurde (négatif/infini) qui serait pire que pas de chiffre du tout. */
+    private String throughputText(int pending) {
+        if (pendingHistory.size() < 2) return "⚡ …";
+        long[] oldest = pendingHistory.peekFirst();
+        long[] newest = pendingHistory.peekLast();
+        long dtMs   = newest[0] - oldest[0];
+        long delta  = oldest[1] - newest[1]; // positif = pending a baissé = progrès réel
+        if (dtMs < 30_000 || delta <= 0) return "⚡ …";
+        double perHour = delta * 3_600_000.0 / dtMs;
+        String rateStr = I18n.t("%s/h", Math.round(perHour));
+        if (pending <= 0) return "⚡ " + rateStr;
+        long etaSec = Math.round(pending * 3600.0 / perHour);
+        return "⚡ " + rateStr + I18n.t(" · ETA %s", formatDuration(etaSec));
+    }
+
     /** Durée lisible en s/min/h/j — avant : toujours en minutes, illisible sur un run de
      *  plusieurs heures/jours (ex. "8674 min restantes" au lieu de "6j 0h"). */
     private static String formatDuration(long totalSec) {
@@ -3837,19 +3918,18 @@ public class MainFrame extends JFrame {
                     lastStatsRefreshMs = now;
                     refreshStats();
                 }
-            }
+            },
+            // Bug trouvé en direct (2026-08-15) : la barre TAGGING ne se mettait à jour que via le
+            // "progress" 0-100 de SwingWorker (voir bloc ci-dessous, gardé pour compat mais plus
+            // utilisé pour la barre) — sur 144k fichiers, un point de pourcentage = ~1445 fichiers,
+            // la barre restait vide des HEURES. Ce callback se déclenche à CHAQUE fichier.
+            (doneCount, total) -> SwingUtilities.invokeLater(() -> {
+                JProgressBar bar = progressBars.get(ProgressSlot.TAGGING);
+                bar.setValue((int) ((doneCount * 100L) / total));
+                bar.setString(doneCount + " / " + total + etaText(doneCount, total));
+            })
         );
         w.addPropertyChangeListener(evt -> {
-            if ("progress".equals(evt.getPropertyName())) {
-                int pct = (Integer) evt.getNewValue();
-                JProgressBar bar = progressBars.get(ProgressSlot.TAGGING);
-                bar.setValue(pct);
-                int fileDone = (int) Math.round(pct * totalFiles / 100.0);
-                bar.setString(fileDone + " / " + totalFiles + etaText(fileDone, totalFiles));
-                // Refresher les chips à chaque % de progression (≤101 appels au total)
-                // plutôt qu'à chaque fichier — évite O(n²) sur 100k+ fichiers.
-                refreshStats();
-            }
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 onTaggingDone(toTag);
                 // "Tout tagger" ne prend qu'un instantané de allEntries() au moment du clic — les
@@ -3861,6 +3941,20 @@ public class MainFrame extends JFrame {
             }
         });
         WorkerHub.get().submit(WorkerHub.TaskKind.TAGGING, I18n.t("Taguage"), w, w::stopNow);
+        // BUG CRITIQUE trouvé en direct (2026-08-15) : scheduleAutoSaveFollowUp() n'était armé que
+        // depuis onTaggingDone(), c'est-à-dire seulement quand CE lot complet de "Tout tagger" a
+        // fini — or ce lot est un instantané de TOUT allEntries() au moment du clic (voir plus haut),
+        // potentiellement des dizaines de milliers de fichiers sur une grosse bibliothèque. Sur un
+        // run réel, ce lot a mis plusieurs JOURS à se vider (débit mesuré ~483 fichiers/h pour ~91k
+        // restants) : pendant toute cette fenêtre, aucun Enregistrer ne s'est JAMAIS déclenché — des
+        // milliers de fichiers IDENTIFIED se sont accumulés en mémoire sans jamais être écrits sur
+        // le disque (donc aucune pochette téléchargée non plus, résolue seulement à l'Enregistrement,
+        // voir TagEnrichment.resolveCover()) ; tout ce travail aurait été perdu au moindre
+        // redémarrage. Armer la chaîne ICI, dès le lancement, pas seulement à la toute fin : SAVE et
+        // TAGGING ne se bloquent jamais mutuellement (voir WorkerHub.conflictsWith()), donc rien
+        // n'empêchait déjà techniquement de sauvegarder pendant qu'un taguage tourne encore — seul le
+        // point de déclenchement automatique manquait.
+        if (!selOnly && !autoSaveWatchPending) scheduleAutoSaveFollowUp();
     }
 
     /**
@@ -3946,6 +4040,27 @@ public class MainFrame extends JFrame {
         setStatus(I18n.t("Arrêté."));
         btnTagAll.setEnabled(true);
         btnCancel.setEnabled(false);
+        endAllProgress();
+    }
+
+    /** Annule spécifiquement les tâches qui bloquent {@code kind} — PAS cancelAll() (stopAll()
+     *  ci-dessus), qui couperait aussi des tâches sans rapport. Utilisé par PodcastDialog.onTag()
+     *  (2026-08-15) : "Tagger comme podcast" est bloqué par le taguage principal quasi en
+     *  permanence sur une grosse bibliothèque (même fichiers PENDING/SKIPPED des deux côtés), et
+     *  cancelAll() aurait aussi arrêté un Enregistrement en cours sans rapport avec ce blocage.
+     *  Même nettoyage d'UI que stopAll() (PROCESSING→PENDING, chips, barres, boutons), juste ciblé
+     *  sur les tâches réellement en cause plutôt que tout arrêter. */
+    public void cancelBlockersFor(WorkerHub.TaskKind kind) {
+        for (WorkerHub.TaskHandle h : WorkerHub.get().blockers(kind)) h.cancel();
+        for (FileEntry e : tableModel.allEntries()) {
+            if (e.status == FileEntry.Status.PROCESSING) {
+                e.status  = FileEntry.Status.PENDING;
+                e.message = "";
+                tableModel.update(e);
+            }
+        }
+        refreshStats();
+        resetBtns();
         endAllProgress();
     }
 
@@ -4079,6 +4194,12 @@ public class MainFrame extends JFrame {
      * taguage actif), pas à chaque relance intermédiaire.
      */
     private void scheduleAutoSaveFollowUp() {
+        // Interrupteur utilisateur (chkAutoSaveEnabled, Config.autoSaveEnabled()) : un seul point de
+        // garde ici plutôt que devant chacun des appelants (onTaggingDone, SaveWorker.done,
+        // continueStartTagging) — couvre tout point d'entrée présent ET futur. Le bouton "Enregistrer
+        // tout" manuel (saveAll()) n'est PAS concerné : il reste toujours utilisable, seule cette
+        // chaîne d'auto-relance est coupée.
+        if (!Config.get().autoSaveEnabled()) return;
         // Garde anti-doublon : onTaggingDone() ET ce timer lui-même peuvent chacun vouloir
         // (re)lancer cette chaîne — vrai seulement pendant la fenêtre d'attente de 5s, effacé dès
         // que le timer se déclenche (voir plus bas), pas pendant tout le cycle de vie de la chaîne.
@@ -4819,16 +4940,22 @@ public class MainFrame extends JFrame {
                 table.repaint();
                 followProcessing(entry);
                 if (entry.status != FileEntry.Status.PROCESSING) appendLog(entry);
-            });
-        w.addPropertyChangeListener(evt -> {
-            if ("progress".equals(evt.getPropertyName())) {
-                int pct = (Integer) evt.getNewValue();
+            },
+            // Même correctif que continueStartTagging() (voir son commentaire, 2026-08-15) : mise à
+            // jour de la barre à chaque fichier, plus au pourcentage arrondi (qui ne bougeait quasi
+            // jamais sur un gros lot). refreshStats() throttlé à 300ms (lastStatsRefreshMs, déjà
+            // réinitialisé plus haut) plutôt qu'à chaque fichier — évite O(n²) sur un gros lot forcé.
+            (doneCount, total) -> SwingUtilities.invokeLater(() -> {
                 JProgressBar bar = progressBars.get(ProgressSlot.TAGGING);
-                bar.setValue(pct);
-                int fileDone = (int) Math.round(pct * forcedTotal / 100.0);
-                bar.setString(fileDone + " / " + forcedTotal + etaText(fileDone, forcedTotal));
-                refreshStats();
-            }
+                bar.setValue((int) ((doneCount * 100L) / total));
+                bar.setString(doneCount + " / " + total + etaText(doneCount, total));
+                long now = System.currentTimeMillis();
+                if (now - lastStatsRefreshMs >= 300) {
+                    lastStatsRefreshMs = now;
+                    refreshStats();
+                }
+            }));
+        w.addPropertyChangeListener(evt -> {
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 if (openReviewOnDone) {
                     resetBtns();
@@ -5798,11 +5925,27 @@ public class MainFrame extends JFrame {
             pred = pred.and(statusPred);
         }
 
-        boolean noFilter = text.isBlank() && statusSel == FILTER_ALL;
+        if (activeSkipReasonFilter != null) {
+            com.opentagger.model.SkipReason r = activeSkipReasonFilter;
+            pred = pred.and(e -> e.skipReason == r);
+        }
+
+        boolean noFilter = text.isBlank() && statusSel == FILTER_ALL && activeSkipReasonFilter == null;
         tableModel.setFilter(noFilter ? null : pred);
 
         // Mettre à jour les chips de stats pour refléter la vue filtrée
         refreshStats();
+    }
+
+    /** Filtre le tableau principal sur une catégorie de non-identification précise — appelé depuis
+     *  NonIdentifiedReportDialog (double-clic sur une ligne du rapport). Réinitialise le filtre de
+     *  statut (les chips) : la catégorie choisie détermine déjà implicitement SKIPPED ou ERROR, pas
+     *  besoin d'un chip actif en plus, qui serait de toute façon ambigu (certaines catégories comme
+     *  ERROR_GENERIC/FILE_MISSING sont côté ERROR, les autres côté SKIPPED). */
+    public void filterBySkipReason(com.opentagger.model.SkipReason reason) {
+        activeStatusFilter = FILTER_ALL;
+        activeSkipReasonFilter = reason;
+        applyFilter();
     }
 
     private static boolean containsIgnoreCase(String haystack, String needleLower) {
@@ -5947,9 +6090,23 @@ public class MainFrame extends JFrame {
         // de podcast ne peut de toute façon correspondre qu'à un fichier PAS DÉJÀ identifié comme
         // vraie musique — restreindre aux PENDING/SKIPPED (même filtre que AlbumCompletionWorker
         // pour ses candidats) réduit l'ensemble à sonder à ce qui est réellement pertinent.
-        // allEntries() : sinon candidats limités aux fichiers visibles si un filtre est actif.
+        //
+        // Correctif incomplet à l'époque : PENDING/SKIPPED restait ~80k fichiers sur cette
+        // bibliothèque — même problème, en moins pire. Repéré en direct (2026-08-15) : un filtre
+        // texte actif dans le tableau principal ("butler", 60 lignes visibles) était totalement
+        // ignoré ici (commentaire d'origine : "sinon candidats limités aux fichiers visibles si un
+        // filtre est actif" — délibérément ignoré, mauvais choix). Un filtre actif exprime
+        // clairement une intention de restreindre — le respecter réduit le lot de 80k à 60 dans ce
+        // cas réel. Repli sur allEntries() UNIQUEMENT si aucun filtre n'est actif (comportement
+        // d'origine préservé pour ce cas).
+        List<com.opentagger.model.FileEntry> pool = new ArrayList<>();
+        if (tableModel.isFiltered()) {
+            for (int i = 0; i < tableModel.getRowCount(); i++) pool.add(tableModel.get(i));
+        } else {
+            pool = tableModel.allEntries();
+        }
         List<com.opentagger.model.FileEntry> candidates = new ArrayList<>();
-        for (FileEntry e : tableModel.allEntries()) {
+        for (FileEntry e : pool) {
             if (e.status == FileEntry.Status.PENDING || e.status == FileEntry.Status.SKIPPED) candidates.add(e);
         }
         if (candidates.isEmpty()) {

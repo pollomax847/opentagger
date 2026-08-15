@@ -110,6 +110,9 @@ public class DetailPanel extends JPanel {
     private final JLabel     lblCoverInfo = new JLabel(" ", SwingConstants.CENTER);
     private Runnable         onCoverClick;
 
+    // ── Onglet Classique — aperçu composé (lecture seule, voir ClassicalDisplay) ────────────
+    private final JLabel     lblClassicalSummary = new JLabel(" ");
+
     // ── Onglet 5 — Paroles ───────────────────────────────────────────────────
     private final JTextArea  taLyrics    = new JTextArea(8, 40);
     private final JTextField tfLyricsUrl = tf(40);
@@ -226,6 +229,7 @@ public class DetailPanel extends JPanel {
         set(tfComment,      t.comment);
 
         // Classique
+        lblClassicalSummary.setText(com.opentagger.model.ClassicalDisplay.summarize(t));
         set(tfComposer,          t.composer);
         set(tfComposerSort,      t.composerSort);
         set(tfConductor,         t.conductor);
@@ -340,6 +344,7 @@ public class DetailPanel extends JPanel {
         setM(tfDiscTotal,   tags, t -> t.discTotal);
         setM(tfComment,     tags, t -> t.comment);
         // Classique
+        setMLabel(lblClassicalSummary, tags, com.opentagger.model.ClassicalDisplay::summarize);
         setM(tfComposer,          tags, t -> t.composer);
         setM(tfComposerSort,      tags, t -> t.composerSort);
         setM(tfConductor,         tags, t -> t.conductor);
@@ -425,6 +430,15 @@ public class DetailPanel extends JPanel {
             tf.setText("");
             tf.putClientProperty("JTextField.placeholderText", I18n.t("— valeurs multiples —"));
         }
+    }
+
+    /** Même idiome que setM() ci-dessus mais pour un JLabel calculé (pas d'édition, pas de
+     *  placeholder — juste le texte "— valeurs multiples —" en toutes lettres) : utilisé pour
+     *  lblClassicalSummary, dérivé de PLUSIEURS champs à la fois plutôt qu'un simple getter. */
+    private void setMLabel(JLabel lbl, List<TagInfo> tags, Function<TagInfo, String> getter) {
+        Set<String> vals = new HashSet<>();
+        for (TagInfo t : tags) vals.add(getter.apply(t));
+        lbl.setText(vals.size() == 1 ? vals.iterator().next() : I18n.t("— valeurs multiples —"));
     }
 
     private void setMCb(JCheckBox cb, List<TagInfo> tags, Function<TagInfo, Boolean> getter) {
@@ -658,6 +672,8 @@ public class DetailPanel extends JPanel {
 
     private JScrollPane buildClassicalTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
+        lblClassicalSummary.putClientProperty("FlatLaf.style", "font: bold 12 $defaultFont");
+        fields.put(I18n.t("Aperçu :"),             lblClassicalSummary);
         fields.put(I18n.t("Est classique :"),     chkClassical);
         fields.put(I18n.t("Compositeur :"),       tfComposer);
         fields.put(I18n.t("Tri compositeur :"),   tfComposerSort);

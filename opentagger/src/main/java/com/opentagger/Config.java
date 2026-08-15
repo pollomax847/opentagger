@@ -190,6 +190,12 @@ public class Config {
     // 2026-08-12 : après un redémarrage, le taguage ne reprenait jamais tout seul, obligeant à
     // recliquer "Tagger" à chaque fois.
     public boolean autoTagOnScan()                 { return bool("tagging.auto_start_on_scan",  false); }
+    // Défaut true (2026-08-15) : scheduleAutoSaveFollowUp() (MainFrame) existait déjà avant ce
+    // réglage mais s'armait trop tard sur une grosse bibliothèque (voir son commentaire) — une fois
+    // corrigé, activé par défaut pour préserver le comportement voulu à l'origine (jamais rien ne
+    // reste IDENTIFIED en mémoire sans jamais être écrit). Désactivable pour repasser en contrôle
+    // 100% manuel (façon Picard strict) si préféré — voir chkAutoSaveEnabled.
+    public boolean autoSaveEnabled()               { return bool("tagging.auto_save_enabled",    true); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source
