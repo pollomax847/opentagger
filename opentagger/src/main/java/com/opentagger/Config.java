@@ -190,12 +190,60 @@ public class Config {
     // 2026-08-12 : après un redémarrage, le taguage ne reprenait jamais tout seul, obligeant à
     // recliquer "Tagger" à chaque fois.
     public boolean autoTagOnScan()                 { return bool("tagging.auto_start_on_scan",  false); }
+    // Défaut true (2026-08-16, demande utilisateur) : dernier recours quand AUCUNE méthode
+    // (cache/MBID/AcoustID/SongRec/recherche texte MB/AudD) n'a rien confirmé, mais que les tags
+    // déjà présents dans le fichier ont l'air valides (non vides, non génériques) — voir
+    // TaggingWorker.findTags() fin de méthode. Contrairement au bug de confiance aveugle déjà
+    // corrigé cette session (SongRec trust bug, qui acceptait des tags AVANT toute vérification),
+    // celui-ci n'intervient qu'EN DERNIER ; score volontairement bas (voir son usage) et source
+    // dédiée (MetadataCache.SOURCE_UNVERIFIED_TAGS) pour rester visible/filtrable séparément des
+    // identifications réellement confirmées.
+    public boolean trustReadableTagsFallback()     { return bool("tagging.trust_readable_tags_fallback", true); }
+    // Détection DJ mix / long format (2026-08-16, demande utilisateur) — voir TaggingWorker.
+    // findTags() étape 0.8. Défaut actif, seuil 20 min : sous ce seuil, un titre "long" (single
+    // étendu, morceau classique...) reste traité normalement ; au-dessus, quasiment toujours un mix
+    // continu/podcast/set live qui ne correspond à aucun enregistrement MB unique.
+    public boolean djMixDetectionEnabled()         { return bool("tagging.dj_mix_detection_enabled", true); }
+    public int     djMixMinDurationSec()           { return num("tagging.dj_mix_min_duration_sec", 1200); }
     // Défaut true (2026-08-15) : scheduleAutoSaveFollowUp() (MainFrame) existait déjà avant ce
     // réglage mais s'armait trop tard sur une grosse bibliothèque (voir son commentaire) — une fois
     // corrigé, activé par défaut pour préserver le comportement voulu à l'origine (jamais rien ne
     // reste IDENTIFIED en mémoire sans jamais être écrit). Désactivable pour repasser en contrôle
     // 100% manuel (façon Picard strict) si préféré — voir chkAutoSaveEnabled.
     public boolean autoSaveEnabled()               { return bool("tagging.auto_save_enabled",    true); }
+    // Défaut true (2026-08-16, demande utilisateur) : synchronise les playlists sidecar (.m3u/
+    // .m3u8/.pls) trouvées dans le dossier d'origine à chaque renommage/déplacement de fichier
+    // (FileRenamer.moveFile — voir PlaylistSync). Constat réel motivant : plusieurs .pls de la
+    // bibliothèque référençaient déjà un nom de fichier obsolète (mojibake jamais recorrigé), preuve
+    // que ces playlists pourrissent silencieusement sans ce correctif.
+    public boolean syncPlaylistsOnRename()         { return bool("tagging.sync_playlists_on_rename", true); }
+    // Défaut true (2026-08-16, demande utilisateur, choix explicite "automatique dans la cascade"
+    // plutôt qu'une action manuelle) : identification d'album entier par checksum de durées façon
+    // "Albunack Disc IDs" de SongKong — voir TaggingWorker.findTags() étape 0.6 et
+    // MusicBrainzClient.lookupByToc(), testé en direct contre l'API MusicBrainz publique.
+    public boolean discIdMatchingEnabled()         { return bool("tagging.discid_matching_enabled", true); }
+    // Nombre minimal de pistes consécutives (TrackNo 1..N sans trou) requis dans un dossier avant
+    // de tenter un lookup TOC — sous ce seuil, le checksum porte sur trop peu de données pour être
+    // discriminant (un simple single ou EP de 2 pistes produirait trop de faux positifs plausibles).
+    public int     discIdMinTracks()               { return num("tagging.discid_min_tracks", 3); }
+    // Défaut true (2026-08-16, demande utilisateur explicite "construit ça de façon auto") : devine
+    // une URL Bandcamp depuis artiste+titre (jamais de recherche réelle — bloquée, voir
+    // BandcampClient) en tout dernier recours dans TaggingWorker.findTags(), uniquement si RIEN
+    // d'autre n'a identifié le fichier, et seulement appliqué si le contenu récupéré correspond
+    // vraiment (TrackMatcher.titleSimilarity) — jamais de fausse donnée écrite sur un essai raté.
+    public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", true); }
+    // Substitution de préfixe pour convertir un chemin "Location" de l'XML iTunes (souvent un
+    // lecteur Windows, ex. "C:/Users/xxx/OneDrive/Musiques") vers le point de montage réel sur ce
+    // système (ex. "/mnt/Music") — voir ITunesLibraryImporter.resolveLocalPath(). Vide par défaut
+    // (aucune substitution) : l'utilisateur doit le configurer une fois pour son propre système,
+    // même logique que le script itunes_path_updater.py déjà utilisé pour ce même problème.
+    public String  itunesXmlPathFrom()             { return str("itunes.xml_path_from", ""); }
+    public String  itunesXmlPathTo()               { return str("itunes.xml_path_to",   ""); }
+    // Chemin du fichier XML lui-même — mémorisé pour ne pas le re-choisir via JFileChooser à
+    // chaque import/écriture (demande utilisateur 2026-08-16). Modifiable dans Préférences >
+    // iTunes, et mis à jour automatiquement dès qu'un fichier est choisi dans ITunesImportDialog/
+    // MainFrame.writeItunesXmlCorrections.
+    public String  itunesXmlFilePath()             { return str("itunes.xml_file_path", ""); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source

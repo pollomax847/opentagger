@@ -11,6 +11,8 @@ import java.util.Map;
 
 import javax.swing.*;
 import java.io.File;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.BiConsumer;
@@ -80,6 +82,16 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final TaggerScript taggerScript = new TaggerScript();
     // Cache alias artiste : artistMbid → nom Latin (évite un appel MB par fichier)
     private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // Identification d'album par TOC (voir findTags() étape 0.6) : UN SEUL lookup MB par dossier,
+    // pas par fichier — computeIfAbsent garantit qu'entre plusieurs threads traitant la même album
+    // en parallèle (pool multi-thread, voir doInBackground()), un seul déclenche réellement l'appel
+    // réseau, les autres attendent le résultat déjà en cours de calcul. discIdFailedFolders évite
+    // de retenter un dossier déjà jugé non concluant à chaque nouveau fichier qu'il contient.
+    private final java.util.Map<Path, MusicBrainzClient.ReleaseTracklist> discIdCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<Path> discIdFailedFolders =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     // ── Journal de corrections ────────────────────────────────────────────────
     private final com.opentagger.CorrectionLog correctionLog = new com.opentagger.CorrectionLog();
@@ -367,7 +379,18 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // l'identification.
             best.durationSec = entry.current.durationSec;
 
-            if (best.score < seuil) {
+            // Le repli "tags existants non vérifiés" (SOURCE_UNVERIFIED_TAGS, score=50 volontairement
+            // bas — voir findTags()) est EXEMPT du seuil habituel : c'est par construction son seul
+            // résultat possible (dernier recours après échec de tout le reste), le seuil n'a donc
+            // aucun sens à lui appliquer — il finirait systématiquement rejeté "score trop bas" alors
+            // que le but même de ce repli est de sortir ces fichiers de Non identifié.
+            // SOURCE_BANDCAMP inclus dans la même exemption : score volontairement bas (55, voir
+            // findTags() étape 6a) mais déjà vérifié par sa propre logique (TrackMatcher.
+            // titleSimilarity sur le contenu RÉEL renvoyé par Bandcamp) — pas un score de recherche
+            // MB comparable au seuil habituel, même raisonnement que SOURCE_UNVERIFIED_TAGS.
+            boolean unverifiedFallback = MetadataCache.SOURCE_UNVERIFIED_TAGS.equals(lastFindTagsSource.get())
+                    || MetadataCache.SOURCE_BANDCAMP.equals(lastFindTagsSource.get());
+            if (best.score < seuil && !unverifiedFallback) {
                 entry.candidates = results;
                 entry.status     = FileEntry.Status.SKIPPED;
                 entry.skipReason = com.opentagger.model.SkipReason.LOW_SCORE;
@@ -394,13 +417,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // toujours au-dessus du seuil. On parcourt maintenant tous les candidats valides par
             // score décroissant (déjà l'ordre renvoyé par l'API MB) et on garde le premier dont la
             // durée est cohérente, avant d'abandonner.
-            TagInfo durationOk = null;
-            for (TagInfo candidate : results) {
-                if (candidate.score < seuil) break; // triés par score décroissant : la suite ne fera que pire
-                candidate.durationSec = entry.current.durationSec;
-                if (!FileEntry.isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
-                    durationOk = candidate;
-                    break;
+            // Même exemption que ci-dessus pour le repli tags existants : mbDurationSec n'est jamais
+            // renseigné pour ce cas (aucun vrai enregistrement MB associé), donc rien à comparer —
+            // et le score=50 volontairement bas ferait échouer la garde "candidate.score < seuil"
+            // dès le premier tour, aboutissant à tort à "durée incohérente" pour un cas qui n'a
+            // simplement pas de durée MB de référence.
+            TagInfo durationOk = unverifiedFallback ? best : null;
+            if (!unverifiedFallback) {
+                for (TagInfo candidate : results) {
+                    if (candidate.score < seuil) break; // triés par score décroissant : la suite ne fera que pire
+                    candidate.durationSec = entry.current.durationSec;
+                    if (!FileEntry.isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
+                        durationOk = candidate;
+                        break;
+                    }
                 }
             }
             if (durationOk == null) {
@@ -658,6 +688,86 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         System.out.flush();
     }
 
+    // ── Identification d'album par TOC (voir findTags() étape 0.6) ───────────────────────────
+
+    /**
+     * Un seul lookup MB par ALBUM (jamais par fichier — voir discIdCache dans findTags()). Renvoie
+     * {@code null} si le dossier ne se prête pas au matching TOC (trop peu de pistes, numéros de
+     * piste manquants/non contigus/dupliqués, durées inconnues pour au moins un fichier) ou si
+     * aucun candidat suffisamment confiant n'a été trouvé — jamais d'exception propagée, un échec
+     * ici ne doit jamais interrompre le taguage normal du dossier (repli silencieux vers la suite
+     * de la cascade, voir l'appelant).
+     */
+    private MusicBrainzClient.ReleaseTracklist matchFolderByToc(Path folder, MusicBrainzClient mb) {
+        try {
+            List<FileEntry> siblings = new ArrayList<>();
+            for (FileEntry fe : entries) {
+                Path p = fe.currentPath != null ? fe.currentPath : fe.file.toPath();
+                if (folder.equals(p.getParent())) siblings.add(fe);
+            }
+            int minTracks = Config.get().discIdMinTracks();
+            if (siblings.size() < minTracks) return null;
+
+            // Ordre = numéro de piste EXISTANT, exige une séquence 1..N sans trou ni doublon —
+            // bien plus sûr qu'un tri par nom de fichier (jamais garanti fiable sur cette
+            // bibliothèque, plusieurs conventions de nommage mélangées selon la source d'origine).
+            // Un dossier qui ne respecte pas ça est un candidat trop incertain : on préfère
+            // s'abstenir plutôt que risquer un matching TOC sur un ordre faux.
+            int[] durations = new int[siblings.size()];
+            boolean[] seen = new boolean[siblings.size() + 1];
+            for (FileEntry fe : siblings) {
+                TagInfo cur = fe.current;
+                if (cur == null || cur.durationSec <= 0 || cur.track.isBlank()) return null;
+                int tn;
+                try { tn = Integer.parseInt(cur.track.split("/")[0].trim()); }
+                catch (NumberFormatException e) { return null; }
+                if (tn < 1 || tn > siblings.size() || seen[tn]) return null;
+                seen[tn] = true;
+                durations[tn - 1] = cur.durationSec;
+            }
+
+            List<Integer> durList = new ArrayList<>();
+            for (int d : durations) durList.add(d);
+            List<MusicBrainzClient.DiscIdCandidate> candidates = mb.lookupByToc(durList);
+            if (candidates.isEmpty()) return null;
+
+            // Secteurs attendus — mêmes maths que MusicBrainzClient.lookupByToc(), pour classer les
+            // candidats renvoyés par le lookup flou.
+            int expectedSectors = 150;
+            for (int d : durations) expectedSectors += d * 75;
+
+            String bestMbid = null;
+            int bestDiff = Integer.MAX_VALUE;
+            for (MusicBrainzClient.DiscIdCandidate c : candidates) {
+                if (c.trackCount() != siblings.size()) continue;
+                int diff = Math.abs(c.sectors() - expectedSectors);
+                if (diff < bestDiff) { bestDiff = diff; bestMbid = c.releaseMbid(); }
+            }
+            // Tolérance généreuse (5% du total) : les durées viennent de fichiers déjà encodés/
+            // rippés, pas d'une lecture directe du TOC physique — un écart bien plus large qu'un
+            // vrai disque signale un mauvais candidat plutôt qu'une simple imprécision d'arrondi.
+            if (bestMbid == null || bestDiff > expectedSectors * 0.05) return null;
+
+            log(I18n.t("  Album complet détecté (%d pistes, dossier '%s') → identification par TOC…",
+                    siblings.size(), folder.getFileName()));
+            return mb.lookupRelease(bestMbid);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Piste MB correspondant au numéro TRACK du fichier — {@code null} si le tag est absent/
+     *  illisible ou qu'aucune piste de la release ne porte ce numéro. */
+    private MusicBrainzClient.ReleaseTrack findTrackInRelease(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
+        String trackTag = readTag(fichier, FieldKey.TRACK);
+        if (trackTag == null || trackTag.isBlank()) return null;
+        int tn;
+        try { tn = Integer.parseInt(trackTag.split("/")[0].trim()); }
+        catch (NumberFormatException e) { return null; }
+        for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) if (t.trackNo() == tn) return t;
+        return null;
+    }
+
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
     private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify,
@@ -758,7 +868,123 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // complète — le résultat SongRec qu'on vient de calculer y sera juste recalculé.
         }
 
-        // 0.7. Compromis vitesse optionnel (skipSongRecOnConfidentMb, off par défaut) : si le
+        // 0.6. Identification d'album ENTIER par TOC (checksum de durées de pistes, façon "Albunack
+        // Disc IDs" de SongKong — voir MusicBrainzClient.lookupByToc()) — demande utilisateur
+        // (2026-08-16), choix explicite "automatique dans la cascade" plutôt qu'une action manuelle.
+        // Testé en direct contre l'API MusicBrainz publique (lookup flou ws/2/discid?toc=, aucune
+        // dépendance au serveur Albunack propriétaire de SongKong, non accessible à un tiers). Placée
+        // AVANT AcoustID/SongRec/recherche texte : une fois le dossier résolu (un seul appel réseau
+        // par ALBUM, pas par fichier — voir discIdCache), chaque piste devient une identification
+        // instantanée et à haute confiance, sans jamais analyser le contenu audio. Ne s'applique
+        // qu'aux dossiers "album complet" (≥ discIdMinTracks pistes, numéros de piste 1..N sans trou
+        // ni doublon, durées connues pour toutes) — tout dossier qui ne remplit pas ces conditions
+        // (compilation en vrac, singles, dossier incomplet) tombe silencieusement dans la suite
+        // normale de la cascade, aucune régression pour les cas déjà bien couverts par ailleurs.
+        if (Config.get().discIdMatchingEnabled() && fichier.getParentFile() != null) {
+            Path folder = fichier.getParentFile().toPath();
+            if (!discIdFailedFolders.contains(folder)) {
+                MusicBrainzClient.ReleaseTracklist tl =
+                        discIdCache.computeIfAbsent(folder, f -> matchFolderByToc(f, mb));
+                if (tl == null) {
+                    discIdFailedFolders.add(folder);
+                } else {
+                    MusicBrainzClient.ReleaseTrack myTrack = findTrackInRelease(tl, fichier);
+                    if (myTrack != null) {
+                        TagInfo t = new TagInfo();
+                        t.artist           = myTrack.artist();
+                        t.title            = myTrack.title();
+                        t.album            = tl.album();
+                        t.albumArtist      = tl.albumArtist().isBlank() ? myTrack.artist() : tl.albumArtist();
+                        t.albumArtistSort  = tl.albumArtistSort();
+                        t.year             = tl.year();
+                        t.originalYear     = tl.originalYear();
+                        t.releaseMbid      = tl.releaseMbid();
+                        t.releaseGroupMbid = tl.releaseGroupMbid();
+                        t.recordingMbid    = myTrack.recordingMbid();
+                        t.track            = String.valueOf(myTrack.trackNo());
+                        t.trackTotal       = String.valueOf(myTrack.trackTotal());
+                        if (myTrack.disc() > 0) t.discNo = String.valueOf(myTrack.disc());
+                        t.country          = tl.country();
+                        t.barcode          = tl.barcode();
+                        t.releaseStatus    = tl.releaseStatus();
+                        t.label            = tl.label();
+                        t.catalogNo        = tl.catalogNo();
+                        t.script           = tl.script();
+                        if (tl.isCompilation()) t.isCompilation = "1";
+                        // Score élevé mais volontairement < 100 (réservé aux identifications vérifiées
+                        // par empreinte audio/MBID direct) : le checksum porte sur TOUT l'album, une
+                        // confiance très élevée, mais jamais de vérification du contenu audio réel.
+                        t.score = 95;
+                        log(I18n.t("  Album identifié par TOC → %s – %s [%s]", t.artist, t.title, tl.album()));
+                        lastFindTagsSource.set(MetadataCache.SOURCE_DISCID);
+                        return List.of(t);
+                    }
+                    // tl résolu mais aucune piste MB ne correspond au numéro de CE fichier (tag
+                    // TRACK incohérent avec la structure détectée) → suite normale pour ce fichier
+                    // seul, le reste de l'album profite quand même du match.
+                }
+            }
+        }
+
+        // 0.7. Détection DJ mix / long format — DOIT passer avant le "0.75" ci-dessous (recherche
+        // MB texte rapide) : bug trouvé en direct (2026-08-16) sur "SE-1105.mp3" (65 min) — placée
+        // après à l'origine, la recherche texte rapide trouvait un mauvais résultat par coïncidence
+        // ("SE-1 Yukako", 22s) et repartait AVANT que cette détection n'ait la moindre chance
+        // d'intervenir ; le garde-fou de durée finissait par rejeter ce mauvais match (donc aucune
+        // donnée fausse écrite), mais le fichier finissait "Ignoré" au lieu d'utiliser le repli DJ
+        // mix qui l'aurait sauvé. Inutile (et coûteux) de lancer AcoustID/SongRec/recherche MB texte
+        // sur un fichier de plusieurs dizaines de minutes à plusieurs heures : ça ne correspond à
+        // AUCUN enregistrement MusicBrainz unique (mix continu, pas une piste), le temps passé sur
+        // les empreintes/recherches serait perdu, et une éventuelle empreinte capterait un segment
+        // aléatoire du mix plutôt que "le morceau". Demande utilisateur (2026-08-16) après avoir
+        // constaté des mixs DJ/longs formats YouTube finissant à tort "non identifié" (ou pire,
+        // matchés à une seule piste au hasard dedans). Détection par durée uniquement (seuil
+        // configurable) — le nom de fichier est trop varié pour un mot-clé fiable. Réutilise
+        // SOURCE_UNVERIFIED_TAGS (même repli "tags existants non vérifiés" que plus bas dans cette
+        // méthode, mêmes exemptions de seuil de score/durée déjà câblées dans processEntry() — pas
+        // de nouvelle logique à dupliquer côté score/durée).
+        if (Config.get().djMixDetectionEnabled()
+                && existingTags != null && existingTags.durationSec >= Config.get().djMixMinDurationSec()) {
+            // URL YouTube dans le commentaire (yt-dlp et consorts la préservent souvent) : essayée
+            // en premier, avant les tags bruts — un titre de vidéo YouTube est généralement plus
+            // fiable qu'un nom de fichier/tag local pour un mix ripé depuis YouTube (voir
+            // YouTubeOEmbedClient pour le pourquoi/comment).
+            String ytUrl = YouTubeOEmbedClient.extractUrl(readTag(fichier, FieldKey.COMMENT));
+            TagInfo ytInfo = ytUrl != null ? YouTubeOEmbedClient.fetch(ytUrl) : null;
+            String mixArtist = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.ARTIST));
+            String mixTitle  = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+            if (isGenericTag(mixArtist)) mixArtist = "";
+            if (isGenericTag(mixTitle))  mixTitle  = "";
+            if (ytInfo != null && !ytInfo.title.isBlank()) {
+                log(I18n.t("  URL YouTube trouvée dans le commentaire → %s – %s", ytInfo.artist, ytInfo.title));
+                if (!ytInfo.artist.isBlank()) mixArtist = ytInfo.artist;
+                mixTitle = ytInfo.title;
+            }
+            if (mixArtist.isBlank() || mixTitle.isBlank()) {
+                String[] fn = parseFilename(fichier);
+                if (mixArtist.isBlank() && !isGenericTag(fn[0])) mixArtist = fn[0];
+                if (mixTitle.isBlank()  && !isGenericTag(fn[1])) mixTitle  = fn[1];
+            }
+            if (!mixArtist.isBlank() && !mixTitle.isBlank() && !TagEnrichment.hasNonLatinChars(mixArtist)
+                    && !TagEnrichment.hasNonLatinChars(mixTitle)) {
+                TagInfo mix = new TagInfo();
+                mix.artist      = mixArtist;
+                mix.title       = mixTitle;
+                mix.albumArtist = mixArtist;
+                mix.genre = !existingTags.genre.isBlank() ? existingTags.genre : "DJ Mix";
+                if (!existingTags.album.isBlank()) mix.album = existingTags.album;
+                if (!existingTags.year.isBlank())  mix.year  = existingTags.year;
+                mix.score = 50;
+                log(I18n.t("  Format long détecté (%ds ≥ %ds) → repli tags directs : %s – %s",
+                        existingTags.durationSec, Config.get().djMixMinDurationSec(), mixArtist, mixTitle));
+                lastFindTagsSource.set(MetadataCache.SOURCE_UNVERIFIED_TAGS);
+                return List.of(mix);
+            }
+            log(I18n.t("  Format long détecté (%ds) mais aucun tag/nom de fichier exploitable → suite normale",
+                    existingTags.durationSec));
+        }
+
+        // 0.75. Compromis vitesse optionnel (skipSongRecOnConfidentMb, off par défaut) : si le
         // fichier a un artiste+titre exploitables dans ses tags, tenter une recherche MB texte
         // rapide AVANT SongRec — pas besoin de payer le fingerprint audio si le texte suffit déjà.
         // Ignoré en reidentification forcée (même logique que tagAlbum/artist/title plus haut : on
@@ -1173,6 +1399,99 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log(I18n.t("  AudD → rien trouvé"));
             } catch (Exception e) {
                 log(I18n.t("  AudD erreur: %s", e.getMessage()));
+            }
+        }
+
+        // 6a. Dernier recours VÉRIFIÉ EXTERNE : deviner une page piste Bandcamp depuis
+        // artiste+titre (voir BandcampClient.guessTrackUrl/fetchTrack, testés en direct le
+        // 2026-08-16 sur de vraies pages — structure JSON-LD confirmée, format de durée non
+        // standard corrigé). Demande utilisateur explicite (2026-08-16, "construit ça de façon
+        // auto") — contrairement au repli "tags existants" juste en dessous (6b, confiance
+        // aveugle), celui-ci est confirmé par le contenu réel renvoyé par Bandcamp
+        // (TrackMatcher.titleSimilarity sur artiste ET titre) avant d'être appliqué : un essai qui
+        // ne correspond pas (mauvaise devinette d'URL, 404, artiste différent) échoue
+        // silencieusement, jamais de fausse donnée écrite. Volontairement en tout dernier recours
+        // de la cascade (après épuisement de TOUTES les autres méthodes) : limite mécaniquement le
+        // volume de requêtes vers un site tiers scrapé sans API officielle à la seule fraction de
+        // bibliothèque réellement bloquée ailleurs, pas toute la bibliothèque.
+        if (results.isEmpty() && !nonLatinInput && Config.get().bandcampGuessEnabled()) {
+            String ytUrl = YouTubeOEmbedClient.extractUrl(readTag(fichier, FieldKey.COMMENT));
+            TagInfo ytInfo = ytUrl != null ? YouTubeOEmbedClient.fetch(ytUrl) : null;
+            String bcArtist = artist, bcTitle = title;
+            if (ytInfo != null && !ytInfo.title.isBlank()) {
+                if (!ytInfo.artist.isBlank()) bcArtist = ytInfo.artist;
+                bcTitle = ytInfo.title;
+            }
+            String guessUrl = BandcampClient.guessTrackUrl(bcArtist, bcTitle);
+            if (guessUrl != null) {
+                try {
+                    var bc = BandcampClient.fetchTrack(guessUrl);
+                    if (bc != null && !bc.title().isBlank() && !bc.artist().isBlank()
+                            && TrackMatcher.titleSimilarity(bc.title().toLowerCase(), bcTitle.toLowerCase())
+                                    >= Config.get().trackMatchingThreshold()
+                            && TrackMatcher.titleSimilarity(bc.artist().toLowerCase(), bcArtist.toLowerCase())
+                                    >= Config.get().trackMatchingThreshold()) {
+                        TagInfo bcInfo = new TagInfo();
+                        bcInfo.artist      = bc.artist();
+                        bcInfo.title       = bc.title();
+                        bcInfo.albumArtist = bc.artist();
+                        if (!bc.album().isBlank()) bcInfo.album = bc.album();
+                        java.util.regex.Matcher ym = java.util.regex.Pattern.compile("\\b(\\d{4})\\b")
+                                .matcher(bc.releaseDate());
+                        if (ym.find()) bcInfo.year = ym.group(1);
+                        // Score légèrement > le repli "tags existants" (50, voir 6b) : celui-ci est
+                        // confirmé par une source externe, pas une simple confiance dans le fichier.
+                        bcInfo.score = 55;
+                        log(I18n.t("  Bandcamp (URL devinée, vérifiée) → %s – %s [%s]",
+                                bc.artist(), bc.title(), guessUrl));
+                        lastFindTagsSource.set(MetadataCache.SOURCE_BANDCAMP);
+                        return List.of(bcInfo);
+                    }
+                } catch (Exception e) {
+                    log(I18n.t("  Bandcamp devinette échouée/non trouvée : %s", e.getMessage()));
+                }
+            }
+        }
+
+        // 6b. Dernier recours : rien n'a été confirmé, mais les tags déjà présents sur le fichier
+        // ont l'air valides (non vides, non génériques, voir isGenericTag() déjà appliqué ci-dessus
+        // à artist/title) — les utiliser directement plutôt que déclarer non identifié. Demande
+        // utilisateur (2026-08-16) après avoir constaté qu'un outil tiers plus permissif (aucune
+        // vérification MB) retrouvait ces mêmes fichiers en faisant confiance aux tags existants —
+        // repéré en direct sur "(2003) Alejandro Sanz - No es lo mismo (Paraíso en vivo).mp3" :
+        // tags lus correctement, MB/SongRec/AudD tous épuisés sans résultat, fichier pourtant
+        // parfaitement identifiable via ses propres tags. Contrairement au bug de confiance aveugle
+        // déjà corrigé cette session (SongRec trust bug, qui acceptait des tags AVANT toute
+        // vérification), celui-ci n'intervient qu'ICI, tout en bas, après épuisement de TOUTES les
+        // autres méthodes. Source dédiée (SOURCE_UNVERIFIED_TAGS, pas SOURCE_TEXT) pour que
+        // processEntry() puisse l'exempter du seuil de score habituel (voir plus bas) sans
+        // affaiblir ce seuil pour les vraies recherches texte MB.
+        if (results.isEmpty() && !nonLatinInput && Config.get().trustReadableTagsFallback()) {
+            // URL YouTube dans le commentaire, même repli que pour les mixs DJ (voir étape 0.8) —
+            // ici aussi essayée en premier, elle peut rescaper un fichier même si artist/title
+            // locaux sont vides/génériques (le titre de la vidéo suffit alors à lui seul).
+            String ytUrl = YouTubeOEmbedClient.extractUrl(readTag(fichier, FieldKey.COMMENT));
+            TagInfo ytInfo = ytUrl != null ? YouTubeOEmbedClient.fetch(ytUrl) : null;
+            String fbArtist = artist, fbTitle = title;
+            if (ytInfo != null && !ytInfo.title.isBlank()) {
+                log(I18n.t("  URL YouTube trouvée dans le commentaire → %s – %s", ytInfo.artist, ytInfo.title));
+                if (!ytInfo.artist.isBlank()) fbArtist = ytInfo.artist;
+                fbTitle = ytInfo.title;
+            }
+            if (!fbArtist.isBlank() && !fbTitle.isBlank()) {
+                TagInfo fallback = new TagInfo();
+                fallback.artist      = fbArtist;
+                fallback.title       = fbTitle;
+                fallback.albumArtist = fbArtist;
+                if (!existingAlbum.isBlank()) fallback.album = existingAlbum;
+                if (existingTags != null) {
+                    if (!existingTags.year.isBlank())  fallback.year  = existingTags.year;
+                    if (!existingTags.genre.isBlank()) fallback.genre = existingTags.genre;
+                }
+                fallback.score = 50;
+                log(I18n.t("  Repli tags existants (aucune méthode confirmée) : %s – %s", fbArtist, fbTitle));
+                lastFindTagsSource.set(MetadataCache.SOURCE_UNVERIFIED_TAGS);
+                return List.of(fallback);
             }
         }
         return results;

@@ -582,6 +582,73 @@ public class MusicBrainzClient {
         return best.path("id").asText("").trim();
     }
 
+    // ── Identification d'album par TOC (façon "Albunack Disc IDs" de SongKong) ───────────────
+
+    /** Candidat brut renvoyé par lookupByToc() — l'appelant filtre sur trackCount avant d'aller
+     *  chercher le détail complet via lookupRelease(releaseMbid). */
+    public record DiscIdCandidate(String releaseMbid, String album, int trackCount, int sectors) {}
+
+    private static final int CDDA_SECTORS_PER_SEC = 75; // standard CD-DA, invariant
+    private static final int CDDA_LEAD_IN_SECTORS = 150; // 2s, invariant sur tout CD Audio
+
+    /**
+     * Identifie un album COMPLET (dossier sans piste manquante ni surnuméraire, ordre connu) via
+     * le lookup FLOU documenté par MusicBrainz (paramètre toc=, voir
+     * wiki.musicbrainz.org/Disc_ID_Calculation) — sans CD physique, sans reproduire l'algorithme
+     * de hash exact (SHA-1 modifié, non trivial bit-à-bit depuis des fichiers déjà encodés) :
+     * les offsets sont approximés depuis les DURÉES DE FICHIER (secondes → secteurs CDDA, 75/s),
+     * et MusicBrainz fait lui-même la tolérance côté serveur. Testé en direct le 2026-08-16 avec
+     * le TOC d'exemple de leur documentation (Nirvana "Nevermind") : la release est bien retrouvée.
+     *
+     * Inspiré des "Albunack Disc IDs" de SongKong (même principe : identifier un album entier via
+     * nombre+durée des pistes plutôt qu'une empreinte audio piste par piste) mais construit sur
+     * l'API MusicBrainz publique existante — leur serveur Albunack lui-même est propriétaire, non
+     * documenté, non accessible à un tiers.
+     *
+     * @param trackDurationsSec durées en secondes, DANS L'ORDRE des pistes (position 1..N)
+     */
+    public List<DiscIdCandidate> lookupByToc(List<Integer> trackDurationsSec) throws Exception {
+        // MusicBrainz exige au moins 2 pistes pour un TOC — en dessous, aucune information
+        // discriminante par rapport à une simple recherche texte/AcoustID déjà tentée avant ce
+        // repli dans le pipeline appelant.
+        if (trackDurationsSec == null || trackDurationsSec.size() < 2) return List.of();
+
+        List<Integer> offsets = new ArrayList<>();
+        int cursor = CDDA_LEAD_IN_SECTORS;
+        for (int durSec : trackDurationsSec) {
+            offsets.add(cursor);
+            cursor += Math.max(1, durSec) * CDDA_SECTORS_PER_SEC;
+        }
+        int totalSectors = cursor;
+
+        StringBuilder toc = new StringBuilder();
+        toc.append(1).append(' ').append(trackDurationsSec.size()).append(' ').append(totalSectors);
+        for (int off : offsets) toc.append(' ').append(off);
+
+        // "-" : discid placeholder volontairement invalide — on ne connaît jamais le vrai hash
+        // (jamais de CD physique ici), seul le paramètre toc= compte pour le lookup flou.
+        String url = mbBaseUrl() + "/discid/-?toc="
+                + URLEncoder.encode(toc.toString(), StandardCharsets.UTF_8)
+                + "&fmt=json&cdstubs=no&inc=artist-credits";
+
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return List.of();
+
+        JsonNode root = mapper.readTree(response.body());
+        List<DiscIdCandidate> out = new ArrayList<>();
+        for (JsonNode rel : root.path("releases")) {
+            String relMbid = rel.path("id").asText("").trim();
+            String title   = rel.path("title").asText("").trim();
+            for (JsonNode medium : rel.path("media")) {
+                int tc = medium.path("track-count").asInt(0);
+                for (JsonNode disc : medium.path("discs")) {
+                    out.add(new DiscIdCandidate(relMbid, title, tc, disc.path("sectors").asInt(0)));
+                }
+            }
+        }
+        return out;
+    }
+
     // ── Lookup d'une release complète (tracklist) ─────────────────────────────
 
     public record ReleaseTrack(int disc, int trackNo, int trackTotal, String title,

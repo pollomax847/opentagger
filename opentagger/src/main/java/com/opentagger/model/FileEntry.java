@@ -52,13 +52,12 @@ public class FileEntry {
     public SkipReason skipReason = null;
 
     /** Écart significatif entre durée réelle du fichier et durée MusicBrainz de l'enregistrement
-     *  identifié — seuil 20s ET 20% relatif pour ne pas confondre avec un simple radio edit/
-     *  remaster (quelques secondes d'écart légitimes). 0 = non renseigné (MB ou fichier), jamais
-     *  considéré comme un écart. Seule source de vérité pour ce calcul — utilisé à la fois avant
-     *  taguage (TaggingWorker, bloque en SKIPPED) et après (TagEnrichment.saveEntry(), déplace pour
-     *  vérification sans bloquer, seul filet de sécurité pour les chemins qui contournent le
-     *  premier — matching manuel via MatchDialog excepté : durationSec y reste à 0 par absence de
-     *  copie depuis entry.current, donc jamais faussement signalé pour un choix humain explicite).
+     *  identifié. 0 = non renseigné (MB ou fichier), jamais considéré comme un écart. Seule source
+     *  de vérité pour ce calcul — utilisé à la fois avant taguage (TaggingWorker, bloque en SKIPPED)
+     *  et après (TagEnrichment.saveEntry(), déplace pour vérification sans bloquer, seul filet de
+     *  sécurité pour les chemins qui contournent le premier — matching manuel via MatchDialog
+     *  excepté : durationSec y reste à 0 par absence de copie depuis entry.current, donc jamais
+     *  faussement signalé pour un choix humain explicite).
      *  ATTENTION : fileSec<=0 seul ne doit JAMAIS être traité comme "forcément vide/corrompu" ici —
      *  tenté une fois (2026-07-18), reverté en urgence : entry.current.durationSec peut encore
      *  valoir 0 simplement parce que la phase 2 du scan (lecture des tags, voir MainFrame.
@@ -67,11 +66,30 @@ public class FileEntry {
      *  Constaté en direct : des centaines de faux positifs sur des fichiers dont la Durée
      *  s'affichait correctement (4:19, 5:07...) une fois le scan rattrapé. La vraie détection des
      *  fichiers 0 octet reste le scan lui-même (voir MainFrame.readTags()/AudioDuration fallback),
-     *  pas cette comparaison. */
+     *  pas cette comparaison.
+     *  <p>
+     *  Seuil ASYMÉTRIQUE (2026-08-16, retour utilisateur confirmé sur données réelles) : un fichier
+     *  plus COURT que la durée MB (20s ET 20% relatif) reste un signal fort de mauvais match (extrait,
+     *  radio edit collé à tort, fichier tronqué) — seuil inchangé, strict. Un fichier plus LONG (30s
+     *  ET 50% relatif, nettement plus tolérant) est très souvent légitime : live/bootleg, DJ set,
+     *  version étendue, bonus — repéré en direct sur deux vrais bootlegs "blink-182 ... All The
+     *  Small Things" (212s/208s fichier vs 171s MB, correctement identifiés mais rejetés à tort par
+     *  l'ancien seuil symétrique). Un Math.abs() unique traitait les deux directions identiquement,
+     *  alors que ce sont deux signaux de nature différente. */
+    /** "Track ID" de l'entrée iTunes correspondante, si ce fichier a été résolu lors d'un import
+     *  XML iTunes (voir ITunesImportDialog) — {@code null} tant qu'aucun import ne l'a établi.
+     *  Permet de repousser un changement (renommage, note) vers CETTE entrée précise du XML iTunes
+     *  (voir ITunesXmlSyncQueue/ITunesXmlWriter) sans avoir à re-résoudre le chemin à chaque fois. */
+    public Integer itunesTrackId = null;
+
     public static boolean isDurationMismatch(int fileSec, int mbSec) {
         if (fileSec <= 0 || mbSec <= 0) return false;
-        int diff = Math.abs(fileSec - mbSec);
-        return diff > 20 && diff > mbSec * 0.20;
+        int diff = fileSec - mbSec;
+        if (diff < 0) {
+            int shortfall = -diff;
+            return shortfall > 20 && shortfall > mbSec * 0.20;
+        }
+        return diff > 30 && diff > mbSec * 0.50;
     }
 
     /**

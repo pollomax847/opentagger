@@ -238,10 +238,19 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
             if (!parsed.isEmpty()) return parsed;
         }
         List<MusicBrainzClient.RecordingRelease> releases = mb.lookupRecordingReleases(recordingMbid);
-        if (!releases.isEmpty()) {
-            String raw = mb.lastRawJson();
-            if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
-        }
+        // Bug trouvé en direct (2026-08-15) : ne mettait en cache QUE si releases non vide — or
+        // lookupRecordingReleases() renvoie exactement la même liste vide, que ce soit un recording
+        // qui a légitimement 0 release, OU un échec réseau complet (getWithRetry() null sur 301/400/
+        // timeout — lastRawJson() reste alors "" par défaut, un NOUVEAU MusicBrainzClient() étant
+        // créé par entrée dans doInBackground(), donc jamais de valeur périmée d'un autre recording).
+        // Sans distinction, un recording qui échoue en permanence (ex. lien 301 non suivi côté
+        // mirror codeshy) n'était JAMAIS mis en cache et se re-questionnait à CHAQUE exécution — 332
+        // requêtes gaspillées vers le même recording sur cette seule session, la fréquence ayant
+        // explosé depuis que l'auto-enregistrement (donc "Grouper par compilations" auto-déclenché
+        // après chaque sauvegarde) tourne en continu. !raw.isBlank() suffit seul comme condition :
+        // vrai UNIQUEMENT si une réponse serveur a réellement été reçue (releases vide y compris).
+        String raw = mb.lastRawJson();
+        if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
         return releases;
     }
 }

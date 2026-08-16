@@ -64,6 +64,7 @@ public class SettingsDialog extends JDialog {
     private JTextField tfDurationMismatchFolder;
     private JCheckBox  chkVideoAutoRecover;
     private JCheckBox  chkSkipSongRecOnConfidentMb;
+    private JCheckBox  chkDjMixDetection, chkDiscIdMatching, chkBandcampGuess, chkSyncPlaylists;
     private JSpinner   spnSkipSongRecMinScore;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
@@ -239,6 +240,7 @@ public class SettingsDialog extends JDialog {
     private JTextField tfMbCollectionId;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbMbOAuthMode;
+    private JTextField     tfItunesXmlPath, tfItunesXmlPathFrom, tfItunesXmlPathTo;
     private JTextField     tfMbServer;
     private JTextField     tfMbAuthUser;
     private JPasswordField tfMbAuthPass;
@@ -299,6 +301,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Script"),       scrollWrap(buildScriptPanel()));
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
         tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
+        tabs.addTab(I18n.t("iTunes"),       scrollWrap(buildItunesPanel()));
         buildSearchIndex();
         if (lastTabIndex >= 0 && lastTabIndex < tabs.getTabCount()) tabs.setSelectedIndex(lastTabIndex);
         tabs.addChangeListener(e -> lastTabIndex = tabs.getSelectedIndex());
@@ -475,13 +478,10 @@ public class SettingsDialog extends JDialog {
         spListenBrainzMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
         spListenBrainzMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
                 + "ListenBrainz (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
-        // FanArt.tv est activé/désactivé depuis la liste des fournisseurs de pochette
-        // (onglet Tags) — pas de case séparée ici pour éviter deux réglages contradictoires.
-        chkLastfmEnabled   = new JCheckBox(I18n.t("Activer l'enrichissement Last.fm"));
-        // Requête Last.fm séparée (artist.getInfo) du genre/mood (track.getTopTags) — un appel
-        // réseau en plus par fichier pour des champs (URL officielle, lien Wikipedia) que tout le
-        // monde ne regarde pas. Décochable indépendamment sans perdre le genre/mood Last.fm.
-        chkLastfmArtistUrls = new JCheckBox(I18n.t("Récupérer aussi l'URL officielle + Wikipedia de l'artiste (requête réseau supplémentaire)"));
+        // FanArt.tv (Tags → Fournisseurs de pochette) et Last.fm (Matching → Sources de genres,
+        // voir buildMatchingPanel()) sont activés/priorisés là où se trouve le reste de leur
+        // comportement — cet onglet ne garde QUE les clés/identifiants (2026-08-16, retour
+        // utilisateur : le réglage Last.fm était écartelé entre cet onglet et Matching, confus).
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
@@ -545,42 +545,9 @@ public class SettingsDialog extends JDialog {
             }
         }
 
-        // Section enrichissement
-        JPanel enrichInner = new JPanel(new GridBagLayout());
-        enrichInner.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), I18n.t("Enrichissement automatique")));
-        {
-            GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 0; c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(3, 10, 3, 8); c.gridwidth = 3;
-            enrichInner.add(chkLastfmEnabled, c);
-        }
-        {
-            GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 1; c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(0, 28, 3, 8); c.gridwidth = 3;
-            enrichInner.add(chkLastfmArtistUrls, c);
-        }
-        {
-            // Repère explicite pour l'utilisateur — avant, ce lien n'existait que dans un
-            // commentaire de code (voir plus haut), pas dans l'UI elle-même : la clé FanArt.tv est
-            // ici, mais son activation/priorité est dans un tout autre onglet (Tags), et les
-            // réglages de comptage Last.fm sont dans un 3e (Matching) — rien ne les reliait.
-            JLabel hint = new JLabel(I18n.t(
-                "<html><i>FanArt.tv : activer/désactiver et priorité dans l'onglet Tags → "
-                + "Fournisseurs de pochette.<br>Last.fm : nombre de genres max dans l'onglet "
-                + "Matching → Sources de genres.</i></html>"));
-            hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
-            GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 2; c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(2, 10, 4, 8); c.gridwidth = 3;
-            enrichInner.add(hint, c);
-        }
-
         JPanel p = new JPanel(new BorderLayout(0, 4));
         p.setBorder(new EmptyBorder(8, 8, 8, 8));
-        p.add(inner,       BorderLayout.CENTER);
-        p.add(enrichInner, BorderLayout.SOUTH);
+        p.add(inner, BorderLayout.CENTER);
         return p;
     }
 
@@ -700,6 +667,17 @@ public class SettingsDialog extends JDialog {
         spDiscogsMaxGenres = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
         spLastfmMaxGenres  = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
 
+        // Déplacé depuis l'onglet API (2026-08-16, retour utilisateur : le réglage Last.fm était
+        // écartelé entre API — activer/désactiver — et Matching — nombre de genres — sans lien
+        // entre les deux ; regroupé ici avec le reste du comportement Last.fm, l'onglet API ne
+        // garde plus que la clé elle-même).
+        chkLastfmEnabled   = new JCheckBox(I18n.t("Activer l'enrichissement Last.fm"));
+        chkLastfmArtistUrls = new JCheckBox(I18n.t("Récupérer aussi l'URL officielle + Wikipedia de l'artiste (requête réseau supplémentaire)"));
+        chkLastfmArtistUrls.setToolTipText(I18n.t(
+            "Requête Last.fm séparée (artist.getInfo) du genre/mood (track.getTopTags) — un appel "
+            + "réseau en plus par fichier pour des champs que tout le monde ne regarde pas. "
+            + "Décochable indépendamment sans perdre le genre/mood Last.fm."));
+
         tfPreferredFormats   = tf();
         tfPreferredFormats.setToolTipText(I18n.t("ex: CD,Digital Media,Vinyl — priorité décroissante"));
         tfVaName             = tf();
@@ -796,9 +774,12 @@ public class SettingsDialog extends JDialog {
         JPanel genrePanel = form(new String[]{
             "Source genres Discogs :",
             "Max genres Discogs :",
-            "Max genres Last.fm :"
+            "Max genres Last.fm :",
+            "",
+            ""
         }, new JComponent[]{
-            cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres
+            cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres,
+            chkLastfmEnabled, chkLastfmArtistUrls
         }, "Sources de genres (Discogs / Last.fm)");
 
         // MB genres + filtre partagé (s'applique aussi à Discogs/Last.fm, voir GenreFilter)
@@ -1005,6 +986,36 @@ public class SettingsDialog extends JDialog {
         compilationSeriesInner.add(compilationSeriesHint, BorderLayout.SOUTH);
         compilationSeriesPanel.add(compilationSeriesInner, BorderLayout.CENTER);
 
+        // ── Derniers recours (2026-08-16) — case à cocher plutôt que settings.properties à éditer
+        // à la main : Config.get() relit sa valeur à CHAQUE fichier traité (jamais mise en cache),
+        // donc cocher/décocher ici prend effet immédiatement sur le lot en cours, sans redémarrer
+        // l'appli (contrairement à éditer le fichier sur disque, qui ne touche jamais la copie en
+        // mémoire du process déjà lancé).
+        chkDjMixDetection = new JCheckBox(I18n.t("Détecter les mixs DJ / formats longs (durée seuil)"));
+        chkDjMixDetection.setToolTipText(I18n.t(
+            "Au-delà du seuil de durée (20 min par défaut), tente d'abord une identification par "
+            + "tags/URL YouTube plutôt que par empreinte audio/recherche MB — un mix continu ne "
+            + "correspond à aucun enregistrement MusicBrainz unique."));
+        chkDiscIdMatching = new JCheckBox(I18n.t("Identifier un album complet par empreinte de durées (façon Albunack/SongKong)"));
+        chkDiscIdMatching.setToolTipText(I18n.t(
+            "Pour un dossier avec assez de pistes numérotées 1..N sans trou : calcule un TOC "
+            + "(comme un CD) depuis les durées de fichier et interroge MusicBrainz — un seul appel "
+            + "réseau pour tout l'album, avant AcoustID/SongRec."));
+        chkBandcampGuess = new JCheckBox(I18n.t("Deviner et vérifier une page Bandcamp en dernier recours"));
+        chkBandcampGuess.setToolTipText(I18n.t(
+            "Uniquement si RIEN d'autre n'a identifié le fichier : devine une URL "
+            + "artiste.bandcamp.com/track/titre depuis les tags, et n'applique que si le contenu "
+            + "récupéré correspond vraiment (jamais de fausse donnée sur un essai raté)."));
+        chkSyncPlaylists = new JCheckBox(I18n.t("Corriger les playlists (.m3u/.pls) lors d'un renommage"));
+        chkSyncPlaylists.setToolTipText(I18n.t(
+            "Quand OpenTagger renomme/déplace un fichier, met à jour la référence correspondante "
+            + "dans les playlists .m3u/.pls trouvées dans son ancien dossier — évite qu'elles "
+            + "pointent silencieusement vers un fichier qui n'existe plus."));
+
+        JPanel lastResortPanel = form(new String[]{"", "", "", ""},
+                new JComponent[]{chkDjMixDetection, chkDiscIdMatching, chkBandcampGuess, chkSyncPlaylists},
+                I18n.t("Derniers recours"));
+
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
         combined.add(matchPanel);
@@ -1015,6 +1026,7 @@ public class SettingsDialog extends JDialog {
         combined.add(mbGenrePanel);
         combined.add(transPanel);
         combined.add(priorityInner);
+        combined.add(lastResortPanel);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -2239,6 +2251,70 @@ public class SettingsDialog extends JDialog {
         return wrap;
     }
 
+    /**
+     * Chemin du XML iTunes + substitution de préfixe Windows→Linux (voir ITunesLibraryImporter/
+     * ITunesXmlWriter) — demande utilisateur (2026-08-16) : le chemin était jusqu'ici re-choisi via
+     * JFileChooser à chaque import/écriture, jamais mémorisé. Le champ chemin est pré-rempli au
+     * prochain lancement des dialogues concernés (voir ITunesImportDialog/MainFrame.
+     * writeItunesXmlCorrections) et mis à jour automatiquement dès qu'un fichier y est choisi.
+     */
+    private JPanel buildItunesPanel() {
+        tfItunesXmlPath     = tf();
+        tfItunesXmlPath.setToolTipText(I18n.t(
+            "Chemin de \"iTunes Music Library.xml\" — mémorisé une fois choisi, pré-rempli au "
+            + "prochain import/écriture (menu Bibliothèque). Laisser vide pour re-choisir à chaque fois."));
+        tfItunesXmlPathFrom = tf();
+        tfItunesXmlPathFrom.setToolTipText(I18n.t(
+            "Préfixe de chemin tel qu'il apparaît dans le XML (souvent un lecteur Windows, ex. "
+            + "\"C:/Users/xxx/OneDrive/Musiques\") — requis pour que les chemins \"Location\" du XML "
+            + "se résolvent vers vos fichiers réels sur ce système, et pour toute correction de "
+            + "chemin en écriture (jamais de Location réécrite sans ce réglage, voir ITunesXmlWriter)."));
+        tfItunesXmlPathTo   = tf();
+        tfItunesXmlPathTo.setToolTipText(I18n.t(
+            "Point de montage réel correspondant sur ce système (ex. \"/mnt/Music\") — l'autre moitié "
+            + "de la substitution ci-dessus."));
+
+        JButton btnBrowse = new JButton(I18n.t("Parcourir…"));
+        btnBrowse.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser();
+            fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                    "iTunes Music Library.xml", "xml"));
+            if (!tfItunesXmlPath.getText().isBlank())
+                fc.setSelectedFile(new java.io.File(tfItunesXmlPath.getText().trim()));
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfItunesXmlPath.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel pathRow = new JPanel(new BorderLayout(4, 0));
+        pathRow.add(tfItunesXmlPath, BorderLayout.CENTER);
+        pathRow.add(btnBrowse,       BorderLayout.EAST);
+
+        JPanel inner = new JPanel(new GridBagLayout());
+        inner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Bibliothèque iTunes (import/écriture — lecture seule sauf action explicite)")));
+
+        Object[][] rows = {
+            { "Fichier XML :",        pathRow,             },
+            { "Préfixe dans le XML :", tfItunesXmlPathFrom, },
+            { "Préfixe réel ici :",   tfItunesXmlPathTo,    },
+        };
+        for (int i = 0; i < rows.length; i++) {
+            GridBagConstraints lc = new GridBagConstraints();
+            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST;
+            lc.insets = new Insets(3, 10, 3, 8);
+            inner.add(new JLabel(I18n.t((String) rows[i][0])), lc);
+
+            GridBagConstraints fc = new GridBagConstraints();
+            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL;
+            fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 8);
+            inner.add((JComponent) rows[i][1], fc);
+        }
+
+        JPanel p = new JPanel(new BorderLayout());
+        p.setBorder(new EmptyBorder(12, 12, 12, 12));
+        p.add(inner, BorderLayout.NORTH);
+        return p;
+    }
+
     private void refreshMbStatus(JLabel lbl, JButton btnAction, JButton btnLogout) {
         boolean connected = Config.get().mbConnected();
         String  username  = Config.get().mbUsername();
@@ -2292,6 +2368,10 @@ public class SettingsDialog extends JDialog {
         tfDurationMismatchFolder.setText(cfg.str("duration_mismatch.move_folder",          ""));
         chkVideoAutoRecover.setSelected(cfg.videoAutoRecover());
         chkSkipSongRecOnConfidentMb.setSelected(cfg.skipSongRecOnConfidentMb());
+        chkDjMixDetection.setSelected(cfg.djMixDetectionEnabled());
+        chkDiscIdMatching.setSelected(cfg.discIdMatchingEnabled());
+        chkBandcampGuess.setSelected(cfg.bandcampGuessEnabled());
+        chkSyncPlaylists.setSelected(cfg.syncPlaylistsOnRename());
         spnSkipSongRecMinScore.setValue(cfg.skipSongRecMinScore());
 
         startupFolderModel.clear();
@@ -2423,6 +2503,10 @@ public class SettingsDialog extends JDialog {
         tfMbAuthPass    .setText(cfg.mbAuthPass());
         spMbRateLimitMs .setValue(cfg.mbRateLimitMs());
 
+        tfItunesXmlPath    .setText(cfg.itunesXmlFilePath());
+        tfItunesXmlPathFrom.setText(cfg.itunesXmlPathFrom());
+        tfItunesXmlPathTo  .setText(cfg.itunesXmlPathTo());
+
         scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
         currentScriptIndex = -1;
         refreshScriptsList();
@@ -2521,6 +2605,10 @@ public class SettingsDialog extends JDialog {
         p.setProperty("duration_mismatch.move_folder",  tfDurationMismatchFolder.getText().trim());
         p.setProperty("video.auto_recover",            String.valueOf(chkVideoAutoRecover.isSelected()));
         p.setProperty("tagging.skip_songrec_on_confident_mb", String.valueOf(chkSkipSongRecOnConfidentMb.isSelected()));
+        p.setProperty("tagging.dj_mix_detection_enabled",     String.valueOf(chkDjMixDetection.isSelected()));
+        p.setProperty("tagging.discid_matching_enabled",      String.valueOf(chkDiscIdMatching.isSelected()));
+        p.setProperty("tagging.bandcamp_guess_enabled",       String.valueOf(chkBandcampGuess.isSelected()));
+        p.setProperty("tagging.sync_playlists_on_rename",     String.valueOf(chkSyncPlaylists.isSelected()));
         p.setProperty("tagging.skip_songrec_min_score",       String.valueOf(spnSkipSongRecMinScore.getValue()));
 
         StringBuilder sb = new StringBuilder();
@@ -2673,6 +2761,9 @@ public class SettingsDialog extends JDialog {
                 ? "https://musicbrainz.org/ws/2" : tfMbServer.getText().trim());
         p.setProperty("musicbrainz.auth_user",        tfMbAuthUser.getText().trim());
         p.setProperty("musicbrainz.auth_pass",        new String(tfMbAuthPass.getPassword()));
+        p.setProperty("itunes.xml_file_path",         tfItunesXmlPath.getText().trim());
+        p.setProperty("itunes.xml_path_from",         tfItunesXmlPathFrom.getText().trim());
+        p.setProperty("itunes.xml_path_to",           tfItunesXmlPathTo.getText().trim());
         p.setProperty("musicbrainz.rate_limit_ms",    String.valueOf(spMbRateLimitMs.getValue()));
 
         // Mémoriser les dossiers déjà connus avant la sauvegarde

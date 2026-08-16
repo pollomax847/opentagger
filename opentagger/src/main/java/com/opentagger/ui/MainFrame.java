@@ -155,6 +155,11 @@ public class MainFrame extends JFrame {
 
     // ── Undo / Redo ───────────────────────────────────────────────────────────
     private final com.opentagger.UndoManager undoManager = new com.opentagger.UndoManager();
+    // Voir refreshStats() : chargement paresseux, une seule fois, dès que la table contient au
+    // moins une entrée (chemin le plus simple et le plus robuste face aux multiples façons dont la
+    // table peut se peupler — CLI --initialDirs, ouverture manuelle de dossier — plutôt que de
+    // dépendre d'un unique callback "scan terminé").
+    private boolean undoHistoryBound = false;
     private JButton btnUndo, btnRedo;
     private JCheckBoxMenuItem chkForceAcoustId;
     private JCheckBoxMenuItem chkAutoGroupCompilations;
@@ -1162,6 +1167,11 @@ public class MainFrame extends JFrame {
         bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         bibliotheque.add(mitem(I18n.t("Rapport Non identifiés…"), null,
             e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
+        bibliotheque.add(mitem(I18n.t("Importer XML iTunes…"), null,
+            e -> new ITunesImportDialog(this, tableModel).setVisible(true)));
+        bibliotheque.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
+            e -> writeItunesXmlCorrections()));
+        bibliotheque.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
         m.add(bibliotheque);
 
         JMenu musicbrainz = new JMenu("MusicBrainz");
@@ -1637,6 +1647,20 @@ public class MainFrame extends JFrame {
     }
 
     private void refreshStats() {
+        // Chargement paresseux de l'historique undo persistant (voir UndoManager) — au plus tôt
+        // possible sans dépendre d'un callback "scan terminé" spécifique, mais pas avant que la
+        // table ait effectivement quelque chose dedans (sinon le resolver ne trouverait jamais
+        // rien et on aurait quand même consommé un aller-retour SQLite pour rien à chaque
+        // démarrage sans dossier ouvert).
+        if (!undoHistoryBound && !tableModel.allEntries().isEmpty()) {
+            undoHistoryBound = true;
+            java.util.Map<Path, FileEntry> byPath = new java.util.HashMap<>();
+            for (FileEntry fe : tableModel.allEntries()) {
+                Path p = (fe.currentPath != null ? fe.currentPath : fe.file.toPath()).toAbsolutePath().normalize();
+                byPath.put(p, fe);
+            }
+            undoManager.bindPersistence(p -> byPath.get(p.toAbsolutePath().normalize()));
+        }
         // Purge d'abord les entrées qui ont cessé de correspondre au filtre actif depuis leur
         // dernier update() (voir FileTableModel.dirty) — refreshStats() est déjà appelé à
         // intervalle régulier (throttlé) dans toutes les boucles de scan/taguage, point de purge
@@ -2665,6 +2689,170 @@ public class MainFrame extends JFrame {
         }.execute();
     }
 
+    /**
+     * Applique une note importée (voir ITunesImportDialog) à chaque entrée du tableau
+     * actuellement chargée — même chemin que applyDetail() (snapshot avant/après, undo persistant,
+     * écriture sécurisée) pour qu'une note importée par erreur reste annulable exactement comme
+     * une édition manuelle, y compris après redémarrage (voir UndoManager). Ne touche jamais un
+     * fichier qui n'est pas actuellement dans ce tableau — voir ITunesImportDialog pour le
+     * pourquoi (ne jamais écrire sur un fichier que l'utilisateur n'a pas chargé/vu cette
+     * session).
+     */
+    /** Répercute une note éditée manuellement vers la file XML iTunes (voir ITunesXmlSyncQueue) —
+     *  UNIQUEMENT si ce fichier a déjà un Track ID connu (établi par un import XML antérieur, voir
+     *  ITunesImportDialog) ; no-op silencieux sinon (immense majorité des fichiers). Ne pousse
+     *  jamais rien depuis applyRatingImport() elle-même : la note vient déjà de ce même Track ID,
+     *  la repousser serait un aller-retour sans effet. */
+    private void queueRatingBackToItunes(FileEntry e, String newRating) {
+        if (e.itunesTrackId == null || newRating == null || newRating.isBlank()) return;
+        try {
+            int stars = Integer.parseInt(newRating.trim());
+            if (stars >= 1 && stars <= 5) {
+                com.opentagger.ITunesXmlSyncQueue.queueRatingChange(e.itunesTrackId, stars);
+            }
+        } catch (NumberFormatException ignored) {
+            // Valeur brute ID3 (0-255) plutôt que 1-5 étoiles — voir TagEnrichment.parseStars()
+            // pour la même ambiguïté ; pas assez fiable pour repousser vers iTunes sans risquer un
+            // mauvais nombre d'étoiles, on préfère s'abstenir.
+        }
+    }
+
+    /**
+     * Applique un album Bandcamp (voir BandcampMatchDialog) — position N de l'album → N-ième
+     * fichier de {@code selection} (ordre déjà fixé par le tableau au moment de l'appel). Même
+     * circuit que les autres écritures manuelles (snapshot/undo persistant/écriture sécurisée).
+     */
+    public void applyBandcampAlbum(com.opentagger.BandcampClient.BandcampAlbum album, List<FileEntry> selection) {
+        int n = Math.min(album.tracks().size(), selection.size());
+        if (n == 0) return;
+        MetadataCache correctionsCache = new MetadataCache();
+        try {
+            for (int i = 0; i < n; i++) {
+                var track = album.tracks().get(i);
+                FileEntry e    = selection.get(i);
+                TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
+                TagInfo   ti   = e.activeTags();
+                ti.artist      = album.artist();
+                ti.albumArtist = album.artist();
+                ti.album       = album.title();
+                ti.title       = track.title();
+                ti.track       = String.valueOf(track.position());
+                ti.trackTotal  = String.valueOf(album.tracks().size());
+                // Format réel constaté ("08 Aug 2018 00:00:00 GMT", voir BandcampClient) — l'année
+                // n'est PAS dans les 4 derniers caractères ("GMT"), d'où l'extraction par regex
+                // plutôt qu'un substring naïf en fin de chaîne.
+                java.util.regex.Matcher ym = java.util.regex.Pattern.compile("\\b(\\d{4})\\b")
+                        .matcher(album.releaseDate());
+                if (ym.find()) ti.year = ym.group(1);
+                int mr = tableModel.indexOf(e);
+                if (mr >= 0) refreshTableRow(mr, ti);
+                undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
+                        I18n.t("Bandcamp %s", e.filename()));
+                recordFieldCorrections(correctionsCache, e, snap, ti);
+                if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
+            }
+            setStatus(I18n.t("Bandcamp appliqué — %d fichier(s)", n));
+        } finally {
+            correctionsCache.close();
+        }
+    }
+
+    public void applyRatingImport(java.util.Map<FileEntry, String> newRatings) {
+        if (newRatings.isEmpty()) return;
+        MetadataCache correctionsCache = new MetadataCache();
+        try {
+            for (var entry : newRatings.entrySet()) {
+                FileEntry e    = entry.getKey();
+                TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
+                TagInfo   ti   = e.activeTags();
+                ti.rating = entry.getValue();
+                int mr = tableModel.indexOf(e);
+                if (mr >= 0) refreshTableRow(mr, ti);
+                undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
+                        I18n.t("Import note iTunes %s", e.filename()));
+                recordFieldCorrections(correctionsCache, e, snap, ti);
+                if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
+            }
+            setStatus(I18n.t("Notes iTunes appliquées — %d fichier(s)", newRatings.size()));
+        } finally {
+            correctionsCache.close();
+        }
+    }
+
+    /**
+     * Applique la file d'attente (voir ITunesXmlSyncQueue) au VRAI fichier XML iTunes — action
+     * manuelle explicite uniquement, jamais déclenchée automatiquement (voir ITunesXmlWriter pour
+     * les garanties : sauvegarde horodatée systématique, réécriture chirurgicale ligne par ligne,
+     * jamais un DOM complet). Demande utilisateur (2026-08-16) après mise en garde sur le risque
+     * réel de désynchronisation avec la vraie base iTunes (.itl).
+     */
+    private void writeItunesXmlCorrections() {
+        int pending = com.opentagger.ITunesXmlSyncQueue.pendingCount();
+        if (pending == 0) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("Aucune correction en attente (renommage ou note sur un fichier importé depuis iTunes)."),
+                    I18n.t("XML iTunes"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        JFileChooser fc = new JFileChooser();
+        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("iTunes Music Library.xml", "xml"));
+        fc.setDialogTitle(I18n.t("Fichier XML iTunes à corriger"));
+        // Chemin mémorisé (Préférences > iTunes) — voir Config.itunesXmlFilePath().
+        String remembered = Config.get().itunesXmlFilePath();
+        if (!remembered.isBlank()) fc.setSelectedFile(new java.io.File(remembered));
+        if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        java.io.File xml = fc.getSelectedFile();
+        Config.get().set("itunes.xml_file_path", xml.getAbsolutePath());
+
+        int ok = JOptionPane.showConfirmDialog(this, I18n.t(
+                "%d correction(s) en attente vont être écrites dans :\n%s\n\n"
+              + "Une sauvegarde horodatée sera créée AVANT toute modification "
+              + "(fichier.backup_AAAAMMJJ_HHMMSS, dans le même dossier).\n\n"
+              + "Continuer ?", pending, xml.getAbsolutePath()),
+                I18n.t("Confirmer l'écriture"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        setStatus(I18n.t("Écriture des corrections dans le XML iTunes…"));
+        new SwingWorker<com.opentagger.ITunesXmlWriter.Result, Void>() {
+            @Override protected com.opentagger.ITunesXmlWriter.Result doInBackground() throws Exception {
+                var changes = com.opentagger.ITunesXmlSyncQueue.snapshotAndClear();
+                return com.opentagger.ITunesXmlWriter.apply(xml, changes);
+            }
+            @Override protected void done() {
+                try {
+                    var r = get();
+                    JOptionPane.showMessageDialog(MainFrame.this, I18n.t(
+                            "%d chemin(s) corrigé(s), %d note(s) mise(s) à jour, %d ignoré(s) "
+                          + "(vérification aller-retour échouée ou préfixe non configuré).\n\n"
+                          + "Sauvegarde : %s",
+                            r.locationChanges(), r.ratingChanges(), r.skippedUnverified(),
+                            r.backupFile() != null ? r.backupFile().getAbsolutePath() : "—"),
+                            I18n.t("XML iTunes mis à jour"), JOptionPane.INFORMATION_MESSAGE);
+                    setStatus(I18n.t("XML iTunes mis à jour"));
+                } catch (Exception ex) {
+                    showError(I18n.t("Échec de l'écriture du XML iTunes : %s", ex.getMessage()));
+                }
+            }
+        }.execute();
+    }
+
+    /** Sélection actuelle, DANS L'ORDRE du tableau (pas l'ordre de clic) — voir BandcampMatchDialog,
+     *  qui applique la piste N de Bandcamp au N-ième élément de cette liste. */
+    private void openBandcampDialog() {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("Sélectionne d'abord les fichiers de l'album dans le tableau, dans l'ordre des pistes."),
+                    I18n.t("Bandcamp"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        // rows est déjà dans l'ordre VISUEL (ordre d'affichage, ex. trié par n° de piste) — surtout
+        // ne pas re-trier par index modèle, ça annulerait un tri actif et casserait l'ordre voulu.
+        List<FileEntry> selection = new ArrayList<>();
+        for (int viewRow : rows) selection.add(tableModel.get(table.convertRowIndexToModel(viewRow)));
+        new BandcampMatchDialog(this, selection).setVisible(true);
+    }
+
     private void applyDetail() {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) return;
@@ -2684,6 +2872,7 @@ public class MainFrame extends JFrame {
                 refreshTableRow(mr, ti);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Modifier %s", e.filename()));
                 recordFieldCorrections(correctionsCache, e, snap, ti);
+                if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
                 // Ne marquer TAGGED qu'APRÈS confirmation d'écriture réussie — sinon un échec
                 // d'écriture (permissions, fichier verrouillé...) laissait quand même le statut à
                 // TAGGED, jamais annulé (même défaut déjà corrigé dans les autres pipelines).
@@ -2707,6 +2896,7 @@ public class MainFrame extends JFrame {
                     detailPanel.collect(ti);
                     refreshTableRow(mr, ti);
                     undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Lot %s", e.filename()));
+                    if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
                     pending.add(new PendingWrite(e, mr, snap, ti));
                 }
                 setStatus(I18n.t("Sauvegarde de %d fichier(s)…", pending.size()));
@@ -6356,6 +6546,8 @@ public class MainFrame extends JFrame {
                     if (java.nio.file.Files.exists(dest)) { skipped++; continue; }
                     try {
                         java.nio.file.Files.move(f.toPath(), dest);
+                        com.opentagger.PlaylistSync.onFileMoved(f.toPath(), dest);
+                        com.opentagger.ITunesXmlSyncQueue.onFileMoved(f.toPath(), dest);
                         e.currentPath = dest;
                         // result (tags déjà identifiés) survit à l'échec d'écriture d'origine — pas
                         // besoin de tout ré-identifier, juste retenter l'enregistrement sur le

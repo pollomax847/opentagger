@@ -59,6 +59,14 @@
       <version>4.13.2</version>
       <scope>test</scope>
     </dependency>
+
+    <!-- Recherche Bandcamp (bandcamp.com/search + JSON-LD des pages album, comme SongKong) —
+         même version que celle embarquée dans SongKong (jsoup-1.17.2.jar), voir BandcampClient -->
+    <dependency>
+      <groupId>org.jsoup</groupId>
+      <artifactId>jsoup</artifactId>
+      <version>1.17.2</version>
+    </dependency>
   </dependencies>
 
   <build>

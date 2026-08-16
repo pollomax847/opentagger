@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.logging.Logger;
 
@@ -98,6 +99,22 @@ public class MetadataCache implements AutoCloseable {
                         ts        INTEGER NOT NULL
                     )""");
                 st.execute("CREATE INDEX IF NOT EXISTS idx_corr_path ON corrections(path)");
+                // ── Undo persistant (2026-08-16, demande utilisateur — écart réel constaté face à
+                // SongKong : UndoManager était 100% en mémoire, perdu au moindre redémarrage). Log
+                // append-only borné (voir pruneUndoHistory) des éditions manuelles (DetailPanel),
+                // rejoué au démarrage dans UndoManager.undoStack via résolution path→FileEntry vivant
+                // dans la session courante — un fichier absent de cette session (dossier fermé,
+                // renommé depuis) est silencieusement ignoré au rechargement plutôt que de planter.
+                st.execute("""
+                    CREATE TABLE IF NOT EXISTS undo_history (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                        path        TEXT    NOT NULL,
+                        description TEXT    NOT NULL,
+                        before_json TEXT    NOT NULL,
+                        after_json  TEXT    NOT NULL,
+                        ts          INTEGER NOT NULL
+                    )""");
+                st.execute("CREATE INDEX IF NOT EXISTS idx_undo_ts ON undo_history(ts)");
                 // ── Historique personnel permanent (équivalent Derby 726 Mo) ─
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS tagging_history (
@@ -266,6 +283,50 @@ public class MetadataCache implements AutoCloseable {
         } catch (Exception e) { LOG.warning("recordCorrection : " + e.getMessage()); }
     }
 
+    // ── Undo persistant ────────────────────────────────────────────────────────
+
+    /** Snapshot avant/après une édition manuelle — voir UndoManager, rejoué au démarrage. */
+    public record UndoRow(String path, String description, String beforeJson, String afterJson, long ts) {}
+
+    /** Best-effort : un échec d'écriture ici ne doit jamais empêcher l'undo en mémoire de
+     *  fonctionner pour la session en cours (voir UndoManager.push). */
+    public synchronized void pushUndoHistory(String path, String description, String beforeJson,
+                                              String afterJson, int maxHistory) {
+        if (conn == null) return;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO undo_history(path,description,before_json,after_json,ts) VALUES(?,?,?,?,?)")) {
+            ps.setString(1, path);
+            ps.setString(2, description);
+            ps.setString(3, beforeJson);
+            ps.setString(4, afterJson);
+            ps.setLong(5, System.currentTimeMillis());
+            ps.executeUpdate();
+        } catch (Exception e) { LOG.warning("pushUndoHistory : " + e.getMessage()); return; }
+        // Purge au-delà de maxHistory — log borné, pas un historique permanent façon
+        // tagging_history (voir commentaire de classe UndoManager).
+        try (Statement st = conn.createStatement()) {
+            st.execute("DELETE FROM undo_history WHERE id NOT IN "
+                    + "(SELECT id FROM undo_history ORDER BY ts DESC LIMIT " + maxHistory + ")");
+        } catch (Exception e) { LOG.warning("pushUndoHistory (purge) : " + e.getMessage()); }
+    }
+
+    /** Ordonné du plus ancien au plus récent — à rejouer tel quel via UndoManager.push() pour que
+     *  la commande la plus récente se retrouve en haut de la pile undo reconstituée. */
+    public synchronized List<UndoRow> loadUndoHistory(int limit) {
+        List<UndoRow> out = new ArrayList<>();
+        if (conn == null) return out;
+        String sql = "SELECT path,description,before_json,after_json,ts FROM undo_history "
+                + "ORDER BY ts DESC LIMIT " + limit;
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                out.add(new UndoRow(rs.getString(1), rs.getString(2), rs.getString(3),
+                        rs.getString(4), rs.getLong(5)));
+            }
+        } catch (Exception e) { LOG.warning("loadUndoHistory : " + e.getMessage()); return out; }
+        Collections.reverse(out);
+        return out;
+    }
+
     // ── Historique personnel (tagging_history + file_history) ────────────────
 
     /**
@@ -333,6 +394,22 @@ public class MetadataCache implements AutoCloseable {
     /** Fichier marqué "déjà taggué" manuellement (MainFrame.markAsAlreadyTagged()) — pas identifié
      *  par OpenTagger lui-même, juste tamponné à partir de ses tags déjà présents sur le disque. */
     public static final String SOURCE_EXISTING = "existing";
+    // Distinct de SOURCE_EXISTING (qui signifie "confirmé manuellement par l'utilisateur", voir
+    // MainFrame.java) — celui-ci signifie "aucune méthode n'a rien confirmé, tags existants
+    // utilisés en dernier recours tels quels" (voir TaggingWorker.findTags(), 2026-08-16).
+    public static final String SOURCE_UNVERIFIED_TAGS = "unverified_tags";
+    /** Album entier identifié par checksum de durées de pistes (TOC CDDA approximé), pas par
+     *  empreinte audio piste par piste — voir TaggingWorker.findTags() étape 0.6 et
+     *  MusicBrainzClient.lookupByToc(). Confiance élevée (le checksum porte sur TOUT l'album, pas
+     *  une seule piste) mais distincte de SOURCE_ACOUSTID/SOURCE_SONGREC (jamais d'analyse du
+     *  contenu audio réel, uniquement les durées déclarées par les fichiers). */
+    public static final String SOURCE_DISCID   = "discid";
+    /** URL Bandcamp devinée depuis artiste+titre (jamais recherchée — bandcamp.com/search est
+     *  bloqué, voir BandcampClient) puis VÉRIFIÉE par similarité avant application — voir
+     *  TaggingWorker.findTags() étape 6a. Distincte de SOURCE_UNVERIFIED_TAGS (repli sans aucune
+     *  vérification externe, juste en dessous dans la cascade) : celle-ci a été confirmée par le
+     *  contenu réel d'une page Bandcamp, pas seulement les tags locaux du fichier. */
+    public static final String SOURCE_BANDCAMP = "bandcamp";
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {

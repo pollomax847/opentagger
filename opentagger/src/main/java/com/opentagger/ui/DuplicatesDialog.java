@@ -425,6 +425,8 @@ public class DuplicatesDialog extends JDialog {
                         for (int i = 1; java.nio.file.Files.exists(dest); i++)
                             dest = targetDir.resolve(stem + "_" + i + ext);
                         java.nio.file.Files.move(srcPath, dest);
+                        com.opentagger.PlaylistSync.onFileMoved(srcPath, dest);
+                        com.opentagger.ITunesXmlSyncQueue.onFileMoved(srcPath, dest);
                         e.currentPath = dest;
                         publish(e);
                         if (journalLine != null) journalLine.accept(I18n.t(

@@ -472,6 +472,12 @@ public class FileRenamer {
 
     // ── Déplacement de fichier ────────────────────────────────────────────────
 
+    /**
+     * Point de passage unique de {@link #rename}/{@link #moveToFolder}/{@link #renameInPlace} —
+     * volontairement le seul endroit où brancher {@link PlaylistSync#onFileMoved} plutôt que de le
+     * dupliquer aux 3 sites d'appel : garantit qu'un futur 4e appelant de moveFile() hérite de la
+     * synchronisation des playlists sans action supplémentaire.
+     */
     private static void moveFile(Path src, Path dst) throws IOException {
         try {
             Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);
@@ -509,6 +515,8 @@ public class FileRenamer {
                 CROSS_DEVICE_COPY_LIMIT.release();
             }
         }
+        PlaylistSync.onFileMoved(src, dst);
+        ITunesXmlSyncQueue.onFileMoved(src, dst);
     }
 
     // ── Nettoyage des dossiers vides ──────────────────────────────────────────
