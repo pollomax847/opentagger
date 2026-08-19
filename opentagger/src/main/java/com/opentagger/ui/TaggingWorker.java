@@ -510,7 +510,19 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // Si le fichier original était dans une compilation (albumArtist = Various Artists,
             // ou tag IS_COMPILATION = 1) et que MB n'a pas trouvé de release compilation,
             // on restaure l'album et albumArtist originaux pour ne pas perdre la structure.
-            if (Config.get().preserveCompilationAlbum()) {
+            //
+            // RESTREINT à SOURCE_TEXT (2026-08-17, retour utilisateur) : cette restauration fait
+            // confiance aveuglément à des tags EXISTANTS potentiellement faux (mauvais rip, tag
+            // générique laissé par un autre outil) — sans garde-fou, elle écraserait même un
+            // résultat frais confirmé par empreinte audio (SongRec/AcoustID) ou par un MBID/TOC
+            // déjà vérifié, qui sont des preuves bien plus fiables du VRAI contexte album que
+            // d'anciens tags jamais revérifiés. Ne s'applique donc plus que quand l'identification
+            // vient d'une simple recherche texte MB — le seul cas où "faire confiance à ce qui
+            // était déjà là" a un sens, cohérent avec le bug de confiance aveugle SongRec déjà
+            // corrigé cette session pour la même raison. Chaque restauration reste tracée (voir
+            // CompilationRestoreLog) pour audit, même dans ce cas restreint.
+            if (Config.get().preserveCompilationAlbum()
+                    && MetadataCache.SOURCE_TEXT.equals(lastFindTagsSource.get())) {
                 String origAlbumArtist   = readTag(fichier, FieldKey.ALBUM_ARTIST);
                 String origIsCompilation = readTag(fichier, FieldKey.IS_COMPILATION);
                 String origAlbum         = cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
@@ -522,6 +534,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 if (origWasCompilation && !origAlbum.isBlank() && !"1".equals(best.isCompilation)) {
                     log(I18n.t("  compilation restaurée : album='%s' albumArtist='%s'",
                         origAlbum, origAlbumArtist));
+                    com.opentagger.CompilationRestoreLog.record(
+                        fichier.getAbsolutePath(), lastFindTagsSource.get(),
+                        origAlbum, origAlbumArtist.isBlank() ? Config.get().vaName() : origAlbumArtist,
+                        best.album, best.albumArtist);
                     best.album         = origAlbum;
                     best.albumArtist   = origAlbumArtist.isBlank()
                         ? Config.get().vaName() : origAlbumArtist;

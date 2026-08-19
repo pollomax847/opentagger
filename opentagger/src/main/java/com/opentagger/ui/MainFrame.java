@@ -65,6 +65,10 @@ public class MainFrame extends JFrame {
 
     // ── État ─────────────────────────────────────────────────────────────────
     private final FileTableModel tableModel = new FileTableModel();
+
+    /** Accès en lecture seule à la table chargée — utilisé par SettingsDialog pour la détection
+     *  automatique de séries de compilations (2026-08-17). */
+    public List<FileEntry> allEntries() { return tableModel.allEntries(); }
     private int                     currentMask = Config.get().defaultRenameMask();
     // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
     // onPreferencesSaved() d'écraser ce choix par le masque par défaut des Préférences.
@@ -286,7 +290,12 @@ public class MainFrame extends JFrame {
     private java.util.Map<String, MetadataCache.ScanCacheEntry> sharedScanCacheMap;
     private int scanCacheMapRefCount = 0;
 
-    private java.util.Map<String, MetadataCache.ScanCacheEntry> acquireScanCacheMap(MetadataCache cache) {
+    /** Public (2026-08-17) pour qu'ITunesImportDialog réutilise ce cache partagé au lieu de
+     *  recharger tout scan_cache (des centaines de milliers de lignes) à chaque tentative d'import
+     *  — exactement le motif qui avait déjà causé un OutOfMemoryError par le passé (voir commentaire
+     *  ci-dessus) et qui provoquait à nouveau une fuite mémoire native constatée en direct ce
+     *  soir (plusieurs Go de croissance sur quelques tentatives d'import). */
+    public java.util.Map<String, MetadataCache.ScanCacheEntry> acquireScanCacheMap(MetadataCache cache) {
         synchronized (scanCacheMapLock) {
             if (sharedScanCacheMap == null) sharedScanCacheMap = cache.loadScanCacheMap();
             scanCacheMapRefCount++;
@@ -294,7 +303,7 @@ public class MainFrame extends JFrame {
         }
     }
 
-    private void releaseScanCacheMap() {
+    public void releaseScanCacheMap() {
         synchronized (scanCacheMapLock) {
             if (--scanCacheMapRefCount <= 0) {
                 scanCacheMapRefCount = 0;
@@ -405,6 +414,7 @@ public class MainFrame extends JFrame {
         // la table reçoit null et le drag-drop ne fonctionne pas sur la zone principale.
         installDragDrop();
         buildUI();
+        com.opentagger.SelfHealthMonitor.start();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1167,6 +1177,8 @@ public class MainFrame extends JFrame {
         bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         bibliotheque.add(mitem(I18n.t("Rapport Non identifiés…"), null,
             e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
+        bibliotheque.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
+            e -> new CompilationRestoreReportDialog(this).setVisible(true)));
         bibliotheque.add(mitem(I18n.t("Importer XML iTunes…"), null,
             e -> new ITunesImportDialog(this, tableModel).setVisible(true)));
         bibliotheque.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
@@ -2802,6 +2814,27 @@ public class MainFrame extends JFrame {
         if (!remembered.isBlank()) fc.setSelectedFile(new java.io.File(remembered));
         if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         java.io.File xml = fc.getSelectedFile();
+
+        // Même garde que ITunesImportDialog (voir son commentaire, 2026-08-17) : un dossier validé
+        // par erreur au lieu du fichier XML lui-même.
+        if (xml.isDirectory()) {
+            java.io.File candidate = new java.io.File(xml, "iTunes Music Library.xml");
+            if (candidate.isFile()) {
+                xml = candidate;
+            } else {
+                JOptionPane.showMessageDialog(this, I18n.t(
+                        "\"%s\" est un dossier, pas le fichier XML lui-même — et aucun "
+                      + "\"iTunes Music Library.xml\" n'a été trouvé dedans.", xml.getName()),
+                        I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+        }
+        if (!xml.isFile()) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("Fichier introuvable : %s", xml.getAbsolutePath()),
+                    I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
         Config.get().set("itunes.xml_file_path", xml.getAbsolutePath());
 
         int ok = JOptionPane.showConfirmDialog(this, I18n.t(
@@ -2813,10 +2846,11 @@ public class MainFrame extends JFrame {
         if (ok != JOptionPane.YES_OPTION) return;
 
         setStatus(I18n.t("Écriture des corrections dans le XML iTunes…"));
+        final java.io.File xmlFinal = xml;
         new SwingWorker<com.opentagger.ITunesXmlWriter.Result, Void>() {
             @Override protected com.opentagger.ITunesXmlWriter.Result doInBackground() throws Exception {
                 var changes = com.opentagger.ITunesXmlSyncQueue.snapshotAndClear();
-                return com.opentagger.ITunesXmlWriter.apply(xml, changes);
+                return com.opentagger.ITunesXmlWriter.apply(xmlFinal, changes);
             }
             @Override protected void done() {
                 try {

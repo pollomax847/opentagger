@@ -84,28 +84,68 @@ public class ITunesImportDialog extends JDialog {
         if (!remembered.isBlank()) fc.setSelectedFile(new File(remembered));
         if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         File xml = fc.getSelectedFile();
+
+        // Repéré en direct (2026-08-17) : un dossier avait été enregistré comme "fichier XML"
+        // choisi (FlatLaf permet de valider "Ouvrir" sur un dossier, contrairement au Swing par
+        // défaut) — le parsing échouait silencieusement ensuite (aucun retour visible), et le
+        // chemin invalide restait mémorisé pour la prochaine fois. Recherche automatique du
+        // fichier dedans plutôt que d'échouer sans explication.
+        if (xml.isDirectory()) {
+            File candidate = new File(xml, "iTunes Music Library.xml");
+            if (candidate.isFile()) {
+                xml = candidate;
+            } else {
+                JOptionPane.showMessageDialog(this, I18n.t(
+                        "\"%s\" est un dossier, pas le fichier XML lui-même — et aucun "
+                      + "\"iTunes Music Library.xml\" n'a été trouvé dedans. Choisis directement "
+                      + "le fichier .xml.", xml.getName()),
+                        I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+        }
+        if (!xml.isFile()) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("Fichier introuvable : %s", xml.getAbsolutePath()),
+                    I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
         com.opentagger.Config.get().set("itunes.xml_file_path", xml.getAbsolutePath());
         lblFile.setText(xml.getName());
         btnChoose.setEnabled(false);
         summary.setText(I18n.t("Analyse en cours…"));
 
+        final File xmlFinal = xml;
         new SwingWorker<String, Void>() {
             private Map<FileEntry, String> ratings = new HashMap<>();
             private int xmlWithRating, xmlWithPlayCount, resolvedOnDisk, appliedToLoaded;
 
             @Override protected String doInBackground() throws Exception {
-                List<ITunesLibraryImporter.ITunesTrack> tracks = ITunesLibraryImporter.parse(xml);
+                List<ITunesLibraryImporter.ITunesTrack> tracks = ITunesLibraryImporter.parse(xmlFinal);
 
                 // Index nom de fichier → chemins connus (toute la bibliothèque déjà scannée, pas
                 // seulement le tableau chargé) — repli quand la substitution de préfixe seule ne
                 // suffit pas (dossiers réorganisés depuis l'export XML, constaté en réel).
+                //
+                // Cache PARTAGÉ (acquire/release à compteur de références, voir MainFrame) plutôt
+                // qu'un chargement direct via cache.loadScanCacheMap() — corrigé le 2026-08-17
+                // après avoir constaté en direct une fuite mémoire native de plusieurs Go sur
+                // quelques tentatives d'import répétées : charger tout scan_cache (des centaines
+                // de milliers de lignes) à chaque appel est EXACTEMENT le motif déjà documenté
+                // ailleurs (voir le commentaire de MainFrame.sharedScanCacheMap) comme ayant causé
+                // un OutOfMemoryError par le passé pour la même raison.
                 Map<String, List<Path>> byFilename = new HashMap<>();
                 try (MetadataCache cache = new MetadataCache()) {
-                    for (String p : cache.loadScanCacheMap().keySet()) {
-                        Path path = Paths.get(p);
-                        byFilename.computeIfAbsent(
-                                path.getFileName().toString().toLowerCase(Locale.ROOT),
-                                k -> new ArrayList<>()).add(path);
+                    var scanCacheMap = owner.acquireScanCacheMap(cache);
+                    try {
+                        for (String p : scanCacheMap.keySet()) {
+                            Path path = Paths.get(p);
+                            byFilename.computeIfAbsent(
+                                    path.getFileName().toString().toLowerCase(Locale.ROOT),
+                                    k -> new ArrayList<>()).add(path);
+                        }
+                    } finally {
+                        owner.releaseScanCacheMap();
                     }
                 }
 
@@ -153,7 +193,13 @@ public class ITunesImportDialog extends JDialog {
                     pendingRatings = ratings;
                     btnApply.setEnabled(!ratings.isEmpty());
                 } catch (Exception ex) {
-                    summary.setText(I18n.t("Échec de l'import : %s", ex.getMessage()));
+                    // Popup EN PLUS du texte du résumé (2026-08-17, retour utilisateur : un échec
+                    // silencieux dans la zone de texte n'était pas assez visible pour être remarqué)
+                    String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                    summary.setText(I18n.t("Échec de l'import : %s", msg));
+                    JOptionPane.showMessageDialog(ITunesImportDialog.this,
+                            I18n.t("Échec de l'import : %s", msg),
+                            I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
                 }
             }
         }.execute();

@@ -70,6 +70,13 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     // pas les fichiers déjà en cours de traitement dans le pool.
     private volatile ExecutorService pool;
 
+    // Pool de connexions SQLite — une par thread, voir SaveWorker.cachePool pour le diagnostic
+    // complet (2026-08-17) : même anti-motif "une connexion par fichier" que SaveWorker/
+    // InfoCompleterWorker avant leur correctif, moindre impact ici (bien moins de vidéos que de
+    // fichiers audio dans une bibliothèque) mais corrigé pour la même raison.
+    private final java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
+            new java.util.concurrent.LinkedBlockingQueue<>();
+
     public VideoRecoveryWorker(List<File> videos, Path scanRoot, Consumer<String> onProgress) {
         this(videos, scanRoot, onProgress, null);
     }
@@ -99,6 +106,8 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
 
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
 
+        for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
+
         for (int i = 0; i < total; i++) {
             if (isCancelled()) break;
             final File video   = videos.get(i);
@@ -107,8 +116,12 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
         }
 
         pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
+        try {
+            for (Future<?> f : futures) {
+                try { f.get(); } catch (Exception ignored) {}
+            }
+        } finally {
+            for (MetadataCache c : cachePool) c.close();
         }
         return null;
     }
@@ -150,13 +163,16 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
                 throw new IOException("Extraction audio impossible (format déjà mp3 ?)");
             }
 
-            // MetadataCache PAR FICHIER, pas le champ partagé — même correctif que SaveWorker
-            // (2026-07-29) : ses méthodes sont toutes synchronized sur l'instance (Connection JDBC
-            // unique), la partager entre threads sérialisait tout le monde au moindre accès cache.
+            // Connexion empruntée au pool (une par thread, voir cachePool) plutôt qu'ouverte/
+            // fermée à chaque vidéo.
             TagEnrichment.SaveResult res;
-            try (MetadataCache cache = new MetadataCache()) {
+            MetadataCache cache = cachePool.poll();
+            if (cache == null) cache = new MetadataCache(); // filet de sécurité
+            try {
                 res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
                         deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+            } finally {
+                cachePool.offer(cache);
             }
 
             Path movedTo = moveToSubfolder(video, VideoScanner.CONVERTED_FOLDER);

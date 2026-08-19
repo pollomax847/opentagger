@@ -71,6 +71,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     // que le thread de doInBackground(), pas les tâches déjà soumises au pool.
     private volatile ExecutorService pool;
 
+    // Pool de connexions SQLite — une par thread, réutilisée pour tous ses fichiers plutôt qu'une
+    // par fichier (voir SaveWorker.cachePool pour le diagnostic complet, 2026-08-17 : NMT a montré
+    // la catégorie "Other" grimper à 6+ Go sur ce même anti-motif "une connexion par fichier",
+    // introduit ici le même jour — 2026-07-29 — que dans SaveWorker, jamais mesuré côté natif).
+    private final java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
+            new java.util.concurrent.LinkedBlockingQueue<>();
+
     public InfoCompleterWorker(List<FileEntry> entries,
                                Consumer<String> onProgress,
                                Consumer<FileEntry> onUpdate,
@@ -97,25 +104,34 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
 
-        for (int i = 0; i < entries.size(); i++) {
-            if (isCancelled()) break;
-            final FileEntry entry  = entries.get(i);
-            final int       fileIdx = i + 1;
-            // MetadataCache ajoutée aux instances fraîches par tâche le 2026-07-29 (même
-            // correctif que TaggingWorker/SaveWorker) : ses méthodes sont toutes synchronized sur
-            // l'instance (Connection JDBC unique, pas thread-safe) — la partager entre threads via
-            // un champ `cache` sérialisait tout le monde au moindre accès cache. Chaque tâche ouvre
-            // et ferme la sienne (try-with-resources).
-            futures.add(pool.submit(() -> {
-                try (MetadataCache taskCache = new MetadataCache()) {
-                    processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient(), taskCache);
-                }
-            }));
-        }
+        // Une connexion par thread (voir cachePool) plutôt qu'une par fichier.
+        for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
 
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
+        try {
+            for (int i = 0; i < entries.size(); i++) {
+                if (isCancelled()) break;
+                final FileEntry entry  = entries.get(i);
+                final int       fileIdx = i + 1;
+                // Connexion empruntée au pool (une par thread, jamais partagée entre threads en
+                // même temps — voir cachePool) : garde l'absence de verrou partagé du correctif
+                // 2026-07-29 sans payer le coût mémoire natif d'une connexion par fichier.
+                futures.add(pool.submit(() -> {
+                    MetadataCache taskCache = cachePool.poll();
+                    if (taskCache == null) taskCache = new MetadataCache(); // filet de sécurité
+                    try {
+                        processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient(), taskCache);
+                    } finally {
+                        cachePool.offer(taskCache);
+                    }
+                }));
+            }
+
+            pool.shutdown();
+            for (Future<?> f : futures) {
+                try { f.get(); } catch (Exception ignored) {}
+            }
+        } finally {
+            for (MetadataCache c : cachePool) c.close();
         }
         return null;
     }

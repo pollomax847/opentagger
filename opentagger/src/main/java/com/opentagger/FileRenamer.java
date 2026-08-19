@@ -184,6 +184,7 @@ public class FileRenamer {
 
             moveFile(fichier, cible);
             moveMatchingLrc(fichier, nom, cible);
+            moveLocalCoverIfPresent(fichier.getParent(), cible.getParent());
         }
         return cible;
     }
@@ -210,6 +211,53 @@ public class FileRenamer {
         try {
             if (!Files.exists(destLrc)) moveFile(origLrc, destLrc);
         } catch (IOException ignored) {}
+    }
+
+    /**
+     * Déplace la pochette locale (folder.jpg, cover.jpg…) du dossier d'origine vers le dossier de
+     * destination, pour la même raison que {@link #moveMatchingLrc} : sans ça, elle reste dans
+     * l'ancien dossier, et {@link #isDeletableLeftover} la traite ensuite comme un simple résidu
+     * supprimable (elle l'est presque toujours — CAA/FanArt/Shazam passent AVANT "local" dans
+     * {@code cover.provider_order}, donc la pochette locale a déjà été embarquée dans le tag de
+     * chaque piste avant ce point la plupart du temps) — mais quand ces fournisseurs échouent tous
+     * et que "local" n'a jamais été atteint (ou est désactivé), la pochette locale n'a JAMAIS été
+     * embarquée nulle part : la supprimer directement comme résidu la ferait purement et simplement
+     * disparaître (pochette perso de l'utilisateur, scan haute résolution, édition différente de
+     * celle de MusicBrainz…). Repéré en audit (2026-08-18) sans qu'un cas réel ait encore été
+     * signalé — corrigé préventivement plutôt que d'attendre une perte réelle, cohérent avec la
+     * préférence utilisateur de rester non-destructif face à un doute. Ne déplace qu'UNE seule fois
+     * par dossier (le premier fichier de la piste qui se déplace l'entraîne avec lui) : les pistes
+     * suivantes du même dossier trouvent la destination déjà occupée et ne font rien — la copie
+     * restée dans l'ancien dossier (si plusieurs pistes y résidaient) retombe alors correctement sur
+     * {@link #isDeletableLeftover}, un VRAI doublon puisque la pochette a déjà rejoint sa nouvelle
+     * destination.
+     */
+    private static void moveLocalCoverIfPresent(Path origParent, Path destParent) {
+        if (origParent == null || destParent == null || origParent.equals(destParent)) return;
+        for (String name : localCoverCandidateNames()) {
+            Path src = origParent.resolve(name);
+            if (!Files.exists(src)) continue;
+            Path dst = destParent.resolve(name);
+            try {
+                if (!Files.exists(dst)) moveFile(src, dst);
+            } catch (IOException ignored) {}
+            return; // une seule pochette locale par dossier (même contrat que TagEnrichment.findLocalCover)
+        }
+    }
+
+    /** Noms de fichiers reconnus comme pochette locale — ensemble fixe (voir
+     *  {@link TagEnrichment#LOCAL_COVER_FILENAMES}) plus le nom configuré via {@code cover.filename},
+     *  utilisé à la fois pour décider quoi déplacer ({@link #moveLocalCoverIfPresent}) et quoi
+     *  considérer comme résidu supprimable après coup ({@link #isDeletableLeftover}) — même liste
+     *  dans les deux cas pour ne jamais désynchroniser "ce qu'on déplace" de "ce qu'on peut supprimer". */
+    private static List<String> localCoverCandidateNames() {
+        List<String> names = new ArrayList<>(TagEnrichment.LOCAL_COVER_FILENAMES);
+        String coverBase = Config.get().str("cover.filename", "cover").toLowerCase(Locale.ROOT);
+        for (String ext : List.of(".jpg", ".png")) {
+            String custom = coverBase + ext;
+            if (!names.contains(custom)) names.add(custom);
+        }
+        return names;
     }
 
     public Path rename(Path fichier, TagInfo info, int maskIndex) throws IOException {
@@ -551,9 +599,10 @@ public class FileRenamer {
     private static boolean isDeletableLeftover(Path p) {
         if (Files.isDirectory(p)) return false;
         String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
-        if (TagEnrichment.LOCAL_COVER_FILENAMES.contains(name)) return true;
-        String coverBase = Config.get().str("cover.filename", "cover").toLowerCase(Locale.ROOT);
-        if (name.equals(coverBase + ".jpg") || name.equals(coverBase + ".png")) return true;
+        // Une pochette locale n'atteint ce point QUE si moveLocalCoverIfPresent() l'a déjà transférée
+        // vers la nouvelle destination (appelé à chaque rename(), avant que ce nettoyage n'intervienne)
+        // — ce qui restait ici est donc un doublon réel, jamais la seule copie existante.
+        if (localCoverCandidateNames().contains(name)) return true;
         if (name.startsWith("opentagger_") && name.endsWith(".log")) return true;
         return name.startsWith("._");
     }

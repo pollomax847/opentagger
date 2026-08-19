@@ -66,6 +66,19 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     // doInBackground(), pas les fichiers déjà en cours d'enregistrement dans le pool.
     private volatile ExecutorService pool;
 
+    // Pool de connexions SQLite réutilisées — UNE par thread du pool, empruntée/rendue à chaque
+    // fichier, PAS une nouvelle par fichier (voir processOne() pour l'historique complet du
+    // correctif de 2026-07-29 que ceci remplace). Diagnostiqué en direct le 2026-08-17 via JVM
+    // Native Memory Tracking : la catégorie "Other" (mémoire native hors-tas) grimpait de 0,2 Mo à
+    // 6,27 Go en 1h de gros lot — cause racine identifiée comme la fragmentation native accumulée
+    // par des dizaines de milliers d'ouvertures/fermetures de connexions SQLite (une par fichier
+    // enregistré), jamais mesurée à l'époque du correctif de contention de threads. Un pool borné
+    // à "threads" instances garde l'absence de verrou partagé (chaque thread a SA PROPRE connexion,
+    // jamais accédée par un autre) tout en ramenant le nombre d'ouvertures réelles de centaines de
+    // milliers à une poignée pour toute la session.
+    private final java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
+            new java.util.concurrent.LinkedBlockingQueue<>();
+
     public SaveWorker(List<FileEntry> entries, int maskIndex,
                        Consumer<String> onProgress, Consumer<FileEntry> onUpdate,
                        BiConsumer<Integer,Integer> onCount) {
@@ -91,14 +104,24 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
-        for (int i = 0; i < entries.size(); i++) {
-            if (isCancelled()) break;
-            final FileEntry entry   = entries.get(i);
-            final int       fileIdx = i + 1;
-            futures.add(pool.submit(() -> processOne(entry, fileIdx, total)));
-        }
+        // Une connexion par thread, créées une fois ici plutôt qu'à la demande dans processOne() —
+        // voir le commentaire du champ cachePool pour le pourquoi de ce pool.
+        for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
 
-        WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
+        try {
+            for (int i = 0; i < entries.size(); i++) {
+                if (isCancelled()) break;
+                final FileEntry entry   = entries.get(i);
+                final int       fileIdx = i + 1;
+                futures.add(pool.submit(() -> processOne(entry, fileIdx, total)));
+            }
+
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
+        } finally {
+            // Toutes les tâches sont finies (ou annulées) à ce stade — aucune ne détient plus de
+            // connexion empruntée, sûr de tout fermer.
+            for (MetadataCache c : cachePool) c.close();
+        }
         return null;
     }
 
@@ -126,19 +149,14 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         }
 
         log(I18n.t("▶ SAVE %s", fichier.getName()));
-        // Une MetadataCache PAR FICHIER plutôt qu'une instance partagée entre les threads du pool
-        // (comme avant ce correctif) : ses méthodes sont toutes synchronized sur l'instance elle-
-        // même (nécessaire pour protéger sa Connection JDBC unique, qui n'est pas thread-safe) —
-        // partagée entre 6 threads (batch.threads), ça sérialise tout le monde au moindre appel
-        // (getCachedImage, getLookup, saveTaggingHistory...) même pour des fichiers sans aucun
-        // rapport entre eux, réduisant l'enregistrement "parallèle" à peu de chose près à du
-        // séquentiel. Trouvé en direct 2026-07-29 via jstack (5 threads BLOCKED sur le même moniteur
-        // pendant qu'un 6e tenait le verrou). Chaque MetadataCache ouvre sa PROPRE connexion SQLite
-        // (déjà configurée WAL + busy_timeout=20000, voir son constructeur) — plusieurs connexions
-        // séparées vers le même fichier .db sont le cas d'usage normal de ce mode, avec un vrai
-        // parallélisme sur les lectures et une sérialisation fine (pas un verrou JVM grossier) sur
-        // les écritures.
-        try (MetadataCache cache = new MetadataCache()) {
+        // Connexion empruntée au pool (une par thread, jamais accédée par un autre thread pendant
+        // le prêt — voir cachePool) plutôt qu'ouverte/fermée à chaque fichier : garde l'absence de
+        // verrou partagé du correctif 2026-07-29 (chaque connexion reste propre à SON thread) sans
+        // payer le coût mémoire natif d'une connexion SQLite par fichier (voir cachePool pour le
+        // diagnostic complet, 2026-08-17).
+        MetadataCache cache = cachePool.poll();
+        if (cache == null) cache = new MetadataCache(); // filet de sécurité, ne devrait jamais arriver
+        try {
             TagEnrichment.SaveResult res = TagEnrichment.saveEntry(
                     fichier, ti, caa, fanArt, deezer, writer, renamer, cache, mbOauth,
                     entry.scanRoot, maskIndex, msg -> log("  " + msg));
@@ -175,6 +193,8 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log(I18n.t("  ✗ ERROR %s : %s", fichier.getName(), msg));
             markError(entry, msg);
+        } finally {
+            cachePool.offer(cache);
         }
 
         finish(entry, total);

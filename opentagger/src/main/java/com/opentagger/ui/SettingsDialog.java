@@ -961,9 +961,17 @@ public class SettingsDialog extends JDialog {
             if (sel >= 0 && sel < lstCompilationSeriesModel.size()-1) { String v = lstCompilationSeriesModel.remove(sel); lstCompilationSeriesModel.add(sel+1, v); lstCompilationSeries.setSelectedIndex(sel+1); }
         });
 
+        JButton btnDetectCompilationSeries = new JButton(I18n.t("Détecter automatiquement…"));
+        btnDetectCompilationSeries.setToolTipText(I18n.t(
+            "Analyse les albums \"Various Artists\"/compilation déjà chargés dans le tableau "
+            + "principal et propose les préfixes les plus fréquents (ex. \"NRJ\", \"RFM\") — évite "
+            + "de retaper un nom à la main (source de fautes, voir l'exemple \"Generation\" au lieu "
+            + "de \"Génération\") : tu choisis parmi du texte réel extrait de tes propres fichiers."));
+        btnDetectCompilationSeries.addActionListener(e -> detectCompilationSeries());
+
         JPanel compilationSeriesBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
         for (JButton b : new JButton[]{btnAddCompilationSeries, btnRemoveCompilationSeries,
-                btnUpCompilationSeries, btnDownCompilationSeries})
+                btnUpCompilationSeries, btnDownCompilationSeries, btnDetectCompilationSeries})
             compilationSeriesBtns.add(b);
 
         JPanel compilationSeriesPicker = new JPanel(new BorderLayout(0, 4));
@@ -2974,6 +2982,94 @@ public class SettingsDialog extends JDialog {
         sp.setBorder(null);
         sp.getVerticalScrollBar().setUnitIncrement(12);
         return sp;
+    }
+
+    /**
+     * Propose des séries de compilations depuis les vrais albums "Various Artists" déjà chargés
+     * dans le tableau principal — demande utilisateur (2026-08-17) après une vraie faute de frappe
+     * ("Generation Top 50" au lieu de "Génération Top 50") qui empêchait silencieusement le
+     * matching de fonctionner sur 94 fichiers réels. Heuristique volontairement simple : premier
+     * mot de chaque album de compilation, compté par fréquence — les vraies séries ("NRJ", "RFM",
+     * "Fun", "Stars", "Génération"...) reviennent naturellement souvent, un nom de mot isolé au
+     * hasard non. Choisir DANS une liste de texte réel plutôt que retaper élimine la classe
+     * d'erreur (accents, orthographe) qui vient de se produire.
+     */
+    private void detectCompilationSeries() {
+        if (!(getOwner() instanceof MainFrame mf)) return;
+
+        String vaName = Config.get().vaName();
+        // "bo"/"ost"/"bande"/"soundtrack" exclus pour la même raison que "hits"/"top" : ce sont des
+        // TYPES de contenu (musique de film), pas des marques de série récurrentes comme "NRJ" ou
+        // "Stars 80" — un même titre peut légitimement apparaître sur plusieurs BO de films
+        // différents, donc les proposer comme "série" produirait de faux rapprochements entre
+        // bandes originales sans rapport (retour utilisateur, 2026-08-19).
+        java.util.Set<String> stopwords = java.util.Set.of(
+            "the", "les", "le", "la", "various", "artists", "vol", "volume", "compilation",
+            "compil", "best", "hits", "top", "album", "single", "disc", "cd",
+            "bo", "ost", "bande", "soundtrack", "musique", "originale");
+
+        java.util.Map<String, Integer> counts  = new java.util.HashMap<>();
+        java.util.Map<String, String>  display = new java.util.HashMap<>();
+        // Un exemple de titre d'album COMPLET par candidat — un simple premier mot ("100%", "Fun")
+        // ne dit rien tout seul contrairement à "NRJ"/"Stars" ; retour utilisateur (2026-08-19) après
+        // avoir vu "100%" proposé sans pouvoir deviner qu'il vient de "100% Hits Running Song".
+        java.util.Map<String, String>  example = new java.util.HashMap<>();
+        for (var e : mf.allEntries()) {
+            var t = e.activeTags();
+            if (t == null || t.album == null || t.album.isBlank()) continue;
+            boolean isComp = "1".equals(t.isCompilation)
+                    || vaName.equalsIgnoreCase(t.albumArtist)
+                    || "Various Artists".equalsIgnoreCase(t.albumArtist);
+            if (!isComp) continue;
+
+            String firstWord = t.album.trim().split("[\\s,(\\[]", 2)[0].trim();
+            if (firstWord.length() < 2) continue;
+            String key = stripDiacritics(firstWord).toLowerCase(java.util.Locale.ROOT);
+            if (stopwords.contains(key) || key.chars().allMatch(Character::isDigit)) continue;
+            counts.merge(key, 1, Integer::sum);
+            display.putIfAbsent(key, firstWord);
+            example.putIfAbsent(key, t.album.trim());
+        }
+
+        java.util.Set<String> already = new java.util.HashSet<>();
+        for (int i = 0; i < lstCompilationSeriesModel.size(); i++)
+            already.add(stripDiacritics(lstCompilationSeriesModel.get(i)).toLowerCase(java.util.Locale.ROOT).trim());
+
+        var candidates = counts.entrySet().stream()
+            .filter(en -> en.getValue() >= 3)
+            .filter(en -> !already.contains(en.getKey()))
+            .sorted((a, b) -> b.getValue() - a.getValue())
+            .limit(30)
+            .toList();
+
+        if (candidates.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Aucun nouveau candidat trouvé (bibliothèque pas chargée, ou tout est déjà "
+                     + "dans la liste)."),
+                I18n.t("Détection automatique"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        DefaultListModel<String> pickModel = new DefaultListModel<>();
+        for (var en : candidates)
+            pickModel.addElement(display.get(en.getKey()) + "  (" + en.getValue() + I18n.t(" albums")
+                + " — ex: « " + example.get(en.getKey()) + " »)");
+        JList<String> pickList = new JList<>(pickModel);
+        pickList.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+
+        int ok = JOptionPane.showConfirmDialog(this,
+            new JScrollPane(pickList),
+            I18n.t("Sélectionne les séries à ajouter (%d candidat(s) trouvé(s))", candidates.size()),
+            JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (ok != JOptionPane.OK_OPTION) return;
+
+        for (int idx : pickList.getSelectedIndices())
+            lstCompilationSeriesModel.addElement(display.get(candidates.get(idx).getKey()));
+    }
+
+    private static String stripDiacritics(String s) {
+        return java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "");
     }
 
     private JPanel form(String[] labels, JComponent[] fields, String title) {
