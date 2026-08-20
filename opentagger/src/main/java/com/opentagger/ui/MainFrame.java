@@ -470,21 +470,50 @@ public class MainFrame extends JFrame {
                 for (com.opentagger.model.FileEntry fe : tableModel.allEntries()) {
                     if (fe.file.toPath().equals(fp) || fp.equals(fe.currentPath)) return;
                 }
-                com.opentagger.model.FileEntry e = new com.opentagger.model.FileEntry(f, new com.opentagger.model.TagInfo());
-                // Déterminer la racine : trouver le scanRoot du dossier parent
-                Path parent = p.getParent();
-                for (com.opentagger.model.FileEntry ex : tableModel.allEntries()) {
-                    if (ex.scanRoot != null && parent.startsWith(ex.scanRoot)) { e.scanRoot = ex.scanRoot; break; }
-                }
-                tableModel.add(e);
-                // Lire les tags en arrière-plan
+                // Repli supplémentaire (2026-08-20, retour utilisateur : des fichiers déjà taggués
+                // repassaient "en attente" pendant un run à fort débit) : la garde ci-dessus compare
+                // fe.currentPath, mais SON écriture (SaveWorker, après le renommage physique déjà
+                // effectué sur disque) passe elle aussi par un invokeLater() distinct — sous forte
+                // charge (EDT engorgée par des dizaines de threads de taguage), rien ne garantit que
+                // CE callback-ci s'exécute APRÈS celui de SaveWorker, même si le renommage physique
+                // l'a chronologiquement précédé. Résultat : la garde ne voit pas encore le nouveau
+                // currentPath, et une DEUXIÈME entrée vierge se crée pour le même fichier physique
+                // tout juste tagué. Plutôt que de comparer des chemins en mémoire qui peuvent être
+                // temporairement désynchronisés, on vérifie D'ABORD (en arrière-plan, avant de créer
+                // quoi que ce soit) le marqueur écrit DANS le fichier lui-même — même repli déjà
+                // fiable utilisé par loadDirectory()/loadSingleFile() pour ce même problème de fond
+                // (fichier déplacé hors du pipeline de renommage suivi en mémoire).
                 new SwingWorker<com.opentagger.model.TagInfo, Void>() {
                     @Override protected com.opentagger.model.TagInfo doInBackground() { return readTags(f); }
                     @Override protected void done() {
-                        try { e.current = get(); tableModel.update(e); refreshStats(); } catch (Exception ignored) {}
+                        com.opentagger.model.TagInfo ti;
+                        try { ti = get(); } catch (Exception ex) { ti = new com.opentagger.model.TagInfo(); }
+                        boolean alreadyTagged = !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
+                        if (alreadyTagged) {
+                            // Quasi certainement le fichier qu'une sauvegarde vient de renommer ici
+                            // (course décrite ci-dessus) : ne rien créer — l'entrée d'origine verra
+                            // son propre currentPath se mettre à jour dès que SaveWorker traite sa
+                            // file d'attente EDT, sans qu'un doublon ne soit jamais apparu entre
+                            // temps dans l'interface.
+                            return;
+                        }
+                        // Re-vérifier la garde anti-doublon : le temps de cette lecture en arrière-
+                        // plan, une autre voie a pu ajouter ce même chemin.
+                        for (com.opentagger.model.FileEntry fe : tableModel.allEntries()) {
+                            if (fe.file.toPath().equals(fp) || fp.equals(fe.currentPath)) return;
+                        }
+                        com.opentagger.model.FileEntry e = new com.opentagger.model.FileEntry(f, new com.opentagger.model.TagInfo());
+                        // Déterminer la racine : trouver le scanRoot du dossier parent
+                        Path parent = p.getParent();
+                        for (com.opentagger.model.FileEntry ex : tableModel.allEntries()) {
+                            if (ex.scanRoot != null && parent.startsWith(ex.scanRoot)) { e.scanRoot = ex.scanRoot; break; }
+                        }
+                        e.current = ti;
+                        tableModel.add(e);
+                        refreshStats();
+                        setStatus(I18n.t("Nouveau fichier détecté : %s", f.getName()));
                     }
                 }.execute();
-                setStatus(I18n.t("Nouveau fichier détecté : %s", f.getName()));
             }));
             folderWatcher.start();
         } catch (Exception ex) {
@@ -1975,6 +2004,16 @@ public class MainFrame extends JFrame {
         java.util.Comparator<String> durationCompare = (a, b) ->
             Integer.compare(parseDurationString(a), parseDurationString(b));
         rowSorter.setComparator(FileTableModel.COL_DURATION, durationCompare);
+        // Colonne Note : même raison que durationCompare — "10" ne doit pas trier avant "9", et la
+        // valeur peut aller jusqu'à 255 (échelle ID3v2 brute, voir TagInfo.rating) donc l'écart avec
+        // une comparaison texte est encore plus marqué que pour la durée.
+        java.util.Comparator<String> ratingCompare = (a, b) -> {
+            int ia = 0, ib = 0;
+            try { ia = (a == null || a.isBlank()) ? 0 : Integer.parseInt(a.trim()); } catch (NumberFormatException ignored) {}
+            try { ib = (b == null || b.isBlank()) ? 0 : Integer.parseInt(b.trim()); } catch (NumberFormatException ignored) {}
+            return Integer.compare(ia, ib);
+        };
+        rowSorter.setComparator(FileTableModel.COL_RATING, ratingCompare);
 
         // Largeurs par défaut élargies (colonnes 1-5) — les valeurs d'origine tronquaient
         // fréquemment "Artiste Album" ("Various Artists"…) et "Album" (titres de compilation
@@ -1996,6 +2035,7 @@ public class MainFrame extends JFrame {
         colWidth(cm, 8, 56,  36,  70);   // Piste
         colWidth(cm, 9, 130, 80,  220);  // Statut
         colWidth(cm, 10, 56,  40,  90);  // Durée
+        colWidth(cm, 11, 50,  36,  70);  // Note
         // Ré-affichée (2026-08-15, retour utilisateur) après avoir été masquée le temps que le
         // rattrapage en arrière-plan de la durée (bibliothèque scannée avant l'ajout de la colonne)
         // converge — COL_DURATION=10 et son comparateur de tri (juste au-dessus) n'ont jamais cessé
@@ -3186,6 +3226,16 @@ public class MainFrame extends JFrame {
         lblMemory.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
         updateMemoryLabel();
         new javax.swing.Timer(2000, e -> updateMemoryLabel()).start();
+        // Filet de sécurité pour les chips de statut (Tagués/En attente/...) : refreshStats() n'est
+        // par ailleurs appelée QUE de façon réactive et throttlée (300ms) depuis chaque boucle de
+        // scan/taguage — si un de ces points d'appel cesse d'être atteint pour une raison quelconque
+        // (chemin de code différent selon le worker actif, exception avalée avant d'y arriver...),
+        // les chips restent figés indéfiniment alors que le taguage réel continue en arrière-plan,
+        // aucune sauvegarde perdue mais l'affichage ment. Retour utilisateur (2026-08-20) : compteurs
+        // figés 20 min alors que des ✔ ENREGISTRÉ continuaient d'apparaître dans le journal au même
+        // moment — confirme que c'est un problème d'affichage, pas de traitement. Un tick de 3s
+        // indépendant de tout worker garantit que l'écart ne dépasse jamais quelques secondes.
+        new javax.swing.Timer(3000, e -> refreshStats()).start();
 
         JPanel eastPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         eastPanel.setOpaque(false);
