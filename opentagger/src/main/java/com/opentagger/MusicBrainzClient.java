@@ -60,6 +60,18 @@ public class MusicBrainzClient {
     private String  lastRawJson      = "";
     /** Album préféré fourni par TaggingWorker pour orienter pickBestRelease(). */
     private String  preferredAlbum   = "";
+    /** Code HTTP d'un échec DÉFINITIF (301/400/404…) sur le dernier getWithRetry(), 0 sinon —
+     *  distingue "le serveur a répondu, mais avec une erreur qui ne se résoudra pas toute seule"
+     *  d'un simple épuisement de tentatives 503/429 (transitoire, potentiellement bon au prochain
+     *  essai) ou d'une IOException réseau. Voir lookupRecordingReleases()/CompilationClusterWorker
+     *  pour l'usage : sans cette distinction, un recording dont le mirror MB renvoie 301 en boucle
+     *  n'était jamais mis en cache (lastRawJson restait vide, aucun corps de réponse jamais capturé)
+     *  et se re-questionnait indéfiniment à chaque passage de "Grouper par compilations" — 332
+     *  requêtes gaspillées vers le même recording constatées en direct sur une seule session
+     *  (2026-08-20), le correctif du 2026-08-15 (!raw.isBlank()) ne couvrant que le cas où UN corps
+     *  de réponse a effectivement été reçu, jamais celui-ci où getWithRetry() abandonne avant.
+     */
+    private int     lastHttpErrorStatus = 0;
 
     /** Dernier JSON brut reçu — utilisé par TaggingWorker pour la mise en cache. */
     public String lastRawJson() { return lastRawJson; }
@@ -197,6 +209,7 @@ public class MusicBrainzClient {
      * Comme Picard ratecontrol.py : backoff jusqu'à ~30 secondes.
      */
     private HttpResponse<String> getWithRetry(String url) throws Exception {
+        lastHttpErrorStatus = 0;
         int delayMs = 1000;
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             if (attempt > 0) {
@@ -239,6 +252,7 @@ public class MusicBrainzClient {
             if (status == 200) return response;
             if (status == 503 || status == 429) continue; // retry
             System.out.println("  MB HTTP " + status + " : " + url);
+            lastHttpErrorStatus = status; // erreur définitive (voir son commentaire de champ)
             return null;
         }
         System.out.println("  MB : échec après " + MAX_RETRIES + " tentatives");
@@ -853,7 +867,16 @@ public class MusicBrainzClient {
                 + "?fmt=json&inc=releases+release-groups";
 
         HttpResponse<String> response = getWithRetry(url);
-        if (response == null) return List.of();
+        if (response == null) {
+            // Échec DÉFINITIF (301/400/404…, pas un simple épuisement 503/429 ni une IOException
+            // réseau, voir lastHttpErrorStatus) : marqueur JSON minimal plutôt que lastRawJson vide,
+            // pour que CompilationClusterWorker.fetchRecordingReleasesCached() puisse quand même
+            // mettre ce résultat (négatif) en cache et ne plus jamais requestionner ce recording
+            // contre ce mirror — sinon un recording qui échoue en boucle est re-questionné à chaque
+            // "Grouper par compilations" auto-déclenché après chaque sauvegarde, indéfiniment.
+            lastRawJson = lastHttpErrorStatus != 0 ? "{\"releases\":[]}" : "";
+            return List.of();
+        }
 
         lastRawJson = response.body();
         return parseRecordingReleasesFromCache(lastRawJson);

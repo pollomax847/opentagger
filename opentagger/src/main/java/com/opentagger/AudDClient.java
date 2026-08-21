@@ -26,6 +26,52 @@ public class AudDClient {
 
     private static final String API_URL = "https://api.audd.io/";
 
+    // Une seule popup par session, même si les 12 threads de taguage tombent tous sur la même
+    // erreur d'authentification en même temps (jeton invalide → échoue IDENTIQUEMENT pour chaque
+    // fichier tenté) — sans ce verrou, autant de popups que d'appels AudD en vol au moment où le
+    // jeton expire. Retour utilisateur (2026-08-21) : "faut mettre un popup pour la mettre à jour
+    // même sans passer par préférences" après avoir découvert le jeton expiré/invalide caché dans
+    // le journal, jamais signalé autrement qu'en texte noyé parmi des milliers de lignes.
+    private static final java.util.concurrent.atomic.AtomicBoolean TOKEN_PROMPT_SHOWN =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** Vrai si le message d'erreur AudD indique un jeton invalide/inactif/expiré (par opposition à
+     *  un quota dépassé ou un souci réseau transitoire, qui ne se règlent pas en changeant le jeton). */
+    public static boolean isAuthError(String message) {
+        if (message == null) return false;
+        String m = message.toLowerCase(java.util.Locale.ROOT);
+        return m.contains("authorization failed") || m.contains("api_token is incorrect")
+                || m.contains("invalid, or inactive") || m.contains("api token");
+    }
+
+    /** Popup non bloquant (appelable depuis n'importe quel thread de fond) proposant de corriger
+     *  le jeton AudD directement, sans passer par la fenêtre Préférences complète — au plus UNE
+     *  fois par session, quel que soit le nombre de fichiers qui échouent avec la même cause. */
+    public static void maybePromptTokenUpdate(String errorMessage) {
+        if (!isAuthError(errorMessage)) return;
+        if (!TOKEN_PROMPT_SHOWN.compareAndSet(false, true)) return;
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            String current = Config.get().str("audd.api_token", "");
+            javax.swing.JTextField field = new javax.swing.JTextField(current, 30);
+            Object[] message = {
+                I18n.t("Le jeton API AudD est invalide, inactif ou expiré — chaque reconnaissance "
+                     + "échoue avec cette même erreur depuis le début de cette session :"),
+                new javax.swing.JLabel("<html><i>" + errorMessage + "</i></html>"),
+                I18n.t("Nouveau jeton (audd.io → tableau de bord) :"),
+                field
+            };
+            int ok = javax.swing.JOptionPane.showConfirmDialog(null, message,
+                    I18n.t("Jeton AudD invalide"), javax.swing.JOptionPane.OK_CANCEL_OPTION,
+                    javax.swing.JOptionPane.WARNING_MESSAGE);
+            if (ok == javax.swing.JOptionPane.OK_OPTION) {
+                String updated = field.getText().trim();
+                if (!updated.isBlank() && !updated.equals(current)) {
+                    Config.get().set("audd.api_token", updated);
+                }
+            }
+        });
+    }
+
     private final ObjectMapper mapper = new ObjectMapper();
     private static final HttpClient http = HttpTimeouts.client();
 

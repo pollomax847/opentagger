@@ -1415,6 +1415,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log(I18n.t("  AudD → rien trouvé"));
             } catch (Exception e) {
                 log(I18n.t("  AudD erreur: %s", e.getMessage()));
+                AudDClient.maybePromptTokenUpdate(e.getMessage());
             }
         }
 

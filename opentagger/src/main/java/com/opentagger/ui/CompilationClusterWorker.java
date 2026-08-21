@@ -233,9 +233,15 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
             MetadataCache cache, String recordingMbid, MusicBrainzClient mb) throws Exception {
         String cacheKey = "recording-releases:" + recordingMbid;
         String cached = cache.getLookup(cacheKey);
+        // cached != null suffit seul : une entrée EXISTE, qu'elle représente 0 ou N releases, donc
+        // fiable telle quelle — le test précédent (!parsed.isEmpty()) ignorait un résultat cache
+        // légitimement vide (recording sans autre release, OU échec définitif désormais mis en cache
+        // via lastHttpErrorStatus, voir MusicBrainzClient.lookupRecordingReleases()) et repartait
+        // en réseau à chaque appel malgré un cache déjà rempli — trouvé en direct (2026-08-20) via un
+        // recording qui échouait en 301 sur le mirror : le correctif d'écriture seul ne suffisait
+        // pas tant que la lecture continuait de contourner le cache pour ce même cas.
         if (cached != null) {
-            List<MusicBrainzClient.RecordingRelease> parsed = mb.parseRecordingReleasesFromCache(cached);
-            if (!parsed.isEmpty()) return parsed;
+            return mb.parseRecordingReleasesFromCache(cached);
         }
         List<MusicBrainzClient.RecordingRelease> releases = mb.lookupRecordingReleases(recordingMbid);
         // Bug trouvé en direct (2026-08-15) : ne mettait en cache QUE si releases non vide — or
