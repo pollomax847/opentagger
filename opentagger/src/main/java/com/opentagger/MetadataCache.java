@@ -410,6 +410,14 @@ public class MetadataCache implements AutoCloseable {
      *  vérification externe, juste en dessous dans la cascade) : celle-ci a été confirmée par le
      *  contenu réel d'une page Bandcamp, pas seulement les tags locaux du fichier. */
     public static final String SOURCE_BANDCAMP = "bandcamp";
+    /** Piste rattachée à une release déjà "épinglée" par une autre piste du même groupe/album dans
+     *  ce même lot de taguage (matching par numéro de piste ou similarité de titre contre la
+     *  tracklist complète de la release) — voir TaggingWorker.groupPinnedRelease et findTags()
+     *  étape 0.65. Distincte de SOURCE_DISCID (checksum de durées sur TOUT le dossier) : ici,
+     *  seule UNE piste du groupe a été vérifiée (audio ou texte à haute confiance), les autres
+     *  suivent sans vérification individuelle propre — évite juste que des pistes du même album
+     *  divergent vers des éditions MusicBrainz différentes. */
+    public static final String SOURCE_GROUP_PIN = "group_pin";
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {

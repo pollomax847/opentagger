@@ -15,7 +15,7 @@ import java.awt.geom.*;
  */
 public final class ToolbarIcon implements Icon {
 
-    public enum Kind { FOLDER_OPEN, TAG, TAG_CHECK, SAVE, STOP, REFRESH, TRANSCODE, UPLOAD }
+    public enum Kind { FOLDER_OPEN, TAG, TAG_CHECK, SAVE, STOP, REFRESH, TRANSCODE, UPLOAD, DISC, SEARCH }
 
     private final Kind kind;
     private final Color color;
@@ -51,6 +51,8 @@ public final class ToolbarIcon implements Icon {
             case REFRESH     -> paintRefresh(g2, s);
             case TRANSCODE   -> paintTranscode(g2, s);
             case UPLOAD      -> paintUpload(g2, s);
+            case DISC        -> paintDisc(g2, s);
+            case SEARCH      -> paintSearch(g2, s);
         }
         g2.dispose();
     }
@@ -107,6 +109,18 @@ public final class ToolbarIcon implements Icon {
         g2.draw(new Line2D.Float(4*s, 11*s, 4*s, 5*s));
         g2.draw(new Line2D.Float(8*s, 13*s, 8*s, 3*s));
         g2.draw(new Line2D.Float(12*s, 10*s, 12*s, 6*s));
+    }
+
+    private void paintDisc(Graphics2D g2, float s) {
+        // Disque compact : cercle extérieur + petit cercle central (le trou) — même trait fin/simple
+        // que les autres icônes, reconnaissable sans détail superflu (pas de reflet/dégradé).
+        g2.draw(new Ellipse2D.Float(2*s, 2*s, 12*s, 12*s));
+        g2.fill(new Ellipse2D.Float(6.9f*s, 6.9f*s, 2.2f*s, 2.2f*s));
+    }
+
+    private void paintSearch(Graphics2D g2, float s) {
+        g2.draw(new Ellipse2D.Float(2*s, 2*s, 8*s, 8*s));
+        g2.draw(new Line2D.Float(9.5f*s, 9.5f*s, 13.5f*s, 13.5f*s));
     }
 
     private void paintUpload(Graphics2D g2, float s) {

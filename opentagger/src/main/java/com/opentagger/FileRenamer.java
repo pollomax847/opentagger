@@ -425,6 +425,14 @@ public class FileRenamer {
         // ici — voir docs/files/04-COMPARAISON-PICARD-ONETAGGER.md (OneTagger issue #157).
         s = s.replace("\u0000", "");
         String cleaned = s.trim()
+                // Normalise l'espacement autour de ':' AVANT sa neutralisation ci-dessous — sinon
+                // "Britten : X" et "Britten: X" (même album, juste un espace en trop avant les
+                // deux-points selon la source qui a fourni le tag — tag existant vs SongRec vs
+                // MusicBrainz) produisent deux segments de chemin différents ("Britten _ X" vs
+                // "Britten_ X"), fragmentant un même album en plusieurs dossiers — repéré en direct
+                // 2026-08-26 sur "Robert Cohen/Britten : Cello Suites" (3 dossiers pour un seul
+                // album).
+                .replaceAll("\\s*:\\s*", ": ")
                 .replaceAll("[\\\\:*?\"<>|]", "_")
                 .replaceAll("\\.{2,}", ".")
                 .replaceAll("\\s+", " ")

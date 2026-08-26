@@ -93,6 +93,24 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.Set<Path> discIdFailedFolders =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    // Cohérence de groupe pour un lot sans TOC exploitable (pistes sans numéro/durée fiable — voir
+    // matchFolderByToc()) : demande utilisateur (2026-08-24) après le correctif "tagger tout l'album
+    // depuis la vue arborescence" — s'assurer qu'un clic sur un groupe n'aboutit pas à des pistes
+    // éparpillées sur plusieurs releases MusicBrainz différentes (même artiste/titre d'album, mais
+    // rééditions/remasters distincts) simplement parce que chaque piste est cherchée indépendamment.
+    // putIfAbsent : la PREMIÈRE piste du groupe à trouver une release à haute confiance (score ≥ seuil
+    // ET durée cohérente, déjà validé par le code appelant avant l'écriture) fixe la release pour tout
+    // le reste du groupe — clé = AlbumGrouping.key(), le même regroupement que la vue arborescence,
+    // donc s'applique même à des fichiers répartis sur plusieurs dossiers physiques sous un même tag
+    // album. discIdMatchingEnabled réutilisé comme interrupteur (même famille de fonctionnalité
+    // "cohérence d'album" côté Préférences, pas la peine d'en exposer un second).
+    private final java.util.Map<String, String> groupPinnedRelease =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<String, MusicBrainzClient.ReleaseTracklist> pinnedTracklistCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<String> pinnedTracklistFailed =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     // ── Journal de corrections ────────────────────────────────────────────────
     private final com.opentagger.CorrectionLog correctionLog = new com.opentagger.CorrectionLog();
 
@@ -353,8 +371,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             log(I18n.t("▶ START  %s", fichier.getName()));
 
+            // Clé de groupe pour groupPinnedRelease (voir son commentaire) — calculée UNE FOIS ici sur
+            // les tags encore inchangés de cette entrée (entry.result n'est écrit qu'à la fin de
+            // processEntry), pour rester identique à la clé qu'a utilisée la vue arborescence au
+            // moment où l'utilisateur a cliqué le groupe.
+            String groupKey = com.opentagger.AlbumGrouping.key(entry);
+
             log(I18n.t("  findTags..."));
-            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm, cache);
+            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm, cache, groupKey);
             entry.forceReidentify = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
             log(I18n.t("  findTags → %s résultat(s)%s", results.size(),
@@ -447,6 +471,16 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 return;
             }
             best = durationOk;
+
+            // Cohérence de groupe (voir groupPinnedRelease) : cette piste vient de trouver une release
+            // à haute confiance (score ≥ seuil ET durée cohérente, validé juste au-dessus) — la fixer
+            // pour le reste du groupe si aucune autre piste ne l'a déjà fait. putIfAbsent : la première
+            // piste gagne : au pire quelques pistes suivent l'un ou l'autre choix si deux pistes du
+            // même groupe sont traitées en parallèle et trouvent chacune une release différente, tous
+            // deux déjà validés individuellement — jamais pire que le comportement sans épinglage.
+            if (Config.get().discIdMatchingEnabled() && !best.releaseMbid.isBlank()) {
+                groupPinnedRelease.putIfAbsent(groupKey, best.releaseMbid);
+            }
 
             log(I18n.t("  ✓ identifié : %s – %s (score=%s)", best.artist, best.title, best.score));
 
@@ -784,11 +818,28 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return null;
     }
 
+    /** Repli de {@link #findTrackInRelease} pour groupPinnedRelease (voir findTags() étape 0.65) :
+     *  contrairement au TOC (dossier "album complet" garanti par construction), une piste épinglée
+     *  par une AUTRE piste du groupe n'a pas forcément de tag TRACK exploitable (fichier encore
+     *  brut) — repli sur la similarité de titre contre chaque piste de la tracklist, seuil déjà
+     *  utilisé ailleurs dans ce fichier pour la même famille de décision (voir son appelant). */
+    private MusicBrainzClient.ReleaseTrack findTrackInReleaseByTitle(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
+        String titleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+        if (titleTag.isBlank() || isGenericTag(titleTag)) return null;
+        MusicBrainzClient.ReleaseTrack bestTrack = null;
+        double bestSim = 0;
+        for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) {
+            double sim = TrackMatcher.titleSimilarity(titleTag.toLowerCase(), t.title().toLowerCase());
+            if (sim > bestSim) { bestSim = sim; bestTrack = t; }
+        }
+        return bestSim >= Config.get().trackMatchingThreshold() ? bestTrack : null;
+    }
+
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
     private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify,
                                     MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm,
-                                    MetadataCache cache) throws Exception {
+                                    MetadataCache cache, String groupKey) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
         if (TagWriter.repairM4aIfNeeded(fichier)) log(I18n.t("  M4A réparé OK"));
 
@@ -938,6 +989,65 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // tl résolu mais aucune piste MB ne correspond au numéro de CE fichier (tag
                     // TRACK incohérent avec la structure détectée) → suite normale pour ce fichier
                     // seul, le reste de l'album profite quand même du match.
+                }
+            }
+        }
+
+        // 0.65. Cohérence de groupe — voir groupPinnedRelease : une AUTRE piste du même groupe (même
+        // clé que la vue arborescence — voir AlbumGrouping.key()) a déjà trouvé une release à haute
+        // confiance PLUS TÔT dans ce lot. Ne s'applique QUE si le TOC ci-dessus n'a rien donné pour
+        // CE fichier (dossier pas assez complet/track manquant/déjà en échec) — le TOC reste toujours
+        // prioritaire, checksum sur tout l'album donc plus fiable qu'un simple matching titre/piste
+        // contre une release trouvée par une autre piste. Contrairement au TOC, s'applique aussi aux
+        // groupes éparpillés sur plusieurs dossiers physiques (regroupement par tag album, pas par
+        // dossier).
+        if (Config.get().discIdMatchingEnabled() && groupKey != null) {
+            String pinnedMbid = groupPinnedRelease.get(groupKey);
+            if (pinnedMbid != null && !pinnedTracklistFailed.contains(pinnedMbid)) {
+                MusicBrainzClient.ReleaseTracklist tl = pinnedTracklistCache.computeIfAbsent(pinnedMbid, mbid -> {
+                    try { return mb.lookupRelease(mbid); } catch (Exception e) { return null; }
+                });
+                if (tl == null) {
+                    pinnedTracklistFailed.add(pinnedMbid);
+                } else {
+                    MusicBrainzClient.ReleaseTrack myTrack = findTrackInRelease(tl, fichier);
+                    if (myTrack == null) myTrack = findTrackInReleaseByTitle(tl, fichier);
+                    if (myTrack != null) {
+                        TagInfo t = new TagInfo();
+                        t.artist           = myTrack.artist();
+                        t.title            = myTrack.title();
+                        t.album            = tl.album();
+                        t.albumArtist      = tl.albumArtist().isBlank() ? myTrack.artist() : tl.albumArtist();
+                        t.albumArtistSort  = tl.albumArtistSort();
+                        t.year             = tl.year();
+                        t.originalYear     = tl.originalYear();
+                        t.releaseMbid      = tl.releaseMbid();
+                        t.releaseGroupMbid = tl.releaseGroupMbid();
+                        t.recordingMbid    = myTrack.recordingMbid();
+                        t.track            = String.valueOf(myTrack.trackNo());
+                        t.trackTotal       = String.valueOf(myTrack.trackTotal());
+                        if (myTrack.disc() > 0) t.discNo = String.valueOf(myTrack.disc());
+                        t.country          = tl.country();
+                        t.barcode          = tl.barcode();
+                        t.releaseStatus    = tl.releaseStatus();
+                        t.label            = tl.label();
+                        t.catalogNo        = tl.catalogNo();
+                        t.script           = tl.script();
+                        if (tl.isCompilation()) t.isCompilation = "1";
+                        if (myTrack.lengthMs() > 0) t.mbDurationSec = myTrack.lengthMs() / 1000;
+                        // Score < TOC (95) : matching titre/numéro contre une release VÉRIFIÉE par une
+                        // autre piste, pas un checksum sur ce fichier précis — reste au-dessus du seuil
+                        // par défaut (match.min_score_auto=90) et bénéficie en plus du garde-fou durée
+                        // ci-dessus (mbDurationSec renseigné, contrairement au TOC).
+                        t.score = 92;
+                        log(I18n.t("  Cohérence de groupe → %s – %s [%s] (release déjà fixée par une autre piste du groupe)",
+                                t.artist, t.title, tl.album()));
+                        lastFindTagsSource.set(MetadataCache.SOURCE_GROUP_PIN);
+                        return List.of(t);
+                    }
+                    // Aucune piste de la release épinglée ne correspond (numéro/titre) → ce fichier
+                    // n'appartient probablement pas à CETTE édition précise (bonus track, single...) →
+                    // suite normale, identification indépendante pour lui seul.
                 }
             }
         }

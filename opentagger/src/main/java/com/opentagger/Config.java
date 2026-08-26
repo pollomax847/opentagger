@@ -366,7 +366,7 @@ public class Config {
     // (installs qui l'avaient ajouté manuellement pendant la brève période où c'était une action
     // secondaire) est simplement ignorée sans erreur — comportement générique déjà en place pour
     // tout id inconnu (voir MainFrame.findToolbarAction()/SettingsDialog.load()).
-    public static final String DEFAULT_TOOLBAR_ACTIONS = "refreshFolders,transcode,submitAcoustId";
+    public static final String DEFAULT_TOOLBAR_ACTIONS = "refreshFolders,transcode,submitAcoustId,cdImport";
     public String[] toolbarActions() {
         String v = str("toolbar.actions", DEFAULT_TOOLBAR_ACTIONS);
         if (v.isBlank()) return new String[0];

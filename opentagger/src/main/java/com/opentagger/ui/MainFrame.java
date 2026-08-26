@@ -718,10 +718,16 @@ public class MainFrame extends JFrame {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) { setStatus(I18n.t("Sélectionnez d'abord des fichiers.")); return; }
 
+        // entriesAtViewRow() — pas tableModel.get(table.convertRowIndexToModel(r)), voir le
+        // commentaire détaillé de startTagging() pour pourquoi cette dernière forme est fausse dès
+        // que la vue arborescence est active (bug repéré en direct 2026-08-24, cette méthode
+        // précise étant justement "Rafraîchir tags + pochette (sélection)" — la fonctionnalité que
+        // l'utilisateur décrivait comme "corriger tous les fichiers sélectionnés").
+        java.util.Set<com.opentagger.model.FileEntry> targetSet = new java.util.LinkedHashSet<>();
+        for (int r : rows) targetSet.addAll(entriesAtViewRow(r));
         java.util.List<com.opentagger.model.FileEntry> targets = new java.util.ArrayList<>();
-        for (int r : rows) {
-            com.opentagger.model.FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
-            com.opentagger.model.TagInfo   ti = e.activeTags();
+        for (com.opentagger.model.FileEntry e : targetSet) {
+            com.opentagger.model.TagInfo ti = e.activeTags();
             if (!ti.recordingMbid.isBlank() || !ti.releaseMbid.isBlank()) targets.add(e);
         }
         if (targets.isEmpty()) {
@@ -1201,8 +1207,10 @@ public class MainFrame extends JFrame {
         JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
         bibliotheque.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
         bibliotheque.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
+        bibliotheque.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
         bibliotheque.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
         bibliotheque.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
+        bibliotheque.add(mitem(I18n.t("Supprimer la sélection (corbeille)…"), null, e -> deleteSelectedFiles()));
         bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         bibliotheque.add(mitem(I18n.t("Rapport Non identifiés…"), null,
             e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
@@ -1361,7 +1369,8 @@ public class MainFrame extends JFrame {
         new String[]{"syncListenBrainz",   I18n.t("Synchroniser ListenBrainz")},
         new String[]{"podcastDialog",      I18n.t("Tagger comme podcast")},
         new String[]{"detectDuplicates",   I18n.t("Détecter les doublons")},
-        new String[]{"historyDialog",      I18n.t("Historique de taguage")}
+        new String[]{"historyDialog",      I18n.t("Historique de taguage")},
+        new String[]{"cdImport",           I18n.t("Importer un CD")}
     );
 
     /**
@@ -1399,6 +1408,9 @@ public class MainFrame extends JFrame {
                 I18n.t("Détecter les fichiers en double"), this::detectDuplicates));
         list.add(new ToolbarAction("historyDialog", I18n.t("Historique de taguage"),
                 I18n.t("Ouvrir l'historique de taguage"), () -> new HistoryDialog(this).setVisible(true)));
+        list.add(new ToolbarAction("cdImport", I18n.t("Importer un CD"),
+                I18n.t("Extraire un CD audio ou copier un CD de données"),
+                () -> new CdImportDialog(this).setVisible(true)));
         return list;
     }
 
@@ -1536,6 +1548,7 @@ public class MainFrame extends JFrame {
             case "refreshFolders"  -> ToolbarIcon.Kind.REFRESH;
             case "transcode"       -> ToolbarIcon.Kind.TRANSCODE;
             case "submitAcoustId"  -> ToolbarIcon.Kind.UPLOAD;
+            case "cdImport"        -> ToolbarIcon.Kind.DISC;
             default -> null;
         };
     }
@@ -1605,6 +1618,11 @@ public class MainFrame extends JFrame {
         p.add(new JSeparator(JSeparator.VERTICAL));
         tfFilter = new JTextField(16);
         tfFilter.putClientProperty("JTextField.placeholderText", I18n.t("Rechercher…"));
+        // Icône loupe intégrée au champ (FlatLaf.leadingIcon) plutôt qu'un JLabel séparé à côté —
+        // repère visuel immédiat pour "ceci est une recherche", cohérent avec le reste des icônes
+        // vectorielles de l'appli. Purement cosmétique, aucun changement de comportement.
+        tfFilter.putClientProperty("JTextField.leadingIcon",
+                new ToolbarIcon(ToolbarIcon.Kind.SEARCH, new Color(0x90A4AE), 13));
         cbFilterField = new JComboBox<>(new String[]{
             I18n.t("Tous les champs"), I18n.t("Artiste"), I18n.t("Artiste album"), I18n.t("Titre"),
             I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste")});
@@ -2315,6 +2333,7 @@ public class MainFrame extends JFrame {
         JMenuItem miRename = new JMenuItem("✏  " + I18n.t("Renommer ce fichier"));
         JMenuItem miReveal = new JMenuItem("📁  " + I18n.t("Ouvrir le dossier parent"));
         JMenuItem miRemove = new JMenuItem("✗  " + I18n.t("Retirer de la liste"));
+        JMenuItem miDelete = new JMenuItem("🗑  " + I18n.t("Supprimer (corbeille)…"));
 
         miTag.addActionListener(e -> startTagging(true));
         miRename.addActionListener(e -> {
@@ -2382,6 +2401,7 @@ public class MainFrame extends JFrame {
             for (int row : table.getSelectedRows()) toRemove.addAll(entriesAtViewRow(row));
             tableModel.removeEntries(toRemove);
         });
+        miDelete.addActionListener(e -> deleteSelectedFiles());
 
         JMenuItem miAcoustId = new JMenuItem("🎵  " + I18n.t("Soumettre fingerprint AcoustID"));
         miAcoustId.addActionListener(e -> submitAcoustId());
@@ -2406,7 +2426,7 @@ public class MainFrame extends JFrame {
         menu.add(miRefreshMeta); menu.addSeparator();
         menu.add(miMbEdit); menu.add(miMbContrib); menu.addSeparator();
         menu.add(miAcoustId); menu.addSeparator();
-        menu.add(miReveal); menu.add(miRemove);
+        menu.add(miReveal); menu.add(miRemove); menu.add(miDelete);
 
         // Menu réduit pour une ligne d'en-tête de groupe (vue arborescence) — les actions
         // intrinsèquement mono-fichier ci-dessus (Renommer ce fichier, Correspondance manuelle,
@@ -2558,7 +2578,11 @@ public class MainFrame extends JFrame {
         coverSection.add(lblCoverImg);
 
         // ── Chemin du fichier ────────────────────────────────────────────────
-        lblFilePath = new JLabel(" ");
+        // Message d'accueil plutôt qu'un espace vide qui ressemble à un panneau cassé/pas encore
+        // chargé — retour utilisateur (2026-08-23, "améliore l'ui") : clearDetail() (aucune ligne
+        // sélectionnée) laissait toute la colonne droite visuellement vide sans indice de ce qu'il
+        // fallait faire.
+        lblFilePath = new JLabel(I18n.t("Sélectionnez un fichier pour voir ses détails"));
         lblFilePath.putClientProperty("FlatLaf.style", "foreground: #546E7A; font: 11 $defaultFont");
         lblFilePath.setBorder(new EmptyBorder(4, 14, 0, 14));
 
@@ -2699,7 +2723,7 @@ public class MainFrame extends JFrame {
     }
 
     private void clearDetail() {
-        lblFilePath.setText(" ");
+        lblFilePath.setText(I18n.t("Sélectionnez un fichier pour voir ses détails"));
         detailPanel.clear();
         lblCoverImg.setIcon(null); lblCoverImg.setText("—");
     }
@@ -2809,8 +2833,12 @@ public class MainFrame extends JFrame {
         }
     }
 
-    public void applyRatingImport(java.util.Map<FileEntry, String> newRatings) {
-        if (newRatings.isEmpty()) return;
+    /** @return succès d'écriture RÉEL par fichier (pas juste "traité") — retour utilisateur
+     *  (2026-08-24) : ITunesImportDialog n'avait aucun moyen de savoir si l'écriture sur disque
+     *  avait vraiment réussi pour chaque fichier, seulement un compte global optimiste. */
+    public java.util.Map<FileEntry, Boolean> applyRatingImport(java.util.Map<FileEntry, String> newRatings) {
+        java.util.Map<FileEntry, Boolean> results = new java.util.LinkedHashMap<>();
+        if (newRatings.isEmpty()) return results;
         MetadataCache correctionsCache = new MetadataCache();
         try {
             for (var entry : newRatings.entrySet()) {
@@ -2823,12 +2851,16 @@ public class MainFrame extends JFrame {
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
                         I18n.t("Import note iTunes %s", e.filename()));
                 recordFieldCorrections(correctionsCache, e, snap, ti);
-                if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
+                boolean written = writeTagsSafe(e, ti);
+                if (written) markManuallyTagged(e, ti, mr);
+                results.put(e, written);
             }
-            setStatus(I18n.t("Notes iTunes appliquées — %d fichier(s)", newRatings.size()));
+            long okCount = results.values().stream().filter(Boolean::booleanValue).count();
+            setStatus(I18n.t("Notes iTunes appliquées — %d/%d fichier(s) écrit(s)", okCount, newRatings.size()));
         } finally {
             correctionsCache.close();
         }
+        return results;
     }
 
     /**
@@ -2922,8 +2954,16 @@ public class MainFrame extends JFrame {
         }
         // rows est déjà dans l'ordre VISUEL (ordre d'affichage, ex. trié par n° de piste) — surtout
         // ne pas re-trier par index modèle, ça annulerait un tri actif et casserait l'ordre voulu.
+        // entryAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)), même bug de fond
+        // que startTagging()/refreshSelectedMeta() en vue arborescence) — une ligne d'en-tête de
+        // groupe éventuellement sélectionnée résout vers null ici (filtrée), jamais "tous ses
+        // membres" (entriesAtViewRow) : cette correspondance Bandcamp est position-à-position avec
+        // l'ordre visuel des PISTES, une expansion de groupe casserait cet ordre.
         List<FileEntry> selection = new ArrayList<>();
-        for (int viewRow : rows) selection.add(tableModel.get(table.convertRowIndexToModel(viewRow)));
+        for (int viewRow : rows) {
+            FileEntry e = entryAtViewRow(viewRow);
+            if (e != null) selection.add(e);
+        }
         new BandcampMatchDialog(this, selection).setVisible(true);
     }
 
@@ -3040,7 +3080,8 @@ public class MainFrame extends JFrame {
     private void openMatchDialog() {
         int row = table.getSelectedRow();
         if (row < 0) { setStatus(I18n.t("Sélectionnez un fichier.")); return; }
-        FileEntry entry = tableModel.get(table.convertRowIndexToModel(row));
+        FileEntry entry = entryAtViewRow(row);
+        if (entry == null) { setStatus(I18n.t("Sélectionnez un fichier (pas un en-tête de groupe).")); return; }
         new MatchDialog(this, entry, tableModel, this::refreshDetail).setVisible(true);
     }
 
@@ -3049,7 +3090,8 @@ public class MainFrame extends JFrame {
     private void openCoverDialog() {
         int row = table.getSelectedRow();
         if (row < 0) { setStatus(I18n.t("Sélectionnez un fichier.")); return; }
-        FileEntry entry = tableModel.get(table.convertRowIndexToModel(row));
+        FileEntry entry = entryAtViewRow(row);
+        if (entry == null) { setStatus(I18n.t("Sélectionnez un fichier (pas un en-tête de groupe).")); return; }
         new CoverArtDialog(this, entry, this::refreshDetail).setVisible(true);
     }
 
@@ -3058,7 +3100,9 @@ public class MainFrame extends JFrame {
     private void openMbEditPage() {
         int row = table.getSelectedRow();
         if (row < 0) { setStatus(I18n.t("Sélectionnez un fichier.")); return; }
-        TagInfo ti = tableModel.get(table.convertRowIndexToModel(row)).activeTags();
+        FileEntry mbEditEntry = entryAtViewRow(row);
+        if (mbEditEntry == null) { setStatus(I18n.t("Sélectionnez un fichier (pas un en-tête de groupe).")); return; }
+        TagInfo ti = mbEditEntry.activeTags();
         String mbid = ti.recordingMbid;
         try {
             String url = mbid.isBlank()
@@ -3073,7 +3117,8 @@ public class MainFrame extends JFrame {
     private void openMbContribute() {
         int row = table.getSelectedRow();
         if (row < 0) { setStatus(I18n.t("Sélectionnez un fichier.")); return; }
-        FileEntry entry = tableModel.get(table.convertRowIndexToModel(row));
+        FileEntry entry = entryAtViewRow(row);
+        if (entry == null) { setStatus(I18n.t("Sélectionnez un fichier (pas un en-tête de groupe).")); return; }
         new MbContributeDialog(this, entry).setVisible(true);
     }
 
@@ -3733,6 +3778,12 @@ public class MainFrame extends JFrame {
     }
 
     /** Charge un dossier (récursivement) dans la table — toujours en mode ajout. */
+    /** Point d'entrée public pour un dossier produit HORS du flux normal (glisser-déposer, Ouvrir
+     *  dossier) — utilisé par CdImportDialog pour faire reprendre le pipeline habituel
+     *  (identification/renommage/déplacement) sur le dossier de travail où les pistes viennent
+     *  d'être extraites, exactement comme n'importe quel autre dossier chargé. */
+    public void importFolder(File dir) { loadDirectory(dir); }
+
     private void loadDirectory(File dir) {
         if (dir == null || !dir.isDirectory()) return;
         final String dirName = dir.getName();
@@ -4090,9 +4141,22 @@ public class MainFrame extends JFrame {
             return;
         }
         if (selOnly) {
-            List<FileEntry> toTag = new ArrayList<>();
-            for (int r : table.getSelectedRows())
-                toTag.add(tableModel.get(table.convertRowIndexToModel(r)));
+            // entriesAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)) — bug repéré
+            // en direct 2026-08-24) : en vue arborescence, table.getModel() est albumTreeModel, pas
+            // tableModel — convertRowIndexToModel() renvoie donc un index dans le MAUVAIS modèle,
+            // et une ligne d'en-tête de groupe cliquée (aucun FileEntry direct) n'a de toute façon
+            // pas d'équivalent dans tableModel. Résultat : sélectionner un groupe entier ("cliquer
+            // l'en-tête pour tout sélectionner puis Analyser") ne taguait pas les bons fichiers, ou
+            // rien du tout selon les cas — retour utilisateur : "je peux tagger tout l'album en
+            // cliquant sur le dossier, ça ne fonctionne pas". entriesAtViewRow() gère déjà
+            // correctement les deux vues (voir son usage identique dans installContextMenu()/
+            // miRemove) : un en-tête de groupe développe vers TOUS ses membres, une ligne normale
+            // vers son seul FileEntry. LinkedHashSet : une même piste peut apparaître dans plusieurs
+            // lignes sélectionnées (en-tête + membre déjà sélectionné individuellement) sans se
+            // faire tagger deux fois.
+            java.util.Set<FileEntry> toTagSet = new java.util.LinkedHashSet<>();
+            for (int r : table.getSelectedRows()) toTagSet.addAll(entriesAtViewRow(r));
+            List<FileEntry> toTag = new ArrayList<>(toTagSet);
             continueStartTagging(toTag, 0, true);
             return;
         }
@@ -4757,7 +4821,12 @@ public class MainFrame extends JFrame {
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
         if (sel.length > 0) {
-            for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
+            // entriesAtViewRow() — même correctif que startTagging()/refreshSelectedMeta() (voir
+            // leur commentaire) : tableModel.get(table.convertRowIndexToModel(r)) se trompe de
+            // fichier (ou explose) dès que la vue arborescence est active.
+            java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
+            for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
+            targets.addAll(targetSet);
         } else {
             // allEntries() : "de tout" doit couvrir toute la bibliothèque, pas juste la vue
             // filtrée du moment — sinon un re-taguage "de tout" limité aux fichiers visibles.
@@ -4798,8 +4867,12 @@ public class MainFrame extends JFrame {
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
         if (sel.length > 0) {
-            for (int r : sel) {
-                FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
+            // entriesAtViewRow() — même correctif que forceRetag()/startTagging() (voir leur
+            // commentaire) : tableModel.get(table.convertRowIndexToModel(r)) se trompe de fichier
+            // (ou explose) dès que la vue arborescence est active.
+            java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
+            for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
+            for (FileEntry e : targetSet) {
                 if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
             }
         } else {
@@ -4854,7 +4927,11 @@ public class MainFrame extends JFrame {
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
         if (sel.length > 0) {
-            for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
+            // entriesAtViewRow() — même correctif que forceRetag()/startTagging() (voir leur
+            // commentaire), sinon un en-tête de groupe en vue arborescence casse tout.
+            java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
+            for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
+            targets.addAll(targetSet);
         } else {
             targets.addAll(tableModel.allEntries());
         }
@@ -4941,8 +5018,10 @@ public class MainFrame extends JFrame {
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
         if (sel.length > 0) {
-            for (int r : sel) {
-                FileEntry e = tableModel.get(table.convertRowIndexToModel(r));
+            // entriesAtViewRow() — même correctif que forceRetag()/reidentifyUnmatched().
+            java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
+            for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
+            for (FileEntry e : targetSet) {
                 if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
             }
         } else {
@@ -5103,8 +5182,10 @@ public class MainFrame extends JFrame {
             setStatus(I18n.t("Sélectionnez d'abord les fichiers à marquer comme déjà taggués."));
             return;
         }
-        List<FileEntry> targets = new ArrayList<>();
-        for (int r : sel) targets.add(tableModel.get(table.convertRowIndexToModel(r)));
+        // entriesAtViewRow() — même correctif que forceRetag()/fixEncoding().
+        java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
+        for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
+        List<FileEntry> targets = new ArrayList<>(targetSet);
 
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         int confirm = JOptionPane.showConfirmDialog(this,
@@ -5474,12 +5555,33 @@ public class MainFrame extends JFrame {
             if (e.status == FileEntry.Status.TAGGED) tagged++;
         if (tagged == 0) { setStatus(I18n.t("Aucun fichier tagué à renommer.")); return; }
 
-        List<RenamePreviewDialog.PreviewRow> preview = RenamePreviewDialog.compute(tableModel, currentMask);
-        if (preview.isEmpty()) { setStatus(I18n.t("Aucun fichier tagué à renommer.")); return; }
-
-        // ── 2. Afficher l'aperçu — non-modal avec barre de progression ───────
-        RenamePreviewDialog dlg = new RenamePreviewDialog(this, preview, buildRenameJob(currentMask, null));
-        dlg.setVisible(true);
+        // RenamePreviewDialog.compute() appelle Files.exists() par fichier tagué (détection de
+        // collision, voir FileRenamer.previewTarget()) — un aller-retour disque RÉEL par fichier.
+        // Appelé jusqu'ici en direct sur l'EDT : sur une bibliothèque de plusieurs centaines de
+        // milliers de fichiers tagués et un disque contentionné, ça gelait l'interface entière
+        // (aucun répaint) pendant potentiellement des dizaines de minutes — repéré en direct
+        // (2026-08-24), pile EDT bloquée dans UnixNativeDispatcher.access0() via ce même appel.
+        // Même correctif que "Tout tagger" (voir son commentaire, 2026-08-09) pour exactement la
+        // même classe de problème : déplacer le calcul en arrière-plan, garder l'EDT seulement
+        // pour l'affichage final.
+        setStatus(I18n.t("Préparation de l'aperçu de renommage (%d fichier(s) tagué(s))…", tagged));
+        new SwingWorker<List<RenamePreviewDialog.PreviewRow>, Void>() {
+            @Override protected List<RenamePreviewDialog.PreviewRow> doInBackground() {
+                return RenamePreviewDialog.compute(tableModel, currentMask);
+            }
+            @Override protected void done() {
+                List<RenamePreviewDialog.PreviewRow> preview;
+                try { preview = get(); } catch (Exception ex) {
+                    setStatus(I18n.t("Échec de la préparation de l'aperçu : %s", ex.getMessage()));
+                    return;
+                }
+                if (preview.isEmpty()) { setStatus(I18n.t("Aucun fichier tagué à renommer.")); return; }
+                setStatus(" ");
+                // ── 2. Afficher l'aperçu — non-modal avec barre de progression ───────
+                RenamePreviewDialog dlg = new RenamePreviewDialog(MainFrame.this, preview, buildRenameJob(currentMask, null));
+                dlg.setVisible(true);
+            }
+        }.execute();
     }
 
     private RenamePreviewDialog.RenameJob buildRenameJob(int maskIndex, Path destRoot) {
@@ -5902,14 +6004,28 @@ public class MainFrame extends JFrame {
         for (int i = 0; i < labelsArr.length; i++)
             if (labelsArr[i].equals(chosen)) { organizeMask = folderIndexes.get(i); break; }
 
-        // 3. Aperçu
-        List<RenamePreviewDialog.PreviewRow> preview =
-                RenamePreviewDialog.compute(tableModel, organizeMask, organizeDestRoot);
-        if (preview.isEmpty()) { setStatus(I18n.t("Aucun fichier à organiser.")); return; }
-
-        RenamePreviewDialog dlg = new RenamePreviewDialog(this,
-                preview, I18n.t("Organiser en dossiers"), buildRenameJob(organizeMask, organizeDestRoot));
-        dlg.setVisible(true);
+        // 3. Aperçu — même correctif que renameTagged() (voir son commentaire) : compute() fait un
+        // Files.exists() disque par fichier, jamais en direct sur l'EDT sur une grosse bibliothèque.
+        final int maskForPreview = organizeMask;
+        final Path destForPreview = organizeDestRoot;
+        setStatus(I18n.t("Préparation de l'aperçu d'organisation…"));
+        new SwingWorker<List<RenamePreviewDialog.PreviewRow>, Void>() {
+            @Override protected List<RenamePreviewDialog.PreviewRow> doInBackground() {
+                return RenamePreviewDialog.compute(tableModel, maskForPreview, destForPreview);
+            }
+            @Override protected void done() {
+                List<RenamePreviewDialog.PreviewRow> preview;
+                try { preview = get(); } catch (Exception ex) {
+                    setStatus(I18n.t("Échec de la préparation de l'aperçu : %s", ex.getMessage()));
+                    return;
+                }
+                if (preview.isEmpty()) { setStatus(I18n.t("Aucun fichier à organiser.")); return; }
+                setStatus(" ");
+                RenamePreviewDialog dlg = new RenamePreviewDialog(MainFrame.this,
+                        preview, I18n.t("Organiser en dossiers"), buildRenameJob(maskForPreview, destForPreview));
+                dlg.setVisible(true);
+            }
+        }.execute();
     }
 
     private void chooseMask() {
@@ -6719,6 +6835,68 @@ public class MainFrame extends JFrame {
         }.execute();
     }
 
+    /** Supprime directement les fichiers sélectionnés (n'importe quel statut, pas seulement les
+     *  illisibles comme {@link #deleteErrorFiles()}) — retour utilisateur (2026-08-21) : aucun
+     *  moyen de supprimer un audio depuis l'appli elle-même, il fallait repasser par le
+     *  gestionnaire de fichiers du système. Même sécurité que deleteErrorFiles()/DuplicatesDialog :
+     *  corbeille système plutôt que suppression définitive, confirmation explicite avant, retiré du
+     *  tableau seulement après succès réel (pas en optimiste avant confirmation du disque). */
+    private void deleteSelectedFiles() {
+        if (table == null) return;
+        java.util.Set<FileEntry> toDelete = new java.util.LinkedHashSet<>();
+        for (int row : table.getSelectedRows()) toDelete.addAll(entriesAtViewRow(row));
+        if (toDelete.isEmpty()) {
+            setStatus(I18n.t("Aucun fichier sélectionné."));
+            return;
+        }
+        List<FileEntry> targets = new ArrayList<>(toDelete);
+
+        StringBuilder sb = new StringBuilder(
+                I18n.t("<html><body style='width: 480px'>Déplacer <b>%d fichier(s)</b> dans la corbeille ?<br><br>", targets.size()));
+        int shown = Math.min(targets.size(), 8);
+        for (int i = 0; i < shown; i++) {
+            File f = targets.get(i).currentPath != null ? targets.get(i).currentPath.toFile() : targets.get(i).file;
+            sb.append("&nbsp;• ").append(f.getName()).append("<br>");
+        }
+        if (targets.size() > shown) sb.append(I18n.t("&nbsp;… et %d autre(s)<br>", targets.size() - shown));
+        sb.append(I18n.t("<br><i>Envoyé à la corbeille système — récupérable, pas une suppression définitive.</i></html>"));
+
+        int ok = JOptionPane.showConfirmDialog(this, sb.toString(),
+                I18n.t("Supprimer les fichiers sélectionnés"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        setStatus(I18n.t("Suppression de %d fichier(s)…", targets.size()));
+        new SwingWorker<int[], FileEntry>() {
+            @Override protected int[] doInBackground() {
+                java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+                boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                int deleted = 0, failDel = 0;
+                for (FileEntry e : targets) {
+                    File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    if (moved) { deleted++; publish(e); } else { failDel++; }
+                }
+                return new int[]{ deleted, failDel, trashSupported ? 1 : 0 };
+            }
+            @Override protected void process(List<FileEntry> chunks) {
+                for (FileEntry e : chunks) {
+                    int idx = tableModel.indexOf(e);
+                    if (idx >= 0) tableModel.remove(idx);
+                }
+            }
+            @Override protected void done() {
+                int[] r;
+                try { r = get(); } catch (Exception ex) { return; }
+                String where = r[2] == 1 ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
+                String msg = I18n.t("%d fichier(s) %s", r[0], where);
+                if (r[1] > 0) msg += I18n.t(", %d échec(s) (permission refusée ?)", r[1]);
+                setStatus(msg);
+                refreshStats();
+                JOptionPane.showMessageDialog(MainFrame.this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
+            }
+        }.execute();
+    }
+
     private void submitAcoustId() {
         if (!com.opentagger.AcoustIdSubmitter.isAvailable()) {
             showError(I18n.t("fpcalc introuvable — installez chromaprint pour soumettre une empreinte."));
@@ -6741,8 +6919,10 @@ public class MainFrame extends JFrame {
         int[] sel = table.getSelectedRows();
         List<FileEntry> candidates = new ArrayList<>();
         if (sel.length > 0) {
-            for (int r : sel)
-                candidates.add(tableModel.get(table.convertRowIndexToModel(r)));
+            // entriesAtViewRow() — même correctif que forceRetag()/fixEncoding().
+            java.util.Set<FileEntry> candidateSet = new java.util.LinkedHashSet<>();
+            for (int r : sel) candidateSet.addAll(entriesAtViewRow(r));
+            candidates.addAll(candidateSet);
         } else {
             // allEntries() : "de tout" doit couvrir toute la bibliothèque, pas juste la vue
             // filtrée du moment.
