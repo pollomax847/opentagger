@@ -1334,8 +1334,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Edit)[Feel It (Radio Edit)]".
         artist = collapseSelfConcatenatedTitle(artist);
         title  = collapseSelfConcatenatedTitle(title);
-        // Lire l'album maintenant (utilisé en fallback plus bas quand artiste manque)
-        String existingAlbum = cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
+        // Lire l'album maintenant (utilisé en fallback plus bas quand artiste manque). Ignoré en
+        // reidentification forcée — même raison que tagAlbum/albumHint plus haut : un tag album déjà
+        // faux (ex. contamination historique par un nom de dossier de repli, voir "Sans
+        // Correspondence" trouvé en direct 2026-08-27) biaiserait la recherche MB ET reviendrait
+        // systématiquement via le repli "tags existants" tout en bas de cette méthode — cassant même
+        // "Forcer le re-taguage", censé repartir de zéro. Sans ce garde-fou, un album corrompu ne
+        // pouvait JAMAIS être corrigé par re-identification forcée, seulement en éditant le tag à la
+        // main.
+        String existingAlbum = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.ALBUM));
 
         // Détection hors FR/EN : si les tags contiennent du japonais, coréen, arabe,
         // cyrillique, etc. → inutile de chercher dans MB avec ces termes, SongRec en priorité
