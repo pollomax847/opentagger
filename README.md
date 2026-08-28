@@ -149,7 +149,12 @@ Fichier audio chargé
 - **Java 21+**
 - **ffmpeg** (BPM, extraction segment audio pour SongRec, transcodage audio)
 - **fpcalc** (Chromaprint) — téléchargeable via **Préférences → Audio** si absent
-- **SongRec** (optionnel, Linux/macOS) — `sudo apt install songrec` ou [github.com/marin-m/SongRec](https://github.com/marin-m/SongRec)
+- **SongRec** (optionnel, Linux/macOS) — pas dans les dépôts officiels Debian/Ubuntu, nécessite d'ajouter la PPA tierce avant `apt install` :
+  ```bash
+  sudo add-apt-repository ppa:marin-m/songrec
+  sudo apt update && sudo apt install songrec
+  ```
+  ou compilation depuis [github.com/marin-m/SongRec](https://github.com/marin-m/SongRec)
 
 ### Linux
 

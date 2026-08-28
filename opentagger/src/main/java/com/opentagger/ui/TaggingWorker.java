@@ -450,6 +450,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (!unverifiedFallback) {
                 for (TagInfo candidate : results) {
                     if (candidate.score < seuil) break; // triés par score décroissant : la suite ne fera que pire
+                    // Candidat "mix DJ continu" (ex. "BPM Continuous DJ Mix (mixed by Art
+                    // Department)") : une piste normale matchée par empreinte audio peut tomber sur
+                    // l'enregistrement d'un mix qui la CONTIENT en transition — le garde-fou de durée
+                    // juste en dessous ne protège pas ce cas quand mbDurationSec n'est pas renseigné
+                    // pour ce candidat (SongRec/AcoustID sans confirmation MB, voir leurs branches).
+                    // Repéré en direct 2026-08-28 : "Eric Volta - Blood Burgundy" accepté à 85% comme
+                    // "Art Department - Bpm Continuous Dj Mix", effaçant titre/artiste/album/année
+                    // corrects. Un titre de piste individuelle ne ressemble normalement jamais à ça.
+                    if (isContinuousMixTitle(candidate.title)) continue;
                     candidate.durationSec = entry.current.durationSec;
                     if (!FileEntry.isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
                         durationOk = candidate;
@@ -471,6 +480,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 return;
             }
             best = durationOk;
+
+            // "- Topic" (nom de chaîne YouTube auto-générée) — voir stripYoutubeTopicSuffix() pour
+            // le pourquoi. Appliqué ici, au tout dernier moment avant usage, pour couvrir toutes les
+            // sources (SongRec, AcoustID, MB, replis) sans dupliquer le nettoyage dans chacune.
+            best.artist      = stripYoutubeTopicSuffix(best.artist);
+            best.albumArtist = stripYoutubeTopicSuffix(best.albumArtist);
 
             // Cohérence de groupe (voir groupPinnedRelease) : cette piste vient de trouver une release
             // à haute confiance (score ≥ seuil ET durée cohérente, validé juste au-dessus) — la fixer
@@ -1695,6 +1710,31 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         "reprise", "instrumental", "medley", "overture", "prelude",
         "remix", "edit", "version", "live", "acoustic"
     );
+
+    /** Titre de candidat ressemblant à un mix DJ continu plutôt qu'à une piste individuelle — voir
+     *  son appelant (boucle de cohérence de durée dans processEntry()). Volontairement étroit : ne
+     *  doit jamais accrocher un vrai titre de piste contenant juste "remix" (très courant), donc
+     *  chaque motif exige un mot-clé de mix EN PLUS de "mix" seul. */
+    private static final java.util.regex.Pattern CONTINUOUS_MIX_TITLE = java.util.regex.Pattern.compile(
+            "(?i)\\b(continuous\\s+mix|non-?stop\\s+mix|megamix|mixed\\s+by|mix\\s+session|"
+            + "bpm\\s+continuous|dj\\s*-?\\s*mix)\\b");
+
+    private static boolean isContinuousMixTitle(String title) {
+        return title != null && CONTINUOUS_MIX_TITLE.matcher(title).find();
+    }
+
+    /** Suffixe "- Topic" (nom de chaîne YouTube Content ID auto-générée, ex. "Adriatique - Topic") —
+     *  jamais un vrai crédit d'artiste, peut remonter via une empreinte audio (SongRec/AcoustID)
+     *  identifiant un enregistrement dont l'origine YouTube a laissé ce suffixe dans les métadonnées
+     *  communautaires. Repéré en direct 2026-08-28 : a remplacé "Adriatique, Marino Canal et Delhia
+     *  De France" (crédit complet, correct) par "Adriatique - Topic" (un seul artiste, suffixe
+     *  parasite) — une régression, pas une amélioration. */
+    private static final java.util.regex.Pattern YOUTUBE_TOPIC_SUFFIX = java.util.regex.Pattern.compile(
+            "(?i)\\s*-\\s*topic$");
+
+    private static String stripYoutubeTopicSuffix(String artist) {
+        return artist == null ? null : YOUTUBE_TOPIC_SUFFIX.matcher(artist).replaceAll("");
+    }
 
     private boolean isGenericTag(String s) {
         if (s == null || s.isBlank()) return true;
