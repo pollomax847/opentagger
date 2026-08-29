@@ -554,6 +554,7 @@ public class TagWriter {
 
         // ── Statistiques d'écoute ───────────────────────────────────────────────
         setCustomField(tag, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+        setCustomField(tag, "LASTFM_PLAYCOUNT",       i.lastfmPlayCount);
 
         // ── Marqueur de taguage (portable, indépendant du cache SQLite) ─────────
         setCustomField(tag, "OT_TAGGEDDATE", i.taggedDate);
@@ -739,6 +740,7 @@ public class TagWriter {
 
         // Statistiques d'écoute
         apFreeform(cmd, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+        apFreeform(cmd, "LASTFM_PLAYCOUNT",       i.lastfmPlayCount);
 
         // Marqueur de taguage (portable, indépendant du cache SQLite)
         apFreeform(cmd, "OT_TAGGEDDATE", i.taggedDate);

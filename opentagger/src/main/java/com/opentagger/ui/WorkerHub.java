@@ -37,7 +37,7 @@ public final class WorkerHub {
 
     public enum TaskKind {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
-        COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, PODCAST_TAG,
+        COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, PODCAST_TAG,
         DUPLICATE_DETECT
     }
 
@@ -184,6 +184,10 @@ public final class WorkerHub {
         if (a == b) return true;
         if ((a == TaskKind.LISTENBRAINZ_SYNC && b == TaskKind.TAGGING)
                 || (a == TaskKind.TAGGING && b == TaskKind.LISTENBRAINZ_SYNC)) return true;
+        // LASTFM_SYNC (LastFmSyncWorker) : même raison que LISTENBRAINZ_SYNC juste au-dessus, même
+        // forme d'écriture (writer.write() sur les fichiers déjà TAGGED du tableau).
+        if ((a == TaskKind.LASTFM_SYNC && b == TaskKind.TAGGING)
+                || (a == TaskKind.TAGGING && b == TaskKind.LASTFM_SYNC)) return true;
         // Recherche de compilation (CompilationClusterWorker) : ne fait QUE chercher des
         // correspondances et les remonter pour revue utilisateur (CompilationMatchDialog) — n'écrit
         // RIEN sur le disque ni ne mute aucun FileEntry pendant cette passe (voir sa Javadoc), et

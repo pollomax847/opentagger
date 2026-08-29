@@ -185,7 +185,7 @@ public class MainFrame extends JFrame {
     // ressource partagée à protéger) plutôt qu'un compteur de référence sur un composant unique.
     private enum ProgressSlot {
         TAGGING, SAVE, INFO_COMPLETER, TRANSCODE, ALBUM_COMPLETION, ALBUM_CLUSTER,
-        COMPILATION_CLUSTER, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, DUPLICATE_DETECT
+        COMPILATION_CLUSTER, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, DUPLICATE_DETECT
     }
     private final java.util.Map<ProgressSlot, JProgressBar> progressBars = new java.util.EnumMap<>(ProgressSlot.class);
     private JPanel progressPanel;
@@ -1202,6 +1202,7 @@ public class MainFrame extends JFrame {
         retraitement.add(mitem(I18n.t("Nettoyer les noms + Ré-identifier (Non identifiés)…"), null, e -> cleanNamesAndReidentifyUnmatched()));
         retraitement.add(mitem(I18n.t("Marquer la sélection comme déjà taggée…"), null, e -> markAsAlreadyTagged()));
         retraitement.add(mitem(I18n.t("Synchroniser ListenBrainz…"), null,    e -> syncListenBrainz()));
+        retraitement.add(mitem(I18n.t("Synchroniser Last.fm…"), null,         e -> syncLastFm()));
         m.add(retraitement);
 
         JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
@@ -1367,6 +1368,7 @@ public class MainFrame extends JFrame {
         new String[]{"refreshMeta",        I18n.t("Rafraîchir tags + pochette")},
         new String[]{"forceRetag",         I18n.t("Forcer le re-taguage")},
         new String[]{"syncListenBrainz",   I18n.t("Synchroniser ListenBrainz")},
+        new String[]{"syncLastFm",         I18n.t("Synchroniser Last.fm")},
         new String[]{"podcastDialog",      I18n.t("Tagger comme podcast")},
         new String[]{"detectDuplicates",   I18n.t("Détecter les doublons")},
         new String[]{"historyDialog",      I18n.t("Historique de taguage")},
@@ -1402,6 +1404,8 @@ public class MainFrame extends JFrame {
                 I18n.t("Remettre en PENDING et re-taguer"), this::forceRetag));
         list.add(new ToolbarAction("syncListenBrainz", I18n.t("Synchroniser ListenBrainz"),
                 I18n.t("Récupérer le nombre d'écoutes ListenBrainz pour les fichiers tagués"), this::syncListenBrainz));
+        list.add(new ToolbarAction("syncLastFm", I18n.t("Synchroniser Last.fm"),
+                I18n.t("Récupérer le nombre d'écoutes Last.fm pour les fichiers tagués"), this::syncLastFm));
         list.add(new ToolbarAction("podcastDialog", I18n.t("Tagger comme podcast"),
                 I18n.t("Ouvrir le dialogue de taguage podcast"), this::openPodcastDialog));
         list.add(new ToolbarAction("detectDuplicates", I18n.t("Détecter les doublons"),
@@ -3214,6 +3218,7 @@ public class MainFrame extends JFrame {
             case COMPILATION_CLUSTER -> I18n.t("Compilations");
             case VIDEO_RECOVERY      -> I18n.t("Récupération vidéo");
             case LISTENBRAINZ_SYNC   -> I18n.t("ListenBrainz");
+            case LASTFM_SYNC         -> I18n.t("Last.fm");
             case DUPLICATE_DETECT    -> I18n.t("Doublons");
         };
     }
@@ -4798,6 +4803,63 @@ public class MainFrame extends JFrame {
         });
         WorkerHub.get().submit(WorkerHub.TaskKind.LISTENBRAINZ_SYNC,
                 I18n.t("Synchronisation ListenBrainz"), w, () -> w.cancel(false));
+    }
+
+    /** Synchronise le nombre d'écoutes Last.fm — même mécanique que {@link #syncListenBrainz}, voir
+     *  son commentaire (LastFmSyncWorker/LastFmClient.fetchTopTrackCounts() à la place). */
+    private void syncLastFm() {
+        Optional<WorkerHub.TaskHandle> running = WorkerHub.get().current(WorkerHub.TaskKind.LASTFM_SYNC);
+        if (running.isPresent()) {
+            running.get().cancel();
+            setStatus(I18n.t("Synchronisation Last.fm annulée."));
+            return;
+        }
+        if (!WorkerHub.get().blockers(WorkerHub.TaskKind.LASTFM_SYNC).isEmpty()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin avant de synchroniser Last.fm."));
+            return;
+        }
+
+        if (Config.get().lastfmUsername().isBlank()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Configurez d'abord votre nom d'utilisateur Last.fm dans Préférences → APIs."),
+                "Last.fm", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        // allEntries() : sinon synchronisation incomplète si un filtre est actif.
+        List<FileEntry> targets = new ArrayList<>();
+        java.util.Set<String> seenPaths = new java.util.HashSet<>();
+        for (FileEntry e : tableModel.allEntries()) {
+            if (e.status != FileEntry.Status.TAGGED) continue;
+            String p = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath().toString();
+            if (seenPaths.add(p)) targets.add(e);
+        }
+        if (targets.isEmpty()) {
+            setStatus(I18n.t("Aucun fichier tagué à synchroniser."));
+            return;
+        }
+
+        beginProgress(ProgressSlot.LASTFM_SYNC);
+        progressBars.get(ProgressSlot.LASTFM_SYNC).setIndeterminate(true);
+        setStatus(I18n.t("Synchronisation Last.fm…"));
+
+        LastFmSyncWorker w = new LastFmSyncWorker(
+            targets,
+            msg -> SwingUtilities.invokeLater(() -> setStatus(msg)),
+            entry -> SwingUtilities.invokeLater(() -> { tableModel.update(entry); appendLog(entry); refreshStats(); })
+        );
+        w.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    progressBars.get(ProgressSlot.LASTFM_SYNC).setIndeterminate(false);
+                    endProgress(ProgressSlot.LASTFM_SYNC);
+                    refreshStats();
+                });
+            }
+        });
+        WorkerHub.get().submit(WorkerHub.TaskKind.LASTFM_SYNC,
+                I18n.t("Synchronisation Last.fm"), w, () -> w.cancel(false));
     }
 
     private void forceRetag() {

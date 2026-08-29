@@ -140,6 +140,25 @@ public final class ApiKeyTester {
         }
     }
 
+    public static Result testLastFmUsername(String username) {
+        if (username == null || username.isBlank()) return new Result(false, I18n.t("Nom d'utilisateur vide"));
+        try {
+            String url = "https://ws.audioscrobbler.com/2.0/?method=user.getinfo&user=" + enc(username)
+                    + "&api_key=" + enc(Config.get().lastfmKey()) + "&format=json";
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
+                    .GET().build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200) return new Result(true, I18n.t("Utilisateur trouvé"));
+            if (resp.statusCode() == 404) return new Result(false, I18n.t("Utilisateur introuvable sur Last.fm"));
+            return new Result(false, "HTTP " + resp.statusCode());
+        } catch (Exception e) {
+            return new Result(false, e.getMessage());
+        }
+    }
+
     public static Result testListenBrainz(String username) {
         if (username == null || username.isBlank()) return new Result(false, I18n.t("Nom d'utilisateur vide"));
         try {

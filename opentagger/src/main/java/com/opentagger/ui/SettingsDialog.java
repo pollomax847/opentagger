@@ -84,6 +84,9 @@ public class SettingsDialog extends JDialog {
     // ── Onglet APIs (ListenBrainz) ────────────────────────────────────────────
     private JTextField tfListenBrainzUsername;
     private JSpinner   spListenBrainzMaxTracks;
+    // ── Onglet APIs (Last.fm, synchro écoutes — distinct de tfLastFmKey ci-dessus) ──────────────
+    private JTextField tfLastFmUsername;
+    private JSpinner   spLastfmMaxTracks;
 
     // ── Onglet Tags ───────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -478,6 +481,10 @@ public class SettingsDialog extends JDialog {
         spListenBrainzMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
         spListenBrainzMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
                 + "ListenBrainz (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
+        tfLastFmUsername  = tf();
+        spLastfmMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
+        spLastfmMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
+                + "Last.fm (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
         // FanArt.tv (Tags → Fournisseurs de pochette) et Last.fm (Matching → Sources de genres,
         // voir buildMatchingPanel()) sont activés/priorisés là où se trouve le reste de leur
         // comportement — cet onglet ne garde QUE les clés/identifiants (2026-08-16, retour
@@ -508,6 +515,9 @@ public class SettingsDialog extends JDialog {
             { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testListenBrainz(tfListenBrainzUsername.getText().trim()) },
             { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null, null },
+            { "Nom d'utilisateur Last.fm :", tfLastFmUsername, "https://www.last.fm/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFmUsername(tfLastFmUsername.getText().trim()) },
+            { "Pistes max à synchroniser (Last.fm) :", spLastfmMaxTracks, null, null },
         };
 
         for (int i = 0; i < rows.length; i++) {
@@ -2395,6 +2405,8 @@ public class SettingsDialog extends JDialog {
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
         tfListenBrainzUsername .setText(cfg.listenbrainzUsername());
         spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
+        tfLastFmUsername .setText(cfg.lastfmUsername());
+        spLastfmMaxTracks.setValue(cfg.lastfmMaxTracks());
 
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkLastfmArtistUrls .setSelected(cfg.bool("lastfm.fetch_artist_urls", true));
@@ -2544,7 +2556,7 @@ public class SettingsDialog extends JDialog {
     private JSpinner[] allSpinners() {
         return new JSpinner[]{
             spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays, spDiscogsMaxGenres,
-            spLastfmMaxGenres, spnSkipSongRecMinScore, spListenBrainzMaxTracks, spFpcalcThreads,
+            spLastfmMaxGenres, spnSkipSongRecMinScore, spListenBrainzMaxTracks, spLastfmMaxTracks, spFpcalcThreads,
             spBatchThreads, spMbMinGenreUsage, spMbMaxGenres, spTranscodeBitrate, spMbRateLimitMs
         };
     }
@@ -2635,6 +2647,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
         p.setProperty("listenbrainz.username",   tfListenBrainzUsername.getText().trim());
         p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
+        p.setProperty("lastfm.username",   tfLastFmUsername.getText().trim());
+        p.setProperty("lastfm.max_tracks", String.valueOf(spLastfmMaxTracks.getValue()));
 
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("lastfm.fetch_artist_urls", String.valueOf(chkLastfmArtistUrls.isSelected()));
@@ -2824,7 +2838,7 @@ public class SettingsDialog extends JDialog {
         "acoustid.api_key", "acoustid.user_token",
         "discogs.consumer_key", "discogs.consumer_secret",
         "lastfm.api_key", "fanart.api_key", "rapidapi.key", "audd.api_token",
-        "listenbrainz.username",
+        "listenbrainz.username", "lastfm.username",
         "mb.oauth.client_id", "mb.oauth.client_secret", "mb.oauth.token",
         "mb.oauth.refresh_token", "mb.oauth.username", "mb.oauth.collection_id",
     };

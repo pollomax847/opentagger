@@ -221,6 +221,7 @@ public class TagInfo {
 
     // ── Statistiques d'écoute ────────────────────────────────────────────────
     public String listenbrainzPlayCount = "";  // nombre d'écoutes ListenBrainz (TXXX:LISTENBRAINZ_PLAYCOUNT)
+    public String lastfmPlayCount       = "";  // nombre d'écoutes Last.fm (TXXX:LASTFM_PLAYCOUNT)
 
     /** Vrai si `s` ressemble à un placeholder générique plutôt qu'à une vraie valeur d'identité
      *  (artiste/titre/album) — trop court pour être un nom réel ("1", "0", "-"), ou un des libellés

@@ -510,6 +510,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         : mb.lookupRecording(best.recordingMbid);
                     if (full != null) {
                         if (lookupCached == null) cache.putLookup(best.recordingMbid, mb.lastRawJson());
+                        // full.artist vient de extractTrackArtists() sur le artist-credit COMPLET de
+                        // CET enregistrement précis (déjà confirmé via recordingMbid) — inclut les
+                        // featurings/collaborateurs via joinphrase ("Adriatique, Marino Canal et
+                        // Delhia De France"), contrairement à best.artist qui peut venir d'une source
+                        // plus pauvre (SongRec/AcoustID ne renvoient souvent que l'artiste principal).
+                        // Repéré en direct 2026-08-28 : ce bloc enrichissait déjà album/année/pistes
+                        // depuis full, mais jamais l'artiste — un featuring correctement retrouvé côté
+                        // MusicBrainz restait perdu malgré tout. Écrasement inconditionnel (comme
+                        // album/année ci-dessous) : full vient d'un lookup DIRECT sur le MBID déjà
+                        // confirmé, donc plus fiable que best.artist quelle que soit sa source.
+                        if (!full.artist.isBlank())           best.artist           = full.artist;
                         if (!full.album.isBlank())            best.album            = full.album;
                         if (!full.year.isBlank())             best.year             = full.year;
                         if (!full.track.isBlank())            best.track            = full.track;

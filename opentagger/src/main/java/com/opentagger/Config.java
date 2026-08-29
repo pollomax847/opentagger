@@ -544,6 +544,9 @@ public class Config {
     public String listenbrainzUsername()  { return str("listenbrainz.username", ""); }
     public int    listenbrainzMaxTracks() { return num("listenbrainz.max_tracks", 1000); }
 
+    public String lastfmUsername()  { return str("lastfm.username", ""); }
+    public int    lastfmMaxTracks() { return num("lastfm.max_tracks", 1000); }
+
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {
         props.setProperty(key, value != null ? value : "");

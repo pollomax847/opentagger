@@ -225,6 +225,52 @@ public class LastFmClient {
         return response;
     }
 
+    /**
+     * Récupère le classement des pistes les plus écoutées par {@code username} (user.getTopTracks),
+     * jusqu'à {@code maxTracks} pistes (pagination automatique, 1000/page — plafond confirmé en
+     * direct sur ws.audioscrobbler.com le 2026-08-29). Même architecture que
+     * ListenBrainzClient.fetchTopRecordingCounts() (un seul fetch en masse plutôt qu'un appel par
+     * fichier) — voir LastFmSyncWorker, son seul appelant.
+     *
+     * @return map recordingMbid → nombre d'écoutes (les pistes sans MBID résolu côté Last.fm — assez
+     *         fréquent, la résolution dépend des tags du scrobble d'origine — sont ignorées, pas une
+     *         erreur : rien à quoi les rattacher côté fichiers déjà identifiés par MBID).
+     */
+    public java.util.Map<String, Integer> fetchTopTrackCounts(String username, int maxTracks) throws Exception {
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+        int perPage = 1000;
+        int page = 1;
+        while (counts.size() < maxTracks) {
+            int want = Math.min(perPage, maxTracks - counts.size());
+            String url = BASE_URL + "?method=user.gettoptracks&user=" + encode(username)
+                    + "&api_key=" + Config.get().lastfmKey() + "&format=json"
+                    + "&limit=" + want + "&page=" + page;
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
+                    .GET()
+                    .build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200)
+                throw new Exception("Last.fm HTTP " + response.statusCode() + " : " + response.body());
+
+            JsonNode tracks = mapper.readTree(response.body()).path("toptracks").path("track");
+            if (!tracks.isArray() || tracks.isEmpty()) break;
+
+            for (JsonNode t : tracks) {
+                String mbid = t.path("mbid").asText("").trim();
+                int    n    = t.path("playcount").asInt(0);
+                if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
+            }
+
+            if (tracks.size() < want) break; // dernière page (moins de résultats que demandé)
+            page++;
+        }
+        return counts;
+    }
+
     private boolean isMoodTag(String t) {
         for (String[] group : MOOD_MAP)
             for (String kw : group)
