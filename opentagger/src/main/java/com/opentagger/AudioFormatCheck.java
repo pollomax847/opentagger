@@ -128,6 +128,37 @@ public final class AudioFormatCheck {
         }
     }
 
+    /**
+     * Vrai si ffprobe rapporte une durée exploitable (>= 5s) pour ce fichier — utilisé pour
+     * distinguer un fichier réellement vide/cassé (transcode interrompu, téléchargement avorté :
+     * header peut-être présent mais aucun contenu derrière) d'un simple format non couvert par
+     * {@link #suggestCorrectExtension}. Voir MainFrame.repairMisnamedFiles() — jamais appelé sur le
+     * chemin normal, action manuelle uniquement.
+     */
+    public static boolean hasReadableDuration(java.io.File f) {
+        try {
+            List<String> cmd = List.of(Config.get().str("audio.ffprobe_path", "ffprobe"),
+                    "-v", "quiet", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", f.getAbsolutePath());
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(false);
+            Process p = pb.start();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try (InputStream is = p.getInputStream()) { is.transferTo(out); } catch (Exception ignored) {}
+            });
+            boolean done = p.waitFor(10, TimeUnit.SECONDS);
+            if (!done) { p.destroyForcibly(); return false; }
+            try { drain.join(1000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            String result = out.toString(StandardCharsets.UTF_8).strip();
+            if (result.isEmpty()) return false;
+            double dur = Double.parseDouble(result);
+            return dur >= 5.0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static String detectRealFormat(java.io.File f) {
         try {
             List<String> cmd = List.of(Config.get().str("audio.ffprobe_path", "ffprobe"),

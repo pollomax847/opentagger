@@ -5,6 +5,7 @@ import com.opentagger.AlbumGrouping;
 import com.opentagger.AudioScanner;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
+import com.opentagger.HeadphonesClient;
 import com.opentagger.I18n;
 import com.opentagger.MetadataCache;
 import com.opentagger.TagWriter;
@@ -234,6 +235,13 @@ public class MainFrame extends JFrame {
     // tout de suite ; une seule fenêtre les regroupe à la toute fin réelle de la chaîne (voir
     // flushPendingCompilationMatches(), appelée aux deux points où runPostTagCommand() l'est déjà).
     private final List<CompilationClusterWorker.CompilationMatch> pendingCompilationMatches = new ArrayList<>();
+    // Garde anti-réentrance pour flushPendingCompilationMatches() — sans elle, deux chaînes
+    // Enregistrer→Complétion→Compilations qui atteignaient "la fin" à quelques instants d'écart
+    // pouvaient chacune ouvrir SA PROPRE fenêtre modale (CompilationMatchDialog.setVisible(true)
+    // continue de pomper les autres événements EDT pendant qu'elle bloque, donc un second appel
+    // différé pouvait s'exécuter avant que le premier n'ait fini) — repéré en direct 2026-09-01,
+    // deux fenêtres de revue ouvertes simultanément.
+    private boolean compilationMatchDialogOpen = false;
 
     // Budget PARTAGÉ (tous scans confondus, tout le lancement) de relectures forcées pour rattraper
     // les entrées scan_cache sans durée (voir la boucle de scan) — évite qu'une bibliothèque de
@@ -596,9 +604,23 @@ public class MainFrame extends JFrame {
         actionMap.put("removeRows", new javax.swing.AbstractAction() {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) {
                 if (table == null) return;
-                int[] rows = table.getSelectedRows();
-                for (int i = rows.length - 1; i >= 0; i--)
-                    tableModel.remove(table.convertRowIndexToModel(rows[i]));
+                // entryAtViewRow()/entriesAtViewRow() (pas tableModel.remove(table.
+                // convertRowIndexToModel(r)), même bug de fond qu'applyDetail()/transcodeFiles() en
+                // vue arborescence — voir leurs commentaires) : trouvé en direct 2026-09-01. Suppr
+                // sur une sélection en vue Arborescence par album pouvait retirer de la liste un
+                // fichier totalement différent de celui affiché comme sélectionné (jamais le fichier
+                // réel sur disque ici, juste la ligne — mais quand même le mauvais retrait).
+                // Dédoublonné + trié en indices décroissants avant suppression, sinon retirer un
+                // index bas décale tous les index plus hauts encore à traiter.
+                java.util.Set<FileEntry> toRemove = new java.util.LinkedHashSet<>();
+                for (int row : table.getSelectedRows()) toRemove.addAll(entriesAtViewRow(row));
+                List<Integer> indices = new ArrayList<>();
+                for (FileEntry fe : toRemove) {
+                    int idx = tableModel.indexOf(fe);
+                    if (idx >= 0) indices.add(idx);
+                }
+                indices.sort(java.util.Comparator.reverseOrder());
+                for (int idx : indices) tableModel.remove(idx);
             }
         });
 
@@ -650,7 +672,7 @@ public class MainFrame extends JFrame {
         rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_T,
                 java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "transcode");
         actionMap.put("transcode", new javax.swing.AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent e) { transcodeFiles(false); }
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { transcodeFiles(); }
         });
 
         undoManager.addListener(this::updateUndoButtons);
@@ -905,9 +927,16 @@ public class MainFrame extends JFrame {
         }));
         sel.add(mitem(I18n.t("Désélectionner tout"),     null,      e -> table.clearSelection()));
         sel.add(mitem(I18n.t("Retirer la sélection"),    null,  e -> {
-            int[] rows = table.getSelectedRows();
-            for (int i = rows.length - 1; i >= 0; i--)
-                tableModel.remove(table.convertRowIndexToModel(rows[i]));
+            // Même correctif que le raccourci clavier Suppr (voir son commentaire) — vue arborescence.
+            java.util.Set<FileEntry> toRemove = new java.util.LinkedHashSet<>();
+            for (int row : table.getSelectedRows()) toRemove.addAll(entriesAtViewRow(row));
+            List<Integer> indices = new ArrayList<>();
+            for (FileEntry fe : toRemove) {
+                int idx = tableModel.indexOf(fe);
+                if (idx >= 0) indices.add(idx);
+            }
+            indices.sort(java.util.Comparator.reverseOrder());
+            for (int idx : indices) tableModel.remove(idx);
         }));
         sel.addSeparator();
         sel.add(mitem(I18n.t("Sélectionner les identifiés (pas encore enregistrés)"), null, e -> selectByStatus(FileEntry.Status.IDENTIFIED)));
@@ -1106,8 +1135,11 @@ public class MainFrame extends JFrame {
         m.add(mitem(I18n.t("Grouper les albums…"),     "Ctrl+K", e -> clusterAlbums()));
         m.add(mitem(I18n.t("Grouper par compilations…"), null,   e -> groupByCompilations()));
         m.addSeparator();
-        m.add(mitem(I18n.t("Transcoder les fichiers…"),   "Ctrl+T", e -> transcodeFiles(false)));
-        m.add(mitem(I18n.t("Transcoder la sélection…"),   null,     e -> transcodeFiles(true)));
+        // Fusionné (2026-09-02) : un seul item, transcodeFiles() choisit lui-même sélection vs
+        // tout — voir son commentaire. Remplace les deux anciens items "…les fichiers"/"…la
+        // sélection" qui appelaient en réalité TOUJOURS la même branche "tout" quel que soit le
+        // bouton cliqué.
+        m.add(mitem(I18n.t("Transcoder…"),   "Ctrl+T", e -> transcodeFiles()));
         return m;
     }
 
@@ -1201,27 +1233,45 @@ public class MainFrame extends JFrame {
         retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNamesOnly()));
         retraitement.add(mitem(I18n.t("Nettoyer les noms + Ré-identifier (Non identifiés)…"), null, e -> cleanNamesAndReidentifyUnmatched()));
         retraitement.add(mitem(I18n.t("Marquer la sélection comme déjà taggée…"), null, e -> markAsAlreadyTagged()));
-        retraitement.add(mitem(I18n.t("Synchroniser ListenBrainz…"), null,    e -> syncListenBrainz()));
-        retraitement.add(mitem(I18n.t("Synchroniser Last.fm…"), null,         e -> syncLastFm()));
+        retraitement.add(mitem(I18n.t("Synchroniser les compteurs d'écoute (ListenBrainz + Last.fm)…"), null, e -> syncPlayCounts()));
         m.add(retraitement);
 
+        // Découpé en 4 sous-menus (2026-09-02, retour utilisateur "c'est le bordel") — même motif
+        // déjà validé ailleurs dans ce menu (voir buildSubmenuSelection() : "7 items à plat, trop
+        // d'un coup") : 16 items à plat dans un seul "Bibliothèque" avait largement dépassé ce
+        // seuil au fil des fonctionnalités ajoutées cette session.
         JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
-        bibliotheque.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
-        bibliotheque.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
-        bibliotheque.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
-        bibliotheque.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
-        bibliotheque.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
-        bibliotheque.add(mitem(I18n.t("Supprimer la sélection (corbeille)…"), null, e -> deleteSelectedFiles()));
-        bibliotheque.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
-        bibliotheque.add(mitem(I18n.t("Rapport Non identifiés…"), null,
+
+        JMenu nettoyage = new JMenu(I18n.t("Nettoyage"));
+        nettoyage.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
+        nettoyage.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
+        nettoyage.add(mitem(I18n.t("Réparer les fichiers audio mal nommés…"), null, e -> repairMisnamedFiles()));
+        nettoyage.add(mitem(I18n.t("Nettoyer les dossiers orphelins…"), null, e -> cleanOrphanFolders()));
+        nettoyage.add(mitem(I18n.t("Revue des durées incohérentes…"), null,
+            e -> new DurationMismatchReviewDialog(this, tableModel).setVisible(true)));
+        nettoyage.add(mitem(I18n.t("Supprimer la sélection (corbeille)…"), null, e -> deleteSelectedFiles()));
+        bibliotheque.add(nettoyage);
+
+        JMenu rapports = new JMenu(I18n.t("Rapports"));
+        rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
+        rapports.add(mitem(I18n.t("Rapport Non identifiés…"), null,
             e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
-        bibliotheque.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
+        rapports.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
             e -> new CompilationRestoreReportDialog(this).setVisible(true)));
-        bibliotheque.add(mitem(I18n.t("Importer XML iTunes…"), null,
+        bibliotheque.add(rapports);
+
+        JMenu importExport = new JMenu(I18n.t("Import / Export"));
+        importExport.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
+        importExport.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
+        importExport.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
+        importExport.add(mitem(I18n.t("Importer XML iTunes…"), null,
             e -> new ITunesImportDialog(this, tableModel).setVisible(true)));
-        bibliotheque.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
+        importExport.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
             e -> writeItunesXmlCorrections()));
-        bibliotheque.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
+        importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
+        bibliotheque.add(importExport);
+
+        bibliotheque.add(mitem(I18n.t("Envoyer vers Headphones (album manquant)…"), null, e -> sendToHeadphones()));
         m.add(bibliotheque);
 
         JMenu musicbrainz = new JMenu("MusicBrainz");
@@ -1389,7 +1439,8 @@ public class MainFrame extends JFrame {
                 I18n.t("Rescanner les dossiers chargés pour détecter les nouveaux fichiers (F5)"),
                 this::refreshFolders));
         list.add(new ToolbarAction("transcode", I18n.t("Transcoder"),
-                I18n.t("Transcoder les fichiers sélectionnés (Ctrl+T)"), () -> transcodeFiles(false)));
+                I18n.t("Transcoder la sélection, ou toute la bibliothèque si rien n'est sélectionné (Ctrl+T)"),
+                () -> transcodeFiles()));
         list.add(new ToolbarAction("submitAcoustId", I18n.t("Soumettre AcoustID"),
                 I18n.t("Envoyer les empreintes AcoustID de la sélection, ou de toute la bibliothèque si rien n'est sélectionné"),
                 this::submitAcoustId));
@@ -1797,8 +1848,10 @@ public class MainFrame extends JFrame {
             public String getToolTipText(java.awt.event.MouseEvent e) {
                 int row = rowAtPoint(e.getPoint());
                 if (row < 0) return null;
-                int mr = convertRowIndexToModel(row);
-                return tableModel.getTooltip(mr);
+                // entryAtViewRow() (pas tableModel.getTooltip(convertRowIndexToModel(r)), même bug
+                // de fond qu'ailleurs dans cette classe — voir applyDetail()) : en vue arborescence,
+                // affichait l'infobulle d'un fichier différent de celui survolé.
+                return tableModel.getTooltip(entryAtViewRow(row));
             }
 
             // Avant ce correctif, un tableau vide (premier lancement, ou "Vider" cliqué) était un
@@ -1960,9 +2013,15 @@ public class MainFrame extends JFrame {
      *  ni "Erreur" : ces deux-là n'ont structurellement pas de pochette/album exploitable (voir
      *  applyFilter(), qui bascule automatiquement vers la vue Liste quand l'un des deux devient le
      *  filtre actif pendant que Cover Flow est affiché — rester dessus n'y montrerait jamais rien). */
+    // PENDING/PROCESSING retirés (2026-09-02, retour utilisateur "mode coverflow bizarre") : ces
+    // fichiers n'ont par définition jamais été identifiés/tagués, donc quasiment jamais de vraie
+    // pochette téléchargée — juste une tuile grise placeholder. Même raisonnement déjà appliqué à
+    // SKIPPED/ERROR ailleurs (applyFilter() : "n'afficherait jamais rien d'utile, juste un
+    // carrousel vide") — PENDING/PROCESSING ont exactement le même défaut, jamais exclus jusqu'ici.
+    // Sur une bibliothèque encore majoritairement en attente, la quasi-totalité du carrousel
+    // n'était que des tuiles vides sans intérêt.
     private static boolean isCoverFlowEligible(FileEntry.Status s) {
-        return s == FileEntry.Status.TAGGED || s == FileEntry.Status.IDENTIFIED
-            || s == FileEntry.Status.PENDING || s == FileEntry.Status.PROCESSING;
+        return s == FileEntry.Status.TAGGED || s == FileEntry.Status.IDENTIFIED;
     }
 
     private static String statusLabel(FileEntry.Status s) {
@@ -2948,6 +3007,87 @@ public class MainFrame extends JFrame {
 
     /** Sélection actuelle, DANS L'ORDRE du tableau (pas l'ordre de clic) — voir BandcampMatchDialog,
      *  qui applique la piste N de Bandcamp au N-ième élément de cette liste. */
+    /**
+     * Signale à une instance Headphones tierce (API HTTP, voir HeadphonesClient) qu'un album trouvé
+     * ici mérite d'être mis en recherche/téléchargement de son côté — pour le fichier actuellement
+     * sélectionné. Toujours une confirmation explicite (JOptionPane) avant queueAlbum() : findAlbum()
+     * est une recherche texte MusicBrainz, jamais assez fiable pour agir silencieusement sur un
+     * service externe. Demande utilisateur (2026-08-29), API vérifiée en direct avant implémentation.
+     */
+    private void sendToHeadphones() {
+        FileEntry entry = entryAtViewRow(table.getSelectedRow());
+        if (entry == null) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Sélectionne d'abord un fichier (pas un en-tête de groupe)."),
+                "Headphones", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        TagInfo ti = entry.activeTags();
+        String artist = ti != null ? ti.artist : "";
+        String album  = ti != null ? ti.album  : "";
+        if (artist.isBlank() || album.isBlank()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Ce fichier n'a pas encore d'artiste/album identifié."),
+                "Headphones", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        HeadphonesClient client = new HeadphonesClient();
+        if (!client.isConfigured()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Configure d'abord l'URL et la clé API Headphones dans Préférences → APIs."),
+                "Headphones", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        setStatus(I18n.t("Recherche \"%s – %s\" sur Headphones…", artist, album));
+        final String query = artist + " " + album;
+        new SwingWorker<List<HeadphonesClient.AlbumCandidate>, Void>() {
+            @Override protected List<HeadphonesClient.AlbumCandidate> doInBackground() throws Exception {
+                return client.findAlbum(query);
+            }
+            @Override protected void done() {
+                List<HeadphonesClient.AlbumCandidate> candidates;
+                try { candidates = get(); }
+                catch (Exception ex) {
+                    setStatus(I18n.t("Erreur Headphones : %s", ex.getMessage()));
+                    return;
+                }
+                if (candidates.isEmpty()) {
+                    setStatus(I18n.t("Aucun résultat Headphones pour \"%s\".", query));
+                    return;
+                }
+                String[] options = new String[candidates.size()];
+                for (int i = 0; i < candidates.size(); i++) {
+                    HeadphonesClient.AlbumCandidate c = candidates.get(i);
+                    options[i] = c.artistName() + " — " + c.albumTitle() + I18n.t(" (score %d)", c.score());
+                }
+                String chosen = (String) JOptionPane.showInputDialog(MainFrame.this,
+                        I18n.t("Quel album mettre en recherche sur Headphones ?"), "Headphones",
+                        JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
+                if (chosen == null) { setStatus(I18n.t("Envoi vers Headphones annulé.")); return; }
+                int idx = java.util.Arrays.asList(options).indexOf(chosen);
+                HeadphonesClient.AlbumCandidate pick = candidates.get(idx);
+
+                setStatus(I18n.t("Envoi vers Headphones : %s – %s…", pick.artistName(), pick.albumTitle()));
+                new SwingWorker<Boolean, Void>() {
+                    @Override protected Boolean doInBackground() throws Exception {
+                        return client.queueAlbum(pick.artistId(), pick.releaseId());
+                    }
+                    @Override protected void done() {
+                        try {
+                            boolean ok = get();
+                            setStatus(ok
+                                ? I18n.t("Envoyé à Headphones : %s – %s.", pick.artistName(), pick.albumTitle())
+                                : I18n.t("Échec de l'envoi à Headphones."));
+                        } catch (Exception ex) {
+                            setStatus(I18n.t("Erreur Headphones : %s", ex.getMessage()));
+                        }
+                    }
+                }.execute();
+            }
+        }.execute();
+    }
+
     private void openBandcampDialog() {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) {
@@ -2982,8 +3122,16 @@ public class MainFrame extends JFrame {
         try {
             if (rows.length == 1) {
                 // ── Fichier unique ─────────────────────────────────────────────
-                int       mr   = table.convertRowIndexToModel(rows[0]);
-                FileEntry e    = tableModel.get(mr);
+                // entryAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)), même bug
+                // de fond que openBandcampDialog()/startTagging() en vue arborescence — voir leurs
+                // commentaires) : trouvé en direct 2026-09-01 en auditant les modes d'affichage,
+                // JAMAIS corrigé ici jusqu'à présent malgré le même correctif déjà fait ailleurs —
+                // en vue Arborescence par album, ce chemin pouvait écrire les tags édités sur le
+                // MAUVAIS fichier (les en-têtes de groupe décalent la correspondance ligne de
+                // vue → ligne modèle entre albumTreeModel et tableModel).
+                FileEntry e = entryAtViewRow(rows[0]);
+                if (e == null) return; // ligne d'en-tête de groupe sélectionnée, rien à appliquer
+                int       mr   = tableModel.indexOf(e);
                 TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
                 TagInfo   ti   = e.activeTags();
                 detailPanel.collect(ti);
@@ -3007,8 +3155,10 @@ public class MainFrame extends JFrame {
                 record PendingWrite(FileEntry entry, int modelRow, TagInfo snap, TagInfo ti) {}
                 List<PendingWrite> pending = new ArrayList<>();
                 for (int row : rows) {
-                    int       mr   = table.convertRowIndexToModel(row);
-                    FileEntry e    = tableModel.get(mr);
+                    // Même correctif que la branche fichier unique ci-dessus — voir son commentaire.
+                    FileEntry e = entryAtViewRow(row);
+                    if (e == null) continue; // ligne d'en-tête de groupe, ignorée
+                    int       mr   = tableModel.indexOf(e);
                     TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
                     TagInfo   ti   = e.activeTags();
                     detailPanel.collect(ti);
@@ -3975,7 +4125,7 @@ public class MainFrame extends JFrame {
                         // attente" après réorganisation du dossier.
                         boolean wasPreviouslyTagged = taggedPaths.contains(ff.getAbsolutePath())
                                 || !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
-                        return new Object[]{ entry, ti, wasPreviouslyTagged };
+                        return new Object[]{ entry, ti, wasPreviouslyTagged, size };
                     });
                 }, this::isCancelled);
                 } finally {
@@ -4040,6 +4190,15 @@ public class MainFrame extends JFrame {
                         FileEntry entry    = (FileEntry) chunk[0];
                         com.opentagger.model.TagInfo ti = (com.opentagger.model.TagInfo) chunk[1];
                         boolean wasTagged  = Boolean.TRUE.equals(chunk[2]);
+                        // Taille déjà lue en arrière-plan (ff.length(), voir plus haut) — réutilisée
+                        // ici plutôt que rappeler entry.file.length() sur l'EDT : sur MyBook (disque
+                        // externe lent, souvent saturé), cet appel bloquant répété une fois par
+                        // fichier gelait l'EDT par intermittence pendant toute la durée du scan (menu/
+                        // clics sans effet visible pendant des dizaines de minutes) — repéré en direct
+                        // 2026-08-30 en cherchant pourquoi "Nettoyer les dossiers orphelins" ne
+                        // montrait aucune fenêtre, même correctif que DuplicatesDialog plus tôt cette
+                        // session (précalcul en arrière-plan, jamais d'I/O fichier sur l'EDT).
+                        long size = chunk.length > 3 && chunk[3] instanceof Long ? (Long) chunk[3] : -1L;
                         entry.current = ti;
                         // Coquille vide (0 octet) : jusqu'à ce correctif, AudioFileIO.read() échouait
                         // silencieusement (catch muet dans readTags()), le fichier atterrissait comme
@@ -4051,7 +4210,7 @@ public class MainFrame extends JFrame {
                         // Priorité absolue sur wasTagged ci-dessous : un fichier vidé APRÈS avoir été
                         // tagué (incident disque plein...) peut encore matcher le cache chemin→tagué,
                         // mais son contenu réel prime sur ce que dit le cache.
-                        if (entry.file.length() == 0) {
+                        if (size == 0) {
                             entry.status  = com.opentagger.model.FileEntry.Status.ERROR;
                             entry.message = I18n.t("Fichier vide (0 octet) — corrompu, non identifiable.");
                         } else if (wasTagged) {
@@ -4124,6 +4283,13 @@ public class MainFrame extends JFrame {
         // lots "Tout tagger" démarrés à 1s d'écart (62633 puis 65629 fichiers) juste après avoir
         // activé l'auto-taguage sur une bibliothèque à 4 dossiers de démarrage.
         if (!btnTagAll.isEnabled()) {
+            // Trace stdout — même angle mort que Headphones/Compilations/Enregistrer (2026-08-31/
+            // 09-01) : ces 3 gardes de startTagging() ne parlaient jusqu'ici qu'à la barre de statut
+            // GUI, invisible depuis l'extérieur. Ajouté en creusant un retour "Tagger cet album ne
+            // fonctionne pas" — hypothèse concrète : sur une session où scan/complétion/groupement
+            // tournent presque en continu, ce clic tombe très souvent sur l'un de ces 3 blocages
+            // silencieux plutôt que sur un vrai bug de ciblage de fichier.
+            System.out.println("[OT] Tagger : sauté — bouton déjà désactivé (taguage en préparation/en cours).");
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
         }
@@ -4137,14 +4303,17 @@ public class MainFrame extends JFrame {
         // bibliothèque dont le taguage dure des heures/jours : sans ça, impossible d'enregistrer
         // quoi que ce soit avant la toute fin du run.
         if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            System.out.println("[OT] Tagger : sauté — un taguage tourne déjà.");
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
         }
         List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
         if (!blockers.isEmpty()) {
+            System.out.println("[OT] Tagger : sauté — encore en cours : " + String.join(", ", blockers));
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de taguer.", String.join(", ", blockers)));
             return;
         }
+        System.out.println("[OT] Tagger : démarrage (selOnly=" + selOnly + ").");
         if (selOnly) {
             // entriesAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)) — bug repéré
             // en direct 2026-08-24) : en vue arborescence, table.getModel() est albumTreeModel, pas
@@ -4445,6 +4614,14 @@ public class MainFrame extends JFrame {
         // d'enregistrement).
         List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.SAVE);
         if (!blockers.isEmpty()) {
+            // Trace stdout — même angle mort que Headphones/Compilations (2026-08-31) : ce blocage
+            // ne laissait jamais aucune trace en dehors de la barre de statut GUI. Repéré en direct
+            // 2026-09-01 : plusieurs heures sans le moindre "✔ ENREGISTRÉ" alors que l'identification
+            // et la complétion (auto-relancée en boucle par tagging.post_tag_completion) tournaient
+            // sans arrêt — hypothèse concrète que la Complétion automatique (INFO_COMPLETER, même
+            // groupe LIBRARY_WRITE que SAVE) bloque en continu scheduleAutoSaveFollowUp() sans que
+            // rien ne le signale nulle part hors de l'appli.
+            System.out.println("[OT] Enregistrer : sauté — encore en cours : " + String.join(", ", blockers));
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'enregistrer.", String.join(", ", blockers)));
             return;
         }
@@ -4456,9 +4633,11 @@ public class MainFrame extends JFrame {
             if (e.selected && e.status == FileEntry.Status.IDENTIFIED) toSave.add(e);
         }
         if (toSave.isEmpty()) {
+            System.out.println("[OT] Enregistrer : aucun fichier identifié sélectionné à enregistrer.");
             setStatus(I18n.t("Aucun fichier identifié à enregistrer (utilisez « Tout tagger » d'abord)."));
             return;
         }
+        System.out.println("[OT] Enregistrer : " + toSave.size() + " fichier(s) — démarrage.");
 
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
         beginProgress(ProgressSlot.SAVE);
@@ -4862,23 +5041,28 @@ public class MainFrame extends JFrame {
                 I18n.t("Synchronisation Last.fm"), w, () -> w.cancel(false));
     }
 
+    /** Synchronise les compteurs d'écoute — ListenBrainz et Last.fm fusionnés en une seule action de
+     *  menu (2026-09-02, retour utilisateur "trop d'options" : deux entrées quasi identiques, seul
+     *  le fournisseur changeait). Lance chacun des deux services dont le nom d'utilisateur est
+     *  configuré (silencieusement ignoré sinon — jamais deux popups redondants) ; le message "pas
+     *  configuré" ne s'affiche que si AUCUN des deux ne l'est. syncListenBrainz()/syncLastFm() gardent
+     *  chacune leur propre WorkerHub.TaskKind et leur propre worker — seul le point d'entrée visible
+     *  a été fusionné, pas le mécanisme interne (services et API réellement distincts).
+     */
+    private void syncPlayCounts() {
+        boolean hasLb = !Config.get().listenbrainzUsername().isBlank();
+        boolean hasLf = !Config.get().lastfmUsername().isBlank();
+        if (!hasLb && !hasLf) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Configurez d'abord votre nom d'utilisateur ListenBrainz et/ou Last.fm dans Préférences → APIs."),
+                I18n.t("Synchronisation"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        if (hasLb) syncListenBrainz();
+        if (hasLf) syncLastFm();
+    }
+
     private void forceRetag() {
-        // Cette action lance elle aussi un TaggingWorker (via launchForcedTagging) — même garde
-        // que startTagging()/autoCompleteIncomplete()/completeAlbums(), sinon un taguage déjà actif
-        // continuerait de tourner pendant qu'un second démarre par-dessus.
-        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
-            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
-            return;
-        }
-        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
-        if (!blockers.isEmpty()) {
-            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de forcer le re-taguage.",
-                    String.join(", ", blockers)));
-            return;
-        }
-        // Pas de garde sur SAVE : voir le commentaire de saveAll() — forceRetag() ne cible
-        // que des fichiers déjà TAGGED, jamais touchés par un Enregistrement en cours (qui ne
-        // prend que les IDENTIFIED) — ensembles disjoints, sûr de tourner en même temps.
         // Cible : lignes sélectionnées si ≥1, sinon tous les fichiers TAGGED
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
@@ -4896,13 +5080,51 @@ public class MainFrame extends JFrame {
                 if (e.status == FileEntry.Status.TAGGED) targets.add(e);
             }
         }
+        forceRetagOn(targets);
+    }
+
+    /**
+     * Confirme puis lance "Forcer le re-taguage" sur une liste explicite de fichiers — factorisé
+     * hors de forceRetag() (2026-09-02) pour que d'autres fenêtres de revue (ex.
+     * DurationMismatchReviewDialog, dont le lot "à revérifier"/"probablement cassé" ne proposait
+     * jusqu'ici qu'une correspondance manuelle fichier par fichier — impraticable sur plusieurs
+     * centaines d'entrées) puissent déclencher le même re-taguage ciblé sans dépendre de la
+     * sélection de la fenêtre principale. Package-privé : appelé depuis ui/*.
+     */
+    void forceRetagOn(List<FileEntry> targets) {
+        // Cette action lance elle aussi un TaggingWorker (via launchForcedTagging) — même garde
+        // que startTagging()/autoCompleteIncomplete()/completeAlbums(), sinon un taguage déjà actif
+        // continuerait de tourner pendant qu'un second démarre par-dessus.
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            // Trace stdout — même angle mort que startTagging()/Enregistrer/Compilations (voir
+            // leurs commentaires) : retour utilisateur 2026-09-02 "reforcer taguage ne fonctionne
+            // plus", très probablement ce blocage silencieux (un taguage normal tournait déjà au
+            // moment du clic), jamais signalé nulle part hors de la barre de statut GUI.
+            System.out.println("[OT] Forcer re-taguage : sauté — un taguage tourne déjà.");
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            System.out.println("[OT] Forcer re-taguage : sauté — encore en cours : " + String.join(", ", blockers));
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de forcer le re-taguage.",
+                    String.join(", ", blockers)));
+            return;
+        }
+        // Pas de garde sur SAVE : voir le commentaire de saveAll() — forceRetag() ne cible
+        // que des fichiers déjà TAGGED, jamais touchés par un Enregistrement en cours (qui ne
+        // prend que les IDENTIFIED) — ensembles disjoints, sûr de tourner en même temps.
         if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier sélectionné à re-taguer.")); return; }
 
         int confirm = JOptionPane.showConfirmDialog(this,
             I18n.t("%d fichier(s) vont être remis en PENDING et leur cache effacé.\nIls seront re-tagués au prochain lancement du taguage.", targets.size()),
             I18n.t("Forcer le re-taguage"), JOptionPane.OK_CANCEL_OPTION);
-        if (confirm != JOptionPane.OK_OPTION) return;
+        if (confirm != JOptionPane.OK_OPTION) {
+            System.out.println("[OT] Forcer re-taguage : annulé par l'utilisateur (" + targets.size() + " fichier(s) proposé(s)).");
+            return;
+        }
 
+        System.out.println("[OT] Forcer re-taguage : confirmé — " + targets.size() + " fichier(s).");
         resetForReidentification(targets, () -> launchForcedTagging(targets, Config.get().useAcoustId()));
     }
 
@@ -5483,11 +5705,15 @@ public class MainFrame extends JFrame {
             // mais il n'était testé nulle part ici. Un fichier avec artistMbid déjà rempli (identifié
             // par un autre biais que la recherche MB directe) mais recordingMbid vide n'était donc
             // jamais mis en file pour cette passe, malgré son ⚠ visible dans le journal.
+            // country/releaseType/originalYear ajoutés (2026-09-01, rattrapage demandé par
+            // l'utilisateur) : voir InfoCompleterWorker.needsMb, même raison — ces 3 champs
+            // restaient vides même sur des fichiers par ailleurs déjà complets ici.
             boolean incomplete = ti == null
                 || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank()
                 || ti.album.isBlank()        || ti.year.isBlank()
                 || ti.genre.isBlank()        || ti.mood.isBlank()
-                || ti.bpm.isBlank()          || ti.lyrics.isBlank();
+                || ti.bpm.isBlank()          || ti.lyrics.isBlank()
+                || ti.country.isBlank()      || ti.releaseType.isBlank() || ti.originalYear.isBlank();
             if (incomplete) targets.add(e);
         }
         if (targets.isEmpty()) { onDone.run(); return; }
@@ -5627,9 +5853,14 @@ public class MainFrame extends JFrame {
         // même classe de problème : déplacer le calcul en arrière-plan, garder l'EDT seulement
         // pour l'affichage final.
         setStatus(I18n.t("Préparation de l'aperçu de renommage (%d fichier(s) tagué(s))…", tagged));
+        // Snapshot pris ICI, sur l'EDT — jamais tableModel.allEntries() directement dans
+        // doInBackground() : un taguage actif en parallèle peut muter la table pendant le calcul
+        // (Files.exists() par fichier, potentiellement long), levant un ConcurrentModificationException
+        // sur la vue non-modifiable (simple wrapper, pas une copie) — voir RenamePreviewDialog.compute().
+        List<FileEntry> snapshotForPreview = new ArrayList<>(tableModel.allEntries());
         new SwingWorker<List<RenamePreviewDialog.PreviewRow>, Void>() {
             @Override protected List<RenamePreviewDialog.PreviewRow> doInBackground() {
-                return RenamePreviewDialog.compute(tableModel, currentMask);
+                return RenamePreviewDialog.compute(snapshotForPreview, currentMask);
             }
             @Override protected void done() {
                 List<RenamePreviewDialog.PreviewRow> preview;
@@ -5755,7 +5986,7 @@ public class MainFrame extends JFrame {
 
     // ── Transcodage audio ─────────────────────────────────────────────────────
 
-    private void transcodeFiles(boolean selectionOnly) {
+    private void transcodeFiles() {
         if (WorkerHub.get().current(WorkerHub.TaskKind.TRANSCODE).isPresent()) {
             JOptionPane.showMessageDialog(this, I18n.t("Un transcodage est déjà en cours."),
                     I18n.t("En cours"), JOptionPane.WARNING_MESSAGE);
@@ -5773,13 +6004,34 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        // Construire la liste des fichiers à transcoder
+        // Construire la liste des fichiers à transcoder — lignes sélectionnées dans le tableau si
+        // ≥1, sinon repli sur les cases à cocher (e.selected) de toute la bibliothèque chargée.
+        // Fusionné (2026-09-02, retour utilisateur) : ce bouton ignorait TOUJOURS la sélection de
+        // lignes (appelé en dur avec selectionOnly=false depuis la barre d'outils/Ctrl+T/menu),
+        // balayant quasi toute la bibliothèque à chaque clic puisque FileEntry.selected vaut true
+        // par défaut — un item de menu séparé ("Transcoder la sélection…") existait pour l'autre
+        // cas, mais ce n'est jamais celui que déclenchait le bouton principal. Même réflexe
+        // "sélection sinon tout" que forceRetag()/reidentifyUnmatched() ailleurs dans ce fichier.
         List<FileEntry> toTranscode = new ArrayList<>();
-        if (selectionOnly) {
-            for (int row : table.getSelectedRows()) {
-                int mi = table.convertRowIndexToModel(row);
-                FileEntry e = tableModel.get(mi);
-                if (e.currentPath != null) toTranscode.add(e);
+        int[] selRows = table.getSelectedRows();
+        if (selRows.length > 0) {
+            // entryAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)), même bug de
+            // fond qu'applyDetail()/openBandcampDialog() en vue arborescence — voir leurs
+            // commentaires) : trouvé en direct 2026-09-01 en auditant les modes d'affichage.
+            // PARTICULIÈREMENT grave ici — pas juste un mauvais tag écrit, le transcodage
+            // REMPLACE/SUPPRIME le fichier source (voir le commentaire juste au-dessus) : en vue
+            // Arborescence par album, ce chemin pouvait transcoder/supprimer un fichier totalement
+            // différent de celui réellement sélectionné à l'écran. Une ligne d'en-tête de groupe
+            // sélectionnée résout vers TOUS ses membres (entriesAtViewRow), cohérent avec "l'album
+            // entier" plutôt que silencieusement ignorée — contrairement à applyDetail() où éditer
+            // "tout l'album" d'un coup n'aurait pas de sens pour des champs texte. Dédoublonné (Set
+            // par identité) : sélectionner à la fois un en-tête de groupe ET une de ses pistes
+            // ajouterait sinon cette piste deux fois, transcodant/supprimant son propre résultat.
+            java.util.Set<FileEntry> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            for (int row : selRows) {
+                for (FileEntry e : entriesAtViewRow(row)) {
+                    if (e.currentPath != null && seen.add(e)) toTranscode.add(e);
+                }
             }
         } else {
             // allEntries() : "de tout" doit couvrir toute la bibliothèque, pas juste la vue
@@ -5944,9 +6196,28 @@ public class MainFrame extends JFrame {
      *  entre deux vagues intermédiaires. No-op si rien n'a été accumulé (cas normal quand
      *  chkAutoGroupCompilations est désactivé). */
     private void flushPendingCompilationMatches() {
-        if (pendingCompilationMatches.isEmpty()) return;
-        new CompilationMatchDialog(this, new ArrayList<>(pendingCompilationMatches), tableModel).setVisible(true);
+        if (pendingCompilationMatches.isEmpty()) {
+            System.out.println("[OT] Compilations : fin de chaîne atteinte, rien à revoir (0 correspondance accumulée).");
+            return;
+        }
+        if (compilationMatchDialogOpen) {
+            // Ne PAS vider pendingCompilationMatches ici : la fenêtre déjà ouverte finira par se
+            // fermer, et tout ce qui s'est accumulé depuis (y compris ce que cet appel voulait
+            // montrer) sera proposé à la prochaine occasion — jamais perdu, juste reporté.
+            System.out.println("[OT] Compilations : fenêtre de revue déjà ouverte — report (toujours "
+                    + pendingCompilationMatches.size() + " en attente).");
+            return;
+        }
+        System.out.println("[OT] Compilations : fin de chaîne atteinte — fenêtre de revue affichée pour "
+                + pendingCompilationMatches.size() + " correspondance(s) accumulée(s).");
+        List<CompilationClusterWorker.CompilationMatch> toReview = new ArrayList<>(pendingCompilationMatches);
         pendingCompilationMatches.clear();
+        compilationMatchDialogOpen = true;
+        try {
+            new CompilationMatchDialog(this, toReview, tableModel).setVisible(true);
+        } finally {
+            compilationMatchDialogOpen = false;
+        }
     }
 
     /** onDone : exécuté sur l'EDT une fois cette passe de groupement TERMINÉE (dialogue affiché ou
@@ -5972,10 +6243,21 @@ public class MainFrame extends JFrame {
         // qui ÉCRIVENT sur des fichiers déjà tagués (Enregistrer, Complétion, Transcodage...).
         List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.COMPILATION_CLUSTER);
         if (!blockers.isEmpty()) {
+            // Trace stdout — avant ce correctif, statusCallback/logLine n'écrivaient que dans des
+            // composants GUI (barre de statut/panneau Journal), invisibles depuis l'extérieur de
+            // l'appli (aucune trace dans le fichier de sortie standard) : impossible de vérifier si
+            // "Grouper par compilations automatiquement" se déclenchait vraiment ou était sauté en
+            // silence — trouvé en direct 2026-08-31 en cherchant justement à répondre à cette
+            // question. Ce chemin-ci (bloqué par une autre passe LIBRARY_WRITE, ex. la Complétion
+            // automatique après un Enregistrement qui vient de démarrer) est justement le cas le
+            // plus probable de "ne se déclenche jamais" sans que rien ne le signale nulle part.
+            System.out.println("[OT] Compilations : passe sautée (encore en cours : "
+                    + String.join(", ", blockers) + ")");
             setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de grouper par compilations.", String.join(", ", blockers)));
             onDone.run();
             return;
         }
+        System.out.println("[OT] Compilations : recherche de correspondances démarrée…");
         // L'exigence "bibliothèque taguée à 100 %" (héritée de clusterAlbums()) est retirée : cette
         // passe filtre déjà elle-même sur status==TAGGED (voir CompilationClusterWorker), donc des
         // fichiers encore PENDING/PROCESSING ailleurs dans la table ne changent rien à sa
@@ -5987,15 +6269,36 @@ public class MainFrame extends JFrame {
         CompilationClusterWorker w = new CompilationClusterWorker(
             tableModel,
             this::setStatus,
-            s -> appendLogLine(s, FileEntry.Status.IDENTIFIED, null),
+            s -> { System.out.println("[OT] Compilations : " + s); appendLogLine(s, FileEntry.Status.IDENTIFIED, null); },
             matches -> SwingUtilities.invokeLater(() -> {
                 endProgress(ProgressSlot.COMPILATION_CLUSTER);
                 if (matches.isEmpty()) {
+                    System.out.println("[OT] Compilations : terminé, aucune correspondance trouvée.");
                     setStatus(I18n.t("Aucune correspondance de compilation trouvée."));
                 } else if (deferDialog) {
-                    pendingCompilationMatches.addAll(matches);
+                    // Dédoublonnage par FileEntry (identité, pas equals()) — sans lui, un fichier
+                    // dont la correspondance est déjà en attente (jamais encore écrite sur disque,
+                    // donc entry.result ne change pas) ressortait identique à CHAQUE nouvelle vague
+                    // de "Grouper par compilations" (une par Enregistrement) et se réajoutait en
+                    // double, triple... dans pendingCompilationMatches — la garde "unchanged" de
+                    // CompilationClusterWorker.checkEntry() ne compare qu'à ce qui est déjà sur
+                    // disque, jamais à ce qui attend encore une revue. Repéré en direct 2026-09-01 :
+                    // deux fenêtres de revue ouvertes en même temps, la même piste ("Tracie Spencer -
+                    // It's All About You") présente jusqu'à 3 fois dans UNE SEULE fenêtre.
+                    java.util.Set<FileEntry> alreadyPending = java.util.Collections.newSetFromMap(
+                            new java.util.IdentityHashMap<>());
+                    for (CompilationClusterWorker.CompilationMatch m : pendingCompilationMatches) alreadyPending.add(m.entry());
+                    int before = matches.size();
+                    List<CompilationClusterWorker.CompilationMatch> newOnes = matches.stream()
+                            .filter(m -> alreadyPending.add(m.entry()))
+                            .toList();
+                    pendingCompilationMatches.addAll(newOnes);
+                    System.out.println("[OT] Compilations : " + newOnes.size() + " correspondance(s) trouvée(s) "
+                            + "cette vague" + (newOnes.size() != before ? " (" + (before - newOnes.size()) + " doublon(s) ignoré(s))" : "")
+                            + " — " + pendingCompilationMatches.size() + " en attente au total (revue différée en fin de session).");
                     setStatus(I18n.t("%d correspondance(s) de compilation en attente (fin de session).", pendingCompilationMatches.size()));
                 } else {
+                    System.out.println("[OT] Compilations : " + matches.size() + " correspondance(s) — fenêtre de revue affichée.");
                     new CompilationMatchDialog(this, matches, tableModel).setVisible(true);
                 }
                 onDone.run();
@@ -6071,9 +6374,11 @@ public class MainFrame extends JFrame {
         final int maskForPreview = organizeMask;
         final Path destForPreview = organizeDestRoot;
         setStatus(I18n.t("Préparation de l'aperçu d'organisation…"));
+        // Snapshot sur l'EDT — même correctif que renameTagged() ci-dessus (voir son commentaire).
+        List<FileEntry> snapshotForOrganize = new ArrayList<>(tableModel.allEntries());
         new SwingWorker<List<RenamePreviewDialog.PreviewRow>, Void>() {
             @Override protected List<RenamePreviewDialog.PreviewRow> doInBackground() {
-                return RenamePreviewDialog.compute(tableModel, maskForPreview, destForPreview);
+                return RenamePreviewDialog.compute(snapshotForOrganize, maskForPreview, destForPreview);
             }
             @Override protected void done() {
                 List<RenamePreviewDialog.PreviewRow> preview;
@@ -6154,7 +6459,7 @@ public class MainFrame extends JFrame {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /** Lit les 90+ champs d'un fichier audio — même couverture que TagWriter. */
-    private TagInfo readTags(File f) {
+    TagInfo readTags(File f) {
         // Opus/AAC/WV/APE : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO) — inutile
         // de tenter AudioFileIO.read() en sachant qu'il va échouer.
         if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
@@ -6409,10 +6714,16 @@ public class MainFrame extends JFrame {
     private void selectByStatus(FileEntry.Status... statuses) {
         Set<FileEntry.Status> set = Set.of(statuses);
         table.clearSelection();
+        // entryAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)), même bug de fond
+        // qu'applyDetail()/transcodeFiles() en vue arborescence — voir leurs commentaires) : trouvé
+        // en direct 2026-09-01. Particulièrement facile à déclencher ici (un simple clic sur un chip
+        // de statut) — en vue Arborescence par album, albumTreeModel a PLUS de lignes que tableModel
+        // (les en-têtes de groupe s'ajoutent), donc modelRow pouvait dépasser tableModel.getRowCount()
+        // et lever une exception, ou pire, renvoyer le statut d'un fichier totalement différent.
+        // entryAtViewRow() renvoie null pour un en-tête, filtré naturellement par le null-check.
         for (int viewRow = 0; viewRow < table.getRowCount(); viewRow++) {
-            int modelRow = table.convertRowIndexToModel(viewRow);
-            FileEntry e  = tableModel.get(modelRow);
-            if (set.contains(e.status))
+            FileEntry e = entryAtViewRow(viewRow);
+            if (e != null && set.contains(e.status))
                 table.addRowSelectionInterval(viewRow, viewRow);
         }
         int n = table.getSelectedRowCount();
@@ -6666,7 +6977,8 @@ public class MainFrame extends JFrame {
             @Override protected DuplicateDetector.DetectionResult doInBackground() {
                 List<DuplicateDetector.DuplicateGroup> groups = DuplicateDetector.detect(all);
                 java.util.Map<DuplicateDetector.DuplicateGroup, FileEntry> bestByGroup = DuplicateDetector.computeBestMap(groups);
-                return new DuplicateDetector.DetectionResult(groups, bestByGroup);
+                java.util.Map<FileEntry, Long> sizesByFile = DuplicateDetector.computeSizes(groups);
+                return new DuplicateDetector.DetectionResult(groups, bestByGroup, sizesByFile);
             }
             @Override protected void done() {
                 if (isCancelled()) return;
@@ -6697,7 +7009,7 @@ public class MainFrame extends JFrame {
                 // doivent donc s'exécuter qu'une seule fois chacun sur toute la séquence — sinon
                 // beginProgress() réinitialiserait la barre (value=0/string vide) à CHAQUE fichier.
                 boolean[] started = {false};
-                new DuplicatesDialog(MainFrame.this, groups, result.bestByGroup(), tableModel,
+                new DuplicatesDialog(MainFrame.this, groups, result.bestByGroup(), result.sizesByFile(), tableModel,
                     (s, status) -> appendLogLine(s, status, null),
                     (done, dtotal) -> SwingUtilities.invokeLater(() -> {
                         if (!started[0]) { started[0] = true; beginProgress(ProgressSlot.DUPLICATE_DETECT); }
@@ -6897,6 +7209,403 @@ public class MainFrame extends JFrame {
         }.execute();
     }
 
+    /**
+     * Cherche, dans les dossiers de démarrage, les fichiers audio dont l'extension n'est PAS
+     * reconnue par AudioScanner — donc invisibles au scan normal, jamais vus par l'appli. Signature
+     * laissée par un import Soulseek/beets interrompu (suffixe aléatoire à la place de l'extension,
+     * ex. "Titre.NeJrfI") — trouvé en direct 2026-08-30, ~1800 fichiers dans
+     * /mnt/MyBook/itunes/Music/a_classer. Regroupée avec "Supprimer les fichiers illisibles" dans le
+     * menu Bibliothèque (demande utilisateur) : même famille de nettoyage, complémentaires (celle-ci
+     * trouve des fichiers que le scan n'a même jamais vus, l'autre nettoie ceux déjà vus en échec).
+     *
+     * Sonde chaque candidat via ffprobe (AudioFormatCheck) : propose de renommer ceux qui sont un
+     * vrai format audio reconnu, et de déplacer vers la corbeille (jamais suppression définitive,
+     * même sécurité que deleteErrorFiles()) ceux qui sont vides/illisibles — deux confirmations
+     * séparées, jamais d'action silencieuse. Le reste (extension inconnue, format non déterminable
+     * avec confiance) n'est ni renommé ni supprimé, juste compté dans le résumé.
+     */
+    private void repairMisnamedFiles() {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.MISNAMED_REPAIR).isPresent()) {
+            setStatus(I18n.t("Recherche de fichiers mal nommés déjà en cours."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.MISNAMED_REPAIR);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de chercher les fichiers mal nommés.",
+                    String.join(", ", blockers)));
+            return;
+        }
+
+        List<String> roots = new ArrayList<>();
+        for (String s : Config.get().startupFolders()) if (s != null && !s.isBlank()) roots.add(s);
+        if (roots.isEmpty()) {
+            setStatus(I18n.t("Aucun dossier de démarrage configuré (Préférences → Dossiers)."));
+            return;
+        }
+
+        setStatus(I18n.t("Recherche de fichiers audio mal nommés…"));
+        SwingWorker<Void, Void> w = new SwingWorker<Void, Void>() {
+            // Même liste qu'AudioScanner (dupliquée : privée là-bas, pas la peine d'exposer un
+            // accesseur juste pour cette action opportuniste) — ne re-sonde jamais un fichier déjà
+            // visible au scan normal.
+            final java.util.Set<String> KNOWN_AUDIO = java.util.Set.of(
+                ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".opus", ".wma", ".ape", ".wv",
+                ".aiff", ".aif", ".mpc", ".mp4", ".dsf", ".dff");
+            // Types clairement non-audio rencontrés dans une bibliothèque musicale — jamais sondés
+            // (juste du bruit : pochettes, playlists, notices...), pour ne pas gaspiller un appel
+            // ffprobe par fichier sur des centaines de milliers d'entrées sans rapport.
+            final java.util.Set<String> SKIP = java.util.Set.of(
+                ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".txt", ".nfo", ".pdf", ".db",
+                ".ini", ".log", ".url", ".m3u", ".m3u8", ".cue", ".json", ".xml", ".sfv", ".lrc",
+                ".jpe", ".jpe~", ".ds_store", ".m4p", ".mov", ".avi", ".mkv");
+
+            final List<File> renamable = new ArrayList<>();
+            final java.util.Map<File, String> suggestedExt = new java.util.HashMap<>();
+            final List<File> emptyOrBroken = new ArrayList<>();
+            int scanned = 0;
+
+            @Override protected Void doInBackground() {
+                for (String root : roots) walk(new File(root));
+                return null;
+            }
+
+            void walk(File dir) {
+                if (isCancelled()) return;
+                File[] children = dir.listFiles();
+                if (children == null) return;
+                for (File f : children) {
+                    if (isCancelled()) return;
+                    if (f.isDirectory()) { walk(f); continue; }
+                    String name = f.getName();
+                    if (name.startsWith(".")) continue;
+                    String lower = name.toLowerCase();
+                    if (KNOWN_AUDIO.stream().anyMatch(lower::endsWith)) continue;
+                    if (SKIP.stream().anyMatch(lower::endsWith)) continue;
+
+                    scanned++;
+                    if (scanned % 200 == 0)
+                        publish(); // process() ignore le contenu, juste pour rafraîchir le statut
+                    if (f.length() == 0) { emptyOrBroken.add(f); continue; }
+
+                    String ext = com.opentagger.AudioFormatCheck.suggestCorrectExtension(f);
+                    if (ext != null) {
+                        renamable.add(f);
+                        suggestedExt.put(f, ext);
+                    } else if (!com.opentagger.AudioFormatCheck.hasReadableDuration(f)) {
+                        emptyOrBroken.add(f);
+                    }
+                    // ni renommable ni manifestement vide : extension inconnue non résolue avec
+                    // assez de confiance, laissée de côté (pas comptée dans les deux listes
+                    // d'action, mais dans "scanned").
+                }
+            }
+
+            @Override protected void process(List<Void> chunks) {
+                setStatus(I18n.t("Recherche de fichiers audio mal nommés… %d examinés (%d à renommer, %d vides/cassés)",
+                        scanned, renamable.size(), emptyOrBroken.size()));
+            }
+
+            @Override protected void done() {
+                if (isCancelled()) { setStatus(I18n.t("Recherche annulée.")); return; }
+                try { get(); } catch (Exception ex) {
+                    setStatus(I18n.t("Erreur pendant la recherche : %s", ex.getMessage()));
+                    return;
+                }
+                if (renamable.isEmpty() && emptyOrBroken.isEmpty()) {
+                    setStatus(I18n.t("%d fichier(s) à extension inconnue examiné(s), aucun fichier audio détecté parmi eux.", scanned));
+                    return;
+                }
+
+                if (!renamable.isEmpty()) {
+                    StringBuilder sb = new StringBuilder(I18n.t(
+                        "<html><body style='width: 480px'><b>%d fichier(s) audio à extension non reconnue</b> "
+                        + "(suffixe aléatoire à la place de l'extension, ex. import interrompu) :<br><br>", renamable.size()));
+                    int shown = Math.min(renamable.size(), 8);
+                    for (int i = 0; i < shown; i++)
+                        sb.append("&nbsp;• ").append(renamable.get(i).getName()).append("<br>");
+                    if (renamable.size() > shown)
+                        sb.append(I18n.t("&nbsp;… et %d autre(s)<br>", renamable.size() - shown));
+                    sb.append(I18n.t("<br>Renommer automatiquement vers l'extension correspondant au contenu "
+                        + "réel détecté (ffprobe) ?<br><i>Seul le nom change, rien d'autre n'est modifié — "
+                        + "jamais de suppression.</i></html>"));
+                    int renameOk = JOptionPane.showConfirmDialog(MainFrame.this, sb.toString(),
+                        I18n.t("Fichiers audio mal nommés"), JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+                    if (renameOk == JOptionPane.YES_OPTION) {
+                        int renamed = 0, skipped = 0;
+                        for (File f : renamable) {
+                            String ext = suggestedExt.get(f);
+                            String name = f.getName();
+                            java.nio.file.Path parent = f.toPath().getParent();
+                            java.nio.file.Path dest = parent.resolve(name + "." + ext);
+                            for (int n = 2; java.nio.file.Files.exists(dest) && n < 100; n++)
+                                dest = parent.resolve(name + " (" + n + ")." + ext);
+                            try {
+                                java.nio.file.Files.move(f.toPath(), dest);
+                                renamed++;
+                            } catch (Exception ex) { skipped++; }
+                        }
+                        setStatus(I18n.t("%d fichier(s) renommé(s), %d échec(s). Un scan retrouvera ces fichiers.", renamed, skipped));
+                    }
+                }
+
+                if (!emptyOrBroken.isEmpty()) {
+                    StringBuilder sb = new StringBuilder(I18n.t(
+                        "<html><body style='width: 480px'><b>%d fichier(s) vide(s) ou illisible(s)</b> "
+                        + "(0 octet, ou aucune durée audio détectable — transcode/téléchargement probablement "
+                        + "interrompu) :<br><br>", emptyOrBroken.size()));
+                    int shown = Math.min(emptyOrBroken.size(), 8);
+                    for (int i = 0; i < shown; i++)
+                        sb.append("&nbsp;• <font color='#cc4444'>").append(emptyOrBroken.get(i).getName()).append("</font><br>");
+                    if (emptyOrBroken.size() > shown)
+                        sb.append(I18n.t("&nbsp;… et %d autre(s)<br>", emptyOrBroken.size() - shown));
+                    sb.append(I18n.t("<br>Déplacer ces fichiers vers la corbeille ?</html>"));
+                    int delOk = JOptionPane.showConfirmDialog(MainFrame.this, sb.toString(),
+                        I18n.t("Fichiers vides ou illisibles"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    if (delOk == JOptionPane.YES_OPTION) {
+                        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+                        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                        int deleted = 0, failDel = 0;
+                        for (File f : emptyOrBroken) {
+                            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                            if (moved) deleted++; else failDel++;
+                        }
+                        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
+                        setStatus(I18n.t("%d fichier(s) illisible(s) %s%s", deleted, where,
+                                failDel > 0 ? I18n.t(", %d échec(s)", failDel) : ""));
+                    }
+                }
+            }
+        };
+        WorkerHub.get().submit(WorkerHub.TaskKind.MISNAMED_REPAIR,
+                I18n.t("Recherche de fichiers mal nommés"), w, () -> w.cancel(true));
+    }
+
+    /**
+     * Cherche les dossiers qui n'ont jamais contenu la moindre piste audio — des coquilles vides
+     * ou quasi-vides laissées par un import raté (scene-release, yt-dlp, rip CD interrompu…) : un
+     * JSON/log/pochette cassée tout seul dans un dossier, jamais de musique. Trouvé en direct
+     * 2026-08-30 : "1_-_Clara_Nunes/Unknown_Album/srr.json" (daté décembre 2025, donc bien antérieur
+     * à cette campagne de taguage) et "01 [unknown]/Unknown Album" avec un log dedans.
+     *
+     * Complémentaire — pas redondant — avec {@link #repairMisnamedFiles()} et le nettoyage
+     * automatique {@link com.opentagger.FileRenamer#deleteEmptyAncestors}. Ce dernier ne se
+     * déclenche QU'en effet de bord d'un renommage réussi (il regarde le dossier D'OÙ une piste
+     * vient d'être déplacée) : un dossier qui n'a jamais hébergé de piste — donc jamais de
+     * renommage à son sujet — n'est jamais examiné, aussi longtemps que le scan tourne. Cette
+     * fonction fait la passe qui manquait : parcourir tout l'arbre et repérer les branches
+     * entières sans aucun audio, plutôt que d'attendre un renommage qui ne viendra jamais.
+     *
+     * Sécurité : ne classe "résidu jetable" que des fichiers de type manifestement non-musical
+     * (json/log/nfo/txt/cue/m3u/db/ini/sfv/srr, pochettes locales, AppleDouble) ou des images de
+     * moins de 20 Ko (le cas "pochette vide" signalé). Toute extension inconnue est d'abord
+     * sondée via {@link com.opentagger.AudioFormatCheck} exactement comme dans
+     * {@link #repairMisnamedFiles()} — si c'est en réalité de l'audio lisible mal étiqueté, le
+     * dossier n'est PAS considéré orphelin (laissé à repairMisnamedFiles()/traitement normal), pour
+     * ne jamais faire disparaître une vraie piste par erreur. Tout fichier "réel" non reconnu (gros
+     * fichier, extension inhabituelle) fait basculer le dossier en "à vérifier" — jamais supprimé
+     * automatiquement, juste compté dans le résumé.
+     */
+    private void cleanOrphanFolders() {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.ORPHAN_CLEANUP).isPresent()) {
+            setStatus(I18n.t("Recherche de dossiers orphelins déjà en cours."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.ORPHAN_CLEANUP);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de chercher les dossiers orphelins.",
+                    String.join(", ", blockers)));
+            return;
+        }
+
+        List<String> roots = new ArrayList<>();
+        for (String s : Config.get().startupFolders()) if (s != null && !s.isBlank()) roots.add(s);
+        if (roots.isEmpty()) {
+            setStatus(I18n.t("Aucun dossier de démarrage configuré (Préférences → Dossiers)."));
+            return;
+        }
+
+        setStatus(I18n.t("Recherche de dossiers orphelins (sans audio)…"));
+        SwingWorker<Void, Void> w = new SwingWorker<Void, Void>() {
+            final java.util.Set<String> KNOWN_AUDIO = java.util.Set.of(
+                ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".opus", ".wma", ".ape", ".wv",
+                ".aiff", ".aif", ".mpc", ".mp4", ".dsf", ".dff");
+            // Types considérés comme résidu jetable partout dans un dossier déjà avéré sans audio —
+            // volontairement plus large que FileRenamer.isDeletableLeftover() (qui ne gère que le
+            // cas post-renommage, pochette/log opentagger_*/AppleDouble) : ici on couvre aussi les
+            // sous-produits d'imports tiers repérés en direct (json, log générique, nfo, cue, sfv,
+            // srr...).
+            final java.util.Set<String> RESIDUE_EXT = java.util.Set.of(
+                ".json", ".log", ".nfo", ".txt", ".cue", ".m3u", ".m3u8", ".db", ".ini", ".sfv",
+                ".srr", ".url", ".lrc", ".xml");
+            final java.util.Set<String> IMAGE_EXT = java.util.Set.of(
+                ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp");
+            static final long SMALL_IMAGE_BYTES = 20_000L;
+
+            final List<OrphanDir> trashCandidates = new ArrayList<>();
+            int unknownFolders = 0; // contient du contenu non reconnu, jamais touché automatiquement
+            int scanned = 0;
+
+            record OrphanDir(File dir, long fileCount, long totalBytes) {}
+
+            @Override protected Void doInBackground() {
+                for (String root : roots) {
+                    File r = new File(root);
+                    if (!scanDir(r)) {
+                        // La racine elle-même est entièrement sans audio (cas limite, rare) —
+                        // aucun parent au-dessus d'elle pour la signaler, donc on la traite ici.
+                        classify(r);
+                    }
+                }
+                return null;
+            }
+
+            /** @return true si {@code dir} (ou l'un de ses descendants) contient au moins un fichier
+             *  audio reconnu — dans ce cas, les branches enfants sans audio sont signalées ici même
+             *  (elles sont "orphelines" par rapport à ce parent qui, lui, contient de la musique
+             *  ailleurs). Si {@code dir} entier n'a aucun audio, ne rien signaler ici : laisser
+             *  l'appelant (parent) décider — la branche remonte jusqu'à trouver un ancêtre qui a de
+             *  l'audio ailleurs, ou jusqu'à la racine du scan si aucun n'en a. */
+            boolean scanDir(File dir) {
+                if (isCancelled()) return true; // ne rien signaler en cas d'annulation
+                File[] children = dir.listFiles();
+                if (children == null) return true; // inaccessible : ne jamais y toucher
+                scanned++;
+                if (scanned % 500 == 0) publish();
+
+                boolean hasAudio = false;
+                List<File> subOrphans = new ArrayList<>();
+                for (File f : children) {
+                    if (isCancelled()) return true;
+                    if (f.isDirectory()) {
+                        if (scanDir(f)) hasAudio = true; else subOrphans.add(f);
+                        continue;
+                    }
+                    String lower = f.getName().toLowerCase();
+                    if (lower.startsWith(".")) continue; // AppleDouble/dotfiles, jamais un signal audio
+                    if (KNOWN_AUDIO.stream().anyMatch(lower::endsWith)) { hasAudio = true; continue; }
+                    // Extension inconnue et fichier non trivial : sonder comme repairMisnamedFiles()
+                    // avant de conclure — coût ffprobe limité, car on n'atteint ce point que pour
+                    // des dossiers déjà candidats (peu de fichiers).
+                    boolean recognizedResidue = RESIDUE_EXT.stream().anyMatch(lower::endsWith)
+                            || f.length() == 0
+                            || (IMAGE_EXT.stream().anyMatch(lower::endsWith) && f.length() < SMALL_IMAGE_BYTES);
+                    if (!recognizedResidue && f.length() > 0) {
+                        if (com.opentagger.AudioFormatCheck.suggestCorrectExtension(f) != null
+                                || com.opentagger.AudioFormatCheck.hasReadableDuration(f)) {
+                            hasAudio = true; // audio mal étiqueté : laisser repairMisnamedFiles() s'en charger
+                        }
+                    }
+                }
+
+                if (hasAudio) {
+                    for (File orphan : subOrphans) classify(orphan);
+                    return true;
+                }
+                return false; // dossier entier (fichiers + sous-dossiers) sans aucun audio
+            }
+
+            /** {@code dir} est confirmé sans aucun audio dans toute sa descendance — décide s'il ne
+             *  contient que du résidu jetable (candidat corbeille) ou du contenu non reconnu (jamais
+             *  touché, juste compté). */
+            void classify(File dir) {
+                long[] stats = {0, 0}; // {fileCount, totalBytes}
+                boolean onlyResidue = collectStats(dir, stats);
+                if (onlyResidue) {
+                    trashCandidates.add(new OrphanDir(dir, stats[0], stats[1]));
+                } else {
+                    unknownFolders++;
+                }
+            }
+
+            boolean collectStats(File dir, long[] stats) {
+                File[] children = dir.listFiles();
+                if (children == null) return true;
+                boolean onlyResidue = true;
+                for (File f : children) {
+                    if (f.isDirectory()) {
+                        if (!collectStats(f, stats)) onlyResidue = false;
+                        continue;
+                    }
+                    stats[0]++;
+                    stats[1] += f.length();
+                    String lower = f.getName().toLowerCase();
+                    if (lower.startsWith(".")) continue;
+                    boolean residue = RESIDUE_EXT.stream().anyMatch(lower::endsWith)
+                            || f.length() == 0
+                            || (IMAGE_EXT.stream().anyMatch(lower::endsWith) && f.length() < SMALL_IMAGE_BYTES);
+                    if (!residue) onlyResidue = false;
+                }
+                return onlyResidue;
+            }
+
+            @Override protected void process(List<Void> chunks) {
+                setStatus(I18n.t("Recherche de dossiers orphelins… %d dossier(s) examiné(s), %d candidat(s) trouvé(s)",
+                        scanned, trashCandidates.size()));
+            }
+
+            @Override protected void done() {
+                if (isCancelled()) { setStatus(I18n.t("Recherche annulée.")); return; }
+                try { get(); } catch (Exception ex) {
+                    setStatus(I18n.t("Erreur pendant la recherche : %s", ex.getMessage()));
+                    return;
+                }
+                if (trashCandidates.isEmpty() && unknownFolders == 0) {
+                    setStatus(I18n.t("%d dossier(s) examiné(s), aucun dossier orphelin trouvé.", scanned));
+                    return;
+                }
+
+                if (!trashCandidates.isEmpty()) {
+                    long totalBytes = trashCandidates.stream().mapToLong(OrphanDir::totalBytes).sum();
+                    StringBuilder sb = new StringBuilder(I18n.t(
+                        "<html><body style='width: 480px'><b>%d dossier(s) orphelin(s)</b> — jamais eu la "
+                        + "moindre piste audio, ne contiennent que des résidus (json/log/nfo/pochette cassée…), "
+                        + "%.1f Mo au total :<br><br>", trashCandidates.size(), totalBytes / 1_000_000.0));
+                    int shown = Math.min(trashCandidates.size(), 8);
+                    for (int i = 0; i < shown; i++) {
+                        OrphanDir od = trashCandidates.get(i);
+                        sb.append("&nbsp;• ").append(od.dir().getPath())
+                          .append(" (").append(od.fileCount()).append(" fichier(s))<br>");
+                    }
+                    if (trashCandidates.size() > shown)
+                        sb.append(I18n.t("&nbsp;… et %d autre(s)<br>", trashCandidates.size() - shown));
+                    if (unknownFolders > 0)
+                        sb.append(I18n.t("<br>(+ %d dossier(s) sans audio mais avec du contenu non reconnu, "
+                                + "laissés de côté — jamais touchés automatiquement.)<br>", unknownFolders));
+                    sb.append(I18n.t("<br>Déplacer ces dossiers vers la corbeille ?</html>"));
+                    int ok = JOptionPane.showConfirmDialog(MainFrame.this, sb.toString(),
+                        I18n.t("Dossiers orphelins"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    if (ok == JOptionPane.YES_OPTION) {
+                        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
+                        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                        int deleted = 0, failDel = 0;
+                        for (OrphanDir od : trashCandidates) {
+                            boolean moved = trashSupported ? desktop.moveToTrash(od.dir()) : deleteRecursively(od.dir());
+                            if (moved) deleted++; else failDel++;
+                        }
+                        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
+                        setStatus(I18n.t("%d dossier(s) orphelin(s) %s%s", deleted, where,
+                                failDel > 0 ? I18n.t(", %d échec(s)", failDel) : ""));
+                    }
+                } else {
+                    setStatus(I18n.t("%d dossier(s) examiné(s), aucun candidat corbeille — %d dossier(s) sans "
+                            + "audio mais avec du contenu non reconnu (jamais touchés automatiquement).",
+                            scanned, unknownFolders));
+                }
+            }
+
+            boolean deleteRecursively(File dir) {
+                File[] children = dir.listFiles();
+                if (children != null) for (File c : children) {
+                    if (c.isDirectory()) { if (!deleteRecursively(c)) return false; }
+                    else if (!c.delete()) return false;
+                }
+                return dir.delete();
+            }
+        };
+        WorkerHub.get().submit(WorkerHub.TaskKind.ORPHAN_CLEANUP,
+                I18n.t("Recherche de dossiers orphelins"), w, () -> w.cancel(true));
+    }
+
     /** Supprime directement les fichiers sélectionnés (n'importe quel statut, pas seulement les
      *  illisibles comme {@link #deleteErrorFiles()}) — retour utilisateur (2026-08-21) : aucun
      *  moyen de supprimer un audio depuis l'appli elle-même, il fallait repasser par le
@@ -7063,7 +7772,7 @@ public class MainFrame extends JFrame {
         }.execute();
     }
 
-    private void setStatus(String msg) {
+    void setStatus(String msg) {
         SwingUtilities.invokeLater(() -> lblStatus.setText("  " + msg));
     }
 

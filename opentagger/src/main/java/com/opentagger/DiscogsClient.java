@@ -45,7 +45,7 @@ public class DiscogsClient {
         // Genres/styles : ordre et limite configurables
         if (info.genre.isBlank()) {
             String source = Config.get().discogsGenreSource();
-            int    max    = Config.get().discogsMaxGenres();
+            int    max    = Config.get().genreMaxCount();
             List<String> genres;
             if ("genre_only".equals(source)) {
                 genres = extraireTableau(hit.path("genre"));

@@ -844,11 +844,25 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return null;
     }
 
+    // Seuil DÉDIÉ, distinct de match.track_matching_threshold (0.4 par défaut) — trouvé en direct
+    // 2026-09-02 (retour utilisateur, log réel) : à 0.4, cette méthode choisissait systématiquement
+    // "la moins pire" piste d'une release épinglée comportant des dizaines de pistes (ex. "The
+    // Annual 2017", grosse compilation), même pour des fichiers sans AUCUN rapport réel — "Facile.mp3"
+    // épinglé sur "Jonas Blue – Perfect Strangers", "download(4).mp3.mp3" sur "James Brown – Mind
+    // Power"... Aucun rapport de bon sens entre le nom de fichier et le titre choisi. Gravité : le
+    // résultat part avec score=92 (voir l'appelant), AU-DESSUS de match.min_score_auto (90) — donc
+    // auto-enregistré sans aucune revue, une vraie corruption de métadonnées à grande échelle sur un
+    // dossier de fichiers non identifiés mélangés (pas un vrai album cohérent). 0.4 reste adapté à
+    // d'autres usages de trackMatchingThreshold() (filtres plus souples, décisions moins engageantes)
+    // — volontairement PAS touché ici pour ne pas modifier leur comportement sans preuve similaire.
+    private static final double GROUP_PIN_TITLE_MATCH_THRESHOLD = 0.7;
+
     /** Repli de {@link #findTrackInRelease} pour groupPinnedRelease (voir findTags() étape 0.65) :
      *  contrairement au TOC (dossier "album complet" garanti par construction), une piste épinglée
      *  par une AUTRE piste du groupe n'a pas forcément de tag TRACK exploitable (fichier encore
-     *  brut) — repli sur la similarité de titre contre chaque piste de la tracklist, seuil déjà
-     *  utilisé ailleurs dans ce fichier pour la même famille de décision (voir son appelant). */
+     *  brut) — repli sur la similarité de titre contre chaque piste de la tracklist, seuil dédié et
+     *  volontairement strict (voir {@link #GROUP_PIN_TITLE_MATCH_THRESHOLD}) puisque le résultat est
+     *  auto-enregistré sans revue humaine. */
     private MusicBrainzClient.ReleaseTrack findTrackInReleaseByTitle(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
         String titleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
         if (titleTag.isBlank() || isGenericTag(titleTag)) return null;
@@ -858,7 +872,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             double sim = TrackMatcher.titleSimilarity(titleTag.toLowerCase(), t.title().toLowerCase());
             if (sim > bestSim) { bestSim = sim; bestTrack = t; }
         }
-        return bestSim >= Config.get().trackMatchingThreshold() ? bestTrack : null;
+        return bestSim >= GROUP_PIN_TITLE_MATCH_THRESHOLD ? bestTrack : null;
     }
 
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
@@ -930,6 +944,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 && !isGenericTag(existingTags.artist)
                 && !isGenericTag(existingTags.title)) {
             boolean confirmed = true;
+            boolean songRecInconclusive = false;
             if (SongRecClient.isAvailable()) {
                 try {
                     TagInfo sr = songRec.recognize(fichier);
@@ -941,11 +956,40 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                             log(I18n.t("  tags MB existants ⚠ contredits par SongRec (%s – %s) → identification complète",
                                     sr.artist, sr.title));
                         }
+                    } else {
+                        songRecInconclusive = true; // rien reconnu — pas une confirmation, voir ci-dessous
                     }
-                    // sr == null (rien reconnu par SongRec) : ne contredit pas, tags existants gardés.
                 } catch (Exception e) {
-                    // SongRec cassé/indisponible ponctuellement : ne pas bloquer sur une panne
-                    // d'infra — comportement identique à avant ce correctif dans ce cas précis.
+                    songRecInconclusive = true; // panne ponctuelle : même repli qu'un résultat vide
+                }
+            }
+            // SongRec muet ("rien reconnu") n'est PAS une confirmation — avant ce correctif, ce cas
+            // était traité comme "pas contredit, donc tags existants gardés", alors que SongRec
+            // échoue couramment sur du contenu ancien/obscur/mal enregistré (un vrai cas trouvé en
+            // direct 2026-09-01 : "François Valéry – J'explose" gardé sur la foi de tags préexistants
+            // corrects en apparence — recordingMbid + ISRC valides — alors que l'audio réel était
+            // "Princesse Erika – Faut Qu'j'travaille" ; SongRec n'avait rien reconnu du tout sur ce
+            // fichier). Seconde opinion via AcoustID (moteur d'empreinte différent, peut réussir là où
+            // SongRec échoue) UNIQUEMENT dans ce cas précis — pas sur chaque fichier "de confiance",
+            // seulement ceux où la première vérification n'a rien pu confirmer. Toujours piloté par
+            // les réglages déjà existants (tags.trust_existing_mb_tags, clé AcoustID configurée),
+            // aucune nouvelle case à cocher.
+            if (confirmed && songRecInconclusive && !Config.get().acoustidKey().isBlank()) {
+                try {
+                    List<TagInfo> ar = acoustId.identify(fichier);
+                    if (!ar.isEmpty() && !ar.get(0).artist.isBlank()) {
+                        TagInfo ai = ar.get(0);
+                        confirmed = TrackMatcher.titleSimilarity(
+                                ai.artist.toLowerCase(), existingTags.artist.toLowerCase())
+                                >= Config.get().trackMatchingThreshold();
+                        if (!confirmed) {
+                            log(I18n.t("  tags MB existants ⚠ contredits par AcoustID (%s – %s) → identification complète",
+                                    ai.artist, ai.title));
+                        }
+                    }
+                    // AcoustID vide aussi : toujours rien de concluant, tags existants gardés comme avant.
+                } catch (Exception e) {
+                    // AcoustID cassé/indisponible ponctuellement : ne pas bloquer sur une panne d'infra.
                 }
             }
             if (confirmed) {
@@ -1015,6 +1059,49 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // tl résolu mais aucune piste MB ne correspond au numéro de CE fichier (tag
                     // TRACK incohérent avec la structure détectée) → suite normale pour ce fichier
                     // seul, le reste de l'album profite quand même du match.
+                }
+            }
+        }
+
+        // 0.61. Base locale beets par CHEMIN EXACT (lecture seule, aucun réseau) — voir BeetsClient.
+        // Placée juste après le TOC : quasi certaine quand elle matche (beets.music_dir + chemin
+        // relatif stocké = chemin absolu réel du fichier), donc un cran de confiance au-dessus même
+        // du repli texte Headphones/beets juste en dessous. Désactivée par défaut (beets.db_enabled).
+        if (Config.get().beetsDbEnabled()) {
+            TagInfo bx = new BeetsClient().lookupByPath(fichier.getAbsolutePath());
+            if (bx != null) {
+                log(I18n.t("  beets (chemin exact) → %s – %s [%s]", bx.artist, bx.title, bx.album));
+                lastFindTagsSource.set(MetadataCache.SOURCE_BEETS);
+                return List.of(bx);
+            }
+        }
+
+        // 0.62. Bases locales Headphones/beets par similarité artiste+titre (lecture seule, aucun
+        // réseau) — voir HeadphonesClient/BeetsClient pour le détail. Placée avant tout ce qui coûte
+        // un appel réseau (AcoustID/SongRec/MB texte) : gratuite et quasi instantanée, donc aussi
+        // bien tentée tôt. Désactivées par défaut (headphones.db_enabled/beets.db_enabled) — ciblent
+        // un usage spécifique (une instance tierce déjà utilisée pour télécharger/organiser une
+        // partie de la bibliothèque), pas pertinentes sans elles. beets d'abord (schéma plus riche,
+        // voir BeetsClient) puis Headphones si beets ne trouve rien.
+        {
+            String hpArtist = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.ARTIST));
+            String hpTitle  = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+            if (!hpArtist.isBlank() && !hpTitle.isBlank() && !isGenericTag(hpArtist) && !isGenericTag(hpTitle)) {
+                if (Config.get().beetsDbEnabled()) {
+                    TagInfo bx = new BeetsClient().lookupTrack(hpArtist, hpTitle);
+                    if (bx != null) {
+                        log(I18n.t("  beets (similarité locale) → %s – %s [%s]", bx.artist, bx.title, bx.album));
+                        lastFindTagsSource.set(MetadataCache.SOURCE_BEETS);
+                        return List.of(bx);
+                    }
+                }
+                if (Config.get().headphonesDbEnabled()) {
+                    TagInfo hp = new HeadphonesClient().lookupTrack(hpArtist, hpTitle);
+                    if (hp != null) {
+                        log(I18n.t("  Headphones (local) → %s – %s [%s]", hp.artist, hp.title, hp.album));
+                        lastFindTagsSource.set(MetadataCache.SOURCE_HEADPHONES);
+                        return List.of(hp);
+                    }
                 }
             }
         }
@@ -1169,38 +1256,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        // 1. AcoustID (fingerprint) — rapide et parallélisable (aucune limite de débit globale,
-        //    contrairement à SongRec/SHAZAM_GATE ci-dessous) : tenté en premier pour cette raison.
-        //    Auparavant après SongRec ("source principale" pour la précision) — réorganisé le
-        //    2026-08-15 : SongRec sérialise TOUT appel à un seul à la fois dans toute l'appli
-        //    (evite le 429 Shazam du 2026-08-09), donc le placer en premier faisait payer ce
-        //    goulot sur CHAQUE fichier, même ceux qu'AcoustID aurait suffi à identifier seul. Rien
-        //    n'est perdu en théorie : un fichier qu'AcoustID ne reconnaît pas retombe exactement
-        //    sur SongRec comme avant, juste dans l'autre ordre.
-        if (useAcoustId) {
-            // ignore_existing : si un AcoustID est déjà dans les tags et qu'on ne force pas, on skip
-            boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
-            if (!hasExistingId || Config.get().ignoreExistingFingerprints()) {
-                List<TagInfo> r = acoustId.identify(fichier);
-                if (!r.isEmpty() && acoustIdResultPlausible(fichier, r.get(0), forceReidentify)) {
-                    if (existingTags.durationSec > 0
-                            && FileEntry.isDurationMismatch(existingTags.durationSec, r.get(0).mbDurationSec)) {
-                        // Même garde-fou que pour SongRec plus bas dans cette méthode : une
-                        // empreinte AcoustID à confiance élevée (le bypass juste au-dessus, ou une
-                        // similarité d'artiste acceptable) peut malgré tout pointer vers le mauvais
-                        // enregistrement — repéré en direct 2026-08-11 sur "1-08 Crank It Up.mp3"
-                        // (tags existants corrects : David Guetta Feat. Akon – Crank It Up),
-                        // matché par AcoustID à "Dreams", rejeté par la durée mais qui s'arrêtait
-                        // là avant ce correctif au lieu de tenter la recherche texte ci-dessous —
-                        // pourtant la meilleure chance ici, les tags existants étant fiables.
-                        log(I18n.t("  AcoustID : durée incohérente (%ds vs %ds, %s – %s) → poursuite vers le texte",
-                                existingTags.durationSec, r.get(0).mbDurationSec, r.get(0).artist, r.get(0).title));
-                    } else {
-                        lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
-                        return r;
-                    }
-                }
-            }
+        // 1/2. AcoustID vs SongRec — ordre CONDITIONNEL depuis ce correctif (2026-09-02, retour
+        // utilisateur : "forcer retaguage c'était songrec en priorité"). Taguage normal (mise à
+        // jour massive) : AcoustID d'abord — rapide et parallélisable (aucune limite de débit
+        // globale, contrairement à SongRec/SHAZAM_GATE qui sérialise TOUT appel à un seul à la fois
+        // dans toute l'appli, pour éviter le 429 Shazam du 2026-08-09) — réorganisé ainsi le
+        // 2026-08-15 pour ne pas payer ce goulot sur CHAQUE fichier, même ceux qu'AcoustID aurait
+        // suffi à identifier seul. Re-taguage FORCÉ (action volontaire, lot généralement plus
+        // restreint, priorité donnée à la fiabilité plutôt qu'au débit) : SongRec d'abord — décision
+        // d'origine du projet, jamais implémentée dans le code jusqu'ici (l'ordre était resté
+        // identique pour les deux cas depuis le 08-15). Voir tryAcoustId()/trySongRec() pour le
+        // détail de chaque étape, inchangé — seul l'ORDRE d'appel change ici.
+        if (forceReidentify) {
+            List<TagInfo> sr = trySongRec(fichier, existingTags, mb, lastFm, cache);
+            if (sr != null) return sr;
+        } else {
+            List<TagInfo> ai = tryAcoustId(fichier, existingTags, acoustId, forceReidentify);
+            if (ai != null) return ai;
         }
 
         // 1bis. MB Recording ID déjà présent → lookup direct (rapide + précis)
@@ -1224,121 +1296,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        // 2. SongRec (Shazam) — repli si AcoustID n'a rien trouvé : empreinte audio, identifie la
-        //    musique commerciale même avec de faux tags existants, mais sérialisée à un seul appel
-        //    à la fois dans toute l'appli (SHAZAM_GATE, voir plus haut) — volontairement en second
-        //    maintenant pour ne payer ce goulot que sur les fichiers qu'AcoustID n'a pas su résoudre.
-        if (SongRecClient.isAvailable()) {
-            try {
-                log(I18n.t("  SongRec..."));
-                TagInfo sr = songRec.recognize(fichier);
-                boolean srOk = sr != null && !sr.artist.isBlank() && !sr.title.isBlank();
-                if (srOk) {
-                    log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
-                } else if (SongRecClient.lastFailureReason() != null) {
-                    // Jusqu'à ce correctif : un échec SongRec (timeout ffmpeg, aucun match
-                    // Shazam, réponse illisible...) ne laissait ABSOLUMENT aucune trace dans le
-                    // journal — le fichier passait directement à l'étape suivante sans que rien
-                    // n'explique pourquoi, restant PENDING sans indice si les étapes suivantes
-                    // échouaient aussi.
-                    log(I18n.t("  SongRec ✗ %s", SongRecClient.lastFailureReason()));
-                }
-                if (srOk) {
-                    // true dès qu'un candidat SongRec→MB a été rejeté pour durée incohérente — dans
-                    // ce cas, le repli final "SongRec seul" (sans vérification MB, ci-dessous) ne
-                    // doit PAS non plus être rendu tel quel : sr.mbDurationSec y est toujours 0 (non
-                    // renseigné), donc invisible au filet de sécurité de l'appelant
-                    // (isDurationMismatch ignore mbSec<=0) — l'accepter reviendrait à contourner en
-                    // silence la vérification qu'on vient justement de faire échouer.
-                    boolean songRecDurationSuspect = false;
-                    // Enrichir avec MusicBrainz (ajoute MBIDs, piste, disque, etc.)
-                    String srHash = MetadataCache.queryHash(sr.artist, sr.title);
-                    String srCached = cache.getRecordingSearch(srHash);
-                    List<TagInfo> srMb;
-                    if (srCached != null) {
-                        srMb = mb.parseFromCache(srCached);
-                    } else {
-                        srMb = mb.searchRecording(sr.artist, sr.title);
-                        if (!srMb.isEmpty()) cache.putRecordingSearch(srHash, mb.lastRawJson());
-                    }
-                    if (!srMb.isEmpty() && srMb.get(0).score >= 50
-                            && !(existingTags.durationSec > 0
-                                 && FileEntry.isDurationMismatch(existingTags.durationSec, srMb.get(0).mbDurationSec))) {
-                        TagInfo best = srMb.get(0);
-                        // SongRec comble ce que MB n'a pas (genre, année Shazam, album Shazam)
-                        if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
-                        if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
-                        if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
-                        if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
-                        best.score = 90;
-                        log(I18n.t("  SongRec→MB: %s – %s [%s] score=%s", best.artist, best.title, best.album, best.score));
-                        lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
-                        return srMb;
-                    } else if (!srMb.isEmpty() && srMb.get(0).score >= 50) {
-                        // Durée incohérente avec CE candidat SongRec→MB précis (empreinte audio
-                        // fiable sur un passage court/dégradé, mauvais enregistrement matché malgré
-                        // un bon score texte — ex. un extrait DJ-pool de 1min30 reconnu comme un
-                        // morceau totalement différent) : ne PAS s'arrêter ici comme avant (l'appelant
-                        // finissait alors "Durée incohérente" sans jamais tenter la recherche texte
-                        // basée sur le nom de fichier/tags, alors que CELLE-CI aurait pu trouver le
-                        // bon enregistrement — repéré en direct 2026-08-11 sur "16741 - Dr. Dre -
-                        // What's The Difference.mp3", matché à tort à "Breathe" de Blu Cantrell). On
-                        // laisse tomber vers les étapes suivantes (titre nettoyé, texte) au lieu de
-                        // rendre ce résultat.
-                        log(I18n.t("  SongRec→MB : durée incohérente (%ds vs %ds) → poursuite vers les autres méthodes",
-                                existingTags.durationSec, srMb.get(0).mbDurationSec));
-                        songRecDurationSuspect = true;
-                    }
-                    // MB échoue avec le titre complet → réessayer sans qualificatif entre
-                    // parenthèses (ex. "Le coach (feat. Vincenzo)" → "Le coach") : SongRec/Shazam
-                    // renvoie souvent le featuring collé dans le titre, ce qui fait chuter le score
-                    // MB sous le seuil alors qu'une recherche sur le titre seul matche parfaitement
-                    // — même correctif déjà présent dans le fallback SongRec plus loin dans la
-                    // cascade (voir plus bas "titre nettoyé"), qui manquait ici jusqu'à présent.
-                    String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
-                    if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
-                        List<TagInfo> srMbClean = mb.searchRecording(sr.artist, cleanTitle);
-                        if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50
-                                && !(existingTags.durationSec > 0
-                                     && FileEntry.isDurationMismatch(existingTags.durationSec, srMbClean.get(0).mbDurationSec))) {
-                            TagInfo best = srMbClean.get(0);
-                            if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
-                            if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
-                            if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
-                            if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
-                            best.score = 90;
-                            log(I18n.t("  SongRec→MB (titre nettoyé '%s'): %s – %s [%s] score=%s",
-                                    cleanTitle, best.artist, best.title, best.album, best.score));
-                            lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
-                            return srMbClean;
-                        } else if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50) {
-                            // Même garde-fou que srMb ci-dessus.
-                            log(I18n.t("  SongRec→MB (titre nettoyé) : durée incohérente (%ds vs %ds) → poursuite",
-                                    existingTags.durationSec, srMbClean.get(0).mbDurationSec));
-                            songRecDurationSuspect = true;
-                        }
-                    }
-                    if (!songRecDurationSuspect) {
-                        // MB n'a rien enrichi : garder le résultat SongRec seul
-                        sr.score = 85;
-                        log(I18n.t("  SongRec seul (MB sans match): %s – %s", sr.artist, sr.title));
-                        // Cascade centralisée (au lieu d'une copie inline qui divergerait silencieusement
-                        // si TagEnrichment.enrichGenre change) — de toute façon re-noopée sans risque à
-                        // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
-                        TagEnrichment.enrichGenre(sr, discogs, lastFm, cache);
-                        TagEnrichment.enrichClassicalWork(sr, mb, cache);
-                        lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
-                        return List.of(sr);
-                    }
-                    // songRecDurationSuspect : ne pas retourner sr non plus (voir son commentaire
-                    // plus haut) — on laisse tomber vers la recherche texte ci-dessous (AcoustID a
-                    // déjà été tenté avant SongRec, voir plus haut dans cette méthode).
-                } else {
-                    log(I18n.t("  SongRec → rien trouvé"));
-                }
-            } catch (Exception e) {
-                log(I18n.t("  SongRec WARN: %s", e.getMessage()));
-            }
+        // 1/2 (suite) — second essai, dans l'ordre complémentaire au premier ci-dessus (voir son
+        // commentaire pour le pourquoi de cet ordre conditionnel).
+        if (forceReidentify) {
+            List<TagInfo> ai = tryAcoustId(fichier, existingTags, acoustId, forceReidentify);
+            if (ai != null) return ai;
+        } else {
+            List<TagInfo> sr = trySongRec(fichier, existingTags, mb, lastFm, cache);
+            if (sr != null) return sr;
         }
 
         // 3. Tags texte existants, avec fallback sur le nom de fichier
@@ -1669,6 +1634,154 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         } catch (Exception e) { return ""; }
     }
 
+    /** Étape "AcoustID" de la cascade findTags() — extraite (2026-09-02) pour pouvoir être appelée
+     *  soit en premier (taguage normal), soit en second (re-taguage forcé), voir findTags(). Corps
+     *  inchangé par rapport à avant cette extraction, seul l'appelant/l'ordre a changé.
+     *  @return le résultat si résolu, {@code null} sinon (poursuivre la cascade). */
+    private List<TagInfo> tryAcoustId(File fichier, TagInfo existingTags, AcoustIdClient acoustId,
+                                       boolean forceReidentify) throws Exception {
+        if (!useAcoustId) return null;
+        // ignore_existing : si un AcoustID est déjà dans les tags et qu'on ne force pas, on skip
+        boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
+        if (hasExistingId && !Config.get().ignoreExistingFingerprints()) return null;
+        List<TagInfo> r = acoustId.identify(fichier);
+        if (r.isEmpty() || !acoustIdResultPlausible(fichier, r.get(0), forceReidentify)) return null;
+        if (existingTags.durationSec > 0
+                && FileEntry.isDurationMismatch(existingTags.durationSec, r.get(0).mbDurationSec)) {
+            // Une empreinte AcoustID à confiance élevée (le bypass dans acoustIdResultPlausible(),
+            // ou une similarité d'artiste acceptable) peut malgré tout pointer vers le mauvais
+            // enregistrement — repéré en direct 2026-08-11 sur "1-08 Crank It Up.mp3" (tags
+            // existants corrects : David Guetta Feat. Akon – Crank It Up), matché par AcoustID à
+            // "Dreams", rejeté par la durée mais qui s'arrêtait là avant ce correctif au lieu de
+            // tenter la recherche texte ci-dessous — pourtant la meilleure chance ici, les tags
+            // existants étant fiables.
+            log(I18n.t("  AcoustID : durée incohérente (%ds vs %ds, %s – %s) → poursuite vers le texte",
+                    existingTags.durationSec, r.get(0).mbDurationSec, r.get(0).artist, r.get(0).title));
+            return null;
+        }
+        lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
+        return r;
+    }
+
+    /** Étape "SongRec" de la cascade findTags() — extraite (2026-09-02), même raison/mêmes
+     *  garanties que {@link #tryAcoustId}. Corps inchangé par rapport à avant cette extraction.
+     *  @return le résultat si résolu, {@code null} sinon (poursuivre la cascade). */
+    private List<TagInfo> trySongRec(File fichier, TagInfo existingTags, MusicBrainzClient mb,
+                                      LastFmClient lastFm, MetadataCache cache) {
+        if (!SongRecClient.isAvailable()) return null;
+        try {
+            log(I18n.t("  SongRec..."));
+            TagInfo sr = songRec.recognize(fichier);
+            boolean srOk = sr != null && !sr.artist.isBlank() && !sr.title.isBlank();
+            if (srOk) {
+                log(I18n.t("  SongRec → %s – %s", sr.artist, sr.title));
+            } else if (SongRecClient.lastFailureReason() != null) {
+                // Jusqu'à ce correctif : un échec SongRec (timeout ffmpeg, aucun match
+                // Shazam, réponse illisible...) ne laissait ABSOLUMENT aucune trace dans le
+                // journal — le fichier passait directement à l'étape suivante sans que rien
+                // n'explique pourquoi, restant PENDING sans indice si les étapes suivantes
+                // échouaient aussi.
+                log(I18n.t("  SongRec ✗ %s", SongRecClient.lastFailureReason()));
+            }
+            if (!srOk) {
+                log(I18n.t("  SongRec → rien trouvé"));
+                return null;
+            }
+            // true dès qu'un candidat SongRec→MB a été rejeté pour durée incohérente — dans
+            // ce cas, le repli final "SongRec seul" (sans vérification MB, ci-dessous) ne
+            // doit PAS non plus être rendu tel quel : sr.mbDurationSec y est toujours 0 (non
+            // renseigné), donc invisible au filet de sécurité de l'appelant
+            // (isDurationMismatch ignore mbSec<=0) — l'accepter reviendrait à contourner en
+            // silence la vérification qu'on vient justement de faire échouer.
+            boolean songRecDurationSuspect = false;
+            // Enrichir avec MusicBrainz (ajoute MBIDs, piste, disque, etc.)
+            String srHash = MetadataCache.queryHash(sr.artist, sr.title);
+            String srCached = cache.getRecordingSearch(srHash);
+            List<TagInfo> srMb;
+            if (srCached != null) {
+                srMb = mb.parseFromCache(srCached);
+            } else {
+                srMb = mb.searchRecording(sr.artist, sr.title);
+                if (!srMb.isEmpty()) cache.putRecordingSearch(srHash, mb.lastRawJson());
+            }
+            if (!srMb.isEmpty() && srMb.get(0).score >= 50
+                    && !(existingTags.durationSec > 0
+                         && FileEntry.isDurationMismatch(existingTags.durationSec, srMb.get(0).mbDurationSec))) {
+                TagInfo best = srMb.get(0);
+                // SongRec comble ce que MB n'a pas (genre, année Shazam, album Shazam)
+                if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
+                if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
+                if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
+                if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
+                best.score = 90;
+                log(I18n.t("  SongRec→MB: %s – %s [%s] score=%s", best.artist, best.title, best.album, best.score));
+                lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
+                return srMb;
+            } else if (!srMb.isEmpty() && srMb.get(0).score >= 50) {
+                // Durée incohérente avec CE candidat SongRec→MB précis (empreinte audio
+                // fiable sur un passage court/dégradé, mauvais enregistrement matché malgré
+                // un bon score texte — ex. un extrait DJ-pool de 1min30 reconnu comme un
+                // morceau totalement différent) : ne PAS s'arrêter ici comme avant (l'appelant
+                // finissait alors "Durée incohérente" sans jamais tenter la recherche texte
+                // basée sur le nom de fichier/tags, alors que CELLE-CI aurait pu trouver le
+                // bon enregistrement — repéré en direct 2026-08-11 sur "16741 - Dr. Dre -
+                // What's The Difference.mp3", matché à tort à "Breathe" de Blu Cantrell). On
+                // laisse tomber vers les étapes suivantes (titre nettoyé, texte) au lieu de
+                // rendre ce résultat.
+                log(I18n.t("  SongRec→MB : durée incohérente (%ds vs %ds) → poursuite vers les autres méthodes",
+                        existingTags.durationSec, srMb.get(0).mbDurationSec));
+                songRecDurationSuspect = true;
+            }
+            // MB échoue avec le titre complet → réessayer sans qualificatif entre
+            // parenthèses (ex. "Le coach (feat. Vincenzo)" → "Le coach") : SongRec/Shazam
+            // renvoie souvent le featuring collé dans le titre, ce qui fait chuter le score
+            // MB sous le seuil alors qu'une recherche sur le titre seul matche parfaitement
+            // — même correctif déjà présent dans le fallback SongRec plus loin dans la
+            // cascade (voir plus bas "titre nettoyé"), qui manquait ici jusqu'à présent.
+            String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
+            if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
+                List<TagInfo> srMbClean = mb.searchRecording(sr.artist, cleanTitle);
+                if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50
+                        && !(existingTags.durationSec > 0
+                             && FileEntry.isDurationMismatch(existingTags.durationSec, srMbClean.get(0).mbDurationSec))) {
+                    TagInfo best = srMbClean.get(0);
+                    if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
+                    if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
+                    if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
+                    if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
+                    best.score = 90;
+                    log(I18n.t("  SongRec→MB (titre nettoyé '%s'): %s – %s [%s] score=%s",
+                            cleanTitle, best.artist, best.title, best.album, best.score));
+                    lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
+                    return srMbClean;
+                } else if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50) {
+                    // Même garde-fou que srMb ci-dessus.
+                    log(I18n.t("  SongRec→MB (titre nettoyé) : durée incohérente (%ds vs %ds) → poursuite",
+                            existingTags.durationSec, srMbClean.get(0).mbDurationSec));
+                    songRecDurationSuspect = true;
+                }
+            }
+            if (!songRecDurationSuspect) {
+                // MB n'a rien enrichi : garder le résultat SongRec seul
+                sr.score = 85;
+                log(I18n.t("  SongRec seul (MB sans match): %s – %s", sr.artist, sr.title));
+                // Cascade centralisée (au lieu d'une copie inline qui divergerait silencieusement
+                // si TagEnrichment.enrichGenre change) — de toute façon re-noopée sans risque à
+                // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
+                TagEnrichment.enrichGenre(sr, discogs, lastFm, cache);
+                TagEnrichment.enrichClassicalWork(sr, mb, cache);
+                lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
+                return List.of(sr);
+            }
+            // songRecDurationSuspect : ne pas retourner sr non plus — laisser tomber vers la suite
+            // de la cascade (l'autre méthode, texte...).
+            return null;
+        } catch (Exception e) {
+            log(I18n.t("  SongRec WARN: %s", e.getMessage()));
+            return null;
+        }
+    }
+
     /**
      * Garde-fou avant d'accepter un résultat AcoustID — trouvé en vérifiant en direct que
      * l'intégration AcoustID fonctionnait bien : sur "Daft Punk – One More Time" (sans ambiguïté
@@ -1692,7 +1805,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * inclusion, est le signal qui compte ici ; le titre n'est plus utilisé du tout dans ce test.
      */
     private boolean acoustIdResultPlausible(File fichier, TagInfo candidate, boolean forceReidentify) {
-        if (forceReidentify) return true;
         // Empreinte très forte (même seuil "confiance excellente" qu'AcoustIdClient.
         // fetchBestFromMusicBrainz()) : on fait confiance à l'audio plutôt qu'au tag déjà présent,
         // qui peut lui-même être faux à la source (constaté en direct 2026-08-09 : un fichier tagué
@@ -1702,7 +1814,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // uniquement parce qu'il ne ressemblait pas au tag existant erroné). En dessous de ce
         // seuil, on garde la vérification par similarité : elle reste utile contre un vrai faux
         // positif à confiance faible/moyenne (cf. le cas "Rasputin" de SongRec, même session).
+        // Contrôle de confiance TOUJOURS appliqué, y compris en re-taguage forcé — indépendant du
+        // tag existant (une empreinte moyenne/faible n'est pas plus fiable juste parce qu'on a
+        // choisi d'ignorer le tag présent). Avant ce correctif (2026-09-02, retour utilisateur —
+        // log réel : "Club Nouveau" accepté comme "Ashanti", "Hong Kong Syndikat" comme "Chris Rea",
+        // "D'JULZ" comme "Aluna"...), forceReidentify=true renvoyait true INCONDITIONNELLEMENT ici,
+        // contournant même ce contrôle de confiance pourtant sans rapport avec le tag existant.
         if (candidate.acoustidConfidence >= 0.9) return true;
+        // Sous ce seuil, en re-taguage forcé : rejeté plutôt qu'accepté aveuglément — pas de tag
+        // existant fiable à comparer (justement ce qu'on veut pouvoir corriger), donc pas de base
+        // pour une seconde chance ; le fichier retombe sur les méthodes suivantes (SongRec, texte).
+        if (forceReidentify) return false;
         String existingArtist = readTag(fichier, FieldKey.ARTIST);
         if (existingArtist.isBlank()) return true; // rien à comparer
 
@@ -1769,6 +1891,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // cohérence de l'artiste via SongRec, jamais sur le titre — ce titre absurde passait donc
         // sans être détecté ni corrigé.
         if (low.matches("(cover|folder|front|back|album|art|artwork)\\.(jpe?g|png|gif|bmp|webp)")) return true;
+        // Aucun caractère alphanumérique exploitable (ex. tag corrompu "_ _ _ _ _ _ _ _ _ _ _ _ _ _") —
+        // repéré en direct 2026-09-01 : cleanSearchTerm() convertit les "_" en espaces, donc ce genre
+        // de titre part en recherche MB avec un terme quasi vide ; l'artiste seul suffit alors à MB
+        // pour renvoyer N'IMPORTE QUELLE piste de son catalogue avec un score="100" trompeur (rien ne
+        // confirme qu'il s'agit bien de CE fichier). Sans signal exploitable, mieux vaut passer par
+        // SongRec/AcoustID (empreinte audio réelle) que par une recherche texte qui ne peut que deviner.
+        if (s.trim().replaceAll("[^\\p{L}\\p{N}]", "").isBlank()) return true;
         return false;
     }
 

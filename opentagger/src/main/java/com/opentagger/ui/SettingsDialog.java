@@ -46,8 +46,7 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spCacheDays;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbDiscogsGenreSource;
-    private JSpinner   spDiscogsMaxGenres;
-    private JSpinner   spLastfmMaxGenres;
+    // spDiscogsMaxGenres/spLastfmMaxGenres fusionnés dans spMbMaxGenres (voir Config.genreMaxCount())
 
     // ── Onglet Renommage ─────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -87,6 +86,17 @@ public class SettingsDialog extends JDialog {
     // ── Onglet APIs (Last.fm, synchro écoutes — distinct de tfLastFmKey ci-dessus) ──────────────
     private JTextField tfLastFmUsername;
     private JSpinner   spLastfmMaxTracks;
+    // ── Onglet APIs (Headphones — intégration tierce, voir HeadphonesClient) ───────────────────
+    private JCheckBox  chkHeadphonesDbEnabled;
+    private JTextField tfHeadphonesDbPath;
+    private JTextField tfHeadphonesUrl;
+    private JTextField tfHeadphonesApiKey;
+    private JCheckBox  chkHeadphonesAutoQueue;
+    private JSpinner   spHeadphonesAutoQueueMinScore;
+    // ── Onglet APIs (beets — intégration tierce, voir BeetsClient) ─────────────────────────────
+    private JCheckBox  chkBeetsDbEnabled;
+    private JTextField tfBeetsDbPath;
+    private JTextField tfBeetsMusicDir;
 
     // ── Onglet Tags ───────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -485,6 +495,26 @@ public class SettingsDialog extends JDialog {
         spLastfmMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
         spLastfmMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
                 + "Last.fm (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
+        chkHeadphonesDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base Headphones (identification locale)"));
+        chkHeadphonesDbEnabled.setToolTipText(I18n.t("Cherche une correspondance dans la base SQLite d'une "
+                + "instance Headphones tierce avant tout appel réseau — lecture seule, jamais d'écriture."));
+        tfHeadphonesDbPath = tf();
+        tfHeadphonesUrl    = tf();
+        tfHeadphonesApiKey = tf();
+        chkHeadphonesAutoQueue = new JCheckBox(I18n.t("Envoyer automatiquement vers Headphones après chaque enregistrement"));
+        chkHeadphonesAutoQueue.setToolTipText(I18n.t("Si l'album identifié n'est pas déjà connu de Headphones "
+                + "(voir sa base), le met automatiquement en recherche/téléchargement de son côté — au-delà du "
+                + "seuil de confiance ci-dessous."));
+        spHeadphonesAutoQueueMinScore = new JSpinner(new SpinnerNumberModel(90, 0, 100, 1));
+        spHeadphonesAutoQueueMinScore.setToolTipText(I18n.t("Score minimum de CETTE identification (pas celui "
+                + "de la recherche côté Headphones) pour déclencher l'envoi automatique."));
+        chkBeetsDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base beets (identification locale)"));
+        chkBeetsDbEnabled.setToolTipText(I18n.t("Cherche une correspondance (chemin exact, puis similarité) dans "
+                + "la base SQLite d'une instance beets tierce avant tout appel réseau — lecture seule."));
+        tfBeetsDbPath   = tf();
+        tfBeetsMusicDir = tf();
+        tfBeetsMusicDir.setToolTipText(I18n.t("Dossier racine de beets (son réglage \"directory\") — vide = "
+                + "utilise le même dossier racine qu'OpenTagger (Renommage → Racine de bibliothèque)."));
         // FanArt.tv (Tags → Fournisseurs de pochette) et Last.fm (Matching → Sources de genres,
         // voir buildMatchingPanel()) sont activés/priorisés là où se trouve le reste de leur
         // comportement — cet onglet ne garde QUE les clés/identifiants (2026-08-16, retour
@@ -518,6 +548,16 @@ public class SettingsDialog extends JDialog {
             { "Nom d'utilisateur Last.fm :", tfLastFmUsername, "https://www.last.fm/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFmUsername(tfLastFmUsername.getText().trim()) },
             { "Pistes max à synchroniser (Last.fm) :", spLastfmMaxTracks, null, null },
+            { "", chkHeadphonesDbEnabled, null, null },
+            { "Chemin headphones.db :",     tfHeadphonesDbPath,   null, null },
+            { "URL Headphones (API) :",     tfHeadphonesUrl,      null, null },
+            { "Clé API Headphones :",       tfHeadphonesApiKey,   "http://127.0.0.1:8181/home/api_builder",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testHeadphones(tfHeadphonesUrl.getText().trim(), tfHeadphonesApiKey.getText().trim()) },
+            { "", chkHeadphonesAutoQueue, null, null },
+            { "Score minimum (envoi auto) :", spHeadphonesAutoQueueMinScore, null, null },
+            { "", chkBeetsDbEnabled, null, null },
+            { "Chemin library.db (beets) :", tfBeetsDbPath, null, null },
+            { "Dossier racine beets :",       tfBeetsMusicDir, null, null },
         };
 
         for (int i = 0; i < rows.length; i++) {
@@ -674,8 +714,6 @@ public class SettingsDialog extends JDialog {
 
         cmbDiscogsGenreSource = new JComboBox<>(new String[]{
             I18n.t("Style puis Genre"), I18n.t("Genre puis Style"), I18n.t("Genre uniquement")});
-        spDiscogsMaxGenres = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
-        spLastfmMaxGenres  = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
 
         // Déplacé depuis l'onglet API (2026-08-16, retour utilisateur : le réglage Last.fm était
         // écartelé entre API — activer/désactiver — et Matching — nombre de genres — sans lien
@@ -781,14 +819,15 @@ public class SettingsDialog extends JDialog {
             tfVaName, chkStandardizeArtists
         }, "Releases préférées (comme Picard)");
 
+        // Max genres Discogs/Last.fm fusionné avec MusicBrainz (voir spMbMaxGenres, onglet "Filtre
+        // de genres" plus bas) — un seul plafond partagé, réglé une seule fois au même endroit que
+        // la liste d'exclusion déjà partagée (taGenresFilter).
         JPanel genrePanel = form(new String[]{
             "Source genres Discogs :",
-            "Max genres Discogs :",
-            "Max genres Last.fm :",
             "",
             ""
         }, new JComponent[]{
-            cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres,
+            cmbDiscogsGenreSource,
             chkLastfmEnabled, chkLastfmArtistUrls
         }, "Sources de genres (Discogs / Last.fm)");
 
@@ -803,6 +842,9 @@ public class SettingsDialog extends JDialog {
             "Nombre minimum de votes qu'un genre doit avoir reçu sur MusicBrainz pour être retenu — "
             + "évite les étiquettes rares ou farfelues ajoutées par une seule personne."));
         spMbMaxGenres     = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+        spMbMaxGenres.setToolTipText(I18n.t(
+            "Un seul plafond, partagé par Discogs/Last.fm/MusicBrainz (avant : 3 réglages séparés "
+            + "réglés à la même valeur dans la quasi-totalité des cas — fusionnés en un seul)."));
         taGenresFilter    = new JTextArea(4, 20);
         taGenresFilter.setLineWrap(true);
         taGenresFilter.setToolTipText(I18n.t(
@@ -811,7 +853,7 @@ public class SettingsDialog extends JDialog {
             + "inutiles ou hors-sujet (ex: \"seen live\", \"favorites\")."));
         JPanel mbGenrePanel = form(new String[]{
             "Genres votés par les utilisateurs MusicBrainz :", "Popularité minimale requise :",
-            "Nombre max de genres retenus :", "Genres à exclure (un par ligne, préfixe -) :"
+            "Nombre max de genres retenus (Discogs/Last.fm/MusicBrainz) :", "Genres à exclure (un par ligne, préfixe -) :"
         }, new JComponent[]{
             chkMbUseGenres, spMbMinGenreUsage, spMbMaxGenres, new JScrollPane(taGenresFilter)
         }, "Filtre de genres");
@@ -2407,6 +2449,15 @@ public class SettingsDialog extends JDialog {
         spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
         tfLastFmUsername .setText(cfg.lastfmUsername());
         spLastfmMaxTracks.setValue(cfg.lastfmMaxTracks());
+        chkHeadphonesDbEnabled.setSelected(cfg.headphonesDbEnabled());
+        tfHeadphonesDbPath.setText(cfg.headphonesDbPath());
+        tfHeadphonesUrl.setText(cfg.headphonesUrl());
+        tfHeadphonesApiKey.setText(cfg.headphonesApiKey());
+        chkHeadphonesAutoQueue.setSelected(cfg.headphonesAutoQueueEnabled());
+        spHeadphonesAutoQueueMinScore.setValue(cfg.headphonesAutoQueueMinScore());
+        chkBeetsDbEnabled.setSelected(cfg.beetsDbEnabled());
+        tfBeetsDbPath.setText(cfg.beetsDbPath());
+        tfBeetsMusicDir.setText(cfg.beetsMusicDir());
 
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkLastfmArtistUrls .setSelected(cfg.bool("lastfm.fetch_artist_urls", true));
@@ -2416,8 +2467,6 @@ public class SettingsDialog extends JDialog {
         String genreSrc = cfg.str("discogs.genre_source", "style_then_genre");
         cmbDiscogsGenreSource.setSelectedIndex(
             "genre_then_style".equals(genreSrc) ? 1 : "genre_only".equals(genreSrc) ? 2 : 0);
-        spDiscogsMaxGenres.setValue(cfg.num("discogs.max_genres",   3));
-        spLastfmMaxGenres .setValue(cfg.num("lastfm.max_genres",    3));
 
         // ─ Releases préférées ─
         lstCountriesModel.clear();
@@ -2467,7 +2516,7 @@ public class SettingsDialog extends JDialog {
         // ─ MB Genres ─
         chkMbUseGenres   .setSelected(cfg.mbUseGenres());
         spMbMinGenreUsage.setValue(cfg.mbMinGenreUsage());
-        spMbMaxGenres    .setValue(cfg.mbMaxGenres());
+        spMbMaxGenres    .setValue(cfg.genreMaxCount());
         taGenresFilter   .setText(cfg.mbGenresFilter());
 
         // ─ Tags (onglet Tags) ─
@@ -2555,8 +2604,9 @@ public class SettingsDialog extends JDialog {
      *  clavier en cours avant lecture (voir commitAllSpinnerEdits()). */
     private JSpinner[] allSpinners() {
         return new JSpinner[]{
-            spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays, spDiscogsMaxGenres,
-            spLastfmMaxGenres, spnSkipSongRecMinScore, spListenBrainzMaxTracks, spLastfmMaxTracks, spFpcalcThreads,
+            spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays,
+            spnSkipSongRecMinScore, spListenBrainzMaxTracks, spLastfmMaxTracks,
+            spHeadphonesAutoQueueMinScore, spFpcalcThreads,
             spBatchThreads, spMbMinGenreUsage, spMbMaxGenres, spTranscodeBitrate, spMbRateLimitMs
         };
     }
@@ -2579,7 +2629,7 @@ public class SettingsDialog extends JDialog {
     private void save() {
         commitAllSpinnerEdits();
         // Partir du fichier utilisateur existant pour préserver les clés non affichées dans le formulaire
-        // (discogs.genre_source, lastfm.max_genres, mb.oauth.mode configurées manuellement, etc.)
+        // (discogs.genre_source, mb.oauth.mode configurées manuellement, etc.)
         Properties p = new Properties();
         Path userFile = Paths.get(SETTINGS_FILE);
         if (Files.exists(userFile)) {
@@ -2649,6 +2699,15 @@ public class SettingsDialog extends JDialog {
         p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
         p.setProperty("lastfm.username",   tfLastFmUsername.getText().trim());
         p.setProperty("lastfm.max_tracks", String.valueOf(spLastfmMaxTracks.getValue()));
+        p.setProperty("headphones.db_enabled", String.valueOf(chkHeadphonesDbEnabled.isSelected()));
+        p.setProperty("headphones.db_path",    tfHeadphonesDbPath.getText().trim());
+        p.setProperty("headphones.url",        tfHeadphonesUrl.getText().trim());
+        p.setProperty("headphones.api_key",    tfHeadphonesApiKey.getText().trim());
+        p.setProperty("headphones.auto_queue_enabled",  String.valueOf(chkHeadphonesAutoQueue.isSelected()));
+        p.setProperty("headphones.auto_queue_min_score", String.valueOf(spHeadphonesAutoQueueMinScore.getValue()));
+        p.setProperty("beets.db_enabled", String.valueOf(chkBeetsDbEnabled.isSelected()));
+        p.setProperty("beets.db_path",    tfBeetsDbPath.getText().trim());
+        p.setProperty("beets.music_dir",  tfBeetsMusicDir.getText().trim());
 
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("lastfm.fetch_artist_urls", String.valueOf(chkLastfmArtistUrls.isSelected()));
@@ -2657,8 +2716,6 @@ public class SettingsDialog extends JDialog {
 
         String[] genreSources = {"style_then_genre", "genre_then_style", "genre_only"};
         p.setProperty("discogs.genre_source", genreSources[cmbDiscogsGenreSource.getSelectedIndex()]);
-        p.setProperty("discogs.max_genres",   String.valueOf(spDiscogsMaxGenres.getValue()));
-        p.setProperty("lastfm.max_genres",    String.valueOf(spLastfmMaxGenres.getValue()));
 
         // ─ Releases préférées ─
         StringBuilder sbCountries = new StringBuilder();
@@ -2707,7 +2764,7 @@ public class SettingsDialog extends JDialog {
         // ─ MB Genres ─
         p.setProperty("mb.use_genres",       String.valueOf(chkMbUseGenres.isSelected()));
         p.setProperty("mb.min_genre_usage",  String.valueOf(spMbMinGenreUsage.getValue()));
-        p.setProperty("mb.max_genres",       String.valueOf(spMbMaxGenres.getValue()));
+        p.setProperty("genre.max_count",     String.valueOf(spMbMaxGenres.getValue()));
         p.setProperty("mb.genres_filter",    taGenresFilter.getText());
 
         // ─ Onglet Tags ─
@@ -2839,6 +2896,8 @@ public class SettingsDialog extends JDialog {
         "discogs.consumer_key", "discogs.consumer_secret",
         "lastfm.api_key", "fanart.api_key", "rapidapi.key", "audd.api_token",
         "listenbrainz.username", "lastfm.username",
+        "headphones.db_path", "headphones.url", "headphones.api_key",
+        "beets.db_path", "beets.music_dir",
         "mb.oauth.client_id", "mb.oauth.client_secret", "mb.oauth.token",
         "mb.oauth.refresh_token", "mb.oauth.username", "mb.oauth.collection_id",
     };

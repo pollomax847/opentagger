@@ -185,8 +185,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // (identifié par SongRec/texte sans jamais avoir été confirmé par une recherche MB) ne
         // relançait jamais cette recherche, alors que c'est justement recordingMbid.isBlank() qui
         // déclenche le badge "⚠ MBID d'enregistrement manquant" dans TaggingWorker.buildSuggestions.
+        // country/releaseType/originalYear ajoutés au déclencheur (2026-09-01, rattrapage demandé
+        // par l'utilisateur) : ces 3 champs restaient vides sur la quasi-totalité de la bibliothèque
+        // déjà taguée, y compris des fichiers par ailleurs complets (album/year/artistMbid/
+        // recordingMbid déjà remplis) — le raccourci "tags MB existants" de TaggingWorker ne les a
+        // jamais récupérés puisqu'il ne refait pas de recherche MB. Les drapeaux isSoundtrack/isLive/
+        // isGreatestHits/isCompilation n'ont pas besoin d'un déclencheur dédié : ils profitent de la
+        // même recherche MB ci-dessous via fillFlag(), déclenchée par ces 3 champs.
         boolean needsMb = ti.album.isBlank() || ti.year.isBlank()
-                || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank();
+                || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank()
+                || ti.country.isBlank()      || ti.releaseType.isBlank() || ti.originalYear.isBlank();
         if (needsMb) {
             TagInfo mbr = null;
 
@@ -252,6 +260,10 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 if (fillBlank(ti, "originalYear",      mbr.originalYear))     filled.add("originalYear");
                 if (fillBlank(ti, "artists",           mbr.artists))          filled.add("artists");
                 if (fillBlank(ti, "artistsSort",       mbr.artistsSort))      filled.add("artistsSort");
+                if (fillFlag(ti, "isSoundtrack",       mbr.isSoundtrack))     filled.add("isSoundtrack");
+                if (fillFlag(ti, "isLive",             mbr.isLive))           filled.add("isLive");
+                if (fillFlag(ti, "isGreatestHits",     mbr.isGreatestHits))   filled.add("isGreatestHits");
+                if (fillFlag(ti, "isCompilation",      mbr.isCompilation))    filled.add("isCompilation");
                 if (!filled.isEmpty()) { log(I18n.t("  ✎ rempli: %s", String.join(", ", filled))); changed = true; }
             } else if (ti.artistMbid.isBlank()) {
                 // Fallback minimal : artistMbid pour la pochette
@@ -389,6 +401,20 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             var f = TagInfo.class.getField(field);
             String cur = (String) f.get(ti);
             if (cur == null || cur.isBlank()) { f.set(ti, value); return true; }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /** Variante de fillBlank() pour les drapeaux "0"/"1" (isSoundtrack, isLive, isGreatestHits…) :
+     *  ces champs valent "0" par défaut dans TagInfo, donc fillBlank() (qui teste isBlank()) ne les
+     *  remplit jamais — "0" n'est pas vide. Ne fait passer "0"→"1" que si MB confirme le drapeau ;
+     *  ne redescend jamais un "1" (posé manuellement ou par une passe précédente) vers "0". */
+    private boolean fillFlag(TagInfo ti, String field, String value) {
+        if (!"1".equals(value)) return false;
+        try {
+            var f = TagInfo.class.getField(field);
+            String cur = (String) f.get(ti);
+            if (!"1".equals(cur)) { f.set(ti, "1"); return true; }
         } catch (Exception ignored) {}
         return false;
     }

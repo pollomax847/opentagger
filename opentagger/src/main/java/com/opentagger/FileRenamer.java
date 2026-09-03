@@ -433,7 +433,9 @@ public class FileRenamer {
                 // 2026-08-26 sur "Robert Cohen/Britten : Cello Suites" (3 dossiers pour un seul
                 // album).
                 .replaceAll("\\s*:\\s*", ": ")
-                .replaceAll("[\\\\:*?\"<>|]", "_")
+                // "/" ajouté (2026-09-01) : ce sanitizer traite UN SEUL segment de chemin — un "/" de
+                // contenu (medley, voir safe() plus bas) y est tout aussi illégitime que "\"/":"/"*.
+                .replaceAll("[\\\\/:*?\"<>|]", "_")
                 .replaceAll("\\.{2,}", ".")
                 .replaceAll("\\s+", " ")
                 .trim();
@@ -447,7 +449,18 @@ public class FileRenamer {
         catch (NumberFormatException e) { return track.trim(); }
     }
 
-    private String safe(String s) { return s == null ? "" : s; }
+    /** Neutralise "/" (et "\") AVANT que la valeur n'entre dans le moteur Nashorn — ce champ est du
+     *  CONTENU (titre, artiste…), jamais un séparateur de dossier ; ce rôle est réservé aux "/"
+     *  littéraux du masque JS lui-même (ex. albumartist + "/" + album + "/" + title). Sans ça, un
+     *  titre medley MusicBrainz légitime contenant "/" (ex. "Heroic Ewok / The Fleet Goes Into
+     *  Hyperspace (Return of the Jedi)") survit jusqu'à sanitizePath(), qui scinde la chaîne PLEINE
+     *  sur "/" sans distinguer un vrai séparateur d'un "/" de contenu — créant un dossier
+     *  supplémentaire imprévu par piste concernée. Repéré en direct 2026-09-01 sur "Star Wars
+     *  Trilogy: The Original Soundtrack Anthology" (John Williams) : un medley à deux "/" avait même
+     *  créé 2 niveaux de dossiers imbriqués. */
+    private String safe(String s) {
+        return s == null ? "" : s.replace('/', '_').replace('\\', '_');
+    }
 
     /**
      * Déplace un fichier "brut" (sans masque, nom d'origine conservé) vers un dossier — utilisé

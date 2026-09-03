@@ -139,21 +139,24 @@ public class NonIdentifiedReportDialog extends JDialog {
         btnExport .addActionListener(e -> exportJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder ce rapport dans un fichier JSON"));
 
-        JPanel p = new JPanel(new BorderLayout(0, 0));
+        // Empilé, pas côte à côte — même correctif que DurationMismatchReviewDialog (voir son
+        // commentaire) : un texte WEST trop long pouvait pousser les boutons EAST hors des limites
+        // visibles de la fenêtre (setSize() fixe, jamais de pack()), sans le moindre signalement.
+        JPanel p = new JPanel(new BorderLayout(0, 6));
         p.setBorder(new CompoundBorder(
             new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")),
             new EmptyBorder(8, 12, 8, 12)));
-        JLabel hint = new JLabel(I18n.t("  Double-clic sur une ligne : filtrer le tableau principal"));
+        JLabel hint = new JLabel(I18n.t("Double-clic sur une ligne : filtrer le tableau principal"));
         hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
-        JPanel west = new JPanel(new GridLayout(2, 1));
-        west.add(lblCount);
-        west.add(hint);
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-        right.add(btnRefresh);
-        right.add(btnExport);
-        right.add(btnClose);
-        p.add(west,  BorderLayout.WEST);
-        p.add(right, BorderLayout.EAST);
+        JPanel top = new JPanel(new BorderLayout(0, 2));
+        top.add(lblCount, BorderLayout.NORTH);
+        top.add(hint,     BorderLayout.SOUTH);
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        buttons.add(btnRefresh);
+        buttons.add(btnExport);
+        buttons.add(btnClose);
+        p.add(top,     BorderLayout.NORTH);
+        p.add(buttons, BorderLayout.SOUTH);
         return p;
     }
 

@@ -378,6 +378,91 @@ public final class TagEnrichment {
                 } catch (Exception ignored) {}
             }
         }
+        // Envoi automatique vers Headphones (queueAlbum) — demande utilisateur explicite
+        // (2026-08-29), après une première version manuelle (menu "Envoyer vers Headphones").
+        // Volontairement APRÈS coup, pas avant : ne doit jamais empêcher/retarder l'enregistrement
+        // réel du fichier si Headphones est injoignable — network best-effort, jamais bloquant.
+        // Seuil de confiance (score de CETTE identification, pas celui du résultat findAlbum côté
+        // Headphones) : seuil demandé par l'utilisateur (90%, configurable), pour ne jamais envoyer
+        // un album mal identifié en recherche/téléchargement chez un service externe.
+        //
+        // Sur un THREAD À PART (Thread.ofVirtual) depuis ce correctif — jusque-là, malgré le
+        // commentaire ci-dessus, cet appel bloquait bel et bien saveEntry() jusqu'à 20s (timeout
+        // HTTP par défaut) à CHAQUE tentative. Découvert en direct 2026-08-30 en creusant pourquoi
+        // aucun envoi ne réussissait jamais : sur un run réel, 360 tentatives sur 389 se sont
+        // soldées par un HttpTimeoutException — Headphones (une instance Python mono-processus,
+        // relayant chaque recherche à MusicBrainz) ne suit tout simplement pas le rythme du
+        // taguage. Non corrigeable côté OpenTagger (capacité de Headphones lui-même), mais le
+        // "jamais bloquant" du commentaire ci-dessus n'était pas respecté : ~2h de délai pur
+        // accumulé sur cette seule session (360 × jusqu'à 20s), invisible jusqu'ici. Passer en
+        // fire-and-forget rend enfin le commentaire vrai, sans changer le taux de succès côté
+        // Headphones (toujours best-effort, toujours loggé pareil).
+        if (Config.get().headphonesAutoQueueEnabled()
+                && !durationMismatchMoved
+                && written.score >= Config.get().headphonesAutoQueueMinScore()
+                && !written.artist.isBlank() && !written.album.isBlank()) {
+            Thread.ofVirtual().start(() -> {
+            try {
+                HeadphonesClient hp = new HeadphonesClient();
+                if (hp.isConfigured() && !hp.isAlbumKnown(written.artist, written.album)) {
+                    // findAlbum cherche par TITRE D'ALBUM seul (voir ~/headphones/API.md :
+                    // "findAlbum&name=$albumname"), pas par "artiste + album" concaténé —
+                    // confirmé en direct 2026-08-30 : la requête combinée faisait échouer
+                    // systématiquement la recherche MusicBrainz côté Headphones (4/4 tentatives
+                    // réelles "aucun candidat trouvé", y compris pour des artistes/albums aussi
+                    // connus que Céline Dion ou les Backstreet Boys). La requête ne pouvant plus
+                    // filtrer par artiste, on le fait nous-mêmes après coup sur le "uniquename"
+                    // renvoyé par l'API. Seuil bas (0.4, PAS le 0.85 utilisé ailleurs dans ce
+                    // client pour un gate d'égalité stricte) : titleSimilarity pénalise tout mot du
+                    // côté le plus long non apparié à hauteur de 0.4 chacun (voir sa Javadoc), donc
+                    // un artiste tag multi-crédité ("Bruno Mars, Anderson .Paak, Silk Sonic")
+                    // comparé au nom MusicBrainz réel ("Silk Sonic") plafonne structurellement à
+                    // ~0.56 même en cas de correspondance parfaite des mots communs — confirmé en
+                    // direct 2026-08-30 : un seuil à 0.6 rejetait systématiquement ce genre de cas
+                    // pourtant légitime (0/29 tentatives réussies avant ce correctif, y compris pour
+                    // des albums aussi connus que "An Evening With Silk Sonic", vérifié en direct
+                    // que Headphones le trouve bien). Un artiste réellement sans rapport tombe près
+                    // de 0 (quasi aucun mot en commun), donc 0.4 reste largement discriminant.
+                    List<HeadphonesClient.AlbumCandidate> candidates = hp.findAlbum(written.album);
+                    HeadphonesClient.AlbumCandidate pick = candidates.stream()
+                            .filter(c -> TrackMatcher.titleSimilarity(written.artist, c.artistName()) >= 0.4)
+                            .findFirst().orElse(null);
+                    if (pick != null) {
+                        hp.queueAlbum(pick.artistId(), pick.releaseId());
+                        // Seule preuve observable que l'envoi auto a réellement lieu — avant ce
+                        // correctif, catch(Exception ignored) rendait toute la chaîne invisible
+                        // (ni succès ni échec ne laissaient de trace), repéré en direct 2026-08-30
+                        // en cherchant à vérifier que "l'écriture vers Headphones fonctionne".
+                        System.out.println("[OT] Headphones : mis en file — " + written.artist + " - "
+                                + written.album + " (releaseId=" + pick.releaseId()
+                                + ", score identification=" + written.score + ")");
+                    } else {
+                        // Distingue "l'API n'a rien renvoyé" de "l'API a renvoyé des résultats mais
+                        // aucun ne matchait l'artiste" — ambiguïté trouvée en direct 2026-08-30 :
+                        // plusieurs albums bien connus (INXS - Live Baby Live Wembley Stadium)
+                        // ressortaient "aucun candidat" ici alors qu'un test manuel direct de l'API
+                        // Headphones renvoyait un candidat exact (score 100), sans qu'on puisse
+                        // savoir depuis ce seul message si le filtre artiste ou l'API elle-même
+                        // était en cause.
+                        double bestSim = candidates.stream()
+                                .mapToDouble(c -> TrackMatcher.titleSimilarity(written.artist, c.artistName()))
+                                .max().orElse(-1);
+                        System.out.println("[OT] Headphones : aucun candidat trouvé pour "
+                                + written.artist + " - " + written.album
+                                + " (" + candidates.size() + " résultat(s) API, meilleure similarité artiste="
+                                + String.format(java.util.Locale.ROOT, "%.2f", bestSim) + ")");
+                    }
+                }
+            } catch (Exception ex) {
+                // Best-effort : une panne réseau/Headphones ne doit jamais faire échouer
+                // l'enregistrement réel du fichier, déjà terminé à ce stade de toute façon —
+                // mais l'échec doit rester visible dans les logs, pas juste avalé.
+                System.out.println("[OT] ⚠ Headphones : échec envoi pour " + written.artist + " - "
+                        + written.album + " — " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            }
+            });
+        }
+
         return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved);
     }
 

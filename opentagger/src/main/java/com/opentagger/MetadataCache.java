@@ -348,8 +348,11 @@ public class MetadataCache implements AutoCloseable {
 
     public synchronized void saveTaggingHistory(TagInfo t, String key) {
         if (conn == null || key == null || key.isBlank()) return;
+        String json;
         try {
-            String json = mapper.writeValueAsString(t);
+            json = mapper.writeValueAsString(t);
+        } catch (Exception e) { LOG.warning("saveTaggingHistory (sérialisation) : " + e.getMessage()); return; }
+        writeWithRetry("saveTaggingHistory", key, () -> {
             try (PreparedStatement ps = conn.prepareStatement(
                     "INSERT OR REPLACE INTO tagging_history(mbid,artist,title,album,year,json,ts) VALUES(?,?,?,?,?,?,?)")) {
                 ps.setString(1, key);
@@ -361,7 +364,7 @@ public class MetadataCache implements AutoCloseable {
                 ps.setLong(7, System.currentTimeMillis());
                 ps.executeUpdate();
             }
-        } catch (Exception e) { LOG.warning("saveTaggingHistory : " + e.getMessage()); }
+        });
     }
 
     /**
@@ -418,6 +421,19 @@ public class MetadataCache implements AutoCloseable {
      *  suivent sans vérification individuelle propre — évite juste que des pistes du même album
      *  divergent vers des éditions MusicBrainz différentes. */
     public static final String SOURCE_GROUP_PIN = "group_pin";
+    /** Piste retrouvée par similarité de texte (artiste+titre) dans la base SQLite locale d'une
+     *  instance Headphones tierce (lecture seule) — voir HeadphonesClient.lookupTrack() et
+     *  TaggingWorker.findTags() étape 0.62. Confiance modérée : texte seul (comme SOURCE_TEXT),
+     *  mais contre un catalogue déjà curé par l'utilisateur (uniquement des pistes qu'il a lui-même
+     *  téléchargées/organisées via Headphones), donc un cran au-dessus d'une recherche MB à
+     *  l'aveugle. Aucun appel réseau (fichier local), placée tôt dans la cascade pour cette raison. */
+    public static final String SOURCE_HEADPHONES = "headphones";
+    /** Piste retrouvée dans la base SQLite locale d'une instance beets tierce (lecture seule) — voir
+     *  BeetsClient et TaggingWorker.findTags() étapes 0.61 (chemin exact, quasi certain) et 0.63
+     *  (repli similarité texte, même confiance que SOURCE_HEADPHONES). Schéma beets bien plus riche
+     *  (ISRC, MBID complets, composer/work classique) que Headphones — voir BeetsClient pour le
+     *  détail des champs importés. */
+    public static final String SOURCE_BEETS = "beets";
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {
@@ -427,29 +443,66 @@ public class MetadataCache implements AutoCloseable {
     /** Enregistre l'association chemin de fichier → MBID avec la source d'identification. */
     public synchronized void recordFileTagging(String path, String mbid, String source) {
         if (conn == null || path == null) return;
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT OR REPLACE INTO file_history(path,mbid,ts,identified_by) VALUES(?,?,?,?)")) {
-            ps.setString(1, path);
-            ps.setString(2, mbid != null ? mbid : "");
-            ps.setLong(3, System.currentTimeMillis());
-            ps.setString(4, source != null ? source : SOURCE_TEXT);
-            ps.executeUpdate();
-        } catch (Exception e) {
-            // Écriture la plus sensible du cache : un verrou SQLite perdu ici efface
-            // silencieusement l'association fichier→MBID (le fichier retombe en PENDING au
-            // prochain scan malgré des tags corrects sur le disque) — busy_timeout=5000 (voir
-            // init()) absorbe la contention normale, donc un échec ici est un vrai signal.
-            LOG.warning("recordFileTagging (" + path + ") : " + e.getMessage());
-        }
+        writeWithRetry("recordFileTagging", path, () -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT OR REPLACE INTO file_history(path,mbid,ts,identified_by) VALUES(?,?,?,?)")) {
+                ps.setString(1, path);
+                ps.setString(2, mbid != null ? mbid : "");
+                ps.setLong(3, System.currentTimeMillis());
+                ps.setString(4, source != null ? source : SOURCE_TEXT);
+                ps.executeUpdate();
+            }
+        });
     }
 
     /** Supprime l'entrée d'un chemin de fichier dans file_history (après renommage). */
     public synchronized void deleteFileHistory(String path) {
         if (conn == null || path == null) return;
-        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM file_history WHERE path=?")) {
-            ps.setString(1, path);
-            ps.executeUpdate();
-        } catch (Exception e) { LOG.warning("deleteFileHistory (" + path + ") : " + e.getMessage()); }
+        writeWithRetry("deleteFileHistory", path, () -> {
+            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM file_history WHERE path=?")) {
+                ps.setString(1, path);
+                ps.executeUpdate();
+            }
+        });
+    }
+
+    @FunctionalInterface
+    private interface SqlAction { void run() throws Exception; }
+
+    private static final int  WRITE_RETRY_ATTEMPTS  = 3;
+    private static final long WRITE_RETRY_DELAY_MS  = 500;
+
+    /**
+     * Exécute une écriture SQLite avec ré-essais sur SQLITE_BUSY — busy_timeout (20s, voir init())
+     * absorbe déjà la contention normale d'UNE connexion, mais chaque instance de MetadataCache
+     * (une par tâche/fichier, voir TaggingWorker.processEntry()) ouvre sa PROPRE connexion : sous
+     * batch.threads=12+ écritures simultanées (plus InfoCompleterWorker en parallèle, conflit
+     * volontairement autorisé avec TAGGING — voir WorkerHub.conflictsWith()), même 20s peut ne pas
+     * suffire lors d'une rafale. Avant ce correctif, cet échec était DÉFINITIF (juste un
+     * avertissement) — cause racine confirmée en direct (2026-08-29) d'une explosion de doublons :
+     * recordFileTagging échoue silencieusement → l'historique "déjà tagué" n'est jamais écrit → le
+     * fichier redevient "non traité" au scan suivant → ré-identifié → re-déplacé vers une
+     * destination déjà occupée → FileRenamer incrémente un suffixe "(N)" au lieu de reconnaître un
+     * doublon (jusqu'à 99 copies observées du même morceau). 3 tentatives, backoff court (0,5s/1s/
+     * 1,5s) : gère la rafale sans transformer un échec définitif en attente interminable.
+     */
+    private static boolean writeWithRetry(String opName, String path, SqlAction action) {
+        for (int attempt = 1; attempt <= WRITE_RETRY_ATTEMPTS; attempt++) {
+            try {
+                action.run();
+                return true;
+            } catch (Exception e) {
+                boolean busy = e instanceof org.sqlite.SQLiteException se
+                        && se.getResultCode() == org.sqlite.SQLiteErrorCode.SQLITE_BUSY;
+                if (!busy || attempt == WRITE_RETRY_ATTEMPTS) {
+                    LOG.warning(opName + " (" + path + ") : " + e.getMessage()
+                            + (attempt > 1 ? " [après " + attempt + " tentative(s)]" : ""));
+                    return false;
+                }
+                try { Thread.sleep(WRITE_RETRY_DELAY_MS * attempt); } catch (InterruptedException ignored) {}
+            }
+        }
+        return false;
     }
 
     /**
@@ -684,8 +737,11 @@ public class MetadataCache implements AutoCloseable {
     /** Enregistre (ou met à jour) le TagInfo lu pour ce chemin, avec son empreinte mtime/size. */
     public synchronized void putScanCache(String path, long mtime, long size, TagInfo ti) {
         if (conn == null || path == null) return;
+        String json;
         try {
-            String json = mapper.writeValueAsString(ti);
+            json = mapper.writeValueAsString(ti);
+        } catch (Exception e) { LOG.fine("putScanCache (sérialisation): " + e.getMessage()); return; }
+        writeWithRetry("putScanCache", path, () -> {
             try (PreparedStatement ps = conn.prepareStatement(
                     "INSERT OR REPLACE INTO scan_cache(path,mtime,size,json,ts) VALUES(?,?,?,?,?)")) {
                 ps.setString(1, path);
@@ -695,7 +751,7 @@ public class MetadataCache implements AutoCloseable {
                 ps.setLong(5, System.currentTimeMillis());
                 ps.executeUpdate();
             }
-        } catch (Exception e) { LOG.fine("putScanCache: " + e.getMessage()); }
+        });
     }
 
     private static String nullStr(String s) { return s != null ? s : ""; }

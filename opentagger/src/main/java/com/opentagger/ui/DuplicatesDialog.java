@@ -39,6 +39,11 @@ public class DuplicatesDialog extends JDialog {
      *  (voir DuplicateDetector.computeBestMap) — ne JAMAIS rappeler bestInGroup() depuis l'EDT ici,
      *  c'est justement ce qui gelait l'appli (E/S disque par fichier .m4a, répétée par groupe). */
     private final Map<DuplicateGroup, FileEntry> bestByGroup;
+    /** Taille de chaque fichier (-1 si absent), déjà calculée en arrière-plan (voir
+     *  DuplicateDetector.computeSizes()) — ne JAMAIS appeler File.exists()/length() ici, c'est
+     *  justement ce qui gelait l'appli pendant des heures (des milliers d'E/S disque directement
+     *  dans le constructeur, donc sur l'EDT) — repéré en direct 2026-08-29. */
+    private final Map<FileEntry, Long> sizesByFile;
     /** Correspondance parallèle : allBoxes[i] ↔ allEntries[i] */
     private final List<JCheckBox>  allBoxes   = new ArrayList<>();
     private final List<FileEntry>  allEntries = new ArrayList<>();
@@ -54,12 +59,14 @@ public class DuplicatesDialog extends JDialog {
     private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
     public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups,
-                             Map<DuplicateGroup, FileEntry> bestByGroup, FileTableModel tableModel,
+                             Map<DuplicateGroup, FileEntry> bestByGroup, Map<FileEntry, Long> sizesByFile,
+                             FileTableModel tableModel,
                              java.util.function.BiConsumer<String, FileEntry.Status> journalLine,
                              java.util.function.BiConsumer<Integer, Integer> onProgress) {
         super(owner, I18n.t("Doublons détectés — %d groupe(s)", groups.size()), true);
         this.groups      = groups;
         this.bestByGroup = bestByGroup;
+        this.sizesByFile = sizesByFile;
         this.tableModel  = tableModel;
         this.journalLine = journalLine;
         this.onProgress  = onProgress;
@@ -144,7 +151,8 @@ public class DuplicatesDialog extends JDialog {
             allEntries.add(e);
 
             File   f      = e.currentPath != null ? e.currentPath.toFile() : e.file;
-            long   sizeKb = f.exists() ? f.length() / 1024 : -1;
+            Long   sizeB  = sizesByFile.get(e);
+            long   sizeKb = (sizeB != null && sizeB >= 0) ? sizeB / 1024 : -1;
             String ext    = ext(f.getName()).toUpperCase();
             String sz     = sizeKb >= 1024
                 ? I18n.t("%s Mo", SZ.format(sizeKb / 1024.0))

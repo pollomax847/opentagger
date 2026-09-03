@@ -283,8 +283,14 @@ public class FileTableModel extends AbstractTableModel {
 
     /** Retourne le tooltip HTML pour une ligne (suggestions si présentes). */
     public String getTooltip(int row) {
-        FileEntry e = visible.get(row);
-        if (e.suggestions == null || e.suggestions.isEmpty()) return null;
+        return getTooltip(visible.get(row));
+    }
+
+    /** Comme {@link #getTooltip(int)}, mais directement par FileEntry — permet à l'appelant de
+     *  résoudre l'entrée lui-même (voir MainFrame.entryAtViewRow()) plutôt que de dépendre d'un
+     *  index dans CE modèle précis, qui ne correspond plus à la ligne de vue en mode arborescence. */
+    public String getTooltip(FileEntry e) {
+        if (e == null || e.suggestions == null || e.suggestions.isEmpty()) return null;
         StringBuilder sb = new StringBuilder("<html><b>" + I18n.t("Suggestions d'amélioration :") + "</b><br>");
         for (String s : e.suggestions) sb.append("&nbsp;⚠&nbsp;").append(s).append("<br>");
         sb.append("</html>");

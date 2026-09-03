@@ -91,6 +91,14 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
             }
             int total = candidates.size();
             int done  = 0;
+            // Comptage manquant jusqu'à ce correctif — le résultat final ("N correspondance(s)
+            // trouvée(s)") était loggé, mais jamais la TAILLE du lot vérifié : impossible de
+            // distinguer "0 candidat examiné" (rien d'anormal, rien à vérifier) de "25000+ candidats
+            // examinés, 0 trouvé" (suspect) depuis l'extérieur — trouvé en direct 2026-08-31, le
+            // taguage.auto_save_enabled + le scan marquant directement les fichiers déjà tagués
+            // (sans passer par le pipeline d'identification visible) pouvaient produire un très
+            // grand bassin de candidats sans que rien ne le signale.
+            if (logLine != null) logLine.accept(I18n.t("  %d fichier(s) tagué(s) à vérifier", total));
             for (FileEntry entry : candidates) {
                 if (isCancelled()) break;
                 CompilationMatch match = checkEntry(entry, seriesNames, cache, new MusicBrainzClient());
@@ -151,7 +159,12 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
                     && match.releaseId().equals(entry.result.releaseMbid);
             if (unchanged) return null;
 
-            String foundMsg = I18n.t("  trouvé : %s → %s", entry.filename(), match.releaseTitle());
+            // Pays affiché quand connu — permet de vérifier au fil du journal que la préférence
+            // releases.preferred_countries est bien respectée quand plusieurs compilations
+            // candidates existaient pour ce même enregistrement (voir findSeriesMatch()).
+            String foundMsg = match.country() != null && !match.country().isBlank()
+                    ? I18n.t("  trouvé : %s → %s (%s)", entry.filename(), match.releaseTitle(), match.country())
+                    : I18n.t("  trouvé : %s → %s", entry.filename(), match.releaseTitle());
             publish(foundMsg);
             if (logLine != null) logLine.accept(foundMsg);
             return new CompilationMatch(entry, updated, match.releaseTitle());
@@ -163,26 +176,53 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
         }
     }
 
-    /** Cherche la première release qui est soit marquée "Compilation" par MusicBrainz lui-même
-     *  (secondary-type officiel du release-group — détection automatique, aucune liste requise),
-     *  soit dont le titre (ou celui de son release-group) contient, insensible à la casse, un des
-     *  noms de série éventuellement configurés par l'utilisateur (complément optionnel). */
+    /** Cherche, parmi TOUTES les releases marquées "Compilation" par MusicBrainz lui-même
+     *  (secondary-type officiel du release-group — détection automatique, aucune liste requise) ou
+     *  dont le titre (ou celui de son release-group) contient, insensible à la casse, un des noms
+     *  de série éventuellement configurés par l'utilisateur (complément optionnel), celle dont le
+     *  pays correspond le mieux à {@code releases.preferred_countries} — même réglage déjà utilisé
+     *  ailleurs dans l'appli (choix de release lors de l'identification normale, traduction) pour
+     *  privilégier un pays/une langue. Absent jusqu'à ce correctif : la toute première compilation
+     *  trouvée était retenue sans égard au pays, même si une compilation mieux alignée avec le pays
+     *  favori de l'utilisateur existait plus loin dans la liste — retour utilisateur (2026-09-01) :
+     *  "je choisis un pays favori dans les préférences, ça doit aussi s'appliquer aux compilations".
+     *  Repli sur la première trouvée (ordre MB d'origine) si aucune candidate n'a de pays connu ou
+     *  si aucune préférence n'est configurée — comportement identique à avant dans ce cas. */
     private static MusicBrainzClient.RecordingRelease findSeriesMatch(
             List<MusicBrainzClient.RecordingRelease> releases, String[] seriesNames) {
+        String[] preferredCountries = Config.get().preferredCountries();
+        List<MusicBrainzClient.RecordingRelease> candidates = new ArrayList<>();
         for (MusicBrainzClient.RecordingRelease r : releases) {
             if (r.secondaryTypes() != null
                     && r.secondaryTypes().stream().anyMatch(t -> t.equalsIgnoreCase("Compilation"))) {
-                return r;
+                candidates.add(r);
+                continue;
             }
             String title = r.releaseTitle().toLowerCase(Locale.ROOT);
             String groupTitle = r.releaseGroupTitle().toLowerCase(Locale.ROOT);
             for (String series : seriesNames) {
                 String s = series.trim().toLowerCase(Locale.ROOT);
                 if (s.isBlank()) continue;
-                if (title.contains(s) || groupTitle.contains(s)) return r;
+                if (title.contains(s) || groupTitle.contains(s)) { candidates.add(r); break; }
             }
         }
-        return null;
+        if (candidates.isEmpty()) return null;
+        if (preferredCountries.length == 0) return candidates.get(0);
+
+        MusicBrainzClient.RecordingRelease best = null;
+        int bestRank = Integer.MAX_VALUE;
+        for (MusicBrainzClient.RecordingRelease r : candidates) {
+            String country = r.country();
+            if (country == null || country.isBlank()) continue;
+            for (int i = 0; i < preferredCountries.length; i++) {
+                if (preferredCountries[i].trim().equalsIgnoreCase(country.trim()) && i < bestRank) {
+                    best = r;
+                    bestRank = i;
+                    break;
+                }
+            }
+        }
+        return best != null ? best : candidates.get(0);
     }
 
     @Override

@@ -44,10 +44,28 @@ public class DuplicateDetector {
     /** Un groupe de fichiers potentiellement en double. */
     public record DuplicateGroup(List<FileEntry> files, Confidence confidence) {}
 
-    /** Résultat complet d'une passe detect() : les groupes, plus le meilleur fichier de chacun déjà
-     *  calculé (voir computeBestMap ci-dessous — évite de refaire ce calcul, coûteux en E/S, sur
-     *  l'EDT lors de la construction de DuplicatesDialog). */
-    public record DetectionResult(List<DuplicateGroup> groups, Map<DuplicateGroup, FileEntry> bestByGroup) {}
+    /** Résultat complet d'une passe detect() : les groupes, le meilleur fichier de chacun, et la
+     *  taille de CHAQUE fichier (-1 si absent) — tous les trois déjà calculés en arrière-plan (voir
+     *  computeBestMap()/computeSizes() ci-dessous), pour qu'aucun des deux ne soit refait sur l'EDT
+     *  lors de la construction de DuplicatesDialog. Sans sizesByFile, DuplicatesDialog.buildGroup()
+     *  appelait File.exists()/length() pour CHAQUE fichier de CHAQUE groupe DIRECTEMENT dans son
+     *  constructeur (donc sur l'EDT) — gel de plusieurs heures constaté en direct (2026-08-29) sur
+     *  ~18000 fichiers répartis en 7099 groupes, beaucoup sur un montage NTFS lent. */
+    public record DetectionResult(List<DuplicateGroup> groups, Map<DuplicateGroup, FileEntry> bestByGroup,
+                                   Map<FileEntry, Long> sizesByFile) {}
+
+    /** Taille en octets de chaque fichier de chaque groupe (-1 si le fichier n'existe plus) — un
+     *  seul passage E/S, à faire en arrière-plan (voir DetectionResult). */
+    public static Map<FileEntry, Long> computeSizes(List<DuplicateGroup> groups) {
+        Map<FileEntry, Long> sizes = new java.util.HashMap<>();
+        for (DuplicateGroup g : groups) {
+            for (FileEntry e : g.files()) {
+                java.io.File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                sizes.put(e, f.exists() ? f.length() : -1L);
+            }
+        }
+        return sizes;
+    }
 
     /** Retourne une liste de groupes, chaque groupe contenant ≥ 2 fichiers. */
     public static List<DuplicateGroup> detect(List<FileEntry> entries) {

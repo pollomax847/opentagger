@@ -151,7 +151,13 @@ public class Config {
     public String  mbAuthPass()        { return str("musicbrainz.auth_pass", ""); }
     public int     mbRateLimitMs()     { return num("musicbrainz.rate_limit_ms", 1100); }
     public String discogsGenreSource() { return str("discogs.genre_source", "style_then_genre"); }
-    public int    discogsMaxGenres()   { return num("discogs.max_genres", 3); }
+    // Réglage unique partagé par Discogs/Last.fm/MusicBrainz — avant ce correctif (2026-09-01,
+    // retour utilisateur "trop d'options"), 3 réglages séparés (discogs.max_genres,
+    // lastfm.max_genres, mb.max_genres) réglés à la même valeur (3) dans la quasi-totalité des
+    // cas réels : personne ne veut un plafond différent selon le fournisseur qui a trouvé le
+    // genre. Fusionnés en un seul, exposé une seule fois dans les Préférences (onglet "Filtre de
+    // genres", déjà partagé pour la liste d'exclusion — voir taGenresFilter).
+    public int genreMaxCount() { return num("genre.max_count", 3); }
     public boolean fanartEnabled()     { return bool("fanart.download_cover", true); }
     public boolean lastfmEnabled()     { return bool("lastfm.use_tags", true); }
     // URL officielle artiste + lien Wikipedia — appel Last.fm SÉPARÉ de celui du genre/mood
@@ -418,8 +424,7 @@ public class Config {
         return order.toArray(new String[0]);
     }
 
-    // --- MB genres max ---
-    public int     mbMaxGenres()       { return num ("mb.max_genres",            3); }
+    // mb.max_genres fusionné dans genreMaxCount() (voir son commentaire) — 2026-09-01.
 
     // --- ReplayGain ---
     public boolean replayGainEnabled() { return bool("replaygain.enabled",       false); }
@@ -546,6 +551,21 @@ public class Config {
 
     public String lastfmUsername()  { return str("lastfm.username", ""); }
     public int    lastfmMaxTracks() { return num("lastfm.max_tracks", 1000); }
+
+    public boolean headphonesDbEnabled() { return bool("headphones.db_enabled", false); }
+    public String  headphonesDbPath()    { return str("headphones.db_path", System.getProperty("user.home") + "/headphones/headphones.db"); }
+    public String  headphonesUrl()       { return str("headphones.url", "http://127.0.0.1:8181"); }
+    public String  headphonesApiKey()    { return str("headphones.api_key", ""); }
+
+    public boolean beetsDbEnabled() { return bool("beets.db_enabled", false); }
+    public String  beetsDbPath()    { return str("beets.db_path", System.getProperty("user.home") + "/.config/beets/library.db"); }
+    public String  beetsMusicDir()  { return str("beets.music_dir", ""); }
+
+    /** Envoi automatique vers Headphones (queueAlbum) après chaque enregistrement réussi, si
+     *  l'album n'y est pas déjà connu — voir TagEnrichment.saveEntry() et HeadphonesClient. Demande
+     *  utilisateur explicite (2026-08-29), après avoir d'abord construit une version manuelle. */
+    public boolean headphonesAutoQueueEnabled()  { return bool("headphones.auto_queue_enabled", false); }
+    public int     headphonesAutoQueueMinScore() { return num("headphones.auto_queue_min_score", 90); }
 
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {

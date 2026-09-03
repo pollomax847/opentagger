@@ -56,7 +56,7 @@ public class LastFmClient {
         for (GenreFilter.Candidate c : allTags)
             if (!isMoodTag(c.name().toLowerCase())) genreCandidates.add(c);
 
-        List<String> genres = GenreFilter.filter(genreCandidates, Config.get().num("lastfm.max_genres", 3));
+        List<String> genres = GenreFilter.filter(genreCandidates, Config.get().genreMaxCount());
         if (!genres.isEmpty()) info.genre = joinGenres(genres);
     }
 

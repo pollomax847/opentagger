@@ -140,6 +140,28 @@ public final class ApiKeyTester {
         }
     }
 
+    public static Result testHeadphones(String baseUrl, String apiKey) {
+        if (baseUrl == null || baseUrl.isBlank()) return new Result(false, I18n.t("URL vide"));
+        if (apiKey == null || apiKey.isBlank()) return new Result(false, I18n.t("Clé API vide"));
+        try {
+            String base = baseUrl.trim();
+            if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+            String url = base + "/api?apikey=" + enc(apiKey) + "&cmd=getVersion";
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
+                    .GET().build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) return new Result(false, "HTTP " + resp.statusCode());
+            JsonNode root = mapper.readTree(resp.body());
+            if (root.has("current_version")) return new Result(true, I18n.t("Connecté (v%s)", root.path("current_version").asText("")));
+            return new Result(false, I18n.t("Clé API invalide"));
+        } catch (Exception e) {
+            return new Result(false, e.getMessage());
+        }
+    }
+
     public static Result testLastFmUsername(String username) {
         if (username == null || username.isBlank()) return new Result(false, I18n.t("Nom d'utilisateur vide"));
         try {

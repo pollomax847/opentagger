@@ -137,7 +137,7 @@ public class MusicBrainzClient {
         String url = mbBaseUrl() + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels+labels";
+                + "&inc=releases+release-groups+artist-credits+isrcs+artist-rels+work-rels+labels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -154,7 +154,7 @@ public class MusicBrainzClient {
         String url = mbBaseUrl() + "/recording?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8)
                 + "&fmt=json&limit=" + Config.get().num("musicbrainz.results_limit", 5)
-                + "&inc=releases+artist-credits+isrcs+artist-rels+work-rels+labels";
+                + "&inc=releases+release-groups+artist-credits+isrcs+artist-rels+work-rels+labels";
 
         HttpResponse<String> response = getWithRetry(url);
         if (response == null) return List.of();
@@ -853,7 +853,7 @@ public class MusicBrainzClient {
      *  (ex. {@code ui.CompilationClusterWorker} cherche celle qui correspond à une série de
      *  compilation configurée par l'utilisateur). */
     public record RecordingRelease(String releaseId, String releaseTitle, String releaseGroupTitle,
-                                    List<String> secondaryTypes) {}
+                                    List<String> secondaryTypes, String country) {}
 
     /**
      * Comme {@link #lookupRecording}, mais retourne TOUTES les releases où l'enregistrement
@@ -900,7 +900,8 @@ public class MusicBrainzClient {
                         release.path("id").asText("").trim(),
                         release.path("title").asText("").trim(),
                         releaseGroup.path("title").asText("").trim(),
-                        secTypes));
+                        secTypes,
+                        release.path("country").asText("").trim()));
             }
             return result;
         } catch (Exception e) {
@@ -920,7 +921,7 @@ public class MusicBrainzClient {
             int    count = g.path("count").asInt(0);
             candidates.add(new GenreFilter.Candidate(name, count));
         }
-        return String.join(", ", GenreFilter.filter(candidates, Config.get().mbMaxGenres()));
+        return String.join(", ", GenreFilter.filter(candidates, Config.get().genreMaxCount()));
     }
 
     /**

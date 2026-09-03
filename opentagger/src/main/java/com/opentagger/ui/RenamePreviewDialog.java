@@ -194,18 +194,26 @@ public class RenamePreviewDialog extends JDialog {
 
     // ── Factory ───────────────────────────────────────────────────────────────
 
-    public static List<PreviewRow> compute(FileTableModel model, int maskIndex) {
-        return compute(model, maskIndex, null);
+    public static List<PreviewRow> compute(List<FileEntry> entries, int maskIndex) {
+        return compute(entries, maskIndex, null);
     }
 
-    public static List<PreviewRow> compute(FileTableModel model, int maskIndex, Path destRoot) {
+    /**
+     * @param entries snapshot déjà copié par l'appelant (voir MainFrame.renameTagged()/
+     *                organizeFiles()) — jamais {@code tableModel.allEntries()} directement : cette
+     *                méthode tourne dans doInBackground() (Files.exists() par fichier, coûteux),
+     *                pendant qu'un taguage actif peut continuer à muter la table en parallèle sur
+     *                l'EDT. Itérer la vue non-modifiable renvoyée par allEntries() (qui reste un
+     *                simple wrapper autour de la MÊME liste mutable, pas une copie) levait alors un
+     *                ConcurrentModificationException — repéré en direct 2026-09-02 ("Renommer les
+     *                fichiers tagués" cliqué pendant un taguage en cours). Le snapshot doit être pris
+     *                sur l'EDT, avant le lancement du SwingWorker, jamais ici.
+     */
+    public static List<PreviewRow> compute(List<FileEntry> entries, int maskIndex, Path destRoot) {
         FileRenamer renamer = new FileRenamer();
         List<PreviewRow> result = new ArrayList<>();
 
-        // allEntries() : sinon un fichier tagué masqué par un filtre actif n'apparaissait jamais
-        // dans l'aperçu — et n'était donc jamais renommé sur le disque non plus (voir aussi
-        // MainFrame.buildRenameJob(), l'exécution réelle, même correctif).
-        for (FileEntry e : model.allEntries()) {
+        for (FileEntry e : entries) {
             if (e.status != FileEntry.Status.TAGGED) continue;
             if (e.currentPath == null) continue;
 

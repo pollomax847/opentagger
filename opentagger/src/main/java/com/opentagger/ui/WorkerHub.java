@@ -38,7 +38,7 @@ public final class WorkerHub {
     public enum TaskKind {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
         COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, PODCAST_TAG,
-        DUPLICATE_DETECT
+        DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,
@@ -51,7 +51,7 @@ public final class WorkerHub {
     private static final Set<TaskKind> LIBRARY_WRITE = EnumSet.of(
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
             TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
-            TaskKind.DUPLICATE_DETECT);
+            TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP);
 
     public static final class TaskHandle {
         private final TaskKind kind;
