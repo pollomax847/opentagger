@@ -18,13 +18,18 @@ public class BatchProcessor {
     private final int SEUIL_AUTO = Config.get().minScoreAuto();
 
     // mbClient / acoustId / lastFm sont volontairement NON partagés entre les threads du pool
-    // (contrairement à discogs/fanArt/corrector/writer/renamer/cache, qui sont sans état
-    // inter-appel ou déjà synchronisés) : ces trois classes gardent le résultat du dernier
-    // appel dans un champ d'instance relu juste après (lastRawJson, lastFingerprint,
-    // cachedTagsKey/List...). Les partager entre threads concurrents faisait qu'un thread
-    // pouvait lire/mettre en cache le résultat du fichier d'un AUTRE thread — corruption
-    // silencieuse de tags. Une instance fraîche par tâche coûte rien de plus (le HttpClient
-    // sous-jacent, lui, reste statique/partagé dans chaque classe).
+    // (contrairement à discogs/fanArt/corrector/writer/renamer, qui sont sans état inter-appel) :
+    // ces trois classes gardent le résultat du dernier appel dans un champ d'instance relu juste
+    // après (lastRawJson, lastFingerprint, cachedTagsKey/List...). Les partager entre threads
+    // concurrents faisait qu'un thread pouvait lire/mettre en cache le résultat du fichier d'un
+    // AUTRE thread — corruption silencieuse de tags. Une instance fraîche par tâche coûte rien de
+    // plus (le HttpClient sous-jacent, lui, reste statique/partagé dans chaque classe).
+    // MetadataCache (cache) suit désormais la même règle (2026-07-29) : une instance fraîche PAR
+    // TÂCHE (voir le pool.submit() de run()), plus un champ partagé — pas pour la même raison
+    // (pas d'état inter-appel dangereux), mais parce que ses méthodes sont TOUTES synchronized sur
+    // l'instance (Connection JDBC unique, pas thread-safe) : la partager sérialisait tout le monde
+    // au moindre accès cache, contention trouvée en direct sur SaveWorker/TaggingWorker (jstack,
+    // plusieurs threads BLOCKED sur le même moniteur) et corrigée partout à l'identique.
     // Partagé entre threads : ConcurrentHashMap (contrairement à LastFmClient/MusicBrainzClient,
     // une simple Map<String,String> de cache n'a pas d'état interne dangereux à partager).
     private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
@@ -35,7 +40,6 @@ public class BatchProcessor {
     private final TaggerScript      taggerScript = new TaggerScript();
     private final TagWriter         writer       = new TagWriter();
     private final FileRenamer       renamer      = new FileRenamer();
-    private final MetadataCache     cache        = new MetadataCache();
     private final boolean           useAcoustId;
     private final int               maskIndex;
     private final Path              scanRoot;
@@ -74,7 +78,7 @@ public class BatchProcessor {
         // MusicBrainzClient.getWithRetry()) borne de toute façon le débit réel des requêtes MB
         // quel que soit le nombre de threads ; au-delà de 3, le gain vient surtout des étapes non-MB
         // (BPM, paroles, empreinte, écriture disque) qui peuvent, elles, tourner en parallèle.
-        int threads = Config.get().num("batch.threads", 3);
+        int threads = Config.get().num("batch.threads", 6);
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
@@ -83,7 +87,14 @@ public class BatchProcessor {
             final File f  = fichiers.get(i);
             futures.add(pool.submit(() -> {
                 System.out.printf("[%d/%d] %s%n", idx + 1, total.get(), f.getName());
-                processOne(f);
+                // MetadataCache PAR TÂCHE, pas le champ partagé — même correctif que TaggingWorker/
+                // SaveWorker (2026-07-29) : ses méthodes sont toutes synchronized sur l'instance
+                // (Connection JDBC unique), la partager entre threads sérialisait tout le monde au
+                // moindre accès cache malgré le commentaire de classe qui la croyait "sans risque à
+                // partager" (correct pour la corruption de données, faux pour la contention).
+                try (MetadataCache taskCache = new MetadataCache()) {
+                    processOne(f, taskCache);
+                }
                 System.out.println();
             }));
         }
@@ -94,11 +105,27 @@ public class BatchProcessor {
             catch (Exception e) { erreurs.incrementAndGet(); }
         }
 
-        cache.close();
         printSummary();
+        runPostTagCommand();
     }
 
-    private void processOne(File fichier) {
+    /** Même hook que MainFrame.runPostTagCommand() (GUI) — mode CLI aussi couvert : un run par
+     *  lots (cron, script) doit pouvoir déclencher la même automatisation post-traitement (scan
+     *  Plex, rebalance mergerfs…) qu'un "Enregistrer tout" depuis l'interface. */
+    private void runPostTagCommand() {
+        String cmd = Config.get().postTagCommand();
+        if (cmd.isBlank()) return;
+        try {
+            new ProcessBuilder("sh", "-c", cmd)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+        } catch (Exception ex) {
+            System.out.println("Commande post-taguage : échec du lancement — " + ex.getMessage());
+        }
+    }
+
+    private void processOne(File fichier, MetadataCache cache) {
         try {
             // Vérifier l'historique : si ce fichier a déjà été tagué, réutiliser le résultat
             String cachedMbid = cache.getFileTagging(fichier.getAbsolutePath());
@@ -112,7 +139,7 @@ public class BatchProcessor {
                 }
             }
 
-            List<TagInfo> resultats = findTags(fichier);
+            List<TagInfo> resultats = findTags(fichier, cache);
 
             if (resultats.isEmpty()) {
                 System.out.println("  ✗ Aucun résultat trouvé.");
@@ -151,7 +178,7 @@ public class BatchProcessor {
                 // partage inter-threads (cachedTagsKey/cachedTagsList d'instance).
                 LastFmClient lastFm = new LastFmClient();
                 TagEnrichment.enrichGenre(best, discogs, lastFm, cache);
-                TagEnrichment.enrichClassicalWork(best, new MusicBrainzClient());
+                TagEnrichment.enrichClassicalWork(best, new MusicBrainzClient(), cache);
                 // Mood + URLs artiste Last.fm — même gap : absents du CLI/batch jusqu'à présent.
                 if (best.mood.isBlank()) { try { lastFm.enrichMood(best, cache); } catch (Exception ignored) {} }
                 try { lastFm.enrichArtistUrls(best, cache); } catch (Exception ignored) {}
@@ -160,7 +187,14 @@ public class BatchProcessor {
                 try { new LyricsClient().enrich(best); } catch (Exception ignored) {}
 
                 Path cover = TagEnrichment.resolveCover(best, fichier, new CaaClient(), fanArt, deezer, cache);
-                writer.write(fichier, best, cover);
+                // Nettoyage dans un finally (voir même correctif dans TagEnrichment.saveEntry) :
+                // writer.write() levant une exception sautait ce nettoyage, fuite de fichier
+                // temporaire à chaque échec d'écriture (M4A/WAV, disque plein...).
+                try {
+                    writer.write(fichier, best, cover);
+                } finally {
+                    if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
+                }
                 appliques.incrementAndGet();
 
                 // Sauvegarder dans l'historique pour éviter les re-lookups
@@ -224,7 +258,7 @@ public class BatchProcessor {
         } catch (Exception ignored) {}
     }
 
-    private List<TagInfo> findTags(File fichier) throws Exception {
+    private List<TagInfo> findTags(File fichier, MetadataCache cache) throws Exception {
         // Instances fraîches par appel (voir commentaire sur les champs de la classe) : ce
         // findTags() tourne en parallèle sur jusqu'à batch.threads threads différents.
         MusicBrainzClient mbClient = new MusicBrainzClient();

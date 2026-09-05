@@ -15,8 +15,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Récupération des paroles depuis deux sources en cascade :
- *  1. Lyrics.OVH (api.lyrics.ovh) — pas de clé, couverture large
- *  2. lrclib.net — pas de clé, meilleure couverture occidentale, retourne aussi les lyrics synchros
+ *  1. lrclib.net — pas de clé, meilleure couverture occidentale, seule à retourner aussi les
+ *     lyrics synchronisées (voir enrich(), interrogée en premier depuis le 2026-08-12)
+ *  2. Lyrics.OVH (api.lyrics.ovh) — pas de clé, couverture large, texte brut seulement
  */
 public class LyricsClient {
 
@@ -34,12 +35,19 @@ public class LyricsClient {
         String title  = clean(info.title);
         if (artist.isBlank() || title.isBlank()) return;
 
-        // Source 1 : Lyrics.OVH
-        tryLyricsOvh(info, artist, title);
+        // Source 1 : lrclib.net — meilleure couverture occidentale ET seule des deux sources à
+        // fournir des paroles synchronisées (voir tryLrclib()/TagInfo.syncedLyrics, utilisées pour
+        // générer un .lrc à côté de l'audio si lyrics.save_lrc). Interrogée en premier pour
+        // maximiser les .lrc synchronisés générés — inversé le 2026-08-12 : avant ce correctif,
+        // Lyrics.OVH (texte brut uniquement, ci-dessous) répondait souvent en premier et
+        // court-circuitait tryLrclib() ("si toujours vide" ci-dessous jamais atteint dès que
+        // Lyrics.OVH avait quelque chose), privant silencieusement ces morceaux de tout .lrc
+        // synchronisé même quand lrclib.net en avait un.
+        tryLrclib(info, artist, title, info.album);
 
-        // Source 2 : lrclib.net (si toujours vide)
+        // Source 2 : Lyrics.OVH (si toujours vide) — texte brut seulement, jamais de version synchronisée.
         if (info.lyrics.isBlank())
-            tryLrclib(info, artist, title, info.album);
+            tryLyricsOvh(info, artist, title);
     }
 
     private void tryLyricsOvh(TagInfo info, String artist, String title) {

@@ -37,6 +37,11 @@ public class DetailPanel extends JPanel {
     private final JTextField tfTrackTotal   = tf(5);
     private final JTextField tfDiscNo       = tf(5);
     private final JTextField tfDiscTotal    = tf(5);
+    // Alimenté par la désambiguïsation MusicBrainz, les tags déjà présents dans le fichier, les
+    // descriptions de podcast, et (avant ce correctif) même le label Shazam/SongRec faute d'un
+    // champ dédié — écrit dans le fichier (TagWriter → FieldKey.COMMENT/--comment/ffmpeg "comment")
+    // mais jamais affiché ni éditable nulle part dans l'appli jusqu'ici.
+    private final JTextField tfComment      = tf(24);
 
     // ── Onglet 2 — Classique ─────────────────────────────────────────────────
     private final JTextField tfComposer          = tf(24);
@@ -105,6 +110,9 @@ public class DetailPanel extends JPanel {
     private final JLabel     lblCoverInfo = new JLabel(" ", SwingConstants.CENTER);
     private Runnable         onCoverClick;
 
+    // ── Onglet Classique — aperçu composé (lecture seule, voir ClassicalDisplay) ────────────
+    private final JLabel     lblClassicalSummary = new JLabel(" ");
+
     // ── Onglet 5 — Paroles ───────────────────────────────────────────────────
     private final JTextArea  taLyrics    = new JTextArea(8, 40);
     private final JTextField tfLyricsUrl = tf(40);
@@ -120,11 +128,28 @@ public class DetailPanel extends JPanel {
     private final JTextField tfReleaseMbid         = tf(36);
     private final JTextField tfReleaseGroupMbid    = tf(36);
     private final JTextField tfArtistMbid          = tf(36);
+    private final JTextField tfAlbumArtistMbid     = tf(36);
     private final JTextField tfAcoustidId          = tf(36);
+    private final JTextField tfTaggedDate          = tf(12);
     private final JTextField tfDiscogsId           = tf(20);
     private final JTextField tfAppleMusicId        = tf(20);
     private final JTextField tfRoonAlbumTag        = tf(20);
     private final JTextField tfRoonTrackTag        = tf(20);
+    // Métadonnées release MusicBrainz — extraites depuis longtemps (barcode/catalogNo/releaseType/
+    // originalYear/country/script) ou ajoutées lors de ce correctif (label/releaseStatus/media),
+    // mais jamais affichées nulle part dans l'appli avant ce correctif : un utilisateur n'avait
+    // aucun moyen de les voir ni de les corriger à la main, malgré leur écriture réelle dans le
+    // fichier (TagWriter). Repéré en comparant un fichier taggé par OpenTagger avec le même dans
+    // Picard, où tous ces champs sont visibles.
+    private final JTextField tfLabel               = tf(30);
+    private final JTextField tfCatalogNo           = tf(20);
+    private final JTextField tfBarcode             = tf(20);
+    private final JTextField tfReleaseStatus       = tf(20);
+    private final JTextField tfMedia               = tf(20);
+    private final JTextField tfReleaseType         = tf(20);
+    private final JTextField tfOriginalYear        = tf(10);
+    private final JTextField tfCountry             = tf(10);
+    private final JTextField tfScript              = tf(10);
 
     // ── Callbacks ────────────────────────────────────────────────────────────
     private Runnable onApply;
@@ -136,6 +161,17 @@ public class DetailPanel extends JPanel {
 
     // ─────────────────────────────────────────────────────────────────────────
 
+    // Index de l'onglet Pochette dans le JTabbedPane ci-dessous — utilisé par
+    // MainFrame (via onPochetteTabActive) pour masquer la vignette permanente d'en-tête
+    // (coverSection) quand cet onglet est actif : elle affiche la MÊME image en double, en plus
+    // petit, juste au-dessus — repéré à l'écran comme donnant une impression "brouillon"/redondante.
+    public static final int POCHETTE_TAB_INDEX = 1;
+    private java.util.function.Consumer<Boolean> onPochetteTabActive;
+
+    public void setOnPochetteTabActive(java.util.function.Consumer<Boolean> callback) {
+        onPochetteTabActive = callback;
+    }
+
     public DetailPanel() {
         super(new BorderLayout());
         JTabbedPane tabs = new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT);
@@ -146,6 +182,10 @@ public class DetailPanel extends JPanel {
         tabs.addTab(I18n.t("Audio / Mood"),  buildAudioTab());
         tabs.addTab(I18n.t("Paroles"),       buildLyricsTab());
         tabs.addTab(I18n.t("URLs & IDs"),    buildIdsTab());
+        tabs.addChangeListener(e -> {
+            if (onPochetteTabActive != null)
+                onPochetteTabActive.accept(tabs.getSelectedIndex() == POCHETTE_TAB_INDEX);
+        });
         add(tabs, BorderLayout.CENTER);
 
         // Champs mood en lecture seule
@@ -161,7 +201,7 @@ public class DetailPanel extends JPanel {
         // silencieusement au clic "Appliquer", sans aucune erreur ni message.
         for (JTextField tf : new JTextField[]{
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid,
-            tfArtistMbid, tfAcoustidId, tfWorkMbid}) {
+            tfArtistMbid, tfAlbumArtistMbid, tfAcoustidId, tfWorkMbid, tfTaggedDate}) {
             tf.setEditable(false);
             tf.putClientProperty("FlatLaf.style", "foreground: #8899bb");
         }
@@ -186,8 +226,10 @@ public class DetailPanel extends JPanel {
         set(tfTrackTotal,   t.trackTotal);
         set(tfDiscNo,       t.discNo);
         set(tfDiscTotal,    t.discTotal);
+        set(tfComment,      t.comment);
 
         // Classique
+        lblClassicalSummary.setText(com.opentagger.model.ClassicalDisplay.summarize(t));
         set(tfComposer,          t.composer);
         set(tfComposerSort,      t.composerSort);
         set(tfConductor,         t.conductor);
@@ -263,11 +305,22 @@ public class DetailPanel extends JPanel {
         set(tfReleaseMbid,         t.releaseMbid);
         set(tfReleaseGroupMbid,    t.releaseGroupMbid);
         set(tfArtistMbid,          t.artistMbid);
+        set(tfAlbumArtistMbid,     t.albumArtistMbid);
         set(tfAcoustidId,          t.acoustidId);
+        set(tfTaggedDate,          t.taggedDate);
         set(tfDiscogsId,           t.discogsId);
         set(tfAppleMusicId,        t.appleMusicId);
         set(tfRoonAlbumTag,        t.roonAlbumTag);
         set(tfRoonTrackTag,        t.roonTrackTag);
+        set(tfLabel,               t.label);
+        set(tfCatalogNo,           t.catalogNo);
+        set(tfBarcode,             t.barcode);
+        set(tfReleaseStatus,       t.releaseStatus);
+        set(tfMedia,               t.media);
+        set(tfReleaseType,         t.releaseType);
+        set(tfOriginalYear,        t.originalYear);
+        set(tfCountry,             t.country);
+        set(tfScript,              t.script);
     }
 
     /**
@@ -289,7 +342,9 @@ public class DetailPanel extends JPanel {
         setM(tfTrackTotal,  tags, t -> t.trackTotal);
         setM(tfDiscNo,      tags, t -> t.discNo);
         setM(tfDiscTotal,   tags, t -> t.discTotal);
+        setM(tfComment,     tags, t -> t.comment);
         // Classique
+        setMLabel(lblClassicalSummary, tags, com.opentagger.model.ClassicalDisplay::summarize);
         setM(tfComposer,          tags, t -> t.composer);
         setM(tfComposerSort,      tags, t -> t.composerSort);
         setM(tfConductor,         tags, t -> t.conductor);
@@ -337,14 +392,28 @@ public class DetailPanel extends JPanel {
         setMCb(chkGreatestHits, tags, t -> "1".equals(t.isGreatestHits));
         setMCb(chkSoundtrack,   tags, t -> "1".equals(t.isSoundtrack));
         setMCb(chkInstrumental, tags, t -> "1".equals(t.isInstrumental));
+        // Métadonnées release — contrairement aux URLs/IDs juste en dessous (laissées vides : trop
+        // spécifiques à chaque piste pour qu'une "valeur commune" ait un sens), label/catalogue/
+        // code-barres/statut/support/année d'origine/pays/script sont des attributs de la RELEASE,
+        // donc typiquement identiques sur toute une sélection multiple (un album entier) — même
+        // traitement que Album/Année/Genre juste au-dessus.
+        setM(tfLabel,         tags, t -> t.label);
+        setM(tfCatalogNo,     tags, t -> t.catalogNo);
+        setM(tfBarcode,       tags, t -> t.barcode);
+        setM(tfReleaseStatus, tags, t -> t.releaseStatus);
+        setM(tfMedia,         tags, t -> t.media);
+        setM(tfReleaseType,   tags, t -> t.releaseType);
+        setM(tfOriginalYear,  tags, t -> t.originalYear);
+        setM(tfCountry,       tags, t -> t.country);
+        setM(tfScript,        tags, t -> t.script);
         // Paroles, IDs — laisser vide en mode multi
         taLyrics.setText("");
         set(tfLyricsUrl, "");
         for (JTextField tf : new JTextField[]{
             tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
-            tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid,
-            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag}) {
+            tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
+            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate}) {
             tf.setText("");
         }
     }
@@ -361,6 +430,15 @@ public class DetailPanel extends JPanel {
             tf.setText("");
             tf.putClientProperty("JTextField.placeholderText", I18n.t("— valeurs multiples —"));
         }
+    }
+
+    /** Même idiome que setM() ci-dessus mais pour un JLabel calculé (pas d'édition, pas de
+     *  placeholder — juste le texte "— valeurs multiples —" en toutes lettres) : utilisé pour
+     *  lblClassicalSummary, dérivé de PLUSIEURS champs à la fois plutôt qu'un simple getter. */
+    private void setMLabel(JLabel lbl, List<TagInfo> tags, Function<TagInfo, String> getter) {
+        Set<String> vals = new HashSet<>();
+        for (TagInfo t : tags) vals.add(getter.apply(t));
+        lbl.setText(vals.size() == 1 ? vals.iterator().next() : I18n.t("— valeurs multiples —"));
     }
 
     private void setMCb(JCheckBox cb, List<TagInfo> tags, Function<TagInfo, Boolean> getter) {
@@ -389,6 +467,16 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfTrackTotal)).isBlank())   t.trackTotal   = v;
             if (!(v = g(tfDiscNo)).isBlank())       t.discNo       = v;
             if (!(v = g(tfDiscTotal)).isBlank())    t.discTotal    = v;
+            if (!(v = g(tfComment)).isBlank())      t.comment      = v;
+            if (!(v = g(tfLabel)).isBlank())        t.label        = v;
+            if (!(v = g(tfCatalogNo)).isBlank())    t.catalogNo    = v;
+            if (!(v = g(tfBarcode)).isBlank())      t.barcode      = v;
+            if (!(v = g(tfReleaseStatus)).isBlank()) t.releaseStatus = v;
+            if (!(v = g(tfMedia)).isBlank())        t.media        = v;
+            if (!(v = g(tfReleaseType)).isBlank())  t.releaseType  = v;
+            if (!(v = g(tfOriginalYear)).isBlank()) t.originalYear = v;
+            if (!(v = g(tfCountry)).isBlank())      t.country      = v;
+            if (!(v = g(tfScript)).isBlank())       t.script       = v;
             if (!(v = g(tfComposer)).isBlank())     t.composer     = v;
             if (!(v = g(tfConductor)).isBlank())    t.conductor    = v;
             if (!(v = g(tfOrchestra)).isBlank())    t.orchestra    = v;
@@ -430,6 +518,26 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfAlbumArtistSort)).isBlank())  t.albumArtistSort  = v;
             if (!(v = g(tfAmazonId)).isBlank())         t.amazonId         = v;
             if (!(v = g(tfLyricsUrl)).isBlank())        t.lyricsUrl        = v;
+            // Paroles et URLs/IDs externes : populateMulti() les vide volontairement en mode multi
+            // ("Paroles, IDs — laisser vide en mode multi") mais aucun champ n'est jamais désactivé
+            // (setEnabled) — ils restent pleinement éditables. Manquaient ici jusqu'à ce correctif :
+            // un utilisateur qui tapait des paroles ou collait un tag Roon sur une sélection
+            // multiple, puis cliquait "Appliquer", voyait sa saisie silencieusement jamais écrite
+            // sur aucun des fichiers sélectionnés (même bug que les champs classiques ci-dessus,
+            // recyclé sur un autre groupe de champs).
+            if (!(v = taLyrics.getText()).isBlank())          t.lyrics               = v;
+            if (!(v = g(tfArtistOfficialUrl)).isBlank())      t.artistOfficialUrl    = v;
+            if (!(v = g(tfArtistWikipediaUrl)).isBlank())     t.artistWikipediaUrl   = v;
+            if (!(v = g(tfArtistDiscogsUrl)).isBlank())       t.artistDiscogsUrl     = v;
+            if (!(v = g(tfReleaseOfficialUrl)).isBlank())     t.releaseOfficialUrl   = v;
+            if (!(v = g(tfReleaseWikipediaUrl)).isBlank())    t.releaseWikipediaUrl  = v;
+            if (!(v = g(tfReleaseDiscogsUrl)).isBlank())      t.releaseDiscogsUrl    = v;
+            if (!(v = g(tfDiscogsId)).isBlank())              t.discogsId            = v;
+            if (!(v = g(tfAppleMusicId)).isBlank())           t.appleMusicId         = v;
+            if (!(v = g(tfRoonAlbumTag)).isBlank())           t.roonAlbumTag         = v;
+            if (!(v = g(tfRoonTrackTag)).isBlank())           t.roonTrackTag         = v;
+            // MBIDs/AcoustID restent volontairement non collectés, comme en mode fichier unique
+            // (lecture seule).
             // Checkboxes : ne toucher que celles à valeur homogène
             if (!indetermCbs.contains(chkClassical))
                 t.isClassical    = chkClassical.isSelected()    ? "1" : "0";
@@ -458,6 +566,17 @@ public class DetailPanel extends JPanel {
         t.trackTotal   = g(tfTrackTotal);
         t.discNo       = g(tfDiscNo);
         t.discTotal    = g(tfDiscTotal);
+        t.comment      = g(tfComment);
+
+        t.label          = g(tfLabel);
+        t.catalogNo      = g(tfCatalogNo);
+        t.barcode        = g(tfBarcode);
+        t.releaseStatus  = g(tfReleaseStatus);
+        t.media          = g(tfMedia);
+        t.releaseType    = g(tfReleaseType);
+        t.originalYear   = g(tfOriginalYear);
+        t.country        = g(tfCountry);
+        t.script         = g(tfScript);
 
         t.composer         = g(tfComposer);
         t.composerSort     = g(tfComposerSort);
@@ -547,11 +666,14 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Total pistes :"),   tfTrackTotal);
         fields.put(I18n.t("Disque :"),         tfDiscNo);
         fields.put(I18n.t("Total disques :"),  tfDiscTotal);
+        fields.put(I18n.t("Commentaire :"),    tfComment);
         return scroll(formPanel(fields));
     }
 
     private JScrollPane buildClassicalTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
+        lblClassicalSummary.putClientProperty("FlatLaf.style", "font: bold 12 $defaultFont");
+        fields.put(I18n.t("Aperçu :"),             lblClassicalSummary);
         fields.put(I18n.t("Est classique :"),     chkClassical);
         fields.put(I18n.t("Compositeur :"),       tfComposer);
         fields.put(I18n.t("Tri compositeur :"),   tfComposerSort);
@@ -655,16 +777,27 @@ public class DetailPanel extends JPanel {
             }
         });
 
-        JPanel center = new JPanel();
-        center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
-        center.setBorder(new EmptyBorder(20, 20, 10, 20));
+        // GridBagLayout à une seule cellule (weightx/weighty=1, anchor CENTER par défaut) plutôt
+        // que BoxLayout + vertical glue avant/après : ce dernier centre correctement seulement si
+        // LUI-MÊME reçoit sa hauteur réelle disponible, ce qui n'est pas garanti une fois imbriqué
+        // dans le JTabbedPane (qui se dimensionne sur l'onglet le plus haut, ex. Classique/Audio-
+        // Mood) + le JScrollPane du panneau de détail — repéré à l'écran : la pochette apparaissait
+        // décalée vers le bas plutôt que centrée, l'espace en trop n'étant pas réparti également
+        // entre les deux glues. Un GridBagLayout à une cellule centre de façon fiable quel que soit
+        // l'espace alloué, sans dépendre de ce partage de "slack" entre composants.
+        JPanel coverGroup = new JPanel();
+        coverGroup.setLayout(new BoxLayout(coverGroup, BoxLayout.Y_AXIS));
         lblCoverTab.setAlignmentX(java.awt.Component.CENTER_ALIGNMENT);
         lblCoverInfo.setAlignmentX(java.awt.Component.CENTER_ALIGNMENT);
-        center.add(Box.createVerticalGlue());
-        center.add(lblCoverTab);
-        center.add(Box.createVerticalStrut(8));
-        center.add(lblCoverInfo);
-        center.add(Box.createVerticalGlue());
+        coverGroup.add(lblCoverTab);
+        coverGroup.add(Box.createVerticalStrut(8));
+        coverGroup.add(lblCoverInfo);
+
+        JPanel center = new JPanel(new GridBagLayout());
+        center.setBorder(new EmptyBorder(20, 20, 10, 20));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 1; gbc.weighty = 1;
+        center.add(coverGroup, gbc);
 
         JButton btnChange = new JButton(I18n.t("Changer la pochette…"));
         btnChange.addActionListener(e -> { if (onCoverClick != null) onCoverClick.run(); });
@@ -699,6 +832,16 @@ public class DetailPanel extends JPanel {
 
     private JScrollPane buildIdsTab() {
         Map<String, JComponent> fields = new LinkedHashMap<>();
+        fields.put(I18n.t("─── Métadonnées release ───"), sep());
+        fields.put(I18n.t("Label discographique :"),   tfLabel);
+        fields.put(I18n.t("N° de catalogue :"),         tfCatalogNo);
+        fields.put(I18n.t("Code-barres :"),             tfBarcode);
+        fields.put(I18n.t("Statut de la parution :"),   tfReleaseStatus);
+        fields.put(I18n.t("Support :"),                 tfMedia);
+        fields.put(I18n.t("Type de parution :"),        tfReleaseType);
+        fields.put(I18n.t("Année d'origine :"),         tfOriginalYear);
+        fields.put(I18n.t("Pays :"),                    tfCountry);
+        fields.put(I18n.t("Script :"),                  tfScript);
         fields.put(I18n.t("─── URLs artiste ───"),    sep());
         fields.put(I18n.t("Site officiel :"),          tfArtistOfficialUrl);
         fields.put(I18n.t("Wikipedia artiste :"),      tfArtistWikipediaUrl);
@@ -712,12 +855,15 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Release MBID :"),           tfReleaseMbid);
         fields.put(I18n.t("Release Group MBID :"),     tfReleaseGroupMbid);
         fields.put(I18n.t("Artist MBID :"),            tfArtistMbid);
+        fields.put(I18n.t("Release Artist MBID :"),    tfAlbumArtistMbid);
         fields.put(I18n.t("─── Autres IDs ───"),       sep());
         fields.put(I18n.t("AcoustID :"),               tfAcoustidId);
         fields.put(I18n.t("Discogs ID :"),             tfDiscogsId);
         fields.put(I18n.t("Apple Music ID :"),         tfAppleMusicId);
         fields.put(I18n.t("Roon Album Tag :"),         tfRoonAlbumTag);
         fields.put(I18n.t("Roon Track Tag :"),         tfRoonTrackTag);
+        fields.put(I18n.t("─── OpenTagger ───"),       sep());
+        fields.put(I18n.t("Tagué par OpenTagger le :"), tfTaggedDate);
         return scroll(formPanel(fields));
     }
 
@@ -828,6 +974,17 @@ public class DetailPanel extends JPanel {
         hl(tfTrackTotal,  g(tfTrackTotal),  before.trackTotal);
         hl(tfDiscNo,      g(tfDiscNo),      before.discNo);
         hl(tfDiscTotal,   g(tfDiscTotal),   before.discTotal);
+        hl(tfComment,     g(tfComment),     before.comment);
+        // Métadonnées release
+        hl(tfLabel,         g(tfLabel),         before.label);
+        hl(tfCatalogNo,     g(tfCatalogNo),     before.catalogNo);
+        hl(tfBarcode,       g(tfBarcode),       before.barcode);
+        hl(tfReleaseStatus, g(tfReleaseStatus), before.releaseStatus);
+        hl(tfMedia,         g(tfMedia),         before.media);
+        hl(tfReleaseType,   g(tfReleaseType),   before.releaseType);
+        hl(tfOriginalYear,  g(tfOriginalYear),  before.originalYear);
+        hl(tfCountry,       g(tfCountry),       before.country);
+        hl(tfScript,        g(tfScript),        before.script);
         // Classique
         hl(tfComposer,          g(tfComposer),          before.composer);
         hl(tfComposerSort,      g(tfComposerSort),      before.composerSort);
@@ -844,6 +1001,8 @@ public class DetailPanel extends JPanel {
         hl(tfOpus,              g(tfOpus),              before.opus);
         hl(tfClassicalCatalog,  g(tfClassicalCatalog),  before.classicalCatalog);
         hl(tfClassicalNickname, g(tfClassicalNickname), before.classicalNickname);
+        hl(tfSection,           g(tfSection),           before.section);
+        hl(tfOverallWork,       g(tfOverallWork),       before.overallWork);
         hl(tfGrouping,          g(tfGrouping),          before.grouping);
         hlBool(chkClassical,    chkClassical.isSelected(), "1".equals(before.isClassical));
         // Contributeurs
@@ -942,7 +1101,7 @@ public class DetailPanel extends JPanel {
     private JTextField[] allTextFields() {
         return new JTextField[]{
             tfTitle, tfArtist, tfAlbumArtist, tfAlbum, tfYear, tfGenre,
-            tfTrack, tfTrackTotal, tfDiscNo, tfDiscTotal,
+            tfTrack, tfTrackTotal, tfDiscNo, tfDiscTotal, tfComment,
             tfComposer, tfComposerSort, tfConductor, tfOrchestra, tfEnsemble, tfChoir,
             tfWork, tfWorkMbid, tfMovement, tfMovementNo, tfMovementTotal,
             tfPart, tfPeriod, tfOpus, tfClassicalCatalog, tfClassicalNickname,
@@ -956,8 +1115,10 @@ public class DetailPanel extends JPanel {
             tfLyricsUrl,
             tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
-            tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid,
-            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag
+            tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
+            tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate,
+            tfLabel, tfCatalogNo, tfBarcode, tfReleaseStatus, tfMedia,
+            tfReleaseType, tfOriginalYear, tfCountry, tfScript
         };
     }
 }

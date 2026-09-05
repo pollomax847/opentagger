@@ -40,6 +40,58 @@ public class FileEntry {
     /** Forcer la ré-identification même si le cache ou les tags MB existants sont valides. */
     public boolean forceReidentify = false;
 
+    /** SKIPPED spécifiquement parce que la durée du fichier ne correspond pas à celle déclarée par
+     *  MusicBrainz pour l'enregistrement identifié (voir {@link #isDurationMismatch}) — pas
+     *  une simple non-identification. Distingue ce cas pour le déplacement optionnel dédié (voir
+     *  Config.durationMismatchMoveEnabled()), séparé du déplacement générique SKIPPED/ERROR. */
+    public boolean durationMismatch = false;
+
+    /** Catégorie de {@link #message} pour un statut SKIPPED/ERROR — voir {@link SkipReason}. Null
+     *  pour tout fichier traité avant l'introduction de ce champ (session antérieure), ou tant que
+     *  le statut n'est ni SKIPPED ni ERROR. Alimente le rapport "Non identifiés" par cause. */
+    public SkipReason skipReason = null;
+
+    /** Écart significatif entre durée réelle du fichier et durée MusicBrainz de l'enregistrement
+     *  identifié. 0 = non renseigné (MB ou fichier), jamais considéré comme un écart. Seule source
+     *  de vérité pour ce calcul — utilisé à la fois avant taguage (TaggingWorker, bloque en SKIPPED)
+     *  et après (TagEnrichment.saveEntry(), déplace pour vérification sans bloquer, seul filet de
+     *  sécurité pour les chemins qui contournent le premier — matching manuel via MatchDialog
+     *  excepté : durationSec y reste à 0 par absence de copie depuis entry.current, donc jamais
+     *  faussement signalé pour un choix humain explicite).
+     *  ATTENTION : fileSec<=0 seul ne doit JAMAIS être traité comme "forcément vide/corrompu" ici —
+     *  tenté une fois (2026-07-18), reverté en urgence : entry.current.durationSec peut encore
+     *  valoir 0 simplement parce que la phase 2 du scan (lecture des tags, voir MainFrame.
+     *  readTags()) n'est pas encore passée sur ce fichier au moment où le taguage (qui peut
+     *  démarrer avant la fin du scan) l'examine — pas parce que le fichier est réellement vide.
+     *  Constaté en direct : des centaines de faux positifs sur des fichiers dont la Durée
+     *  s'affichait correctement (4:19, 5:07...) une fois le scan rattrapé. La vraie détection des
+     *  fichiers 0 octet reste le scan lui-même (voir MainFrame.readTags()/AudioDuration fallback),
+     *  pas cette comparaison.
+     *  <p>
+     *  Seuil ASYMÉTRIQUE (2026-08-16, retour utilisateur confirmé sur données réelles) : un fichier
+     *  plus COURT que la durée MB (20s ET 20% relatif) reste un signal fort de mauvais match (extrait,
+     *  radio edit collé à tort, fichier tronqué) — seuil inchangé, strict. Un fichier plus LONG (30s
+     *  ET 50% relatif, nettement plus tolérant) est très souvent légitime : live/bootleg, DJ set,
+     *  version étendue, bonus — repéré en direct sur deux vrais bootlegs "blink-182 ... All The
+     *  Small Things" (212s/208s fichier vs 171s MB, correctement identifiés mais rejetés à tort par
+     *  l'ancien seuil symétrique). Un Math.abs() unique traitait les deux directions identiquement,
+     *  alors que ce sont deux signaux de nature différente. */
+    /** "Track ID" de l'entrée iTunes correspondante, si ce fichier a été résolu lors d'un import
+     *  XML iTunes (voir ITunesImportDialog) — {@code null} tant qu'aucun import ne l'a établi.
+     *  Permet de repousser un changement (renommage, note) vers CETTE entrée précise du XML iTunes
+     *  (voir ITunesXmlSyncQueue/ITunesXmlWriter) sans avoir à re-résoudre le chemin à chaque fois. */
+    public Integer itunesTrackId = null;
+
+    public static boolean isDurationMismatch(int fileSec, int mbSec) {
+        if (fileSec <= 0 || mbSec <= 0) return false;
+        int diff = fileSec - mbSec;
+        if (diff < 0) {
+            int shortfall = -diff;
+            return shortfall > 20 && shortfall > mbSec * 0.20;
+        }
+        return diff > 30 && diff > mbSec * 0.50;
+    }
+
     /**
      * Racine du dossier scanné — le renommage par masque est relatif à cette racine.
      * Ex : racine=/musique, masque={artist}/{album}/{track} - {title}

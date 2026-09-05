@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -61,7 +62,13 @@ public final class FfmpegTagIO {
 
     public static boolean handles(File f) {
         String n = f.getName().toLowerCase();
-        return n.endsWith(".opus") || n.endsWith(".aac") || n.endsWith(".wv") || n.endsWith(".ape");
+        // .wav : jaudiotagger sait le LIRE mais son WavTagWriter plante systématiquement à
+        // l'écriture (IllegalArgumentException interne à sa propre classe — "No enum constant
+        // FieldKey.IS_INSTRUMENTAL" — sur n'importe quel .wav, même avec un seul champ renseigné,
+        // vérifié en direct). Contourné en passant aussi la LECTURE par ffmpeg plutôt que de garder
+        // deux chemins différents pour le même format.
+        return n.endsWith(".opus") || n.endsWith(".aac") || n.endsWith(".wv") || n.endsWith(".ape")
+                || n.endsWith(".wav");
     }
 
     private static String ffmpegPath()  { return Config.get().str("audio.ffmpeg_path",  "ffmpeg");  }
@@ -115,6 +122,7 @@ public final class FfmpegTagIO {
             ti.releaseMbid      = tag(tags, "MUSICBRAINZ_ALBUMID");
             ti.recordingMbid    = tag(tags, "MUSICBRAINZ_TRACKID");
             ti.releaseGroupMbid = tag(tags, "MUSICBRAINZ_RELEASEGROUPID");
+            ti.taggedDate       = tag(tags, "OT_TAGGEDDATE");
         } catch (Exception ignored) {}
         return ti;
     }
@@ -144,6 +152,26 @@ public final class FfmpegTagIO {
     // ── Écriture ─────────────────────────────────────────────────────────────
 
     public static void write(File fichier, TagInfo i) throws Exception {
+        write(fichier, i, null);
+    }
+
+    /**
+     * @param coverImage pochette résolue par TagEnrichment (CAA/FanArt/Deezer/Shazam) — actuellement
+     *                    IGNORÉE ici (paramètre gardé pour un signature symétrique avec
+     *                    TagWriter.write(), pas encore exploitable). Testé en direct, sur de vrais
+     *                    fichiers, {@code -map 1:v -disposition:v attached_pic} (technique standard
+     *                    qui fonctionne pour FLAC/MP4/MP3) sur les trois formats : Opus/Ogg échoue
+     *                    ("Unsupported codec id in stream 1" — le muxer ogg de ce ffmpeg ne supporte
+     *                    QUE le théora en vidéo, aucun mécanisme d'image attachée) ; WavPack échoue
+     *                    ("This muxer only supports a single WavPack stream") ; AAC/ADTS accepte la
+     *                    commande SANS ERREUR ("Stream ... (attached pic)" dans le log) mais la
+     *                    pochette est silencieusement perdue à l'écriture — fichier de sortie
+     *                    quasi identique en taille, aucune frame APIC ni flux vidéo à la relecture
+     *                    (vérifié ffprobe + mid3v2). Aucune de ces trois voies n'est donc exploitable
+     *                    avec ffmpeg tel quel ; embarquer une pochette pour ces formats demanderait de
+     *                    construire les frames ID3v2/APEv2 à la main, hors scope ici.
+     */
+    public static void write(File fichier, TagInfo i, Path coverImage) throws Exception {
         String lower = fichier.getName().toLowerCase();
         if (lower.endsWith(".ape")) {
             // Pas un échec ffmpeg à traduire : aucun encodeur/muxer APE n'existe dans ffmpeg,
@@ -153,7 +181,9 @@ public final class FfmpegTagIO {
                 + " format (lecture seule). Aucun outil disponible ici pour le faire.");
         }
         boolean isAac = lower.endsWith(".aac");
-        String ext = lower.endsWith(".wv") ? ".wv" : isAac ? ".aac" : ".opus";
+        String ext = lower.endsWith(".wv")  ? ".wv"
+                   : lower.endsWith(".wav") ? ".wav"
+                   : isAac                  ? ".aac" : ".opus";
         File tmp = File.createTempFile("ot_ffio_", ext, fichier.getParentFile());
         tmp.delete(); // ffmpeg crée le fichier lui-même
 
@@ -167,6 +197,15 @@ public final class FfmpegTagIO {
         // nécessaire/sans effet pour Opus (Ogg gère nativement les commentaires Vorbis).
         if (isAac) { cmd.add("-write_id3v2"); cmd.add("1"); }
 
+        // Parité de champs avec le chemin jaudiotagger natif (TagWriter.writeNative()) : jusqu'ici
+        // Opus/AAC/WV n'avaient droit qu'à une quinzaine de champs de base — aucun mood, classique,
+        // URL, ID Discogs/Apple Music/Roon, ReplayGain ni métadonnée release. Noms de clé vérifiés
+        // empiriquement (pas devinés) en écrivant un TagInfo entièrement rempli via le vrai
+        // TagWriter sur un .flac de test et en relisant les commentaires Vorbis bruts — ce sont
+        // exactement les noms que produit jaudiotagger pour FLAC/OGG, donc round-trip cohérent avec
+        // les autres formats (y compris quelques surprises réelles de la lib, ex. "ORIGINAL YEAR"
+        // avec un espace, "PARTNUMBER" sans "_" — pas des fautes de frappe ici, une clé différente
+        // casserait juste la relecture cohérente entre formats).
         meta(cmd, "title",        i.title);
         meta(cmd, "artist",       i.artist);
         meta(cmd, "album_artist", i.albumArtist);
@@ -181,6 +220,135 @@ public final class FfmpegTagIO {
         meta(cmd, "MUSICBRAINZ_ALBUMID",        i.releaseMbid);
         meta(cmd, "MUSICBRAINZ_TRACKID",        i.recordingMbid);
         meta(cmd, "MUSICBRAINZ_RELEASEGROUPID", i.releaseGroupMbid);
+        meta(cmd, "MUSICBRAINZ_ALBUMARTISTID",  i.albumArtistMbid);
+        meta(cmd, "MUSICBRAINZ_WORKID",         i.workMbid);
+        meta(cmd, "OT_TAGGEDDATE",              i.taggedDate);
+
+        // ── Tri ───────────────────────────────────────────────────────────────
+        meta(cmd, "TITLESORT",       i.titleSort);
+        meta(cmd, "ARTISTSORT",      i.artistSort);
+        meta(cmd, "ALBUMSORT",       i.albumSort);
+        meta(cmd, "ALBUMARTISTSORT", i.albumArtistSort);
+        meta(cmd, "COMPOSERSORT",    i.composerSort);
+        meta(cmd, "CONDUCTOR_SORT",  i.conductorSort);
+        meta(cmd, "ORCHESTRA_SORT",  i.orchestraSort);
+        meta(cmd, "ENSEMBLE_SORT",   i.ensembleSort);
+        meta(cmd, "CHOIR_SORT",      i.choirSort);
+        meta(cmd, "LYRICIST_SORT",   i.lyricistSort);
+        meta(cmd, "PRODUCER_SORT",   i.producerSort);
+        meta(cmd, "ARRANGER_SORT",   i.arrangerSort);
+        meta(cmd, "MIXER_SORT",      i.mixerSort);
+        meta(cmd, "ARTISTS",         i.artists);
+        meta(cmd, "ARTISTS_SORT",    i.artistsSort);
+
+        // ── Contributeurs ────────────────────────────────────────────────────
+        meta(cmd, "CONDUCTOR", i.conductor);
+        meta(cmd, "ORCHESTRA", i.orchestra);
+        meta(cmd, "ENSEMBLE",  i.ensemble);
+        meta(cmd, "CHOIR",     i.choir);
+        meta(cmd, "LYRICIST",  i.lyricist);
+        meta(cmd, "PRODUCER",  i.producer);
+        meta(cmd, "ARRANGER",  i.arranger);
+        meta(cmd, "ENGINEER",  i.engineer);
+        meta(cmd, "MIXER",     i.mixer);
+        meta(cmd, "DJMIXER",   i.djMixer);
+
+        // ── Classique ────────────────────────────────────────────────────────
+        meta(cmd, "WORK",               i.work);
+        meta(cmd, "MOVEMENT",           i.movement);
+        meta(cmd, "MOVEMENT_NO",        i.movementNo);
+        meta(cmd, "MOVEMENT_TOTAL",     i.movementTotal);
+        meta(cmd, "TITLE_MOVEMENT",     i.titleMovement);
+        meta(cmd, "PART",               i.part);
+        meta(cmd, "PART_TYPE",          i.partType);
+        meta(cmd, "PARTNUMBER",         i.partNo);
+        meta(cmd, "PERIOD",             i.period);
+        meta(cmd, "OPUS",               i.opus);
+        meta(cmd, "CLASSICAL_CATALOG",  i.classicalCatalog);
+        meta(cmd, "CLASSICAL_NICKNAME", i.classicalNickname);
+        meta(cmd, "SECTION",            i.section);
+        meta(cmd, "OVERALL_WORK",       i.overallWork);
+        meta(cmd, "GROUPING",           i.grouping);
+
+        // ── Flags ────────────────────────────────────────────────────────────
+        meta(cmd, "IS_CLASSICAL",      i.isClassical);
+        meta(cmd, "COMPILATION",       i.isCompilation);
+        meta(cmd, "IS_HD",             i.isHD);
+        meta(cmd, "LIVE",              i.isLive);
+        meta(cmd, "IS_GREATEST_HITS",  i.isGreatestHits);
+        meta(cmd, "IS_SOUNDTRACK",     i.isSoundtrack);
+        meta(cmd, "IS_INSTRUMENTAL",   i.isInstrumental);
+
+        // ── Audio / tempo / tonalité ─────────────────────────────────────────
+        meta(cmd, "FBPM",     i.fbpm);
+        meta(cmd, "KEY",      i.initialKey);
+        meta(cmd, "LANGUAGE", i.language);
+
+        // ── Humeur (Essentia) ────────────────────────────────────────────────
+        meta(cmd, "MOOD",              i.mood);
+        meta(cmd, "MOOD_AGGRESSIVE",   i.moodAggressive);
+        meta(cmd, "MOOD_ACOUSTIC",     i.moodAcoustic);
+        meta(cmd, "MOOD_ELECTRONIC",   i.moodElectronic);
+        meta(cmd, "MOOD_HAPPY",        i.moodHappy);
+        meta(cmd, "MOOD_PARTY",        i.moodParty);
+        meta(cmd, "MOOD_RELAXED",      i.moodRelaxed);
+        meta(cmd, "MOOD_SAD",          i.moodSad);
+        meta(cmd, "MOOD_VALENCE",      i.moodValence);
+        meta(cmd, "MOOD_AROUSAL",      i.moodArousal);
+        meta(cmd, "MOOD_DANCEABILITY", i.moodDanceability);
+        meta(cmd, "MOOD_INSTRUMENTAL", i.moodInstrumental);
+
+        // ── ReplayGain ───────────────────────────────────────────────────────
+        meta(cmd, "REPLAYGAIN_TRACK_GAIN", i.replayGainTrackGain);
+        meta(cmd, "REPLAYGAIN_TRACK_PEAK", i.replayGainTrackPeak);
+        meta(cmd, "REPLAYGAIN_ALBUM_GAIN", i.replayGainAlbumGain);
+        meta(cmd, "REPLAYGAIN_ALBUM_PEAK", i.replayGainAlbumPeak);
+
+        // ── Paroles ──────────────────────────────────────────────────────────
+        meta(cmd, "LYRICS",          i.lyrics);
+        meta(cmd, "URL_LYRICS_SITE", i.lyricsUrl);
+
+        // ── Rating & tags ────────────────────────────────────────────────────
+        meta(cmd, "RATING", i.rating);
+        meta(cmd, "TAGS",   i.tags);
+
+        // ── Identifiants ─────────────────────────────────────────────────────
+        meta(cmd, "ASIN",               i.amazonId);
+        meta(cmd, "ROONALBUMTAG",       i.roonAlbumTag);
+        meta(cmd, "ROONTRACKTAG",       i.roonTrackTag);
+        meta(cmd, "DISCOGS_RELEASE_ID", i.discogsId);
+        meta(cmd, "APPLE_MUSIC_ID",     i.appleMusicId);
+        meta(cmd, "ACOUSTID_ID",          i.acoustidId);
+        meta(cmd, "ACOUSTID_FINGERPRINT", i.acoustidFingerprint);
+
+        // ── Métadonnées release ──────────────────────────────────────────────
+        meta(cmd, "SCRIPT",                 i.script);
+        meta(cmd, "COUNTRY",                i.country);
+        meta(cmd, "BARCODE",                i.barcode);
+        meta(cmd, "CATALOGNUMBER",          i.catalogNo);
+        meta(cmd, "MUSICBRAINZ_ALBUMTYPE",  i.releaseType);
+        meta(cmd, "ORIGINAL YEAR",          i.originalYear);
+        meta(cmd, "LABEL",                  i.label);
+        meta(cmd, "MUSICBRAINZ_ALBUMSTATUS", i.releaseStatus);
+        meta(cmd, "MEDIA",                  i.media);
+
+        // ── Podcast ──────────────────────────────────────────────────────────
+        meta(cmd, "PODCAST_URL", i.podcastUrl);
+        meta(cmd, "SEASON",      i.podcastSeason);
+        meta(cmd, "EPISODE",     i.podcastEpisode);
+        meta(cmd, "EPISODETYPE", i.podcastEpisodeType);
+        meta(cmd, "KEYWORDS",    i.podcastKeywords);
+
+        // ── Statistiques d'écoute ────────────────────────────────────────────
+        meta(cmd, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+
+        // ── URLs ─────────────────────────────────────────────────────────────
+        meta(cmd, "URL_OFFICIAL_ARTIST_SITE",   i.artistOfficialUrl);
+        meta(cmd, "URL_WIKIPEDIA_ARTIST_SITE",  i.artistWikipediaUrl);
+        meta(cmd, "URL_DISCOGS_ARTIST_SITE",    i.artistDiscogsUrl);
+        meta(cmd, "URL_OFFICIAL_RELEASE_SITE",  i.releaseOfficialUrl);
+        meta(cmd, "URL_WIKIPEDIA_RELEASE_SITE", i.releaseWikipediaUrl);
+        meta(cmd, "URL_DISCOGS_RELEASE_SITE",   i.releaseDiscogsUrl);
 
         if (!i.track.isBlank())
             meta(cmd, "track", i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal);
@@ -217,7 +385,7 @@ public final class FfmpegTagIO {
     }
 
     private static void meta(List<String> cmd, String key, String value) {
-        if (value != null && !value.isBlank()) { cmd.add("-metadata"); cmd.add(key + "=" + value); }
+        if (value != null && !value.isBlank()) { cmd.add("-metadata"); cmd.add(key + "=" + TagWriter.sanitizeArg(value)); }
     }
 
     private static String runCapture(List<String> cmd, int timeoutSec) throws Exception {

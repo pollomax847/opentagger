@@ -61,7 +61,6 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
-    private final MetadataCache     cache   = new MetadataCache();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
 
@@ -71,6 +70,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     // AlbumCompletionWorker.pool (voir leurs commentaires) : sans ça, stopNow() n'interromprait
     // que le thread de doInBackground(), pas les tâches déjà soumises au pool.
     private volatile ExecutorService pool;
+
+    // Pool de connexions SQLite — une par thread, réutilisée pour tous ses fichiers plutôt qu'une
+    // par fichier (voir SaveWorker.cachePool pour le diagnostic complet, 2026-08-17 : NMT a montré
+    // la catégorie "Other" grimper à 6+ Go sur ce même anti-motif "une connexion par fichier",
+    // introduit ici le même jour — 2026-07-29 — que dans SaveWorker, jamais mesuré côté natif).
+    private final java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
+            new java.util.concurrent.LinkedBlockingQueue<>();
 
     public InfoCompleterWorker(List<FileEntry> entries,
                                Consumer<String> onProgress,
@@ -98,29 +104,42 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
 
-        for (int i = 0; i < entries.size(); i++) {
-            if (isCancelled()) break;
-            final FileEntry entry  = entries.get(i);
-            final int       fileIdx = i + 1;
-            futures.add(pool.submit(() ->
-                    processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient())));
-        }
+        // Une connexion par thread (voir cachePool) plutôt qu'une par fichier.
+        for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
 
-        pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
+        try {
+            for (int i = 0; i < entries.size(); i++) {
+                if (isCancelled()) break;
+                final FileEntry entry  = entries.get(i);
+                final int       fileIdx = i + 1;
+                // Connexion empruntée au pool (une par thread, jamais partagée entre threads en
+                // même temps — voir cachePool) : garde l'absence de verrou partagé du correctif
+                // 2026-07-29 sans payer le coût mémoire natif d'une connexion par fichier.
+                futures.add(pool.submit(() -> {
+                    MetadataCache taskCache = cachePool.poll();
+                    if (taskCache == null) taskCache = new MetadataCache(); // filet de sécurité
+                    try {
+                        processOne(entry, fileIdx, total, new MusicBrainzClient(), new LastFmClient(), taskCache);
+                    } finally {
+                        cachePool.offer(taskCache);
+                    }
+                }));
+            }
+
+            pool.shutdown();
+            for (Future<?> f : futures) {
+                try { f.get(); } catch (Exception ignored) {}
+            }
+        } finally {
+            for (MetadataCache c : cachePool) c.close();
         }
-        // cache n'était jamais fermé avant — connexion SQLite qui fuyait pour toute la durée de
-        // vie de l'objet (contrairement à AlbumCompletionWorker/TaggingWorker, qui ferment déjà
-        // leur MetadataCache). Fermer seulement après que toutes les tâches ont fini d'écrire.
-        cache.close();
         return null;
     }
 
     /** Traite un fichier. Appelé en parallèle, une tâche par fichier, depuis le pool créé dans
      *  doInBackground(). */
     private void processOne(FileEntry entry, int fileIdx, int total,
-                             MusicBrainzClient mb, LastFmClient lastFm) {
+                             MusicBrainzClient mb, LastFmClient lastFm, MetadataCache cache) {
         if (isCancelled()) return;
 
         File fichier = entry.currentPath != null
@@ -136,10 +155,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             return;
         }
 
+        CURRENT_FILE.set(fichier.getName());
         log(I18n.t("▶ COMPLÉTER %s", fichier.getName()));
 
         try {
-            completeEntry(entry, fichier, mb, lastFm);
+            completeEntry(entry, fichier, mb, lastFm, cache);
         } catch (Exception ex) {
             log(I18n.t("  ✗ erreur: %s", ex.getMessage()));
         }
@@ -148,7 +168,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         publish(entry);
     }
 
-    private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm) throws Exception {
+    private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm,
+                                MetadataCache cache) throws Exception {
         // Lire le TagInfo actuel depuis e.result ou depuis le fichier
         TagInfo ti = entry.result != null ? entry.result : readTagsFromFile(fichier);
         if (ti == null || (ti.artist.isBlank() && ti.title.isBlank())) {
@@ -164,8 +185,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // (identifié par SongRec/texte sans jamais avoir été confirmé par une recherche MB) ne
         // relançait jamais cette recherche, alors que c'est justement recordingMbid.isBlank() qui
         // déclenche le badge "⚠ MBID d'enregistrement manquant" dans TaggingWorker.buildSuggestions.
+        // country/releaseType/originalYear ajoutés au déclencheur (2026-09-01, rattrapage demandé
+        // par l'utilisateur) : ces 3 champs restaient vides sur la quasi-totalité de la bibliothèque
+        // déjà taguée, y compris des fichiers par ailleurs complets (album/year/artistMbid/
+        // recordingMbid déjà remplis) — le raccourci "tags MB existants" de TaggingWorker ne les a
+        // jamais récupérés puisqu'il ne refait pas de recherche MB. Les drapeaux isSoundtrack/isLive/
+        // isGreatestHits/isCompilation n'ont pas besoin d'un déclencheur dédié : ils profitent de la
+        // même recherche MB ci-dessous via fillFlag(), déclenchée par ces 3 champs.
         boolean needsMb = ti.album.isBlank() || ti.year.isBlank()
-                || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank();
+                || ti.artistMbid.isBlank()   || ti.recordingMbid.isBlank()
+                || ti.country.isBlank()      || ti.releaseType.isBlank() || ti.originalYear.isBlank();
         if (needsMb) {
             TagInfo mbr = null;
 
@@ -231,6 +260,10 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 if (fillBlank(ti, "originalYear",      mbr.originalYear))     filled.add("originalYear");
                 if (fillBlank(ti, "artists",           mbr.artists))          filled.add("artists");
                 if (fillBlank(ti, "artistsSort",       mbr.artistsSort))      filled.add("artistsSort");
+                if (fillFlag(ti, "isSoundtrack",       mbr.isSoundtrack))     filled.add("isSoundtrack");
+                if (fillFlag(ti, "isLive",             mbr.isLive))           filled.add("isLive");
+                if (fillFlag(ti, "isGreatestHits",     mbr.isGreatestHits))   filled.add("isGreatestHits");
+                if (fillFlag(ti, "isCompilation",      mbr.isCompilation))    filled.add("isCompilation");
                 if (!filled.isEmpty()) { log(I18n.t("  ✎ rempli: %s", String.join(", ", filled))); changed = true; }
             } else if (ti.artistMbid.isBlank()) {
                 // Fallback minimal : artistMbid pour la pochette
@@ -258,7 +291,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // pouvait rester décochée à tort si aucun Work MB n'était trouvé.
         String classicalBefore = ti.isClassical + "|" + ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
         corrector.detectClassical(ti);
-        TagEnrichment.enrichClassicalWork(ti, mb);
+        TagEnrichment.enrichClassicalWork(ti, mb, cache);
         String classicalAfter  = ti.isClassical + "|" + ti.opus + "|" + ti.classicalCatalog + "|" + ti.movementNo + "|" + ti.overallWork;
         if (!classicalAfter.equals(classicalBefore)) { log(I18n.t("  œuvre=%s opus=%s", ti.overallWork, ti.opus)); changed = true; }
 
@@ -372,6 +405,20 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         return false;
     }
 
+    /** Variante de fillBlank() pour les drapeaux "0"/"1" (isSoundtrack, isLive, isGreatestHits…) :
+     *  ces champs valent "0" par défaut dans TagInfo, donc fillBlank() (qui teste isBlank()) ne les
+     *  remplit jamais — "0" n'est pas vide. Ne fait passer "0"→"1" que si MB confirme le drapeau ;
+     *  ne redescend jamais un "1" (posé manuellement ou par une passe précédente) vers "0". */
+    private boolean fillFlag(TagInfo ti, String field, String value) {
+        if (!"1".equals(value)) return false;
+        try {
+            var f = TagInfo.class.getField(field);
+            String cur = (String) f.get(ti);
+            if (!"1".equals(cur)) { f.set(ti, "1"); return true; }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
     /** Lit les tags essentiels depuis le fichier (artist, title, album, year, mbids…). */
     private TagInfo readTagsFromFile(File f) {
         // Opus/AAC/WV/APE : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO).
@@ -381,10 +428,18 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             Tag tag = af.getTag();
             if (tag == null) return null;
             TagInfo ti = new TagInfo();
-            ti.artist          = tag.getFirst(FieldKey.ARTIST);
-            ti.title           = tag.getFirst(FieldKey.TITLE);
-            ti.album           = tag.getFirst(FieldKey.ALBUM);
-            ti.albumArtist     = tag.getFirst(FieldKey.ALBUM_ARTIST);
+            // isGenericIdentityValue() : ne jamais faire confiance à un artiste/titre/album déjà
+            // cassé sur le fichier ("1", "Unknown Artist"...) — sans ce garde, une valeur poubelle
+            // déjà présente se recopiait telle quelle à chaque complétion, indéfiniment (bug réel
+            // trouvé le 2026-08-13 : TPE1=ARTIST="1" sur un fichier par ailleurs bien identifié).
+            String rawArtist      = tag.getFirst(FieldKey.ARTIST);
+            String rawTitle       = tag.getFirst(FieldKey.TITLE);
+            String rawAlbum       = tag.getFirst(FieldKey.ALBUM);
+            String rawAlbumArtist = tag.getFirst(FieldKey.ALBUM_ARTIST);
+            ti.artist          = TagInfo.isGenericIdentityValue(rawArtist)      ? "" : rawArtist;
+            ti.title           = TagInfo.isGenericIdentityValue(rawTitle)       ? "" : rawTitle;
+            ti.album           = TagInfo.isGenericIdentityValue(rawAlbum)       ? "" : rawAlbum;
+            ti.albumArtist     = TagInfo.isGenericIdentityValue(rawAlbumArtist) ? "" : rawAlbumArtist;
             ti.year            = tag.getFirst(FieldKey.YEAR);
             ti.track           = tag.getFirst(FieldKey.TRACK);
             ti.genre           = tag.getFirst(FieldKey.GENRE);
@@ -427,8 +482,17 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         for (FileEntry e : chunks) onUpdate.accept(e);
     }
 
+    // Même raison que TaggingWorker.CURRENT_FILE (préfixe de traçabilité par fichier malgré
+    // plusieurs threads parallèles partageant ce même log() static) — ajouté ici aussi le
+    // 2026-08-12 en repérant un cas suspect ("Or Songwriting Process...mp3", un titre de podcast,
+    // suivi d'une ligne "MB trouvé: James Blunt..." impossible à rattacher avec certitude à CE
+    // fichier précis sans préfixe, à cause de l'entrelacement des threads).
+    private static final ThreadLocal<String> CURRENT_FILE = new ThreadLocal<>();
+
     private static void log(String msg) {
-        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg);
+        String ctx = CURRENT_FILE.get();
+        String prefix = ctx != null ? "[" + ctx + "] " : "";
+        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + prefix + msg);
         System.out.flush();
     }
 }

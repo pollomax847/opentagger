@@ -44,9 +44,9 @@ public final class TagEnrichment {
      * qui ne dépend d'aucune heuristique ni de son câblage. Ne fait jamais planter l'appelant
      * (réseau, comme enrichGenre ci-dessus).
      */
-    public static void enrichClassicalWork(TagInfo ti, MusicBrainzClient mb) {
+    public static void enrichClassicalWork(TagInfo ti, MusicBrainzClient mb, MetadataCache cache) {
         if (ti.workMbid.isBlank()) return;
-        try { mb.resolveClassicalWork(ti); } catch (Exception ignored) {}
+        try { mb.resolveClassicalWork(ti, cache); } catch (Exception ignored) {}
     }
 
     /**
@@ -200,7 +200,8 @@ public final class TagEnrichment {
     /** Résultat de {@link #saveEntry}. {@code cover} : pochette réellement résolue (ou null si
      *  aucune trouvée) — les appelants qui construisent des suggestions à l'utilisateur (ex.
      *  "Pochette non trouvée") ne peuvent le savoir qu'ICI, pas pendant l'identification. */
-    public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError) {}
+    public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError,
+                              boolean durationMismatchMoved) {}
 
     /**
      * Étape "Enregistrer" partagée (façon Picard : le disque n'est touché qu'ici, jamais pendant
@@ -232,19 +233,57 @@ public final class TagEnrichment {
                                         MetadataCache cache, MusicBrainzOAuth mbOauth, Path scanRoot,
                                         int maskIndex, java.util.function.Consumer<String> log) throws Exception {
         Path cover = resolveCover(ti, fichier, caa, fanArt, deezer, cache);
-        TagInfo written = writer.write(fichier, ti, cover);
+        TagInfo written;
+        try {
+            written = writer.write(fichier, ti, cover);
 
-        // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
-        // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
-        // de `cover`, résolu seulement maintenant (voir plus haut).
-        if (cover != null && Config.get().bool("cover.save_to_file", false)) {
-            try {
-                String fname = Config.get().str("cover.filename", "cover");
-                String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
-                Path dest = fichier.toPath().resolveSibling(fname + ext);
-                if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
-                    java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            } catch (Exception ignored) {}
+            // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
+            // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
+            // de `cover`, résolu seulement maintenant (voir plus haut).
+            if (cover != null && Config.get().bool("cover.save_to_file", false)) {
+                try {
+                    String fname = Config.get().str("cover.filename", "cover");
+                    String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                    Path dest = fichier.toPath().resolveSibling(fname + ext);
+                    if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
+                        java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (Exception ignored) {}
+            }
+
+            // Portrait d'artiste (artist.jpg à côté de cover.jpg dans le dossier album) — opt-in,
+            // voir Config.artistPhotoEnabled(). Pas de case "overwrite" séparée (contrairement à la
+            // pochette) : un fichier déjà présent suffit, évite un re-téléchargement à chaque piste
+            // du même artiste/album.
+            if (Config.get().artistPhotoEnabled() && fanArt != null) {
+                Path artistPhoto = null;
+                try {
+                    artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
+                    if (artistPhoto != null) {
+                        String fname = Config.get().artistPhotoFilename();
+                        String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                        Path dest = fichier.toPath().resolveSibling(fname + ext);
+                        if (!java.nio.file.Files.exists(dest))
+                            java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (artistPhoto != null) {
+                        try { java.nio.file.Files.deleteIfExists(artistPhoto); } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } finally {
+            // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
+            // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien
+            // ne la relit après ce point (les appelants ne testent que res.cover() == null). La
+            // laisser traîner accumulait un fichier temporaire par piste sur toute une bibliothèque.
+            // Dans un finally (et non juste après l'appel comme avant ce correctif) : writer.write()
+            // lève régulièrement une exception (jaudiotagger M4A/WAV, disque plein...) — sans ça, la
+            // pochette téléchargée restait sur toute écriture en échec, fuite de fichiers temporaires
+            // qui s'accumule avec le taux d'échec réel observé sur cette bibliothèque.
+            if (cover != null) {
+                try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+            }
         }
 
         // Paroles synchronisées (.lrc à côté de l'audio, même basename) — même logique/opt-in que
@@ -314,7 +353,117 @@ public final class TagEnrichment {
                 renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             }
         }
-        return new SaveResult(written, cover, finalPath, renameError);
+
+        // Filet de sécurité APRÈS coup, pas avant : TaggingWorker bloque déjà en SKIPPED tout
+        // candidat dont la durée ne correspond pas à MusicBrainz (voir FileEntry.isDurationMismatch)
+        // avant même de proposer un taguage automatique — mais un match MANUEL (MatchDialog) passe
+        // par ce même saveEntry() sans jamais avoir traversé cette porte, puisque l'utilisateur a
+        // délibérément choisi ce candidat. On ne bloque donc jamais ici (le fichier reste TAGGED,
+        // ses tags sont écrits normalement) : on se contente de le sortir de la bibliothèque
+        // organisée vers le dossier de vérification dédié, pour qu'un écart réel (mauvais rip,
+        // mauvaise édition) saute aux yeux sans jamais avoir empêché ou annulé un choix explicite.
+        // Sans copie de la durée réelle sur le TagInfo choisi (MatchDialog ne le fait pas,
+        // contrairement à TaggingWorker.processEntry() — voir son commentaire), written.durationSec
+        // reste à 0 pour un match manuel : isDurationMismatch() renvoie alors toujours false, donc
+        // ce filet n'agit jamais sur un choix humain explicite, uniquement sur les cas automatiques
+        // qui auraient tout de même échappé à la porte amont (ex. CLI, historique de cache).
+        boolean durationMismatchMoved = false;
+        if (Config.get().durationMismatchMoveEnabled()
+                && com.opentagger.model.FileEntry.isDurationMismatch(written.durationSec, written.mbDurationSec)) {
+            String folder = Config.get().durationMismatchMoveFolder();
+            if (!folder.isBlank()) {
+                try {
+                    Path moved = FileRenamer.moveToFolder(finalPath, java.nio.file.Paths.get(folder));
+                    if (moved != null) { finalPath = moved; durationMismatchMoved = true; }
+                } catch (Exception ignored) {}
+            }
+        }
+        // Envoi automatique vers Headphones (queueAlbum) — demande utilisateur explicite
+        // (2026-08-29), après une première version manuelle (menu "Envoyer vers Headphones").
+        // Volontairement APRÈS coup, pas avant : ne doit jamais empêcher/retarder l'enregistrement
+        // réel du fichier si Headphones est injoignable — network best-effort, jamais bloquant.
+        // Seuil de confiance (score de CETTE identification, pas celui du résultat findAlbum côté
+        // Headphones) : seuil demandé par l'utilisateur (90%, configurable), pour ne jamais envoyer
+        // un album mal identifié en recherche/téléchargement chez un service externe.
+        //
+        // Sur un THREAD À PART (Thread.ofVirtual) depuis ce correctif — jusque-là, malgré le
+        // commentaire ci-dessus, cet appel bloquait bel et bien saveEntry() jusqu'à 20s (timeout
+        // HTTP par défaut) à CHAQUE tentative. Découvert en direct 2026-08-30 en creusant pourquoi
+        // aucun envoi ne réussissait jamais : sur un run réel, 360 tentatives sur 389 se sont
+        // soldées par un HttpTimeoutException — Headphones (une instance Python mono-processus,
+        // relayant chaque recherche à MusicBrainz) ne suit tout simplement pas le rythme du
+        // taguage. Non corrigeable côté OpenTagger (capacité de Headphones lui-même), mais le
+        // "jamais bloquant" du commentaire ci-dessus n'était pas respecté : ~2h de délai pur
+        // accumulé sur cette seule session (360 × jusqu'à 20s), invisible jusqu'ici. Passer en
+        // fire-and-forget rend enfin le commentaire vrai, sans changer le taux de succès côté
+        // Headphones (toujours best-effort, toujours loggé pareil).
+        if (Config.get().headphonesAutoQueueEnabled()
+                && !durationMismatchMoved
+                && written.score >= Config.get().headphonesAutoQueueMinScore()
+                && !written.artist.isBlank() && !written.album.isBlank()) {
+            Thread.ofVirtual().start(() -> {
+            try {
+                HeadphonesClient hp = new HeadphonesClient();
+                if (hp.isConfigured() && !hp.isAlbumKnown(written.artist, written.album)) {
+                    // findAlbum cherche par TITRE D'ALBUM seul (voir ~/headphones/API.md :
+                    // "findAlbum&name=$albumname"), pas par "artiste + album" concaténé —
+                    // confirmé en direct 2026-08-30 : la requête combinée faisait échouer
+                    // systématiquement la recherche MusicBrainz côté Headphones (4/4 tentatives
+                    // réelles "aucun candidat trouvé", y compris pour des artistes/albums aussi
+                    // connus que Céline Dion ou les Backstreet Boys). La requête ne pouvant plus
+                    // filtrer par artiste, on le fait nous-mêmes après coup sur le "uniquename"
+                    // renvoyé par l'API. Seuil bas (0.4, PAS le 0.85 utilisé ailleurs dans ce
+                    // client pour un gate d'égalité stricte) : titleSimilarity pénalise tout mot du
+                    // côté le plus long non apparié à hauteur de 0.4 chacun (voir sa Javadoc), donc
+                    // un artiste tag multi-crédité ("Bruno Mars, Anderson .Paak, Silk Sonic")
+                    // comparé au nom MusicBrainz réel ("Silk Sonic") plafonne structurellement à
+                    // ~0.56 même en cas de correspondance parfaite des mots communs — confirmé en
+                    // direct 2026-08-30 : un seuil à 0.6 rejetait systématiquement ce genre de cas
+                    // pourtant légitime (0/29 tentatives réussies avant ce correctif, y compris pour
+                    // des albums aussi connus que "An Evening With Silk Sonic", vérifié en direct
+                    // que Headphones le trouve bien). Un artiste réellement sans rapport tombe près
+                    // de 0 (quasi aucun mot en commun), donc 0.4 reste largement discriminant.
+                    List<HeadphonesClient.AlbumCandidate> candidates = hp.findAlbum(written.album);
+                    HeadphonesClient.AlbumCandidate pick = candidates.stream()
+                            .filter(c -> TrackMatcher.titleSimilarity(written.artist, c.artistName()) >= 0.4)
+                            .findFirst().orElse(null);
+                    if (pick != null) {
+                        hp.queueAlbum(pick.artistId(), pick.releaseId());
+                        // Seule preuve observable que l'envoi auto a réellement lieu — avant ce
+                        // correctif, catch(Exception ignored) rendait toute la chaîne invisible
+                        // (ni succès ni échec ne laissaient de trace), repéré en direct 2026-08-30
+                        // en cherchant à vérifier que "l'écriture vers Headphones fonctionne".
+                        System.out.println("[OT] Headphones : mis en file — " + written.artist + " - "
+                                + written.album + " (releaseId=" + pick.releaseId()
+                                + ", score identification=" + written.score + ")");
+                    } else {
+                        // Distingue "l'API n'a rien renvoyé" de "l'API a renvoyé des résultats mais
+                        // aucun ne matchait l'artiste" — ambiguïté trouvée en direct 2026-08-30 :
+                        // plusieurs albums bien connus (INXS - Live Baby Live Wembley Stadium)
+                        // ressortaient "aucun candidat" ici alors qu'un test manuel direct de l'API
+                        // Headphones renvoyait un candidat exact (score 100), sans qu'on puisse
+                        // savoir depuis ce seul message si le filtre artiste ou l'API elle-même
+                        // était en cause.
+                        double bestSim = candidates.stream()
+                                .mapToDouble(c -> TrackMatcher.titleSimilarity(written.artist, c.artistName()))
+                                .max().orElse(-1);
+                        System.out.println("[OT] Headphones : aucun candidat trouvé pour "
+                                + written.artist + " - " + written.album
+                                + " (" + candidates.size() + " résultat(s) API, meilleure similarité artiste="
+                                + String.format(java.util.Locale.ROOT, "%.2f", bestSim) + ")");
+                    }
+                }
+            } catch (Exception ex) {
+                // Best-effort : une panne réseau/Headphones ne doit jamais faire échouer
+                // l'enregistrement réel du fichier, déjà terminé à ce stade de toute façon —
+                // mais l'échec doit rester visible dans les logs, pas juste avalé.
+                System.out.println("[OT] ⚠ Headphones : échec envoi pour " + written.artist + " - "
+                        + written.album + " — " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            }
+            });
+        }
+
+        return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved);
     }
 
     /**

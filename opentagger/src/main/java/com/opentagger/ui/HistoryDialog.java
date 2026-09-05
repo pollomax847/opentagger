@@ -37,12 +37,19 @@ public class HistoryDialog extends JDialog {
     private static final String[] COLS =
             {I18n.t("Artiste"), I18n.t("Titre"), I18n.t("Album"), I18n.t("Année"), "MBID", I18n.t("Date taguage")};
 
+    private static final String[] CORR_COLS =
+            {I18n.t("Fichier"), I18n.t("Champ"), I18n.t("Ancienne valeur"), I18n.t("Nouvelle valeur"), I18n.t("Date")};
+
     private final MetadataCache cache;
     private final JTextField    tfArtist = new JTextField(18);
     private final JTextField    tfTitle  = new JTextField(18);
     private final JLabel        lblCount = new JLabel();
     private final JTable        table;
     private final DefaultTableModel model;
+
+    private final JLabel        lblCorrCount = new JLabel();
+    private final JTable        corrTable;
+    private final DefaultTableModel corrModel;
 
     public HistoryDialog(Frame owner) {
         super(owner, I18n.t("Historique de taguage — OpenTagger"), false);
@@ -74,13 +81,34 @@ public class HistoryDialog extends JDialog {
         setColWidth(cm, 4, 240, 120, 400);  // MBID
         setColWidth(cm, 5, 120, 90, 160);   // Date
 
+        corrModel = new DefaultTableModel(CORR_COLS, 0) {
+            @Override public boolean isCellEditable(int r, int c) { return false; }
+        };
+        corrTable = new JTable(corrModel);
+        corrTable.setAutoCreateRowSorter(true);
+        corrTable.setRowHeight(24);
+        corrTable.setShowHorizontalLines(false);
+        corrTable.setIntercellSpacing(new Dimension(0, 0));
+        corrTable.getTableHeader().setReorderingAllowed(false);
+        TableColumnModel corrCm = corrTable.getColumnModel();
+        setColWidth(corrCm, 0, 320, 120, 600); // Fichier
+        setColWidth(corrCm, 1, 120, 80,  200); // Champ
+        setColWidth(corrCm, 2, 180, 80,  360); // Ancienne valeur
+        setColWidth(corrCm, 3, 180, 80,  360); // Nouvelle valeur
+        setColWidth(corrCm, 4, 120, 90,  160); // Date
+
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab(I18n.t("Historique de taguage"), new JScrollPane(table));
+        tabs.addTab(I18n.t("Corrections manuelles"), buildCorrectionsPanel());
+
         getContentPane().setLayout(new BorderLayout(0, 0));
         getContentPane().add(buildHeader(), BorderLayout.NORTH);
-        getContentPane().add(new JScrollPane(table), BorderLayout.CENTER);
+        getContentPane().add(tabs, BorderLayout.CENTER);
         getContentPane().add(buildFooter(), BorderLayout.SOUTH);
 
         // Chargement initial
         loadAll();
+        loadCorrections();
 
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
@@ -113,16 +141,19 @@ public class HistoryDialog extends JDialog {
     // ── Pied de page ─────────────────────────────────────────────────────────
 
     private JPanel buildFooter() {
-        JButton btnClose   = new JButton(I18n.t("Fermer"));
-        JButton btnPurge   = new JButton(I18n.t("Purger l'historique…"));
-        JButton btnExport  = new JButton("📤  " + I18n.t("Exporter JSON"));
-        JButton btnImport  = new JButton("📥  " + I18n.t("Importer JSON"));
-        btnClose .addActionListener(e -> dispose());
-        btnPurge .addActionListener(e -> confirmPurge());
-        btnExport.addActionListener(e -> exportJson());
-        btnImport.addActionListener(e -> importJson());
+        JButton btnClose     = new JButton(I18n.t("Fermer"));
+        JButton btnPurge     = new JButton(I18n.t("Purger l'historique…"));
+        JButton btnCleanScan = new JButton(I18n.t("Nettoyer le cache de scan…"));
+        JButton btnExport    = new JButton("📤  " + I18n.t("Exporter JSON"));
+        JButton btnImport    = new JButton("📥  " + I18n.t("Importer JSON"));
+        btnClose    .addActionListener(e -> dispose());
+        btnPurge    .addActionListener(e -> confirmPurge());
+        btnCleanScan.addActionListener(e -> confirmCleanScanCache());
+        btnExport   .addActionListener(e -> exportJson());
+        btnImport   .addActionListener(e -> importJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder l'historique dans un fichier JSON (partage/sauvegarde)"));
         btnImport.setToolTipText(I18n.t("Fusionner un fichier JSON d'historique (les entrées existantes ne sont pas écrasées)"));
+        btnCleanScan.setToolTipText(I18n.t("Supprime du cache de scan les entrées dont le fichier n'existe plus sur disque (déplacé/supprimé) — peut prendre plusieurs minutes sur une grosse bibliothèque"));
 
         JPanel p = new JPanel(new BorderLayout(0, 0));
         p.setBorder(new CompoundBorder(
@@ -136,6 +167,7 @@ public class HistoryDialog extends JDialog {
         right.add(btnExport);
         right.add(Box.createHorizontalStrut(8));
         right.add(btnClose);
+        right.add(btnCleanScan);
         right.add(btnPurge);
         p.add(buildStats(), BorderLayout.WEST);
         p.add(right,        BorderLayout.EAST);
@@ -154,11 +186,30 @@ public class HistoryDialog extends JDialog {
 
     private void loadAll() {
         tfArtist.setText(""); tfTitle.setText("");
-        fill(cache.queryHistory("", ""));
+        queryAsync("", "");
     }
 
     private void search() {
-        fill(cache.queryHistory(tfArtist.getText(), tfTitle.getText()));
+        queryAsync(tfArtist.getText(), tfTitle.getText());
+    }
+
+    /** cache.queryHistory() trie tagging_history par date — coûteux sur un gros historique jamais
+     *  purgé (voir l'index idx_hist_ts ajouté pour ce cas). Lancé en tâche de fond dans tous les
+     *  cas : ouvrir ce dialogue ne doit jamais pouvoir geler l'EDT (donc TOUTE l'appli, pas
+     *  seulement cette fenêtre) si la base est temporairement lente (écritures concurrentes d'un
+     *  scan en cours, disque externe, etc.).
+     */
+    private void queryAsync(String artistFilter, String titleFilter) {
+        lblCount.setText(I18n.t("Recherche…"));
+        new SwingWorker<List<HistoryEntry>, Void>() {
+            @Override protected List<HistoryEntry> doInBackground() {
+                return cache.queryHistory(artistFilter, titleFilter);
+            }
+            @Override protected void done() {
+                try { fill(get()); }
+                catch (Exception ex) { lblCount.setText(I18n.t("Erreur : %s", ex.getMessage())); }
+            }
+        }.execute();
     }
 
     private void fill(List<HistoryEntry> entries) {
@@ -168,6 +219,44 @@ public class HistoryDialog extends JDialog {
             model.addRow(new Object[]{e.artist(), e.title(), e.album(), e.year(), e.mbid(), date});
         }
         lblCount.setText(I18n.t("%d résultat(s)", entries.size()));
+    }
+
+    // ── Onglet Corrections manuelles ──────────────────────────────────────────
+    // Lecteur de la table `corrections` (voir MainFrame.recordFieldCorrections) : avant ce
+    // correctif, cette table était écrite mais jamais consultée nulle part dans l'appli.
+
+    private JPanel buildCorrectionsPanel() {
+        JPanel p = new JPanel(new BorderLayout(0, 6));
+        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 6));
+        JButton btnRefresh = new JButton(I18n.t("Rafraîchir"));
+        btnRefresh.addActionListener(e -> loadCorrections());
+        top.add(btnRefresh);
+        top.add(lblCorrCount);
+        p.add(top, BorderLayout.NORTH);
+        p.add(new JScrollPane(corrTable), BorderLayout.CENTER);
+        return p;
+    }
+
+    private void loadCorrections() {
+        lblCorrCount.setText(I18n.t("Chargement…"));
+        new SwingWorker<List<MetadataCache.CorrectionEntry>, Void>() {
+            @Override protected List<MetadataCache.CorrectionEntry> doInBackground() {
+                return cache.queryCorrections(2000);
+            }
+            @Override protected void done() {
+                try {
+                    List<MetadataCache.CorrectionEntry> entries = get();
+                    corrModel.setRowCount(0);
+                    for (MetadataCache.CorrectionEntry ce : entries) {
+                        String date = DF.format(Instant.ofEpochMilli(ce.ts()));
+                        corrModel.addRow(new Object[]{ce.path(), ce.field(), ce.oldValue(), ce.newValue(), date});
+                    }
+                    lblCorrCount.setText(I18n.t("%d correction(s)", entries.size()));
+                } catch (Exception ex) {
+                    lblCorrCount.setText(I18n.t("Erreur : %s", ex.getMessage()));
+                }
+            }
+        }.execute();
     }
 
     // ── Export JSON ───────────────────────────────────────────────────────────
@@ -258,6 +347,39 @@ public class HistoryDialog extends JDialog {
             loadAll();
             setTitle(I18n.t("Historique de taguage — OpenTagger (purgé)"));
         }
+    }
+
+    /** Voir MetadataCache.purgeStaleScanCache() : nettoyage du cache de scan (pas l'historique
+     *  personnel ci-dessus), régénérable au prochain scan — coûteux, lancé en tâche de fond. */
+    private void confirmCleanScanCache() {
+        int choice = JOptionPane.showConfirmDialog(this,
+            I18n.t("Supprimer du cache de scan les entrées dont le fichier n'existe plus sur disque ?\n"
+                 + "Sans effet sur vos fichiers ni sur l'historique de taguage — juste un nettoyage\n"
+                 + "de cache technique, régénéré automatiquement au prochain scan.\n"
+                 + "Peut prendre plusieurs minutes sur une grosse bibliothèque."),
+            I18n.t("Nettoyer le cache de scan"), JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+
+        setTitle(I18n.t("Historique de taguage — OpenTagger (nettoyage du cache de scan en cours…)"));
+        new SwingWorker<Integer, Void>() {
+            @Override protected Integer doInBackground() {
+                int removed = cache.purgeStaleScanCache();
+                if (removed > 0) cache.vacuum();
+                return removed;
+            }
+            @Override protected void done() {
+                setTitle(I18n.t("Historique de taguage — OpenTagger"));
+                try {
+                    int n = get();
+                    JOptionPane.showMessageDialog(HistoryDialog.this,
+                        I18n.t("%d entrée(s) obsolète(s) supprimée(s) du cache de scan.", n),
+                        I18n.t("Nettoyage terminé"), JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(HistoryDialog.this,
+                        I18n.t("Erreur : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
     }
 
     private void setColWidth(TableColumnModel cm, int i, int p, int mn, int mx) {

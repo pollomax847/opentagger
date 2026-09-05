@@ -1,10 +1,12 @@
 package com.opentagger.ui;
 
+import com.opentagger.ApiKeyTester;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
 import com.opentagger.FpcalcInstaller;
 import com.opentagger.I18n;
 import com.opentagger.MusicBrainzOAuth;
+import com.opentagger.PostTagCommands;
 import com.opentagger.TaggerScript;
 
 import javax.swing.*;
@@ -44,8 +46,7 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spCacheDays;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbDiscogsGenreSource;
-    private JSpinner   spDiscogsMaxGenres;
-    private JSpinner   spLastfmMaxGenres;
+    // spDiscogsMaxGenres/spLastfmMaxGenres fusionnés dans spMbMaxGenres (voir Config.genreMaxCount())
 
     // ── Onglet Renommage ─────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -53,12 +54,16 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkAutoRename;
     private JCheckBox  chkDeleteEmptyDirs;
     private JCheckBox  chkFollowLog;
+    private JCheckBox  chkUseLibraryRoot;
     private JTextField tfLibraryRoot;
     private JTextField tfPodcastLibraryRoot;
     private JCheckBox  chkMoveSkipped;
     private JTextField tfSkippedFolder;
+    private JCheckBox  chkMoveDurationMismatch;
+    private JTextField tfDurationMismatchFolder;
     private JCheckBox  chkVideoAutoRecover;
     private JCheckBox  chkSkipSongRecOnConfidentMb;
+    private JCheckBox  chkDjMixDetection, chkDiscIdMatching, chkBandcampGuess, chkSyncPlaylists;
     private JSpinner   spnSkipSongRecMinScore;
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
@@ -78,6 +83,20 @@ public class SettingsDialog extends JDialog {
     // ── Onglet APIs (ListenBrainz) ────────────────────────────────────────────
     private JTextField tfListenBrainzUsername;
     private JSpinner   spListenBrainzMaxTracks;
+    // ── Onglet APIs (Last.fm, synchro écoutes — distinct de tfLastFmKey ci-dessus) ──────────────
+    private JTextField tfLastFmUsername;
+    private JSpinner   spLastfmMaxTracks;
+    // ── Onglet APIs (Headphones — intégration tierce, voir HeadphonesClient) ───────────────────
+    private JCheckBox  chkHeadphonesDbEnabled;
+    private JTextField tfHeadphonesDbPath;
+    private JTextField tfHeadphonesUrl;
+    private JTextField tfHeadphonesApiKey;
+    private JCheckBox  chkHeadphonesAutoQueue;
+    private JSpinner   spHeadphonesAutoQueueMinScore;
+    // ── Onglet APIs (beets — intégration tierce, voir BeetsClient) ─────────────────────────────
+    private JCheckBox  chkBeetsDbEnabled;
+    private JTextField tfBeetsDbPath;
+    private JTextField tfBeetsMusicDir;
 
     // ── Onglet Tags ───────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -94,6 +113,10 @@ public class SettingsDialog extends JDialog {
     private JSpinner   spFpcalcThreads;
     private JSpinner   spBatchThreads;
     private JTextField tfPreservedTags;
+    private JCheckBox  chkCapitalize;
+    private JTextField tfCapitalizeLowercase, tfCapitalizeUppercase, tfCapitalizePrefixes;
+    private JCheckBox  chkArtistPhoto;
+    private JTextField tfArtistPhotoFilename;
     private JCheckBox  chkMbUseGenres;
     private JSpinner   spMbMinGenreUsage;
     private JSpinner   spMbMaxGenres;
@@ -120,6 +143,10 @@ public class SettingsDialog extends JDialog {
     private DefaultListModel<String> lstScriptsModel = new DefaultListModel<>();
     private JList<String>            lstScripts;
     private int                      currentScriptIndex = -1;
+    private JCheckBox                chkScriptsEnabled;
+    private java.util.List<String> postTagCommands = new java.util.ArrayList<>();
+    private DefaultListModel<String> lstPostTagCommandsModel = new DefaultListModel<>();
+    private JList<String>            lstPostTagCommands;
 
     // ── Onglet Barre d'outils — actions secondaires personnalisables ────────────────
     @SuppressWarnings("unchecked")
@@ -130,6 +157,7 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet Audio ─────────────────────────────────────────────────────────
     private JCheckBox  chkReplayGainEnabled;
+    private JCheckBox  chkCamelotKey;
 
     // ── Onglet Transcodage ────────────────────────────────────────────────────
     private JCheckBox               chkTranscodeAuto;
@@ -138,6 +166,7 @@ public class SettingsDialog extends JDialog {
     private JSpinner                spTranscodeBitrate;
     private JCheckBox               chkTranscodeDeleteSource;
     private JLabel                  lblTranscodeBitrate;
+    private JCheckBox               chkMoveUnreadable;
 
     // ── Onglet Matching — releases préférées + méta ───────────────────────────
     private JCheckBox  chkTranslateArtists;
@@ -179,6 +208,11 @@ public class SettingsDialog extends JDialog {
     private static final String[] SECONDARY_TYPES = {"Compilation", "Live", "Soundtrack", "Greatest Hits", "Remix", "Demo", "DJ-mix", "Mixtape/Street"};
     private JCheckBox[] chkPrimaryTypes   = new JCheckBox[PRIMARY_TYPES.length];
     private JCheckBox[] chkExcludedSecondary = new JCheckBox[SECONDARY_TYPES.length];
+    private static final String[] NEVER_MODIFY_FIELDS = {
+        "ARTIST", "ALBUM", "ALBUM_ARTIST", "TITLE", "GENRE", "YEAR", "COMMENT",
+        "TRACK", "DISC_NO", "RATING", "LYRICS", "BPM", "KEY"
+    };
+    private JCheckBox[] chkNeverModify = new JCheckBox[NEVER_MODIFY_FIELDS.length];
 
     // Codes ISO → Nom complet (pour affichage dans le sélecteur). Noms obtenus dynamiquement via
     // Locale.getDisplayCountry() dans la langue de l'UI plutôt qu'une map français codée en dur —
@@ -219,6 +253,11 @@ public class SettingsDialog extends JDialog {
     private JTextField tfMbCollectionId;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbMbOAuthMode;
+    private JTextField     tfItunesXmlPath, tfItunesXmlPathFrom, tfItunesXmlPathTo;
+    private JTextField     tfMbServer;
+    private JTextField     tfMbAuthUser;
+    private JPasswordField tfMbAuthPass;
+    private JSpinner        spMbRateLimitMs;
 
     // ── Onglet Démarrage ──────────────────────────────────────────────────────
     private DefaultListModel<String> startupFolderModel;
@@ -241,6 +280,12 @@ public class SettingsDialog extends JDialog {
     // ── Recherche de réglages (10 onglets / ~75 réglages — pas de refonte, juste
     //    un accès direct à un champ sans devoir deviner son onglet) ────────────
     private JTabbedPane tabs;
+    // Statique (survit à une nouvelle instance de SettingsDialog, pas à un redémarrage de
+    // l'appli) : sans ça, rouvrir Préférences retombait systématiquement sur le premier onglet
+    // ("Démarrage") même en venant de fermer sur "Script" ou "Renommage" l'instant d'avant —
+    // signalé en direct comme gênant pour itérer sur un même onglet (OK/Annuler/simple
+    // réouverture, peu importe comment on a quitté le dialogue précédemment).
+    private static int lastTabIndex = 0;
     private JTextField  tfSettingsSearch;
     private final java.util.List<SearchTarget> searchIndex = new java.util.ArrayList<>();
     private record SearchTarget(int tabIndex, String text, JComponent component) {}
@@ -269,7 +314,10 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Script"),       scrollWrap(buildScriptPanel()));
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
         tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
+        tabs.addTab(I18n.t("iTunes"),       scrollWrap(buildItunesPanel()));
         buildSearchIndex();
+        if (lastTabIndex >= 0 && lastTabIndex < tabs.getTabCount()) tabs.setSelectedIndex(lastTabIndex);
+        tabs.addChangeListener(e -> lastTabIndex = tabs.getSelectedIndex());
 
         JButton btnOk     = new JButton(I18n.t("OK"));
         JButton btnCancel = new JButton(I18n.t("Annuler"));
@@ -278,8 +326,17 @@ public class SettingsDialog extends JDialog {
         btnCancel.addActionListener(e -> dispose());
         btnApply .addActionListener(e -> save());
 
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6));
-        buttons.add(btnApply); buttons.add(btnCancel); buttons.add(btnOk);
+        JButton btnResetOptions = new JButton(I18n.t("Réinitialiser les options…"));
+        btnResetOptions.addActionListener(e -> resetOptionsToDefault());
+
+        JPanel buttonsRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6));
+        buttonsRight.add(btnApply); buttonsRight.add(btnCancel); buttonsRight.add(btnOk);
+        JPanel buttonsLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        buttonsLeft.add(btnResetOptions);
+
+        JPanel buttons = new JPanel(new BorderLayout());
+        buttons.add(buttonsLeft,  BorderLayout.WEST);
+        buttons.add(buttonsRight, BorderLayout.EAST);
         buttons.setBorder(new MatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")));
 
         getContentPane().setLayout(new BorderLayout());
@@ -396,6 +453,10 @@ public class SettingsDialog extends JDialog {
                 BorderFactory.createEtchedBorder(), I18n.t("Fermeture de la fenêtre")));
         closePanel.add(chkCloseMinimizes);
 
+        // La commande après taguage vit désormais dans l'onglet Script (voir buildScriptPanel()),
+        // avec les scripts JS — un seul endroit pour "ce qui s'exécute après le taguage", et
+        // extension en liste de plusieurs commandes (PostTagCommands) au passage.
+
         JPanel topPanels = new JPanel();
         topPanels.setLayout(new BoxLayout(topPanels, BoxLayout.Y_AXIS));
         topPanels.add(langPanel);
@@ -430,36 +491,82 @@ public class SettingsDialog extends JDialog {
         spListenBrainzMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
         spListenBrainzMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
                 + "ListenBrainz (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
-        // FanArt.tv est activé/désactivé depuis la liste des fournisseurs de pochette
-        // (onglet Tags) — pas de case séparée ici pour éviter deux réglages contradictoires.
-        chkLastfmEnabled   = new JCheckBox(I18n.t("Activer l'enrichissement Last.fm"));
-        // Requête Last.fm séparée (artist.getInfo) du genre/mood (track.getTopTags) — un appel
-        // réseau en plus par fichier pour des champs (URL officielle, lien Wikipedia) que tout le
-        // monde ne regarde pas. Décochable indépendamment sans perdre le genre/mood Last.fm.
-        chkLastfmArtistUrls = new JCheckBox(I18n.t("Récupérer aussi l'URL officielle + Wikipedia de l'artiste (requête réseau supplémentaire)"));
+        tfLastFmUsername  = tf();
+        spLastfmMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
+        spLastfmMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
+                + "Last.fm (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
+        chkHeadphonesDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base Headphones (identification locale)"));
+        chkHeadphonesDbEnabled.setToolTipText(I18n.t("Cherche une correspondance dans la base SQLite d'une "
+                + "instance Headphones tierce avant tout appel réseau — lecture seule, jamais d'écriture."));
+        tfHeadphonesDbPath = tf();
+        tfHeadphonesUrl    = tf();
+        tfHeadphonesApiKey = tf();
+        chkHeadphonesAutoQueue = new JCheckBox(I18n.t("Envoyer automatiquement vers Headphones après chaque enregistrement"));
+        chkHeadphonesAutoQueue.setToolTipText(I18n.t("Si l'album identifié n'est pas déjà connu de Headphones "
+                + "(voir sa base), le met automatiquement en recherche/téléchargement de son côté — au-delà du "
+                + "seuil de confiance ci-dessous."));
+        spHeadphonesAutoQueueMinScore = new JSpinner(new SpinnerNumberModel(90, 0, 100, 1));
+        spHeadphonesAutoQueueMinScore.setToolTipText(I18n.t("Score minimum de CETTE identification (pas celui "
+                + "de la recherche côté Headphones) pour déclencher l'envoi automatique."));
+        chkBeetsDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base beets (identification locale)"));
+        chkBeetsDbEnabled.setToolTipText(I18n.t("Cherche une correspondance (chemin exact, puis similarité) dans "
+                + "la base SQLite d'une instance beets tierce avant tout appel réseau — lecture seule."));
+        tfBeetsDbPath   = tf();
+        tfBeetsMusicDir = tf();
+        tfBeetsMusicDir.setToolTipText(I18n.t("Dossier racine de beets (son réglage \"directory\") — vide = "
+                + "utilise le même dossier racine qu'OpenTagger (Renommage → Racine de bibliothèque)."));
+        // FanArt.tv (Tags → Fournisseurs de pochette) et Last.fm (Matching → Sources de genres,
+        // voir buildMatchingPanel()) sont activés/priorisés là où se trouve le reste de leur
+        // comportement — cet onglet ne garde QUE les clés/identifiants (2026-08-16, retour
+        // utilisateur : le réglage Last.fm était écartelé entre cet onglet et Matching, confus).
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), I18n.t("Clés d'accès aux services en ligne")));
 
+        // 4e élément par ligne : fournisseur du test "Tester" (null = pas de vérification
+        // possible — MusicBrainz User-Agent n'est qu'un en-tête, pas un identifiant ; RapidAPI
+        // n'est en réalité utilisé par AUCUN chemin de code actuel, testerait dans le vide).
         Object[][] rows = {
-            { "MusicBrainz User-Agent :",   tfMbUserAgent,        null },
-            { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/new-application" },
-            { "AcoustID User Token :",      tfAcoustIdUserToken,  "https://acoustid.org/api-key" },
-            { "Discogs Consumer Key :",     tfDiscogsKey,         "https://www.discogs.com/settings/developers" },
-            { "Discogs Consumer Secret :",  tfDiscogsSecret,      "https://www.discogs.com/settings/developers" },
-            { "Last.fm API Key :",          tfLastFmKey,          "https://www.last.fm/api/account/create" },
-            { "FanArt.tv API Key :",        tfFanArtKey,          "https://fanart.tv/get-an-api-key/" },
-            { "RapidAPI Key (Shazam) :",    tfRapidApiKey,        "https://rapidapi.com/apidojo/api/shazam" },
-            { "AudD API Token :",           tfAudDToken,          "https://dashboard.audd.io/" },
-            { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/" },
-            { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null },
+            { "MusicBrainz User-Agent :",   tfMbUserAgent,        null, null },
+            { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/new-application",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAcoustId(tfAcoustIdKey.getText().trim()) },
+            { "AcoustID User Token :",      tfAcoustIdUserToken,  "https://acoustid.org/api-key", null },
+            { "Discogs Consumer Key :",     tfDiscogsKey,         "https://www.discogs.com/settings/developers", null },
+            { "Discogs Consumer Secret :",  tfDiscogsSecret,      "https://www.discogs.com/settings/developers",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testDiscogs(tfDiscogsKey.getText().trim(), tfDiscogsSecret.getText().trim()) },
+            { "Last.fm API Key :",          tfLastFmKey,          "https://www.last.fm/api/account/create",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFm(tfLastFmKey.getText().trim()) },
+            { "FanArt.tv API Key :",        tfFanArtKey,          "https://fanart.tv/get-an-api-key/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testFanArt(tfFanArtKey.getText().trim()) },
+            { "RapidAPI Key (Shazam) :",    tfRapidApiKey,        "https://rapidapi.com/apidojo/api/shazam", null },
+            { "AudD API Token :",           tfAudDToken,          "https://dashboard.audd.io/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAudD(tfAudDToken.getText().trim()) },
+            { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testListenBrainz(tfListenBrainzUsername.getText().trim()) },
+            { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null, null },
+            { "Nom d'utilisateur Last.fm :", tfLastFmUsername, "https://www.last.fm/",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFmUsername(tfLastFmUsername.getText().trim()) },
+            { "Pistes max à synchroniser (Last.fm) :", spLastfmMaxTracks, null, null },
+            { "", chkHeadphonesDbEnabled, null, null },
+            { "Chemin headphones.db :",     tfHeadphonesDbPath,   null, null },
+            { "URL Headphones (API) :",     tfHeadphonesUrl,      null, null },
+            { "Clé API Headphones :",       tfHeadphonesApiKey,   "http://127.0.0.1:8181/home/api_builder",
+                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testHeadphones(tfHeadphonesUrl.getText().trim(), tfHeadphonesApiKey.getText().trim()) },
+            { "", chkHeadphonesAutoQueue, null, null },
+            { "Score minimum (envoi auto) :", spHeadphonesAutoQueueMinScore, null, null },
+            { "", chkBeetsDbEnabled, null, null },
+            { "Chemin library.db (beets) :", tfBeetsDbPath, null, null },
+            { "Dossier racine beets :",       tfBeetsMusicDir, null, null },
         };
 
         for (int i = 0; i < rows.length; i++) {
             String     label  = I18n.t((String) rows[i][0]);
             JComponent field  = (JComponent) rows[i][1];
             String     url    = (String)     rows[i][2];
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<ApiKeyTester.Result> testFn =
+                    (java.util.function.Supplier<ApiKeyTester.Result>) rows[i][3];
 
             GridBagConstraints lc = new GridBagConstraints();
             lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST;
@@ -471,6 +578,13 @@ public class SettingsDialog extends JDialog {
             fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 4);
             inner.add(field, fc);
 
+            if (testFn != null) {
+                GridBagConstraints tc = new GridBagConstraints();
+                tc.gridx = 3; tc.gridy = i; tc.anchor = GridBagConstraints.WEST;
+                tc.insets = new Insets(3, 0, 3, 4);
+                inner.add(testBtnPanel(testFn), tc);
+            }
+
             GridBagConstraints bc = new GridBagConstraints();
             bc.gridx = 2; bc.gridy = i; bc.anchor = GridBagConstraints.WEST;
             bc.insets = new Insets(3, 0, 3, 8);
@@ -481,42 +595,42 @@ public class SettingsDialog extends JDialog {
             }
         }
 
-        // Section enrichissement
-        JPanel enrichInner = new JPanel(new GridBagLayout());
-        enrichInner.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), I18n.t("Enrichissement automatique")));
-        {
-            GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 0; c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(3, 10, 3, 8); c.gridwidth = 3;
-            enrichInner.add(chkLastfmEnabled, c);
-        }
-        {
-            GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 1; c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(0, 28, 3, 8); c.gridwidth = 3;
-            enrichInner.add(chkLastfmArtistUrls, c);
-        }
-        {
-            // Repère explicite pour l'utilisateur — avant, ce lien n'existait que dans un
-            // commentaire de code (voir plus haut), pas dans l'UI elle-même : la clé FanArt.tv est
-            // ici, mais son activation/priorité est dans un tout autre onglet (Tags), et les
-            // réglages de comptage Last.fm sont dans un 3e (Matching) — rien ne les reliait.
-            JLabel hint = new JLabel(I18n.t(
-                "<html><i>FanArt.tv : activer/désactiver et priorité dans l'onglet Tags → "
-                + "Fournisseurs de pochette.<br>Last.fm : nombre de genres max dans l'onglet "
-                + "Matching → Sources de genres.</i></html>"));
-            hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
-            GridBagConstraints c = new GridBagConstraints();
-            c.gridx = 0; c.gridy = 2; c.anchor = GridBagConstraints.WEST;
-            c.insets = new Insets(2, 10, 4, 8); c.gridwidth = 3;
-            enrichInner.add(hint, c);
-        }
-
         JPanel p = new JPanel(new BorderLayout(0, 4));
         p.setBorder(new EmptyBorder(8, 8, 8, 8));
-        p.add(inner,       BorderLayout.CENTER);
-        p.add(enrichInner, BorderLayout.SOUTH);
+        p.add(inner, BorderLayout.CENTER);
+        return p;
+    }
+
+    /** Bouton "Tester" + statut coloré à côté — appel réseau minimal (voir ApiKeyTester) validant
+     *  la clé/l'identifiant ACTUELLEMENT TAPÉ dans le champ, sans avoir à cliquer sur Enregistrer
+     *  d'abord. En arrière-plan (SwingWorker) : ce sont de vrais appels réseau, jamais sur l'EDT. */
+    private JPanel testBtnPanel(java.util.function.Supplier<ApiKeyTester.Result> testFn) {
+        JButton btn = new JButton(I18n.t("Tester"));
+        btn.putClientProperty("FlatLaf.style", "font: 10 $defaultFont; arc: 6");
+        JLabel status = new JLabel();
+        status.putClientProperty("FlatLaf.style", "font: 10 $defaultFont");
+        btn.addActionListener(e -> {
+            btn.setEnabled(false);
+            status.setText(I18n.t("Test en cours…"));
+            status.setToolTipText(null);
+            status.putClientProperty("FlatLaf.style", "font: 10 $defaultFont; foreground: #888888");
+            new SwingWorker<ApiKeyTester.Result, Void>() {
+                @Override protected ApiKeyTester.Result doInBackground() { return testFn.get(); }
+                @Override protected void done() {
+                    btn.setEnabled(true);
+                    ApiKeyTester.Result r;
+                    try { r = get(); } catch (Exception ex) { r = new ApiKeyTester.Result(false, ex.getMessage()); }
+                    status.setText(r.ok() ? "✓ " + I18n.t("OK") : "✗ " + I18n.t("Échec"));
+                    status.setToolTipText(r.message());
+                    status.putClientProperty("FlatLaf.style",
+                        "font: 10 $defaultFont; foreground: " + (r.ok() ? "#4caf50" : "#f44336"));
+                }
+            }.execute();
+        });
+        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        p.setOpaque(false);
+        p.add(btn);
+        p.add(status);
         return p;
     }
 
@@ -543,6 +657,10 @@ public class SettingsDialog extends JDialog {
     @SuppressWarnings("unchecked")
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(85, 0, 100, 5));
+        spMinScore.setToolTipText(I18n.t(
+            "Niveau de confiance minimum (en %) pour accepter automatiquement une correspondance "
+            + "trouvée sur MusicBrainz par recherche texte (titre/artiste). En dessous de ce seuil, "
+            + "le résultat est ignoré plutôt que d'appliquer un mauvais match au hasard."));
         // Seuil du score composite pondéré fichier↔piste (TrackMatcher, modèle Picard) — distinct
         // du score MB texte ci-dessus (spMinScore) : celui-ci s'applique quand on choisit la
         // meilleure piste DANS une tracklist déjà connue (album-first, groupement d'albums).
@@ -552,19 +670,71 @@ public class SettingsDialog extends JDialog {
             + "l'appariement d'un fichier à une piste d'un album déjà identifié. Même valeur par "
             + "défaut que MusicBrainz Picard (40%)."));
         chkOnlyOfficial  = new JCheckBox(I18n.t("Uniquement les releases officielles"));
+        chkOnlyOfficial.setToolTipText(I18n.t(
+            "Une \"release\" MusicBrainz = une édition précise d'un album (CD original, réédition, "
+            + "promo, bootleg…). Cocher ceci ignore les éditions bootleg/promo/non officielles lors "
+            + "de la recherche de correspondance."));
         chkUseAcoustId   = new JCheckBox(I18n.t("Activer l'identification par empreinte AcoustID (plus précis, plus lent)"));
+        chkUseAcoustId.setToolTipText(I18n.t(
+            "AcoustID identifie un morceau à partir du son lui-même (comme une empreinte digitale "
+            + "audio), pas de son nom de fichier — fonctionne même si le fichier n'a aucun tag ou "
+            + "un nom bizarre. Plus lent que la recherche par texte, activé automatiquement en dernier "
+            + "recours si un fichier reste non identifié."));
         spResultsLimit   = new JSpinner(new SpinnerNumberModel(5, 1, 20, 1));
+        spResultsLimit.setToolTipText(I18n.t(
+            "Nombre maximum de résultats demandés à MusicBrainz (la base de données musicale en "
+            + "ligne utilisée pour identifier vos morceaux) à chaque recherche."));
         spCacheDays      = new JSpinner(new SpinnerNumberModel(30, 1, 365, 7));
+        spCacheDays.setToolTipText(I18n.t(
+            "Les réponses de MusicBrainz sont gardées en mémoire locale ce nombre de jours pour "
+            + "aller plus vite et éviter de re-demander la même chose. Passé ce délai, la prochaine "
+            + "recherche re-vérifie auprès de MusicBrainz au cas où l'info aurait changé."));
+
+        // ── Compromis vitesse : sauter SongRec quand MB texte est déjà confiant ────
+        // Déplacé depuis l'onglet Renommage (2026-08-09, retour utilisateur "je ne comprend pas la
+        // section songrec") : ce réglage concerne l'IDENTIFICATION du morceau (comme AcoustID
+        // juste au-dessus), pas le renommage de fichiers — sa présence dans l'onglet Renommage
+        // n'avait aucun rapport avec les autres options qui l'entouraient.
+        chkSkipSongRecOnConfidentMb = new JCheckBox(I18n.t(
+            "Éviter SongRec quand MusicBrainz (recherche texte) est déjà confiant"));
+        chkSkipSongRecOnConfidentMb.setToolTipText(I18n.t(
+            "SongRec (reconnaissance audio type Shazam) reste la source principale par défaut — plus "
+            + "lent mais fiable même avec des tags faux. En activant ceci : si le fichier a un "
+            + "artiste+titre exploitables dans ses tags (pas génériques, pas déduits du nom de "
+            + "dossier), une recherche MusicBrainz texte rapide est tentée D'ABORD ; si son score "
+            + "dépasse le seuil ci-dessous, SongRec est sauté pour ce fichier. Accélère les "
+            + "bibliothèques déjà bien taguées ET réduit le nombre d'appels au service Shazam "
+            + "(utile si vous voyez des erreurs \"Too Many Requests\"/blocage dans le journal), au "
+            + "prix d'un peu moins de vérification audio sur ces fichiers-là."));
+        spnSkipSongRecMinScore = new JSpinner(new SpinnerNumberModel(90, 50, 100, 1));
+        JPanel skipSongRecScorePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        skipSongRecScorePanel.add(new JLabel(I18n.t("Score MB minimum pour sauter SongRec :")));
+        skipSongRecScorePanel.add(spnSkipSongRecMinScore);
+        skipSongRecScorePanel.add(new JLabel("%"));
 
         cmbDiscogsGenreSource = new JComboBox<>(new String[]{
             I18n.t("Style puis Genre"), I18n.t("Genre puis Style"), I18n.t("Genre uniquement")});
-        spDiscogsMaxGenres = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
-        spLastfmMaxGenres  = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+
+        // Déplacé depuis l'onglet API (2026-08-16, retour utilisateur : le réglage Last.fm était
+        // écartelé entre API — activer/désactiver — et Matching — nombre de genres — sans lien
+        // entre les deux ; regroupé ici avec le reste du comportement Last.fm, l'onglet API ne
+        // garde plus que la clé elle-même).
+        chkLastfmEnabled   = new JCheckBox(I18n.t("Activer l'enrichissement Last.fm"));
+        chkLastfmArtistUrls = new JCheckBox(I18n.t("Récupérer aussi l'URL officielle + Wikipedia de l'artiste (requête réseau supplémentaire)"));
+        chkLastfmArtistUrls.setToolTipText(I18n.t(
+            "Requête Last.fm séparée (artist.getInfo) du genre/mood (track.getTopTags) — un appel "
+            + "réseau en plus par fichier pour des champs que tout le monde ne regarde pas. "
+            + "Décochable indépendamment sans perdre le genre/mood Last.fm."));
 
         tfPreferredFormats   = tf();
         tfPreferredFormats.setToolTipText(I18n.t("ex: CD,Digital Media,Vinyl — priorité décroissante"));
         tfVaName             = tf();
-        chkStandardizeArtists = new JCheckBox(I18n.t("Utiliser les noms MB standardisés (ex: The Beatles vs Beatles, The)"));
+        chkStandardizeArtists = new JCheckBox(I18n.t("Utiliser les noms MusicBrainz standardisés (ex: \"The Beatles\" plutôt que \"Beatles, The\")"));
+        chkStandardizeArtists.setToolTipText(I18n.t(
+            "MusicBrainz = la base de données musicale en ligne (collaborative, gratuite) utilisée "
+            + "pour identifier vos morceaux et récupérer leurs infos. Elle connaît le nom \"officiel\" "
+            + "de chaque artiste ; cocher ceci l'utilise tel quel plutôt qu'une variante trouvée "
+            + "ailleurs (Shazam, nom de fichier…)."));
 
         // ── Sélecteur de pays ISO ──────────────────────────────────────────────
         // Remplir le combo : "(Sélectionner...)" puis tous les pays triés
@@ -629,11 +799,14 @@ public class SettingsDialog extends JDialog {
             "Releases officielles seulement :",
             "",
             "Nb résultats MusicBrainz :",
-            "Durée cache (jours) :"
+            "Durée cache (jours) :",
+            "",
+            ""
         }, new JComponent[]{
             spMinScore, spTrackMatchThreshold, chkOnlyOfficial,
             chkUseAcoustId,
-            spResultsLimit, spCacheDays
+            spResultsLimit, spCacheDays,
+            chkSkipSongRecOnConfidentMb, skipSongRecScorePanel
         }, "Critères de correspondance MusicBrainz");
 
         JPanel releasesPanel = form(new String[]{
@@ -646,30 +819,52 @@ public class SettingsDialog extends JDialog {
             tfVaName, chkStandardizeArtists
         }, "Releases préférées (comme Picard)");
 
+        // Max genres Discogs/Last.fm fusionné avec MusicBrainz (voir spMbMaxGenres, onglet "Filtre
+        // de genres" plus bas) — un seul plafond partagé, réglé une seule fois au même endroit que
+        // la liste d'exclusion déjà partagée (taGenresFilter).
         JPanel genrePanel = form(new String[]{
             "Source genres Discogs :",
-            "Max genres Discogs :",
-            "Max genres Last.fm :"
+            "",
+            ""
         }, new JComponent[]{
-            cmbDiscogsGenreSource, spDiscogsMaxGenres, spLastfmMaxGenres
+            cmbDiscogsGenreSource,
+            chkLastfmEnabled, chkLastfmArtistUrls
         }, "Sources de genres (Discogs / Last.fm)");
 
         // MB genres + filtre partagé (s'applique aussi à Discogs/Last.fm, voir GenreFilter)
-        chkMbUseGenres    = new JCheckBox(I18n.t("Utiliser les genres folksonomy MusicBrainz"));
+        chkMbUseGenres    = new JCheckBox(I18n.t("Utiliser les genres proposés par les utilisateurs MusicBrainz"));
+        chkMbUseGenres.setToolTipText(I18n.t(
+            "MusicBrainz permet à ses utilisateurs de \"voter\" des genres sur chaque morceau (terme "
+            + "technique : \"folksonomy\", une étiquette communautaire plutôt qu'une catégorie fixe). "
+            + "Ce sont ces votes qu'on utilise ici, en plus des genres Discogs/Last.fm."));
         spMbMinGenreUsage = new JSpinner(new SpinnerNumberModel(50, 1, 500, 10));
+        spMbMinGenreUsage.setToolTipText(I18n.t(
+            "Nombre minimum de votes qu'un genre doit avoir reçu sur MusicBrainz pour être retenu — "
+            + "évite les étiquettes rares ou farfelues ajoutées par une seule personne."));
         spMbMaxGenres     = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+        spMbMaxGenres.setToolTipText(I18n.t(
+            "Un seul plafond, partagé par Discogs/Last.fm/MusicBrainz (avant : 3 réglages séparés "
+            + "réglés à la même valeur dans la quasi-totalité des cas — fusionnés en un seul)."));
         taGenresFilter    = new JTextArea(4, 20);
         taGenresFilter.setLineWrap(true);
-        taGenresFilter.setToolTipText(I18n.t("Un genre par ligne. Préfixe - pour exclure (ex: -seen live)"));
+        taGenresFilter.setToolTipText(I18n.t(
+            "Un genre à exclure par ligne, précédé d'un tiret (ex: -seen live). S'applique à toutes "
+            + "les sources de genres (Discogs, Last.fm, MusicBrainz) pour filtrer les étiquettes "
+            + "inutiles ou hors-sujet (ex: \"seen live\", \"favorites\")."));
         JPanel mbGenrePanel = form(new String[]{
-            "Genres folksonomy MusicBrainz :", "Popularité minimale (MB) :",
-            "Max genres MB :", "Filtre de genres (- = exclure, s'applique à Discogs/Last.fm/MB) :"
+            "Genres votés par les utilisateurs MusicBrainz :", "Popularité minimale requise :",
+            "Nombre max de genres retenus (Discogs/Last.fm/MusicBrainz) :", "Genres à exclure (un par ligne, préfixe -) :"
         }, new JComponent[]{
             chkMbUseGenres, spMbMinGenreUsage, spMbMaxGenres, new JScrollPane(taGenresFilter)
         }, "Filtre de genres");
 
         // ── Translittération artistes ──────────────────────────────────────────
-        chkTranslateArtists = new JCheckBox(I18n.t("Translittérer les noms d'artiste non-Latin via alias MB"));
+        chkTranslateArtists = new JCheckBox(I18n.t("Convertir les noms d'artiste écrits en alphabet non-latin (ex: japonais, cyrillique)"));
+        chkTranslateArtists.setToolTipText(I18n.t(
+            "\"Translittérer\" = réécrire un nom dans un autre alphabet en gardant sa prononciation "
+            + "(ex: \"BTS\" plutôt que \"방탄소년단\"). Utilise les noms alternatifs déjà connus de "
+            + "MusicBrainz pour chaque langue listée ci-dessous, dans l'ordre — la première langue "
+            + "qui donne un résultat est utilisée."));
         String[] localeItems = new String[TRANSLATE_LOCALES.length];
         for (int i = 0; i < TRANSLATE_LOCALES.length; i++)
             localeItems[i] = TRANSLATE_LOCALES[i][0] + " — " + I18n.t(TRANSLATE_LOCALES[i][1]);
@@ -818,9 +1013,17 @@ public class SettingsDialog extends JDialog {
             if (sel >= 0 && sel < lstCompilationSeriesModel.size()-1) { String v = lstCompilationSeriesModel.remove(sel); lstCompilationSeriesModel.add(sel+1, v); lstCompilationSeries.setSelectedIndex(sel+1); }
         });
 
+        JButton btnDetectCompilationSeries = new JButton(I18n.t("Détecter automatiquement…"));
+        btnDetectCompilationSeries.setToolTipText(I18n.t(
+            "Analyse les albums \"Various Artists\"/compilation déjà chargés dans le tableau "
+            + "principal et propose les préfixes les plus fréquents (ex. \"NRJ\", \"RFM\") — évite "
+            + "de retaper un nom à la main (source de fautes, voir l'exemple \"Generation\" au lieu "
+            + "de \"Génération\") : tu choisis parmi du texte réel extrait de tes propres fichiers."));
+        btnDetectCompilationSeries.addActionListener(e -> detectCompilationSeries());
+
         JPanel compilationSeriesBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
         for (JButton b : new JButton[]{btnAddCompilationSeries, btnRemoveCompilationSeries,
-                btnUpCompilationSeries, btnDownCompilationSeries})
+                btnUpCompilationSeries, btnDownCompilationSeries, btnDetectCompilationSeries})
             compilationSeriesBtns.add(b);
 
         JPanel compilationSeriesPicker = new JPanel(new BorderLayout(0, 4));
@@ -829,9 +1032,10 @@ public class SettingsDialog extends JDialog {
         compilationSeriesPicker.add(compilationSeriesBtns,      BorderLayout.SOUTH);
 
         JLabel compilationSeriesHint = new JLabel(I18n.t(
-            "<html><i>Ex. Stars 80, NRJ, Fun Radio, RFM. Les morceaux dont l'enregistrement existe<br>"
-          + "aussi sur une release dont le titre contient un de ces noms seront reliés à cette<br>"
-          + "compilation via Outils → Grouper par compilations.</i></html>"));
+            "<html><i>Détection automatique : toute release marquée \"Compilation\" par<br>"
+          + "MusicBrainz est déjà repérée sans rien configurer ici. Cette liste est facultative,<br>"
+          + "pour ajouter en plus un nom de titre précis (ex. Stars 80, NRJ, Fun Radio, RFM)<br>"
+          + "via Outils → Grouper par compilations.</i></html>"));
         compilationSeriesHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
         compilationSeriesHint.setBorder(new EmptyBorder(0, 10, 4, 0));
 
@@ -841,6 +1045,36 @@ public class SettingsDialog extends JDialog {
                 new JComponent[]{compilationSeriesPicker}, I18n.t("Compilations connues"));
         compilationSeriesInner.add(compilationSeriesHint, BorderLayout.SOUTH);
         compilationSeriesPanel.add(compilationSeriesInner, BorderLayout.CENTER);
+
+        // ── Derniers recours (2026-08-16) — case à cocher plutôt que settings.properties à éditer
+        // à la main : Config.get() relit sa valeur à CHAQUE fichier traité (jamais mise en cache),
+        // donc cocher/décocher ici prend effet immédiatement sur le lot en cours, sans redémarrer
+        // l'appli (contrairement à éditer le fichier sur disque, qui ne touche jamais la copie en
+        // mémoire du process déjà lancé).
+        chkDjMixDetection = new JCheckBox(I18n.t("Détecter les mixs DJ / formats longs (durée seuil)"));
+        chkDjMixDetection.setToolTipText(I18n.t(
+            "Au-delà du seuil de durée (20 min par défaut), tente d'abord une identification par "
+            + "tags/URL YouTube plutôt que par empreinte audio/recherche MB — un mix continu ne "
+            + "correspond à aucun enregistrement MusicBrainz unique."));
+        chkDiscIdMatching = new JCheckBox(I18n.t("Identifier un album complet par empreinte de durées (façon Albunack/SongKong)"));
+        chkDiscIdMatching.setToolTipText(I18n.t(
+            "Pour un dossier avec assez de pistes numérotées 1..N sans trou : calcule un TOC "
+            + "(comme un CD) depuis les durées de fichier et interroge MusicBrainz — un seul appel "
+            + "réseau pour tout l'album, avant AcoustID/SongRec."));
+        chkBandcampGuess = new JCheckBox(I18n.t("Deviner et vérifier une page Bandcamp en dernier recours"));
+        chkBandcampGuess.setToolTipText(I18n.t(
+            "Uniquement si RIEN d'autre n'a identifié le fichier : devine une URL "
+            + "artiste.bandcamp.com/track/titre depuis les tags, et n'applique que si le contenu "
+            + "récupéré correspond vraiment (jamais de fausse donnée sur un essai raté)."));
+        chkSyncPlaylists = new JCheckBox(I18n.t("Corriger les playlists (.m3u/.pls) lors d'un renommage"));
+        chkSyncPlaylists.setToolTipText(I18n.t(
+            "Quand OpenTagger renomme/déplace un fichier, met à jour la référence correspondante "
+            + "dans les playlists .m3u/.pls trouvées dans son ancien dossier — évite qu'elles "
+            + "pointent silencieusement vers un fichier qui n'existe plus."));
+
+        JPanel lastResortPanel = form(new String[]{"", "", "", ""},
+                new JComponent[]{chkDjMixDetection, chkDiscIdMatching, chkBandcampGuess, chkSyncPlaylists},
+                I18n.t("Derniers recours"));
 
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
@@ -852,6 +1086,7 @@ public class SettingsDialog extends JDialog {
         combined.add(mbGenrePanel);
         combined.add(transPanel);
         combined.add(priorityInner);
+        combined.add(lastResortPanel);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -861,20 +1096,60 @@ public class SettingsDialog extends JDialog {
     @SuppressWarnings("unchecked")
     private JPanel buildTagsPanel() {
         cmbId3Version              = new JComboBox<>(new String[]{I18n.t("Garder version existante"), I18n.t("ID3v2.3 (compatible)"), I18n.t("ID3v2.4 (standard)")});
+        cmbId3Version.setToolTipText(I18n.t(
+            "ID3v2 = le format des tags (titre, artiste…) écrits dans un MP3. Deux variantes "
+            + "existent : 2.3 (plus ancienne, compatible avec presque tous les lecteurs, même très "
+            + "vieux) et 2.4 (plus récente, gère mieux certains caractères spéciaux). En cas de "
+            + "doute, laissez \"Garder version existante\"."));
         chkPreserveTimestamps      = new JCheckBox(I18n.t("Préserver la date de modification du fichier"));
+        chkPreserveTimestamps.setToolTipText(I18n.t(
+            "Écrire des tags modifie normalement la date \"modifié le\" du fichier. Cocher ceci la "
+            + "remet à sa valeur d'avant après l'écriture, comme si le fichier n'avait pas bougé."));
         chkClearExistingTags       = new JCheckBox(I18n.t("Effacer les tags existants avant écriture (repartir de zéro)"));
+        chkClearExistingTags.setToolTipText(I18n.t(
+            "Supprime TOUS les tags déjà présents sur le fichier avant d'écrire les nouveaux — utile "
+            + "si d'anciens tags mal renseignés par un autre outil traînent et faussent l'affichage. "
+            + "Déconseillé si vous avez des tags personnalisés que vous tenez à garder."));
         chkPreserveImages          = new JCheckBox(I18n.t("Conserver la pochette existante si aucune nouvelle"));
-        chkPreserveCompilation     = new JCheckBox(I18n.t("Conserver le nom d'album des compilations (Various Artists / IS_COMPILATION=1)"));
-        chkTrustExistingMbTags     = new JCheckBox(I18n.t("Faire confiance aux tags MB existants (releaseMbid présent = skip ré-identification)"));
-        chkCorrectPunctuation      = new JCheckBox(I18n.t("Normaliser la ponctuation (‘ ’ “ ” – … → ASCII)"));
-        chkRemoveId3v1             = new JCheckBox(I18n.t("Supprimer le tag ID3v1 des MP3 (footer 128 octets inutile)"));
-        chkSaveAcoustidFingerprints   = new JCheckBox(I18n.t("Sauvegarder l'empreinte AcoustID dans les tags"));
-        chkIgnoreExistingFingerprints = new JCheckBox(I18n.t("Forcer le re-fingerprint (même si AcoustID déjà présent)"));
+        chkPreserveCompilation     = new JCheckBox(I18n.t("Conserver le nom d'album des compilations (\"Various Artists\")"));
+        chkPreserveCompilation.setToolTipText(I18n.t(
+            "Pour un album compilé de plusieurs artistes (ex: une compilation radio), garde le titre "
+            + "d'album déjà écrit sur le fichier plutôt que de le remplacer par celui trouvé sur "
+            + "MusicBrainz — utile quand vous avez déjà organisé vos compilations à votre façon."));
+        chkTrustExistingMbTags     = new JCheckBox(I18n.t("Faire confiance à une identification MusicBrainz déjà confirmée sur le fichier"));
+        chkTrustExistingMbTags.setToolTipText(I18n.t(
+            "Si le fichier a déjà un identifiant MusicBrainz écrit dedans (preuve qu'il a déjà été "
+            + "identifié avec certitude, par OpenTagger ou un autre outil), ne pas chercher à "
+            + "re-identifier le morceau — juste compléter ce qui manque. Accélère les bibliothèques "
+            + "déjà bien taguées."));
+        chkCorrectPunctuation      = new JCheckBox(I18n.t("Normaliser la ponctuation \"fantaisie\" en caractères simples (guillemets, tirets, points de suspension)"));
+        chkRemoveId3v1             = new JCheckBox(I18n.t("Supprimer l'ancien format de tags ID3v1 des MP3 (128 octets obsolètes, inutiles à côté d'ID3v2)"));
+        chkRemoveId3v1.setToolTipText(I18n.t(
+            "ID3v1 est l'ancêtre du format de tags actuel (années 90), limité à 128 caractères, "
+            + "remplacé depuis longtemps par ID3v2 (voir ci-dessus). Le garder en plus ne sert plus "
+            + "à rien et peut semer la confusion avec certains lecteurs."));
+        chkSaveAcoustidFingerprints   = new JCheckBox(I18n.t("Enregistrer l'empreinte audio AcoustID dans les tags du fichier"));
+        chkSaveAcoustidFingerprints.setToolTipText(I18n.t(
+            "AcoustID identifie un morceau à partir du son lui-même (voir l'onglet Matching). "
+            + "Sauvegarder cette empreinte dans le fichier permet de la réutiliser plus tard sans "
+            + "avoir à la recalculer (recalcul = plus lent, consomme du CPU)."));
+        chkIgnoreExistingFingerprints = new JCheckBox(I18n.t("Toujours recalculer l'empreinte AcoustID, même si le fichier en a déjà une"));
+        chkIgnoreExistingFingerprints.setToolTipText(I18n.t(
+            "Une empreinte déjà présente peut avoir été écrite par un autre outil et être fausse ou "
+            + "obsolète (ex: fichier ré-encodé depuis). Cocher ceci ignore l'ancienne et repart d'un "
+            + "calcul frais à chaque fois — plus lent, mais plus fiable en cas de doute."));
         spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
-        spBatchThreads             = new JSpinner(new SpinnerNumberModel(3, 1, 16, 1));
+        spBatchThreads             = new JSpinner(new SpinnerNumberModel(6, 1, 16, 1));
         spBatchThreads.setToolTipText(I18n.t("Fichiers traités en parallèle pendant le taguage (GUI et CLI/--dossier). "
                 + "Le rate-limit MusicBrainz (1 requête/s) reste respecté quel que soit ce réglage — "
                 + "augmenter aide surtout les étapes non-MB (BPM, paroles, écriture disque)."));
+        int cpuCores = Runtime.getRuntime().availableProcessors();
+        JLabel batchThreadsHint = new JLabel(I18n.t(
+            "<html><i>%d cœur(s) CPU détecté(s) — au-delà, gain limité : le frein réel devient<br>"
+          + "MusicBrainz (1 req/s, indépendant de ce réglage) ou le disque mécanique (déjà<br>"
+          + "limité à 1 accès à la fois par disque physique, voir Audio).</i></html>", cpuCores));
+        batchThreadsHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+        batchThreadsHint.setBorder(new EmptyBorder(0, 10, 4, 0));
 
         JLabel id3Hint = new JLabel(I18n.t(
             "<html><i>ID3v2.3 : recommandé pour voitures, NAS anciens, Windows Explorer.<br>" +
@@ -908,14 +1183,20 @@ public class SettingsDialog extends JDialog {
             tagInner.add((JComponent) rows[i][1], fc);
         }
 
+        spFpcalcThreads.setToolTipText(I18n.t(
+            "Nombre de fichiers dont l'empreinte audio AcoustID est calculée EN MÊME TEMPS. Plus "
+            + "haut = plus rapide mais plus de charge CPU ; inutile de dépasser le nombre de cœurs "
+            + "de votre processeur."));
+
         JPanel fpInner = new JPanel(new GridBagLayout());
         fpInner.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), "AcoustID / Fingerprint"));
+                BorderFactory.createEtchedBorder(), I18n.t("AcoustID / Empreinte audio")));
         JComponent[][] fpRows = {
             { new JLabel(""), chkSaveAcoustidFingerprints },
             { new JLabel(""), chkIgnoreExistingFingerprints },
             { new JLabel(I18n.t("Threads fpcalc :")), spFpcalcThreads },
             { new JLabel(I18n.t("Threads de taguage :")), spBatchThreads },
+            { new JLabel(""), batchThreadsHint },
         };
         for (int i = 0; i < fpRows.length; i++) {
             GridBagConstraints lc = new GridBagConstraints();
@@ -929,9 +1210,50 @@ public class SettingsDialog extends JDialog {
 
         // ── Tags préservés ────────────────────────────────────────────────────────
         tfPreservedTags = tf();
-        tfPreservedTags.setToolTipText(I18n.t("Noms FieldKey séparés par | — ex: RATING|COMMENT  (laisser vide = aucun)"));
-        JPanel preserveInner = form(new String[]{"Tags à ne jamais écraser :"},
+        tfPreservedTags.setToolTipText(I18n.t(
+            "Si le taguage ne trouve RIEN pour ce champ (résultat vide), l'ancienne valeur du "
+            + "fichier est conservée au lieu d'être effacée. N'empêche PAS un écrasement si une "
+            + "nouvelle valeur non vide est trouvée — pour ça, voir « Champs verrouillés » "
+            + "ci-dessous. Noms séparés par | (ex: RATING|COMMENT), vide = rien de préservé."));
+        JPanel preserveInner = form(new String[]{"Tags à ne jamais écraser (si vide) :"},
                 new JComponent[]{tfPreservedTags}, "Tags préservés");
+
+        // ── Champs verrouillés (jamais modifiés, même si une nouvelle valeur non vide est
+        // trouvée) — distinct de "Tags préservés" ci-dessus, voir Config.neverModifyTags() /
+        // TagWriter.readNeverModifyTags().
+        for (int i = 0; i < NEVER_MODIFY_FIELDS.length; i++)
+            chkNeverModify[i] = new JCheckBox(NEVER_MODIFY_FIELDS[i]);
+        JPanel neverModifyRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        for (JCheckBox c : chkNeverModify) neverModifyRow.add(c);
+        JPanel neverModifyInner = new JPanel(new BorderLayout());
+        neverModifyInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Champs verrouillés (jamais modifiés)")));
+        neverModifyInner.add(neverModifyRow, BorderLayout.CENTER);
+        JLabel neverModifyHint = new JLabel(I18n.t(
+            "<html><i>Le champ garde sa valeur actuelle quoi qu'il arrive, même si le taguage trouve "
+            + "une valeur différente et non vide — protège par ex. une note (RATING) ou un commentaire "
+            + "édités à la main.</i></html>"));
+        neverModifyHint.setBorder(new EmptyBorder(2, 4, 4, 4));
+        neverModifyInner.add(neverModifyHint, BorderLayout.SOUTH);
+
+        // ── Auto-capitalisation (opt-in) ─────────────────────────────────────────
+        chkCapitalize = new JCheckBox(I18n.t("Capitaliser automatiquement titre/artiste/album"));
+        chkCapitalize.setToolTipText(I18n.t(
+            "Désactivé par défaut : peut casser un nom stylisé intentionnellement (ex. \"will.i.am\", "
+            + "\"MC5\"). Appliqué en tout dernier, après script et enrichissement."));
+        tfCapitalizeLowercase = tf();
+        tfCapitalizeLowercase.setToolTipText(I18n.t(
+            "Mots gardés en minuscule sauf en début/fin (ex: de,le,la,the,of,and), séparés par virgule."));
+        tfCapitalizeUppercase = tf();
+        tfCapitalizeUppercase.setToolTipText(I18n.t(
+            "Mots toujours en majuscule tels quels (ex: U2,MC5), séparés par virgule."));
+        tfCapitalizePrefixes = tf();
+        tfCapitalizePrefixes.setToolTipText(I18n.t(
+            "Préfixes de nom capitalisés à part (ex: Mc,Mac,O' → \"McDonald\", \"O'Brien\"), séparés par virgule."));
+        JPanel capitalizeInner = form(
+            new String[]{"", "Mots en minuscule :", "Mots en majuscule :", "Préfixes préservés :"},
+            new JComponent[]{chkCapitalize, tfCapitalizeLowercase, tfCapitalizeUppercase, tfCapitalizePrefixes},
+            "Capitalisation automatique");
 
         // ── Pochette fichier ──────────────────────────────────────────────────────
         // "Utiliser folder.jpg/cover.jpg local" a déménagé dans la liste des fournisseurs de
@@ -944,6 +1266,19 @@ public class SettingsDialog extends JDialog {
         }, new JComponent[]{
             chkCoverSaveToFile, chkCoverOverwriteFile, tfCoverFilename
         }, "Pochette en fichier (cover.jpg / folder.jpg)");
+
+        // ── Portrait d'artiste (distinct de la pochette album, via FanArt.tv) ──────
+        chkArtistPhoto = new JCheckBox(I18n.t("Sauvegarder un portrait de l'artiste"));
+        chkArtistPhoto.setToolTipText(I18n.t(
+            "Désactivé par défaut. Nécessite une clé FanArt.tv (onglet APIs). Écrit un fichier à "
+            + "côté de la pochette, dans le dossier de l'album (pas remonté au dossier artiste, qui "
+            + "dépend du masque de renommage actif)."));
+        tfArtistPhotoFilename = tf();
+        JPanel artistPhotoInner = form(new String[]{
+            "", "Nom du fichier (sans extension) :"
+        }, new JComponent[]{
+            chkArtistPhoto, tfArtistPhotoFilename
+        }, "Portrait d'artiste");
 
         // ── Fournisseurs de pochette : ordre + activation (pas d'ajout/suppression,
         // l'ensemble des 4 fournisseurs est fixe, contrairement aux pays ou aux scripts) ──
@@ -963,7 +1298,12 @@ public class SettingsDialog extends JDialog {
             int sel = lstCoverProviders.getSelectedIndex();
             if (sel < 0) return;
             String id = coverProviderOrder.get(sel);
-            coverProviderEnabled.put(id, !coverProviderEnabled.get(id));
+            // coverProviderOrder() n'expurge jamais un id inconnu déjà présent dans un
+            // settings.properties édité à la main/corrompu/d'une autre version d'OpenTagger — .get()
+            // renvoyait alors null pour un tel id, et !null levait une NullPointerException à
+            // l'unboxing. getOrDefault(true) est déjà le pattern utilisé partout ailleurs dans ce
+            // fichier pour lire cette même map (voir juste en dessous et save()).
+            coverProviderEnabled.put(id, !coverProviderEnabled.getOrDefault(id, true));
             refreshCoverProvidersList();
             lstCoverProviders.setSelectedIndex(sel);
         });
@@ -1005,9 +1345,12 @@ public class SettingsDialog extends JDialog {
         JPanel pw  = new JPanel(new BorderLayout()); pw.setBorder(new EmptyBorder(8,8,0,8)); pw.add(tagInner,       BorderLayout.CENTER);
         JPanel fw  = new JPanel(new BorderLayout()); fw.setBorder(new EmptyBorder(8,8,0,8)); fw.add(fpInner,        BorderLayout.CENTER);
         JPanel prw = new JPanel(new BorderLayout()); prw.setBorder(new EmptyBorder(8,8,0,8));prw.add(preserveInner, BorderLayout.CENTER);
+        JPanel nmw = new JPanel(new BorderLayout()); nmw.setBorder(new EmptyBorder(8,8,0,8));nmw.add(neverModifyInner, BorderLayout.CENTER);
+        JPanel capw = new JPanel(new BorderLayout()); capw.setBorder(new EmptyBorder(8,8,0,8));capw.add(capitalizeInner, BorderLayout.CENTER);
         JPanel cfw = new JPanel(new BorderLayout()); cfw.setBorder(new EmptyBorder(8,8,0,8));cfw.add(coverFileInner,BorderLayout.CENTER);
+        JPanel apw = new JPanel(new BorderLayout()); apw.setBorder(new EmptyBorder(8,8,0,8));apw.add(artistPhotoInner, BorderLayout.CENTER);
         JPanel cpw = new JPanel(new BorderLayout()); cpw.setBorder(new EmptyBorder(8,8,8,8));cpw.add(coverProvidersBox, BorderLayout.CENTER);
-        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(cfw); combined.add(cpw);
+        combined.add(pw); combined.add(fw); combined.add(prw); combined.add(nmw); combined.add(capw); combined.add(cfw); combined.add(apw); combined.add(cpw);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -1038,11 +1381,26 @@ public class SettingsDialog extends JDialog {
         }
         cmbDefaultMask = new JComboBox<>(maskItems);
         cmbDefaultMask.setMaximumRowCount(maskCount);
+        cmbDefaultMask.setToolTipText(I18n.t(
+            "Le \"masque\" définit comment un fichier taguée est renommé/rangé — par exemple "
+            + "Artiste/Album/NuméroPiste - Titre. Voir les exemples de résultat en bas de cet onglet."));
 
-        chkAutoRename      = new JCheckBox(I18n.t("Renommer automatiquement après le taguage"));
+        chkAutoRename      = new JCheckBox(I18n.t("Renommer/ranger automatiquement les fichiers après le taguage"));
+        chkAutoRename.setToolTipText(I18n.t(
+            "Décoché : les tags sont écrits mais le fichier garde son nom et son emplacement "
+            + "actuels. Coché : le fichier est en plus renommé et rangé selon le masque choisi "
+            + "ci-dessous, juste après l'écriture des tags."));
         chkAutoRename.addActionListener(e -> cmbDefaultMask.setEnabled(chkAutoRename.isSelected()));
-        chkDeleteEmptyDirs = new JCheckBox(I18n.t("Supprimer les dossiers vides après déplacement"));
-        chkFollowLog       = new JCheckBox(I18n.t("Mettre à jour le log avec le nouveau chemin (suivi après renommage)"));
+        chkDeleteEmptyDirs = new JCheckBox(I18n.t("Supprimer les dossiers devenus vides après un déplacement"));
+        chkDeleteEmptyDirs.setToolTipText(I18n.t(
+            "Quand un renommage déplace un fichier vers un nouveau dossier, l'ancien dossier peut se "
+            + "retrouver vide (plus aucun fichier dedans) — cocher ceci le supprime automatiquement "
+            + "plutôt que de laisser traîner des dossiers vides dans la bibliothèque."));
+        chkFollowLog       = new JCheckBox(I18n.t("Garder le panneau Journal synchronisé sur le fichier en cours de traitement"));
+        chkFollowLog.setToolTipText(I18n.t(
+            "Fait défiler automatiquement le panneau Journal (en bas de la fenêtre principale) pour "
+            + "toujours montrer la dernière ligne concernant le fichier actuellement traité, plutôt "
+            + "que de devoir faire défiler vous-même pour suivre la progression."));
 
         // ── Exemples en temps réel ──────────────────────────────────────────────
         com.opentagger.model.TagInfo ex1 = new com.opentagger.model.TagInfo();
@@ -1091,6 +1449,7 @@ public class SettingsDialog extends JDialog {
         updatePreview.run();
 
         // ── Dossier racine de la bibliothèque ──────────────────────────────────
+        chkUseLibraryRoot = new JCheckBox(I18n.t("Utiliser un dossier racine de bibliothèque dédié"));
         tfLibraryRoot = tf();
         tfLibraryRoot.setToolTipText(I18n.t("Dossier racine où tous les fichiers seront déplacés/organisés. Laisser vide = utiliser le dossier scanné."));
         JButton btnBrowseRoot = new JButton("…");
@@ -1136,6 +1495,27 @@ public class SettingsDialog extends JDialog {
         skippedFolderPanel.add(tfSkippedFolder,   BorderLayout.CENTER);
         skippedFolderPanel.add(btnBrowseSkipped,  BorderLayout.EAST);
 
+        // ── Dossier des fichiers à durée incohérente avec MusicBrainz ──────────
+        chkMoveDurationMismatch = new JCheckBox(I18n.t("Déplacer les fichiers à durée incohérente avec MusicBrainz vers ce dossier"));
+        chkMoveDurationMismatch.setToolTipText(I18n.t(
+            "Un fichier identifié dont la durée diffère fortement (>20s et >20%) de celle déclarée par "
+            + "MusicBrainz pour ce titre est probablement un rip tronqué ou un mauvais match — jamais "
+            + "enregistré tel quel (\"Enregistrer tout\" l'ignore). Activer ceci le déplace en plus vers "
+            + "ce dossier dédié, séparé des fichiers non tagués ci-dessus. Rien n'est jamais supprimé."));
+        tfDurationMismatchFolder = tf();
+        tfDurationMismatchFolder.setToolTipText(I18n.t("Dossier où isoler les fichiers dont la durée ne correspond pas à MusicBrainz."));
+        JButton btnBrowseDurationMismatch = new JButton("…");
+        btnBrowseDurationMismatch.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser(tfDurationMismatchFolder.getText().isBlank()
+                    ? System.getProperty("user.home") : tfDurationMismatchFolder.getText());
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfDurationMismatchFolder.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel durationMismatchFolderPanel = new JPanel(new BorderLayout(4, 0));
+        durationMismatchFolderPanel.add(tfDurationMismatchFolder,      BorderLayout.CENTER);
+        durationMismatchFolderPanel.add(btnBrowseDurationMismatch,     BorderLayout.EAST);
+
         // ── Récupération vidéo automatique ──────────────────────────────────────
         chkVideoAutoRecover = new JCheckBox(I18n.t(
             "Récupérer automatiquement l'audio des vidéos (.webm/.vob/.mpg/.mpeg/.avi/.mkv) à chaque scan de dossier"));
@@ -1144,42 +1524,77 @@ public class SettingsDialog extends JDialog {
             + "les convertir en MP3 tagué, sans dialogue à ouvrir. Reconnues → sous-dossier \"Convertis\" ; "
             + "non reconnues → \"Non identifié\". Rien n'est jamais supprimé."));
 
-        // ── Compromis vitesse : sauter SongRec quand MB texte est déjà confiant ────
-        chkSkipSongRecOnConfidentMb = new JCheckBox(I18n.t(
-            "Éviter SongRec quand MusicBrainz (recherche texte) est déjà confiant"));
-        chkSkipSongRecOnConfidentMb.setToolTipText(I18n.t(
-            "SongRec (empreinte audio) reste la source principale par défaut — plus lent mais fiable "
-            + "même avec des tags faux. En activant ceci : si le fichier a un artiste+titre exploitables "
-            + "dans ses tags (pas génériques, pas déduits du nom de dossier), une recherche MusicBrainz "
-            + "texte rapide est tentée D'ABORD ; si son score dépasse le seuil ci-dessous, SongRec est "
-            + "sauté pour ce fichier. Accélère les bibliothèques déjà bien taguées, au prix d'un peu moins "
-            + "de vérification audio sur ces fichiers-là."));
-        spnSkipSongRecMinScore = new JSpinner(new SpinnerNumberModel(90, 50, 100, 1));
-        JPanel skipSongRecScorePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        skipSongRecScorePanel.add(new JLabel(I18n.t("Score MB minimum pour sauter SongRec :")));
-        skipSongRecScorePanel.add(spnSkipSongRecMinScore);
-        skipSongRecScorePanel.add(new JLabel("%"));
-
         JPanel p = form(
-            new String[]{"Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :", "", "", ""},
-            new JComponent[]{rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
-                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkVideoAutoRecover,
-                    chkSkipSongRecOnConfidentMb, skipSongRecScorePanel},
+            new String[]{"", "Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
+                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", ""},
+            new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
+                    chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
+                    chkVideoAutoRecover},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
         p.add(previewScroll, BorderLayout.CENTER);
+
+        // Case à cocher qui grise/dégrise son champ dossier associé — pattern Picard
+        // move_files → move_files_to (confirmé dans Picard.ini) : décoché = champ + bouton
+        // parcourir désactivés, mais la valeur reste affichée (pas effacée) pour ne rien perdre
+        // si l'utilisateur recoche ensuite.
+        bindGate(chkUseLibraryRoot,      rootPanel);
+        bindGate(chkMoveSkipped,         skippedFolderPanel);
+        bindGate(chkMoveDurationMismatch, durationMismatchFolderPanel);
         return p;
+    }
+
+    /** Active/désactive récursivement {@code fields} (et leurs enfants directs, pour les JPanel
+     *  contenant un JTextField + bouton "…") selon l'état de {@code chk} — appelé une fois à la
+     *  construction et une fois dans loadSettings() pour l'état initial. Voir buildRenamePanel(). */
+    private void bindGate(JCheckBox chk, JComponent... fields) {
+        Runnable apply = () -> {
+            boolean on = chk.isSelected();
+            for (JComponent f : fields) {
+                f.setEnabled(on);
+                for (Component child : f.getComponents()) child.setEnabled(on);
+            }
+        };
+        chk.addItemListener(e -> apply.run());
+        apply.run();
     }
 
     private JPanel buildAudioPanel() {
         tfFfmpegPath        = tf();
+        tfFfmpegPath.setToolTipText(I18n.t(
+            "ffmpeg est l'outil qui lit/convertit l'audio en coulisses (transcodage, calcul du "
+            + "volume, extraction d'un extrait pour la reconnaissance...). Laisser vide utilise la "
+            + "version déjà installée sur votre système ; ne remplir que si vous en avez une copie "
+            + "spécifique ailleurs."));
         tfEssentiaPath      = tf();
+        tfEssentiaPath.setToolTipText(I18n.t(
+            "Essentia est un outil optionnel qui analyse le son pour en déduire des caractéristiques "
+            + "avancées (ambiance, dansabilité, genre probable…). Non installé par défaut — laisser "
+            + "vide si vous ne savez pas ce que c'est, ça n'empêche rien de fonctionner."));
         tfFpcalcPath        = tf();
+        tfFpcalcPath.setToolTipText(I18n.t(
+            "fpcalc calcule l'empreinte audio utilisée par AcoustID (voir l'onglet Matching) pour "
+            + "identifier un morceau à partir du son. Requis pour qu'AcoustID fonctionne — le bouton "
+            + "\"Télécharger fpcalc…\" ci-dessous l'installe automatiquement si absent."));
         chkLyricsEnabled    = new JCheckBox(I18n.t("Activer la récupération des paroles"));
-        chkSaveLrc          = new JCheckBox(I18n.t("Écrire un fichier .lrc (paroles synchronisées, si trouvées sur lrclib.net)"));
-        chkReplayGainEnabled= new JCheckBox(I18n.t("Calculer et écrire le ReplayGain (via ffmpeg, lent)"));
+        chkSaveLrc          = new JCheckBox(I18n.t("Écrire un fichier .lrc à côté (paroles synchronisées avec le son, si trouvées)"));
+        chkSaveLrc.setToolTipText(I18n.t(
+            "Un fichier .lrc contient les paroles avec un horodatage par ligne, pour un affichage "
+            + "synchronisé pendant la lecture (comme un karaoké) — supporté par la plupart des "
+            + "lecteurs audio modernes. Cherché sur lrclib.net, une base de paroles gratuite."));
+        chkReplayGainEnabled= new JCheckBox(I18n.t("Égaliser automatiquement le volume entre morceaux (ReplayGain)"));
+        chkReplayGainEnabled.setToolTipText(I18n.t(
+            "ReplayGain calcule de combien monter/baisser le volume de chaque morceau pour qu'ils "
+            + "sonnent tous à peu près aussi fort en lecture aléatoire (certains albums sont "
+            + "enregistrés bien plus fort que d'autres). N'écrase pas le fichier audio lui-même, "
+            + "juste une information de volume que le lecteur applique — nécessite ffmpeg, plus lent."));
+        chkCamelotKey       = new JCheckBox(I18n.t("Écrire la tonalité au format Camelot (8A/8B…) — utilisé par les DJ pour le mixage harmonique"));
+        chkCamelotKey.setToolTipText(I18n.t(
+            "La tonalité musicale d'un morceau (do majeur, la mineur…) peut s'écrire en notation "
+            + "classique ou en \"roue Camelot\" (un code court comme 8A), un système utilisé par les "
+            + "DJ pour repérer facilement quels morceaux s'enchaînent bien harmoniquement. Sans "
+            + "rapport avec le mixage/DJing si vous n'en faites pas — laissez décoché sinon."));
         lblFpcalcStatus     = new JLabel();
 
         refreshFpcalcStatus();
@@ -1202,6 +1617,7 @@ public class SettingsDialog extends JDialog {
             { "Paroles (LyricsOvh) :",  chkLyricsEnabled,   "https://lyricsovh.docs.apiary.io/"             },
             { "",                       chkSaveLrc,         "https://lrclib.net"                            },
             { "ReplayGain :",           chkReplayGainEnabled, null                                           },
+            { "",                       chkCamelotKey,      null                                             },
         };
         for (int i = 0; i < rows.length; i++) {
             String     label = I18n.t((String) rows[i][0]);
@@ -1297,11 +1713,19 @@ public class SettingsDialog extends JDialog {
      *  buildAudioPanel()) — plus un onglet séparé, juste une 2e carte dans le même onglet. */
     @SuppressWarnings("unchecked")
     private JPanel buildTranscodeSection() {
-        chkTranscodeAuto = new JCheckBox(I18n.t("Transcoder automatiquement avant le taguage"));
+        chkTranscodeAuto = new JCheckBox(I18n.t("Convertir automatiquement le format audio avant le taguage"));
+        chkTranscodeAuto.setToolTipText(I18n.t(
+            "\"Transcoder\" = convertir un fichier audio d'un format à un autre (ex: FLAC → MP3). "
+            + "Cocher ceci convertit automatiquement chaque fichier vers le format choisi ci-dessous "
+            + "avant de le taguer — pratique pour uniformiser une bibliothèque aux formats mélangés."));
         cmbTranscodeFormat = new JComboBox<>(new String[]{"MP3", "FLAC", "AAC (M4A)", "OGG", "OPUS"});
         spTranscodeBitrate = new JSpinner(new SpinnerNumberModel(320, 64, 320, 32));
-        chkTranscodeDeleteSource = new JCheckBox(I18n.t("Supprimer le fichier source après transcodage"));
-        lblTranscodeBitrate = new JLabel(I18n.t("Débit (kbps) :"));
+        chkTranscodeDeleteSource = new JCheckBox(I18n.t("Supprimer le fichier d'origine après conversion réussie"));
+        chkTranscodeDeleteSource.setToolTipText(I18n.t(
+            "Décoché (par défaut) : garde les deux fichiers (original + converti). Coché : supprime "
+            + "l'original une fois la conversion confirmée réussie — irréversible, à activer seulement "
+            + "si vous êtes sûr de ne pas vouloir revenir au format d'origine."));
+        lblTranscodeBitrate = new JLabel(I18n.t("Débit (kbps) — qualité/taille, ignoré pour le FLAC sans perte :"));
 
         // Masquer le débit pour les formats sans débit (FLAC)
         cmbTranscodeFormat.addActionListener(e -> {
@@ -1309,6 +1733,18 @@ public class SettingsDialog extends JDialog {
             lblTranscodeBitrate.setEnabled(hasBitrate);
             spTranscodeBitrate.setEnabled(hasBitrate);
         });
+
+        // ── Fichiers source illisibles (moov atom manquant, flux corrompu, souvent carrément
+        // 0 octet — dégâts collatéraux constatés de l'incident disque plein du 2026-07-15) ────
+        // Confirmé par DEUX passes ffmpeg indépendantes avant toute action (voir AudioTranscoder.
+        // verifyUnreadable()) — jamais sur la foi d'un seul message d'erreur du transcodage.
+        // Envoyés à la corbeille système (récupérable), jamais supprimés définitivement.
+        chkMoveUnreadable = new JCheckBox(I18n.t("Envoyer à la corbeille les fichiers confirmés illisibles par ffmpeg"));
+        chkMoveUnreadable.setToolTipText(I18n.t(
+            "Un fichier que ffmpeg ne parvient même pas à ouvrir (\"moov atom not found\", \"Invalid "
+            + "data found\"...), confirmé par une seconde vérification indépendante (décodage seul, "
+            + "rien écrit sur le disque), est presque toujours corrompu ou vide (0 octet) — "
+            + "irrécupérable en l'état. Envoyé à la corbeille système, jamais supprimé définitivement."));
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(
@@ -1322,6 +1758,7 @@ public class SettingsDialog extends JDialog {
             { new JLabel(I18n.t("Format cible :")), cmbTranscodeFormat },
             { lblTranscodeBitrate,      spTranscodeBitrate },
             { chkTranscodeDeleteSource, null },
+            { chkMoveUnreadable,        null },
         };
 
         for (int i = 0; i < rows.length; i++) {
@@ -1356,6 +1793,13 @@ public class SettingsDialog extends JDialog {
     }
 
     private JPanel buildScriptPanel() {
+        // Case globale façon Picard ("Enable Tagger Script(s)", voir Picard.ini
+        // enable_tagger_scripts) : coupe tous les scripts activés d'un coup, sans avoir à
+        // décocher chacun individuellement — vérifiée dans TaggerScript.apply().
+        chkScriptsEnabled = new JCheckBox(I18n.t("Activer les scripts"));
+        chkScriptsEnabled.setToolTipText(I18n.t(
+                "Décoché, aucun script (même activé individuellement ci-dessous) ne s'exécute."));
+
         taTaggerScript = new JTextArea(18, 60);
         taTaggerScript.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         taTaggerScript.setLineWrap(false);
@@ -1531,10 +1975,62 @@ public class SettingsDialog extends JDialog {
         centerSplit.add(scriptsListPanel, BorderLayout.WEST);
         centerSplit.add(scriptBox,        BorderLayout.CENTER);
 
+        // ── Commande(s) après taguage — déplacée depuis l'onglet Démarrage, étendue en liste
+        // (voir PostTagCommands, remplace l'ancien champ texte unique hooks.post_tag_command) ────
+        lstPostTagCommands = new JList<>(lstPostTagCommandsModel);
+        lstPostTagCommands.setVisibleRowCount(4);
+        JScrollPane postTagScroll = new JScrollPane(lstPostTagCommands);
+
+        JButton btnAddCmd    = new JButton("+ " + I18n.t("Ajouter"));
+        JButton btnEditCmd   = new JButton(I18n.t("Modifier…"));
+        JButton btnRemoveCmd = new JButton("− " + I18n.t("Supprimer"));
+        for (JButton b : new JButton[]{btnAddCmd, btnEditCmd, btnRemoveCmd}) b.setMargin(new Insets(1, 6, 1, 6));
+
+        btnAddCmd.addActionListener(e -> {
+            String cmd = JOptionPane.showInputDialog(this, I18n.t("Commande shell :"), I18n.t("Nouvelle commande"));
+            if (cmd == null || cmd.isBlank()) return;
+            postTagCommands.add(cmd.trim());
+            lstPostTagCommandsModel.addElement(cmd.trim());
+        });
+        btnEditCmd.addActionListener(e -> {
+            int sel = lstPostTagCommands.getSelectedIndex();
+            if (sel < 0) return;
+            String cmd = JOptionPane.showInputDialog(this, I18n.t("Commande shell :"), postTagCommands.get(sel));
+            if (cmd == null || cmd.isBlank()) return;
+            postTagCommands.set(sel, cmd.trim());
+            lstPostTagCommandsModel.set(sel, cmd.trim());
+        });
+        btnRemoveCmd.addActionListener(e -> {
+            int sel = lstPostTagCommands.getSelectedIndex();
+            if (sel < 0) return;
+            postTagCommands.remove(sel);
+            lstPostTagCommandsModel.remove(sel);
+        });
+
+        JPanel postTagBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        for (JButton b : new JButton[]{btnAddCmd, btnEditCmd, btnRemoveCmd}) postTagBtns.add(b);
+
+        JPanel postTagPanel = new JPanel(new BorderLayout(0, 4));
+        postTagPanel.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(),
+                I18n.t("Commande(s) après taguage")));
+        JLabel postTagHint = new JLabel(I18n.t(
+                "<html><i>Exécutées une fois, dans l'ordre, à la fin d'un run de taguage complet " +
+                "(pas par fichier).</i></html>"));
+        postTagHint.setFont(postTagHint.getFont().deriveFont(11f));
+        postTagHint.putClientProperty("FlatLaf.style", "foreground: #888888");
+        postTagPanel.add(postTagHint,  BorderLayout.NORTH);
+        postTagPanel.add(postTagScroll, BorderLayout.CENTER);
+        postTagPanel.add(postTagBtns,  BorderLayout.SOUTH);
+
+        JPanel south = new JPanel(new BorderLayout(0, 10));
+        south.add(exBox,       BorderLayout.NORTH);
+        south.add(postTagPanel, BorderLayout.SOUTH);
+
         JPanel outer = new JPanel(new BorderLayout(0, 10));
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
+        outer.add(chkScriptsEnabled, BorderLayout.NORTH);
         outer.add(centerSplit, BorderLayout.CENTER);
-        outer.add(exBox, BorderLayout.SOUTH);
+        outer.add(south, BorderLayout.SOUTH);
         return outer;
     }
 
@@ -1649,7 +2145,12 @@ public class SettingsDialog extends JDialog {
     private JPanel buildMbOAuthPanel() {
         lblMbAccount     = new JLabel();
         cmbMbOAuthMode   = new JComboBox<>(new String[]{
-            I18n.t("scheme (URL handler)"), I18n.t("localhost (port 8484)"), I18n.t("oob (copier-coller)")});
+            I18n.t("Automatique (recommandé)"), I18n.t("Automatique via navigateur local"), I18n.t("Manuel (copier-coller le code)")});
+        cmbMbOAuthMode.setToolTipText(I18n.t(
+            "Façon dont OpenTagger récupère l'autorisation après que vous l'ayez donnée dans le "
+            + "navigateur, lors du clic sur \"Se connecter à MusicBrainz\" ci-dessous. \"Automatique\" "
+            + "fonctionne dans la grande majorité des cas — ne changer que si la connexion échoue "
+            + "systématiquement ; \"Manuel\" demande de copier un code affiché par le navigateur."));
         tfMbCollectionId = tf();
         tfMbCollectionId.setToolTipText(I18n.t("MBID de votre collection MusicBrainz (visible dans l'URL de la "
                 + "page de la collection sur musicbrainz.org) — les releases taguées y seront ajoutées "
@@ -1741,11 +2242,137 @@ public class SettingsDialog extends JDialog {
         btnRow.add(btnAction); btnRow.add(btnLogout);
         inner.add(btnRow, bc);
 
+        // `hint` était en BorderLayout.CENTER, qui s'étire pour occuper TOUT l'espace restant du
+        // panneau — sur cet onglet, ça laissait un grand vide entre le formulaire et la légende
+        // d'aide (visible à l'écran : la légende flottait au milieu d'une zone vide au lieu de
+        // suivre directement le formulaire). `inner` et `hint` regroupés dans une même boîte
+        // verticale collée en NORTH : l'espace restant va sous les deux, pas entre eux.
+        // ── Serveur MusicBrainz (miroir) ────────────────────────────────────────
+        // musicbrainz.server existait déjà comme clé de config mais n'était jamais réellement lue
+        // par MusicBrainzClient (URL codée en dur) — corrigé pour permettre un vrai miroir tiers
+        // (ex. service payant type Headphones Indexer, musicbrainz.codeshy.com avec identifiants
+        // HTTP Basic, qui élimine les 503 de contention en heure de pointe). Volontairement séparé
+        // du compte OAuth ci-dessus : deux mécanismes indépendants (lecture vs contribution).
+        tfMbServer   = tf();
+        tfMbAuthUser = tf();
+        tfMbAuthPass = new JPasswordField();
+        spMbRateLimitMs = new JSpinner(new SpinnerNumberModel(1100, 0, 30000, 100));
+        tfMbServer.setToolTipText(I18n.t(
+            "URL de base de l'API MusicBrainz (défaut : https://musicbrainz.org/ws/2). Changer "
+            + "uniquement pour un miroir tiers de confiance. Utilisez directement https:// si le "
+            + "miroir en a besoin — une redirection http→https ferait perdre l'authentification "
+            + "(Java retire l'en-tête Authorization lors d'une redirection, constaté en direct avec "
+            + "musicbrainz.codeshy.com qui redirige silencieusement)."));
+        tfMbAuthPass.setToolTipText(I18n.t(
+            "Mot de passe HTTP Basic pour le miroir ci-dessus, si requis. Vide = aucune "
+            + "authentification envoyée (cas normal pour l'API publique)."));
+        spMbRateLimitMs.setToolTipText(I18n.t(
+            "<html>Délai minimum (ms) entre deux requêtes MusicBrainz. <b>Ne JAMAIS descendre sous "
+            + "1100 sur la vraie API publique musicbrainz.org — risque de bannissement IP.</b> À "
+            + "réduire (voire 0) UNIQUEMENT si le serveur ci-dessus est un miroir tiers avec sa "
+            + "propre capacité (ex. le miroir codeshy applique 0 de son côté).</html>"));
+
+        JPanel serverInner = new JPanel(new GridBagLayout());
+        serverInner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Serveur MusicBrainz (miroir)")));
+        String[] serverLabels = {"URL du serveur :", "Utilisateur (HTTP Basic) :", "Mot de passe :", "Délai entre requêtes (ms) :"};
+        JComponent[] serverFields = {tfMbServer, tfMbAuthUser, tfMbAuthPass, spMbRateLimitMs};
+        for (int i = 0; i < serverLabels.length; i++) {
+            GridBagConstraints lc = new GridBagConstraints();
+            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(4,10,4,8);
+            serverInner.add(new JLabel(I18n.t(serverLabels[i])), lc);
+            GridBagConstraints fc = new GridBagConstraints();
+            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL; fc.weightx = 1; fc.insets = new Insets(4,0,4,10);
+            serverInner.add(serverFields[i], fc);
+        }
+        GridBagConstraints linkC = new GridBagConstraints();
+        linkC.gridx = 1; linkC.gridy = serverLabels.length; linkC.anchor = GridBagConstraints.WEST; linkC.insets = new Insets(2,0,4,10);
+        JPanel serverLinkRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        serverLinkRow.add(new JLabel(I18n.t("Miroir VIP payant (compte + identifiants ci-dessus) :")));
+        serverLinkRow.add(apiLinkBtn("https://headphones.codeshy.com/vip/"));
+        serverLinkRow.add(testBtnPanel(() -> ApiKeyTester.testMusicBrainz(
+                tfMbServer.getText().trim(), tfMbAuthUser.getText().trim(),
+                new String(tfMbAuthPass.getPassword()))));
+        serverInner.add(serverLinkRow, linkC);
+
+        JPanel top = new JPanel();
+        top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
+        inner.setAlignmentX(Component.LEFT_ALIGNMENT);
+        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        serverInner.setAlignmentX(Component.LEFT_ALIGNMENT);
+        top.add(inner);
+        top.add(hint);
+        top.add(Box.createVerticalStrut(10));
+        top.add(serverInner);
+
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBorder(new EmptyBorder(12, 12, 12, 12));
-        wrap.add(inner, BorderLayout.NORTH);
-        wrap.add(hint,  BorderLayout.CENTER);
+        wrap.add(top, BorderLayout.NORTH);
         return wrap;
+    }
+
+    /**
+     * Chemin du XML iTunes + substitution de préfixe Windows→Linux (voir ITunesLibraryImporter/
+     * ITunesXmlWriter) — demande utilisateur (2026-08-16) : le chemin était jusqu'ici re-choisi via
+     * JFileChooser à chaque import/écriture, jamais mémorisé. Le champ chemin est pré-rempli au
+     * prochain lancement des dialogues concernés (voir ITunesImportDialog/MainFrame.
+     * writeItunesXmlCorrections) et mis à jour automatiquement dès qu'un fichier y est choisi.
+     */
+    private JPanel buildItunesPanel() {
+        tfItunesXmlPath     = tf();
+        tfItunesXmlPath.setToolTipText(I18n.t(
+            "Chemin de \"iTunes Music Library.xml\" — mémorisé une fois choisi, pré-rempli au "
+            + "prochain import/écriture (menu Bibliothèque). Laisser vide pour re-choisir à chaque fois."));
+        tfItunesXmlPathFrom = tf();
+        tfItunesXmlPathFrom.setToolTipText(I18n.t(
+            "Préfixe de chemin tel qu'il apparaît dans le XML (souvent un lecteur Windows, ex. "
+            + "\"C:/Users/xxx/OneDrive/Musiques\") — requis pour que les chemins \"Location\" du XML "
+            + "se résolvent vers vos fichiers réels sur ce système, et pour toute correction de "
+            + "chemin en écriture (jamais de Location réécrite sans ce réglage, voir ITunesXmlWriter)."));
+        tfItunesXmlPathTo   = tf();
+        tfItunesXmlPathTo.setToolTipText(I18n.t(
+            "Point de montage réel correspondant sur ce système (ex. \"/mnt/Music\") — l'autre moitié "
+            + "de la substitution ci-dessus."));
+
+        JButton btnBrowse = new JButton(I18n.t("Parcourir…"));
+        btnBrowse.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser();
+            fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                    "iTunes Music Library.xml", "xml"));
+            if (!tfItunesXmlPath.getText().isBlank())
+                fc.setSelectedFile(new java.io.File(tfItunesXmlPath.getText().trim()));
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+                tfItunesXmlPath.setText(fc.getSelectedFile().getAbsolutePath());
+        });
+        JPanel pathRow = new JPanel(new BorderLayout(4, 0));
+        pathRow.add(tfItunesXmlPath, BorderLayout.CENTER);
+        pathRow.add(btnBrowse,       BorderLayout.EAST);
+
+        JPanel inner = new JPanel(new GridBagLayout());
+        inner.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Bibliothèque iTunes (import/écriture — lecture seule sauf action explicite)")));
+
+        Object[][] rows = {
+            { "Fichier XML :",        pathRow,             },
+            { "Préfixe dans le XML :", tfItunesXmlPathFrom, },
+            { "Préfixe réel ici :",   tfItunesXmlPathTo,    },
+        };
+        for (int i = 0; i < rows.length; i++) {
+            GridBagConstraints lc = new GridBagConstraints();
+            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST;
+            lc.insets = new Insets(3, 10, 3, 8);
+            inner.add(new JLabel(I18n.t((String) rows[i][0])), lc);
+
+            GridBagConstraints fc = new GridBagConstraints();
+            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL;
+            fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 8);
+            inner.add((JComponent) rows[i][1], fc);
+        }
+
+        JPanel p = new JPanel(new BorderLayout());
+        p.setBorder(new EmptyBorder(12, 12, 12, 12));
+        p.add(inner, BorderLayout.NORTH);
+        return p;
     }
 
     private void refreshMbStatus(JLabel lbl, JButton btnAction, JButton btnLogout) {
@@ -1754,6 +2381,11 @@ public class SettingsDialog extends JDialog {
         lbl.setText(connected ? username : I18n.t("(non connecté)"));
         lbl.putClientProperty("FlatLaf.style", connected ? "foreground: #1db954" : "foreground: #888888");
         btnAction.setEnabled(true);
+        // Après un échec OAuth (identifiants refusés, délai dépassé...), le texte restait bloqué
+        // sur "Ouverture du navigateur…" indéfiniment — parfaitement cliquable à nouveau (ligne du
+        // dessus) mais visuellement figé sur l'état "en cours", jusqu'à fermer/rouvrir les
+        // Préférences. Restauré ici à chaque passage en état non-connecté.
+        if (!connected) btnAction.setText("🔑  " + I18n.t("Se connecter à MusicBrainz"));
         btnAction.setVisible(!connected);
         btnLogout.setVisible(connected);
     }
@@ -1765,6 +2397,7 @@ public class SettingsDialog extends JDialog {
         cmbLanguage.setSelectedIndex("en".equals(cfg.uiLanguage()) ? 1 : 0);
         chkUpdateCheck.setSelected(cfg.updateCheckEnabled());
         chkCloseMinimizes.setSelected(cfg.closeMinimizesToTaskbar());
+        chkScriptsEnabled.setSelected(cfg.scriptsEnabled());
         tfMbUserAgent      .setText(cfg.str("musicbrainz.user_agent",   "OpenTagger/1.0 (bain.paul24@gmail.com)"));
         tfAcoustIdKey      .setText(cfg.str("acoustid.api_key",         ""));
         tfAcoustIdUserToken.setText(cfg.str("acoustid.user_token",      ""));
@@ -1780,6 +2413,7 @@ public class SettingsDialog extends JDialog {
         spResultsLimit  .setValue(cfg.num("musicbrainz.results_limit", 5));
         spCacheDays     .setValue(cfg.num("musicbrainz.cache_days",    30));
 
+        chkUseLibraryRoot    .setSelected(cfg.useLibraryRootEnabled());
         tfLibraryRoot        .setText(cfg.str("rename.library_root",  ""));
         tfPodcastLibraryRoot .setText(cfg.str("podcast.library_root", ""));
         cmbDefaultMask    .setSelectedIndex(Math.min(cfg.num("rename.default_mask", 3),
@@ -1790,8 +2424,14 @@ public class SettingsDialog extends JDialog {
         cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
         tfSkippedFolder   .setText(cfg.str("skipped.move_folder",           ""));
+        chkMoveDurationMismatch.setSelected(cfg.bool("duration_mismatch.move_enabled", false));
+        tfDurationMismatchFolder.setText(cfg.str("duration_mismatch.move_folder",          ""));
         chkVideoAutoRecover.setSelected(cfg.videoAutoRecover());
         chkSkipSongRecOnConfidentMb.setSelected(cfg.skipSongRecOnConfidentMb());
+        chkDjMixDetection.setSelected(cfg.djMixDetectionEnabled());
+        chkDiscIdMatching.setSelected(cfg.discIdMatchingEnabled());
+        chkBandcampGuess.setSelected(cfg.bandcampGuessEnabled());
+        chkSyncPlaylists.setSelected(cfg.syncPlaylistsOnRename());
         spnSkipSongRecMinScore.setValue(cfg.skipSongRecMinScore());
 
         startupFolderModel.clear();
@@ -1807,16 +2447,26 @@ public class SettingsDialog extends JDialog {
         tfAudDToken  .setText(cfg.str("audd.api_token", ""));
         tfListenBrainzUsername .setText(cfg.listenbrainzUsername());
         spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
+        tfLastFmUsername .setText(cfg.lastfmUsername());
+        spLastfmMaxTracks.setValue(cfg.lastfmMaxTracks());
+        chkHeadphonesDbEnabled.setSelected(cfg.headphonesDbEnabled());
+        tfHeadphonesDbPath.setText(cfg.headphonesDbPath());
+        tfHeadphonesUrl.setText(cfg.headphonesUrl());
+        tfHeadphonesApiKey.setText(cfg.headphonesApiKey());
+        chkHeadphonesAutoQueue.setSelected(cfg.headphonesAutoQueueEnabled());
+        spHeadphonesAutoQueueMinScore.setValue(cfg.headphonesAutoQueueMinScore());
+        chkBeetsDbEnabled.setSelected(cfg.beetsDbEnabled());
+        tfBeetsDbPath.setText(cfg.beetsDbPath());
+        tfBeetsMusicDir.setText(cfg.beetsMusicDir());
 
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkLastfmArtistUrls .setSelected(cfg.bool("lastfm.fetch_artist_urls", true));
         chkReplayGainEnabled.setSelected(cfg.replayGainEnabled());
+        chkCamelotKey.setSelected(cfg.writeCamelotKey());
 
         String genreSrc = cfg.str("discogs.genre_source", "style_then_genre");
         cmbDiscogsGenreSource.setSelectedIndex(
             "genre_then_style".equals(genreSrc) ? 1 : "genre_only".equals(genreSrc) ? 2 : 0);
-        spDiscogsMaxGenres.setValue(cfg.num("discogs.max_genres",   3));
-        spLastfmMaxGenres .setValue(cfg.num("lastfm.max_genres",    3));
 
         // ─ Releases préférées ─
         lstCountriesModel.clear();
@@ -1858,6 +2508,7 @@ public class SettingsDialog extends JDialog {
             if (fmtIds[i].equalsIgnoreCase(savedFmt)) { cmbTranscodeFormat.setSelectedIndex(i); break; }
         spTranscodeBitrate.setValue(cfg.transcodeBitrate());
         chkTranscodeDeleteSource.setSelected(cfg.transcodeDeleteSource());
+        chkMoveUnreadable.setSelected(cfg.bool("transcode.move_unreadable_enabled", false));
         boolean hasBitrate = cmbTranscodeFormat.getSelectedIndex() != 1;
         lblTranscodeBitrate.setEnabled(hasBitrate);
         spTranscodeBitrate.setEnabled(hasBitrate);
@@ -1865,14 +2516,23 @@ public class SettingsDialog extends JDialog {
         // ─ MB Genres ─
         chkMbUseGenres   .setSelected(cfg.mbUseGenres());
         spMbMinGenreUsage.setValue(cfg.mbMinGenreUsage());
-        spMbMaxGenres    .setValue(cfg.mbMaxGenres());
+        spMbMaxGenres    .setValue(cfg.genreMaxCount());
         taGenresFilter   .setText(cfg.mbGenresFilter());
 
         // ─ Tags (onglet Tags) ─
         tfPreservedTags      .setText(cfg.preservedTags());
+        java.util.Set<String> neverModifySet = java.util.Set.of(cfg.neverModifyTags().split("\\|"));
+        for (int i = 0; i < NEVER_MODIFY_FIELDS.length; i++)
+            chkNeverModify[i].setSelected(neverModifySet.contains(NEVER_MODIFY_FIELDS[i]));
+        chkCapitalize        .setSelected(cfg.capitalizeEnabled());
+        tfCapitalizeLowercase.setText(cfg.capitalizeLowercaseWords());
+        tfCapitalizeUppercase.setText(cfg.capitalizeUppercaseWords());
+        tfCapitalizePrefixes .setText(cfg.capitalizeKeepPrefixes());
         chkCoverSaveToFile   .setSelected(cfg.coverSaveToFile());
         chkCoverOverwriteFile.setSelected(cfg.coverOverwriteFile());
         tfCoverFilename      .setText(cfg.coverFilename());
+        chkArtistPhoto       .setSelected(cfg.artistPhotoEnabled());
+        tfArtistPhotoFilename.setText(cfg.artistPhotoFilename());
 
         // ─ Fournisseurs de pochette : ordre + activation ─
         coverProviderOrder.clear();
@@ -1901,16 +2561,27 @@ public class SettingsDialog extends JDialog {
         chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
         chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
-        spBatchThreads            .setValue(cfg.num("batch.threads", 3));
+        spBatchThreads            .setValue(cfg.num("batch.threads", 6));
 
         String mode = cfg.str("mb.oauth.mode", "scheme");
         cmbMbOAuthMode.setSelectedIndex(
             "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
         tfMbCollectionId.setText(cfg.mbCollectionId());
+        tfMbServer      .setText(cfg.mbServer());
+        tfMbAuthUser    .setText(cfg.mbAuthUser());
+        tfMbAuthPass    .setText(cfg.mbAuthPass());
+        spMbRateLimitMs .setValue(cfg.mbRateLimitMs());
+
+        tfItunesXmlPath    .setText(cfg.itunesXmlFilePath());
+        tfItunesXmlPathFrom.setText(cfg.itunesXmlPathFrom());
+        tfItunesXmlPathTo  .setText(cfg.itunesXmlPathTo());
 
         scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
         currentScriptIndex = -1;
         refreshScriptsList();
+        postTagCommands = new java.util.ArrayList<>(PostTagCommands.load());
+        lstPostTagCommandsModel.clear();
+        for (String c : postTagCommands) lstPostTagCommandsModel.addElement(c);
         if (!scriptDefs.isEmpty()) {
             lstScripts.setSelectedIndex(0);
         } else {
@@ -1929,9 +2600,36 @@ public class SettingsDialog extends JDialog {
         refreshToolbarActionsList();
     }
 
+    /** Tous les JSpinner du dialogue — utilisé uniquement pour forcer la validation d'une saisie
+     *  clavier en cours avant lecture (voir commitAllSpinnerEdits()). */
+    private JSpinner[] allSpinners() {
+        return new JSpinner[]{
+            spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays,
+            spnSkipSongRecMinScore, spListenBrainzMaxTracks, spLastfmMaxTracks,
+            spHeadphonesAutoQueueMinScore, spFpcalcThreads,
+            spBatchThreads, spMbMinGenreUsage, spMbMaxGenres, spTranscodeBitrate, spMbRateLimitMs
+        };
+    }
+
+    /** JSpinner.getValue() renvoie l'ancienne valeur COMMISE, pas ce qui est tapé dans le champ
+     *  texte tant que l'édition n'a pas été validée (Tab/Entrée, ou perte de focus) — sans appel
+     *  explicite à commitEdit() avant de lire les valeurs dans save(), une valeur tapée au clavier
+     *  puis "Enregistrer" cliqué directement (sans quitter le champ au clavier) était perdue
+     *  silencieusement, le fichier de config gardant l'ancienne valeur sans aucune erreur visible.
+     *  Repéré en direct (2026-08-14) : batch.threads réglé à 12 dans l'UI, resté à 6 dans le
+     *  fichier après "Enregistrer". Erreur de parsing (chiffre incomplet, etc.) ignorée : on garde
+     *  alors la dernière valeur commise plutôt que de bloquer toute la sauvegarde pour ce détail. */
+    private void commitAllSpinnerEdits() {
+        for (JSpinner sp : allSpinners()) {
+            if (sp == null) continue;
+            try { sp.commitEdit(); } catch (java.text.ParseException ignored) {}
+        }
+    }
+
     private void save() {
+        commitAllSpinnerEdits();
         // Partir du fichier utilisateur existant pour préserver les clés non affichées dans le formulaire
-        // (discogs.genre_source, lastfm.max_genres, mb.oauth.mode configurées manuellement, etc.)
+        // (discogs.genre_source, mb.oauth.mode configurées manuellement, etc.)
         Properties p = new Properties();
         Path userFile = Paths.get(SETTINGS_FILE);
         if (Files.exists(userFile)) {
@@ -1944,6 +2642,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("ui.language", newLanguage);
         p.setProperty("update.check_enabled", String.valueOf(chkUpdateCheck.isSelected()));
         p.setProperty("ui.close_minimizes",   String.valueOf(chkCloseMinimizes.isSelected()));
+        // hooks.post_tag_command n'est plus jamais écrite ici — remplacée par PostTagCommands
+        // (liste), voir save() plus bas et PostTagCommands.load() pour la migration.
         p.setProperty("update.last_check_ms", String.valueOf(Config.get().lastUpdateCheckMs()));
 
         p.setProperty("musicbrainz.user_agent",        tfMbUserAgent.getText().trim());
@@ -1962,6 +2662,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("musicbrainz.results_limit",     String.valueOf(spResultsLimit.getValue()));
         p.setProperty("musicbrainz.cache_days",        String.valueOf(spCacheDays.getValue()));
 
+        p.setProperty("rename.use_library_root", String.valueOf(chkUseLibraryRoot.isSelected()));
         p.setProperty("rename.library_root",   tfLibraryRoot.getText().trim());
         p.setProperty("podcast.library_root",  tfPodcastLibraryRoot.getText().trim());
         p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
@@ -1970,8 +2671,14 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());
+        p.setProperty("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatch.isSelected()));
+        p.setProperty("duration_mismatch.move_folder",  tfDurationMismatchFolder.getText().trim());
         p.setProperty("video.auto_recover",            String.valueOf(chkVideoAutoRecover.isSelected()));
         p.setProperty("tagging.skip_songrec_on_confident_mb", String.valueOf(chkSkipSongRecOnConfidentMb.isSelected()));
+        p.setProperty("tagging.dj_mix_detection_enabled",     String.valueOf(chkDjMixDetection.isSelected()));
+        p.setProperty("tagging.discid_matching_enabled",      String.valueOf(chkDiscIdMatching.isSelected()));
+        p.setProperty("tagging.bandcamp_guess_enabled",       String.valueOf(chkBandcampGuess.isSelected()));
+        p.setProperty("tagging.sync_playlists_on_rename",     String.valueOf(chkSyncPlaylists.isSelected()));
         p.setProperty("tagging.skip_songrec_min_score",       String.valueOf(spnSkipSongRecMinScore.getValue()));
 
         StringBuilder sb = new StringBuilder();
@@ -1990,15 +2697,25 @@ public class SettingsDialog extends JDialog {
         p.setProperty("audd.api_token", tfAudDToken.getText().trim());
         p.setProperty("listenbrainz.username",   tfListenBrainzUsername.getText().trim());
         p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
+        p.setProperty("lastfm.username",   tfLastFmUsername.getText().trim());
+        p.setProperty("lastfm.max_tracks", String.valueOf(spLastfmMaxTracks.getValue()));
+        p.setProperty("headphones.db_enabled", String.valueOf(chkHeadphonesDbEnabled.isSelected()));
+        p.setProperty("headphones.db_path",    tfHeadphonesDbPath.getText().trim());
+        p.setProperty("headphones.url",        tfHeadphonesUrl.getText().trim());
+        p.setProperty("headphones.api_key",    tfHeadphonesApiKey.getText().trim());
+        p.setProperty("headphones.auto_queue_enabled",  String.valueOf(chkHeadphonesAutoQueue.isSelected()));
+        p.setProperty("headphones.auto_queue_min_score", String.valueOf(spHeadphonesAutoQueueMinScore.getValue()));
+        p.setProperty("beets.db_enabled", String.valueOf(chkBeetsDbEnabled.isSelected()));
+        p.setProperty("beets.db_path",    tfBeetsDbPath.getText().trim());
+        p.setProperty("beets.music_dir",  tfBeetsMusicDir.getText().trim());
 
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("lastfm.fetch_artist_urls", String.valueOf(chkLastfmArtistUrls.isSelected()));
         p.setProperty("replaygain.enabled",     String.valueOf(chkReplayGainEnabled.isSelected()));
+        p.setProperty("audio.camelot_key",      String.valueOf(chkCamelotKey.isSelected()));
 
         String[] genreSources = {"style_then_genre", "genre_then_style", "genre_only"};
         p.setProperty("discogs.genre_source", genreSources[cmbDiscogsGenreSource.getSelectedIndex()]);
-        p.setProperty("discogs.max_genres",   String.valueOf(spDiscogsMaxGenres.getValue()));
-        p.setProperty("lastfm.max_genres",    String.valueOf(spLastfmMaxGenres.getValue()));
 
         // ─ Releases préférées ─
         StringBuilder sbCountries = new StringBuilder();
@@ -2047,11 +2764,19 @@ public class SettingsDialog extends JDialog {
         // ─ MB Genres ─
         p.setProperty("mb.use_genres",       String.valueOf(chkMbUseGenres.isSelected()));
         p.setProperty("mb.min_genre_usage",  String.valueOf(spMbMinGenreUsage.getValue()));
-        p.setProperty("mb.max_genres",       String.valueOf(spMbMaxGenres.getValue()));
+        p.setProperty("genre.max_count",     String.valueOf(spMbMaxGenres.getValue()));
         p.setProperty("mb.genres_filter",    taGenresFilter.getText());
 
         // ─ Onglet Tags ─
         p.setProperty("tags.preserved_tags",       tfPreservedTags.getText().trim());
+        java.util.List<String> selNeverModify = new java.util.ArrayList<>();
+        for (int i = 0; i < NEVER_MODIFY_FIELDS.length; i++)
+            if (chkNeverModify[i].isSelected()) selNeverModify.add(NEVER_MODIFY_FIELDS[i]);
+        p.setProperty("tags.never_modify",         String.join("|", selNeverModify));
+        p.setProperty("capitalize.enabled",         String.valueOf(chkCapitalize.isSelected()));
+        p.setProperty("capitalize.lowercase_words", tfCapitalizeLowercase.getText().trim());
+        p.setProperty("capitalize.uppercase_words", tfCapitalizeUppercase.getText().trim());
+        p.setProperty("capitalize.keep_prefixes",   tfCapitalizePrefixes.getText().trim());
 
         // ─ Fournisseurs de pochette : ordre + activation ─
         p.setProperty("cover.provider_order",             String.join(",", coverProviderOrder));
@@ -2065,6 +2790,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("cover.save_to_file",        String.valueOf(chkCoverSaveToFile.isSelected()));
         p.setProperty("cover.overwrite_file",      String.valueOf(chkCoverOverwriteFile.isSelected()));
         p.setProperty("cover.filename",            tfCoverFilename.getText().trim().isEmpty() ? "cover" : tfCoverFilename.getText().trim());
+        p.setProperty("artist_photo.enabled",      String.valueOf(chkArtistPhoto.isSelected()));
+        p.setProperty("artist_photo.filename",     tfArtistPhotoFilename.getText().trim().isEmpty() ? "artist" : tfArtistPhotoFilename.getText().trim());
         p.setProperty("tags.correct_punctuation",  String.valueOf(chkCorrectPunctuation.isSelected()));
         p.setProperty("tags.remove_id3v1",         String.valueOf(chkRemoveId3v1.isSelected()));
         String[] id3Versions = {"keep", "2.3", "2.4"};
@@ -2079,8 +2806,10 @@ public class SettingsDialog extends JDialog {
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
         p.setProperty("batch.threads",                 String.valueOf(spBatchThreads.getValue()));
 
+        p.setProperty("scripts.enabled", String.valueOf(chkScriptsEnabled.isSelected()));
         flushCurrentScriptEdits();
         TaggerScript.saveScripts(scriptDefs);
+        PostTagCommands.save(postTagCommands);
 
         p.setProperty("toolbar.actions", String.join(",", toolbarActionIds));
         // Marque la migration "refreshFolders" (voir Config.toolbarActions()) comme faite : à
@@ -2095,6 +2824,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("transcode.format",          fmtIds2[cmbTranscodeFormat.getSelectedIndex()]);
         p.setProperty("transcode.bitrate_kbps",    String.valueOf(spTranscodeBitrate.getValue()));
         p.setProperty("transcode.delete_source",   String.valueOf(chkTranscodeDeleteSource.isSelected()));
+        p.setProperty("transcode.move_unreadable_enabled", String.valueOf(chkMoveUnreadable.isSelected()));
 
         // Conserver le client_id/secret (identité d'application embarquée, plus modifiable
         // depuis ce dialogue — voir buildMbOAuthPanel), le token, refresh_token et username existants
@@ -2106,6 +2836,14 @@ public class SettingsDialog extends JDialog {
         String[] oauthModes = {"scheme", "localhost", "oob"};
         p.setProperty("mb.oauth.mode", oauthModes[cmbMbOAuthMode.getSelectedIndex()]);
         p.setProperty("mb.oauth.collection_id",       tfMbCollectionId.getText().trim());
+        p.setProperty("musicbrainz.server",           tfMbServer.getText().trim().isEmpty()
+                ? "https://musicbrainz.org/ws/2" : tfMbServer.getText().trim());
+        p.setProperty("musicbrainz.auth_user",        tfMbAuthUser.getText().trim());
+        p.setProperty("musicbrainz.auth_pass",        new String(tfMbAuthPass.getPassword()));
+        p.setProperty("itunes.xml_file_path",         tfItunesXmlPath.getText().trim());
+        p.setProperty("itunes.xml_path_from",         tfItunesXmlPathFrom.getText().trim());
+        p.setProperty("itunes.xml_path_to",           tfItunesXmlPathTo.getText().trim());
+        p.setProperty("musicbrainz.rate_limit_ms",    String.valueOf(spMbRateLimitMs.getValue()));
 
         // Mémoriser les dossiers déjà connus avant la sauvegarde
         java.util.Set<String> alreadyKnown = new java.util.HashSet<>(
@@ -2148,6 +2886,65 @@ public class SettingsDialog extends JDialog {
                     I18n.t("Erreur sauvegarde : %s", ex.getMessage()),
                     I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    /** Clés API/identifiants personnels — jamais effacées par {@link #resetOptionsToDefault()},
+     *  contrairement à toutes les autres options du dialogue. */
+    private static final String[] PRESERVED_ON_RESET = {
+        "musicbrainz.user_agent", "app.contact",
+        "acoustid.api_key", "acoustid.user_token",
+        "discogs.consumer_key", "discogs.consumer_secret",
+        "lastfm.api_key", "fanart.api_key", "rapidapi.key", "audd.api_token",
+        "listenbrainz.username", "lastfm.username",
+        "headphones.db_path", "headphones.url", "headphones.api_key",
+        "beets.db_path", "beets.music_dir",
+        "mb.oauth.client_id", "mb.oauth.client_secret", "mb.oauth.token",
+        "mb.oauth.refresh_token", "mb.oauth.username", "mb.oauth.collection_id",
+    };
+
+    /** Réinitialise TOUTES les options (matching, tags, renommage, audio, script, barre d'outils,
+     *  dossiers de démarrage, etc.) aux valeurs par défaut — en ne réécrivant que les clés listées
+     *  dans {@link #PRESERVED_ON_RESET}, le fichier utilisateur perd toute autre clé et chaque
+     *  réglage retombe sur le même défaut que {@code Config}/le jar bundlé utilisent déjà pour une
+     *  toute première installation (mécanisme existant, pas dupliqué ici). Demandé le 2026-07-28 :
+     *  l'utilisateur veut pouvoir repartir d'une config propre sans reperdre ses clés API/comptes. */
+    private void resetOptionsToDefault() {
+        int confirm = JOptionPane.showConfirmDialog(this,
+            I18n.t("Réinitialiser TOUTES les options aux valeurs par défaut ?\n\n"
+                 + "Cela inclut : dossiers de démarrage, chemin de bibliothèque/renommage, masques, "
+                 + "filtres de correspondance, options de tags, transcodage, script, barre d'outils…\n\n"
+                 + "Les clés API et identifiants (AcoustID, Discogs, Last.fm, FanArt.tv, AudD, "
+                 + "RapidAPI, ListenBrainz, connexion MusicBrainz) sont conservés."),
+            I18n.t("Réinitialiser les options"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION) return;
+
+        Properties fresh = new Properties();
+        for (String key : PRESERVED_ON_RESET) {
+            String v = Config.get().str(key, "");
+            if (!v.isBlank()) fresh.setProperty(key, v);
+        }
+
+        try {
+            Path dir = Paths.get(Config.configDir());
+            if (!Files.exists(dir)) Files.createDirectories(dir);
+            try (Writer w = Files.newBufferedWriter(Paths.get(SETTINGS_FILE))) {
+                fresh.store(w, "OpenTagger user settings (options réinitialisées le "
+                        + java.time.LocalDate.now() + " — clés API/identifiants conservés)");
+            }
+            Config.get().reload();
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this,
+                    I18n.t("Erreur : %s", ex.getMessage()),
+                    I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        java.awt.Window ownerWindow = getOwner();
+        dispose();
+        if (onPreferencesSaved != null) onPreferencesSaved.run();
+        JOptionPane.showMessageDialog(ownerWindow,
+                I18n.t("Options réinitialisées aux valeurs par défaut."),
+                I18n.t("Réinitialiser les options"), JOptionPane.INFORMATION_MESSAGE);
     }
 
     // ── Helpers UI ───────────────────────────────────────────────────────────
@@ -2213,15 +3010,42 @@ public class SettingsDialog extends JDialog {
         });
     }
 
+    // Un seul flash actif à la fois (voir flashComponent()) — onSettingsSearch() se déclenche à
+    // chaque frappe (pas de debounce) ; sans cet état partagé, taper "enreg" puis "enregi" puis
+    // "enregis..." qui matchent tous le même réglage en moins de 1200ms capturait le JAUNE du
+    // flash en cours comme "couleur d'origine" à restaurer, laissant le composant bloqué en jaune
+    // indéfiniment une fois le minuteur du second appel écoulé.
+    private JComponent flashingComponent;
+    private Color      flashingOriginalBg;
+    private boolean    flashingOriginalOpaque;
+    private Timer      flashingTimer;
+
     /** Flash temporaire du fond du composant trouvé, pour le repérer visuellement dans l'onglet. */
     private void flashComponent(JComponent c) {
-        Color original = c.getBackground();
-        boolean wasOpaque = c.isOpaque();
+        if (flashingTimer != null) flashingTimer.stop();
+        if (flashingComponent != null && flashingComponent != c) {
+            // Un autre composant flashait encore : le restaurer immédiatement avant de basculer.
+            flashingComponent.setBackground(flashingOriginalBg);
+            flashingComponent.setOpaque(flashingOriginalOpaque);
+            flashingComponent.repaint();
+        }
+        if (flashingComponent != c) {
+            // Nouvelle cible : capturer sa VRAIE couleur d'origine, pas un jaune de flash en cours.
+            flashingOriginalBg     = c.getBackground();
+            flashingOriginalOpaque = c.isOpaque();
+            flashingComponent      = c;
+        }
         c.setOpaque(true);
         c.setBackground(new Color(255, 213, 79));
-        Timer t = new Timer(1200, e -> { c.setBackground(original); c.setOpaque(wasOpaque); c.repaint(); });
-        t.setRepeats(false);
-        t.start();
+        flashingTimer = new Timer(1200, e -> {
+            c.setBackground(flashingOriginalBg);
+            c.setOpaque(flashingOriginalOpaque);
+            c.repaint();
+            flashingComponent = null;
+            flashingTimer = null;
+        });
+        flashingTimer.setRepeats(false);
+        flashingTimer.start();
     }
 
     private JScrollPane scrollWrap(JPanel panel) {
@@ -2231,6 +3055,94 @@ public class SettingsDialog extends JDialog {
         sp.setBorder(null);
         sp.getVerticalScrollBar().setUnitIncrement(12);
         return sp;
+    }
+
+    /**
+     * Propose des séries de compilations depuis les vrais albums "Various Artists" déjà chargés
+     * dans le tableau principal — demande utilisateur (2026-08-17) après une vraie faute de frappe
+     * ("Generation Top 50" au lieu de "Génération Top 50") qui empêchait silencieusement le
+     * matching de fonctionner sur 94 fichiers réels. Heuristique volontairement simple : premier
+     * mot de chaque album de compilation, compté par fréquence — les vraies séries ("NRJ", "RFM",
+     * "Fun", "Stars", "Génération"...) reviennent naturellement souvent, un nom de mot isolé au
+     * hasard non. Choisir DANS une liste de texte réel plutôt que retaper élimine la classe
+     * d'erreur (accents, orthographe) qui vient de se produire.
+     */
+    private void detectCompilationSeries() {
+        if (!(getOwner() instanceof MainFrame mf)) return;
+
+        String vaName = Config.get().vaName();
+        // "bo"/"ost"/"bande"/"soundtrack" exclus pour la même raison que "hits"/"top" : ce sont des
+        // TYPES de contenu (musique de film), pas des marques de série récurrentes comme "NRJ" ou
+        // "Stars 80" — un même titre peut légitimement apparaître sur plusieurs BO de films
+        // différents, donc les proposer comme "série" produirait de faux rapprochements entre
+        // bandes originales sans rapport (retour utilisateur, 2026-08-19).
+        java.util.Set<String> stopwords = java.util.Set.of(
+            "the", "les", "le", "la", "various", "artists", "vol", "volume", "compilation",
+            "compil", "best", "hits", "top", "album", "single", "disc", "cd",
+            "bo", "ost", "bande", "soundtrack", "musique", "originale");
+
+        java.util.Map<String, Integer> counts  = new java.util.HashMap<>();
+        java.util.Map<String, String>  display = new java.util.HashMap<>();
+        // Un exemple de titre d'album COMPLET par candidat — un simple premier mot ("100%", "Fun")
+        // ne dit rien tout seul contrairement à "NRJ"/"Stars" ; retour utilisateur (2026-08-19) après
+        // avoir vu "100%" proposé sans pouvoir deviner qu'il vient de "100% Hits Running Song".
+        java.util.Map<String, String>  example = new java.util.HashMap<>();
+        for (var e : mf.allEntries()) {
+            var t = e.activeTags();
+            if (t == null || t.album == null || t.album.isBlank()) continue;
+            boolean isComp = "1".equals(t.isCompilation)
+                    || vaName.equalsIgnoreCase(t.albumArtist)
+                    || "Various Artists".equalsIgnoreCase(t.albumArtist);
+            if (!isComp) continue;
+
+            String firstWord = t.album.trim().split("[\\s,(\\[]", 2)[0].trim();
+            if (firstWord.length() < 2) continue;
+            String key = stripDiacritics(firstWord).toLowerCase(java.util.Locale.ROOT);
+            if (stopwords.contains(key) || key.chars().allMatch(Character::isDigit)) continue;
+            counts.merge(key, 1, Integer::sum);
+            display.putIfAbsent(key, firstWord);
+            example.putIfAbsent(key, t.album.trim());
+        }
+
+        java.util.Set<String> already = new java.util.HashSet<>();
+        for (int i = 0; i < lstCompilationSeriesModel.size(); i++)
+            already.add(stripDiacritics(lstCompilationSeriesModel.get(i)).toLowerCase(java.util.Locale.ROOT).trim());
+
+        var candidates = counts.entrySet().stream()
+            .filter(en -> en.getValue() >= 3)
+            .filter(en -> !already.contains(en.getKey()))
+            .sorted((a, b) -> b.getValue() - a.getValue())
+            .limit(30)
+            .toList();
+
+        if (candidates.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Aucun nouveau candidat trouvé (bibliothèque pas chargée, ou tout est déjà "
+                     + "dans la liste)."),
+                I18n.t("Détection automatique"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        DefaultListModel<String> pickModel = new DefaultListModel<>();
+        for (var en : candidates)
+            pickModel.addElement(display.get(en.getKey()) + "  (" + en.getValue() + I18n.t(" albums")
+                + " — ex: « " + example.get(en.getKey()) + " »)");
+        JList<String> pickList = new JList<>(pickModel);
+        pickList.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+
+        int ok = JOptionPane.showConfirmDialog(this,
+            new JScrollPane(pickList),
+            I18n.t("Sélectionne les séries à ajouter (%d candidat(s) trouvé(s))", candidates.size()),
+            JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (ok != JOptionPane.OK_OPTION) return;
+
+        for (int idx : pickList.getSelectedIndices())
+            lstCompilationSeriesModel.addElement(display.get(candidates.get(idx).getKey()));
+    }
+
+    private static String stripDiacritics(String s) {
+        return java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "");
     }
 
     private JPanel form(String[] labels, JComponent[] fields, String title) {

@@ -14,7 +14,7 @@ public class FileTableModel extends AbstractTableModel {
     private static final String[] COLS = {
         "☑", I18n.t("Fichier"), I18n.t("Artiste"), I18n.t("Artiste Album"), I18n.t("Titre"),
         I18n.t("Album"), I18n.t("Année"), I18n.t("Genre"), I18n.t("Piste"), I18n.t("Statut"),
-        I18n.t("Durée")
+        I18n.t("Durée"), I18n.t("Note")
     };
     public static final int COL_SEL          = 0;
     public static final int COL_FILE         = 1;
@@ -32,6 +32,11 @@ public class FileTableModel extends AbstractTableModel {
     // contrat dans AlbumTreeTableModel) sans que je puisse garantir avoir trouvé tous ces
     // endroits. Coût nul : une 11e colonne en bout de tableau reste sûre par construction.
     public static final int COL_DURATION     = 10;
+    // Même raisonnement que COL_DURATION juste au-dessus (12e colonne en bout de tableau, jamais
+    // renumérotée) — TagInfo.rating est déjà entièrement câblé (import XML iTunes, DetailPanel)
+    // mais invisible tant qu'on n'ouvre pas le panneau Détail d'un fichier ; retour utilisateur
+    // (2026-08-19) après avoir remarqué qu'aucune colonne ne le montre dans le tableau principal.
+    public static final int COL_RATING       = 11;
 
     // `entries` = TOUS les fichiers ; `visible` = la vue filtrée actuelle, c'est elle que JTable
     // voit (getRowCount()/getValueAt() portent sur `visible`, jamais `entries` directement).
@@ -211,6 +216,7 @@ public class FileTableModel extends AbstractTableModel {
             case COL_TRACK        -> ti.track;
             case COL_STATUS       -> statusLabel(e.status, e.message, e.suggestions);
             case COL_DURATION     -> formatDuration(ti.durationSec);
+            case COL_RATING       -> ti.rating;
             default               -> "";
         };
     }
@@ -277,8 +283,14 @@ public class FileTableModel extends AbstractTableModel {
 
     /** Retourne le tooltip HTML pour une ligne (suggestions si présentes). */
     public String getTooltip(int row) {
-        FileEntry e = visible.get(row);
-        if (e.suggestions == null || e.suggestions.isEmpty()) return null;
+        return getTooltip(visible.get(row));
+    }
+
+    /** Comme {@link #getTooltip(int)}, mais directement par FileEntry — permet à l'appelant de
+     *  résoudre l'entrée lui-même (voir MainFrame.entryAtViewRow()) plutôt que de dépendre d'un
+     *  index dans CE modèle précis, qui ne correspond plus à la ligne de vue en mode arborescence. */
+    public String getTooltip(FileEntry e) {
+        if (e == null || e.suggestions == null || e.suggestions.isEmpty()) return null;
         StringBuilder sb = new StringBuilder("<html><b>" + I18n.t("Suggestions d'amélioration :") + "</b><br>");
         for (String s : e.suggestions) sb.append("&nbsp;⚠&nbsp;").append(s).append("<br>");
         sb.append("</html>");

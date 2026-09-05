@@ -147,12 +147,18 @@ public class FpcalcInstaller {
 
     private static String extractTarGz(Path archive, Path dest) throws Exception {
         // Windows télécharge du .zip → cette méthode n'est jamais appelée sur Windows
-        // Linux/macOS : utiliser tar système
+        // Linux/macOS : utiliser tar système.
+        // Avant ce correctif : drainage bloquant de stdout PUIS waitFor() SANS AUCUN TIMEOUT — un
+        // `tar` qui se bloque (archive corrompue, destination sur un montage NAS capricieux, le
+        // terrain de jeu exact de cette appli) gelait l'installateur fpcalc indéfiniment, même
+        // classe de bug que ffmpeg déjà corrigée dans ReplayGainAnalyzer/AudioTranscoder — et le
+        // code de sortie de tar n'était jamais vérifié (un échec silencieux se traduisait juste en
+        // "fpcalc introuvable dans l'archive", sans dire pourquoi). ProcessUtils.readWithTimeout
+        // gère les deux : drainage sur thread virtuel + timeout + vérification du code de sortie.
         ProcessBuilder pb = new ProcessBuilder("tar", "xzf", archive.toString(), "-C", dest.toString());
         pb.redirectErrorStream(true);
-        Process p = pb.start();
-        p.getInputStream().transferTo(OutputStream.nullOutputStream());
-        p.waitFor();
+        if (ProcessUtils.readWithTimeout(pb, 60) == null)
+            throw new IOException("Échec de l'extraction de l'archive fpcalc (tar xzf) — voir logs.");
 
         // Chercher fpcalc dans le dossier extrait
         try (var stream = Files.walk(dest)) {

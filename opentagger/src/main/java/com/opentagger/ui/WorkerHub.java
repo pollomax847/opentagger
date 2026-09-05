@@ -37,14 +37,21 @@ public final class WorkerHub {
 
     public enum TaskKind {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
-        COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, PODCAST_TAG
+        COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, PODCAST_TAG,
+        DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,
-     *  sauf l'exception Enregistrer/Tagger gérée à part dans conflictsWith(). */
+     *  sauf l'exception Enregistrer/Tagger gérée à part dans conflictsWith(). DUPLICATE_DETECT
+     *  n'écrit rien elle-même (voir DuplicateDetector/DuplicatesDialog), mais rejoint ce groupe
+     *  pour la même raison que COMPILATION_CLUSTER : le vrai risque est la suppression/déplacement
+     *  fait par l'utilisateur juste après (DuplicatesDialog), pendant qu'un autre worker écrirait
+     *  encore sur les mêmes fichiers — d'où l'exclusion mutuelle dès la phase de détection plutôt
+     *  qu'au moment du clic sur "Supprimer". */
     private static final Set<TaskKind> LIBRARY_WRITE = EnumSet.of(
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
-            TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG);
+            TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
+            TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP);
 
     public static final class TaskHandle {
         private final TaskKind kind;
@@ -67,8 +74,26 @@ public final class WorkerHub {
 
         /** Toujours passer par ici, jamais worker.cancel(true) en direct : cancelAction est le
          *  stopNow()/cancel(bool) propre à chaque worker (voir SaveWorker.stopNow() et pareil
-         *  ailleurs) — un Future.cancel() nu n'interromprait pas leur pool interne. */
-        public void cancel() { cancelAction.run(); }
+         *  ailleurs) — un Future.cancel() nu n'interromprait pas leur pool interne.
+         *
+         *  Libère aussi `kind` immédiatement, sans attendre le "state"==DONE du worker (voir le
+         *  listener posé dans submit()) : ce DONE peut ne jamais arriver si le thread reste
+         *  bloqué sur une E/S non interruptible (montage NAS/MergerFS qui décroche en pleine
+         *  écriture — déjà vu en prod, voir le commentaire de timeout dans
+         *  AudioTranscoder.transcode()) — shutdownNow()/cancel(true) n'y peuvent rien, ni ffmpeg
+         *  ni un simple Files.write() ne se laissent interrompre par un thread Java. Sans ce
+         *  retrait immédiat, "Arrêter" réinitialise l'UI (MainFrame.stopAll()) mais WorkerHub
+         *  continue de croire la tâche active pour toujours, bloquant tout Enregistrer/Tagger
+         *  ultérieur avec un message trompeur ("Enregistrement annulé"/"Taguage en cours") même
+         *  après un arrêt explicite — retour utilisateur après plusieurs jours d'utilisation
+         *  continue. Un thread zombie ainsi abandonné reste borné à `batch.threads` fichiers déjà
+         *  en cours au moment du clic (le pool est shutdownNow() juste avant, donc rien d'autre
+         *  ne démarre) — même risque déjà accepté côté UI, qui remet ces mêmes entrées PROCESSING
+         *  à PENDING sans attendre ces threads non plus (voir MainFrame.stopAll()). */
+        public void cancel() {
+            cancelAction.run();
+            WorkerHub.get().active.remove(kind, this);
+        }
     }
 
     private static final WorkerHub INSTANCE = new WorkerHub();
@@ -159,6 +184,34 @@ public final class WorkerHub {
         if (a == b) return true;
         if ((a == TaskKind.LISTENBRAINZ_SYNC && b == TaskKind.TAGGING)
                 || (a == TaskKind.TAGGING && b == TaskKind.LISTENBRAINZ_SYNC)) return true;
+        // LASTFM_SYNC (LastFmSyncWorker) : même raison que LISTENBRAINZ_SYNC juste au-dessus, même
+        // forme d'écriture (writer.write() sur les fichiers déjà TAGGED du tableau).
+        if ((a == TaskKind.LASTFM_SYNC && b == TaskKind.TAGGING)
+                || (a == TaskKind.TAGGING && b == TaskKind.LASTFM_SYNC)) return true;
+        // Recherche de compilation (CompilationClusterWorker) : ne fait QUE chercher des
+        // correspondances et les remonter pour revue utilisateur (CompilationMatchDialog) — n'écrit
+        // RIEN sur le disque ni ne mute aucun FileEntry pendant cette passe (voir sa Javadoc), et
+        // ne regarde que les fichiers déjà TAGUÉS, jamais les PENDING/PROCESSING que Tagger traite
+        // — ensembles disjoints, même exception que Enregistrer/Tagger juste en dessous. Débloqué
+        // le 2026-07-28 après un retour utilisateur ("ça bloque le taguage pour rien").
+        if ((a == TaskKind.TAGGING && b == TaskKind.COMPILATION_CLUSTER)
+                || (a == TaskKind.COMPILATION_CLUSTER && b == TaskKind.TAGGING)) return false;
+        // INFO_COMPLETER (InfoCompleterWorker, "▶ COMPLÉTER") : ne cible QUE les fichiers déjà
+        // status==TAGGED||IDENTIFIED (autoCompleteIncomplete(), snapshot figé passé au constructeur,
+        // jamais de relecture live de tableModel) — disjoint par construction de la cible de Tagger
+        // (PENDING/SKIPPED/ERROR), même exception que Enregistrer/Tagger juste au-dessus. SANS ce
+        // correctif : une passe de complétion sur plusieurs milliers de fichiers déjà tagués (réseau,
+        // peut prendre des heures) affamait indéfiniment le taguage de nouveaux fichiers — la boucle
+        // de relance automatique (scheduleAutoTaggingFollowUp) se contentait de se reprogrammer en
+        // silence sans jamais aboutir, sans même prévenir l'utilisateur — repéré en direct
+        // (2026-08-13) : 3971 fichiers PENDING jamais repris après 2h+ de complétion ininterrompue.
+        // ALBUM_COMPLETION (différent d'INFO_COMPLETER malgré le nom proche) reste volontairement
+        // EXCLU de cette exception : il pioche AUSSI dans les candidats SKIPPED/PENDING en lecture
+        // live (AlbumCompletionWorker.doInBackground()), un vrai chevauchement avec Tagger sans
+        // verrou croisé — le débloquer causerait une vraie course de données (perte de mise à jour),
+        // pas juste résoudre la famine.
+        if ((a == TaskKind.TAGGING && b == TaskKind.INFO_COMPLETER)
+                || (a == TaskKind.INFO_COMPLETER && b == TaskKind.TAGGING)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction
@@ -191,8 +244,17 @@ public final class WorkerHub {
         }
     }
 
+    // 900s (15 min) par défaut jusqu'ici — trop agressif en pratique : constaté en direct sur un lot
+    // de 1252 fichiers "Enregistrer tout", CROSS_DEVICE_COPY_LIMIT (voir FileRenamer) sérialise les
+    // déplacements cross-device à 1 seul à la fois pour ménager un disque mécanique/USB de
+    // destination — un fichier peut légitimement attendre son tour plus de 15 minutes derrière des
+    // centaines d'autres. Ce délai déclenchait alors pool.shutdownNow(), qui interrompt TOUS les
+    // threads en cours (pas seulement celui jugé "bloqué"), causant une cascade de "Déplacement
+    // cross-device interrompu" sur des fichiers qui progressaient normalement. Relevé à 6h : reste
+    // un filet de sécurité contre un VRAI blocage infini (appel réseau/sous-processus sans propre
+    // timeout), sans jamais confondre ça avec une file d'attente longue mais bornée.
     public static long defaultFutureTimeoutSec() {
-        return Config.get().num("worker.future_timeout_sec", 900);
+        return Config.get().num("worker.future_timeout_sec", 21600);
     }
 
     private static void log(String msg) {

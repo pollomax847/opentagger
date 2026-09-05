@@ -1,5 +1,6 @@
 package com.opentagger.ui;
 
+import com.opentagger.FileRenamer;
 import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 import com.opentagger.ui.DuplicateDetector.DuplicateGroup;
@@ -8,9 +9,12 @@ import javax.swing.*;
 import javax.swing.border.*;
 import java.awt.*;
 import java.io.File;
+import java.nio.file.Path;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Dialogue de gestion des doublons.
@@ -31,15 +35,41 @@ public class DuplicatesDialog extends JDialog {
 
     private final FileTableModel        tableModel;
     private final List<DuplicateGroup>  groups;
+    /** Meilleur fichier de chaque groupe, précalculé en arrière-plan avant l'ouverture du dialogue
+     *  (voir DuplicateDetector.computeBestMap) — ne JAMAIS rappeler bestInGroup() depuis l'EDT ici,
+     *  c'est justement ce qui gelait l'appli (E/S disque par fichier .m4a, répétée par groupe). */
+    private final Map<DuplicateGroup, FileEntry> bestByGroup;
+    /** Taille de chaque fichier (-1 si absent), déjà calculée en arrière-plan (voir
+     *  DuplicateDetector.computeSizes()) — ne JAMAIS appeler File.exists()/length() ici, c'est
+     *  justement ce qui gelait l'appli pendant des heures (des milliers d'E/S disque directement
+     *  dans le constructeur, donc sur l'EDT) — repéré en direct 2026-08-29. */
+    private final Map<FileEntry, Long> sizesByFile;
     /** Correspondance parallèle : allBoxes[i] ↔ allEntries[i] */
     private final List<JCheckBox>  allBoxes   = new ArrayList<>();
     private final List<FileEntry>  allEntries = new ArrayList<>();
     private JCheckBox chkCleanDirs;
+    /** Journal principal (panneau du bas) et barre de progression (bas-droite) de MainFrame —
+     *  avant ce correctif, suppression/déplacement de doublons n'écrivaient RIEN dans le journal
+     *  visible pendant l'opération (seulement un résumé dans le log fichier via LOG.info(), jamais
+     *  affiché à l'écran) et n'avançaient aucune barre de progression, contrairement à
+     *  renommage/déplacement/groupement par compilations qui font tous les deux. Retour
+     *  utilisateur (2026-08-10). Appelés directement depuis doInBackground() (pas via publish()) —
+     *  même convention déjà utilisée par CompilationClusterWorker pour logLine. */
+    private final java.util.function.BiConsumer<String, FileEntry.Status> journalLine;
+    private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
-    public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups, FileTableModel tableModel) {
+    public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups,
+                             Map<DuplicateGroup, FileEntry> bestByGroup, Map<FileEntry, Long> sizesByFile,
+                             FileTableModel tableModel,
+                             java.util.function.BiConsumer<String, FileEntry.Status> journalLine,
+                             java.util.function.BiConsumer<Integer, Integer> onProgress) {
         super(owner, I18n.t("Doublons détectés — %d groupe(s)", groups.size()), true);
-        this.groups     = groups;
-        this.tableModel = tableModel;
+        this.groups      = groups;
+        this.bestByGroup = bestByGroup;
+        this.sizesByFile = sizesByFile;
+        this.tableModel  = tableModel;
+        this.journalLine = journalLine;
+        this.onProgress  = onProgress;
         setSize(900, 600);
         setMinimumSize(new Dimension(660, 400));
         setLocationRelativeTo(owner);
@@ -80,7 +110,7 @@ public class DuplicatesDialog extends JDialog {
     }
 
     private JPanel buildGroup(DuplicateGroup group) {
-        FileEntry best   = DuplicateDetector.bestInGroup(group.files());
+        FileEntry best   = bestByGroup.get(group);
         String    label  = DuplicateDetector.groupLabel(group);
         Color     badgeColor = switch (group.confidence()) {
             case MBID_EXACT        -> new Color(0x1b5e20); // vert foncé
@@ -121,7 +151,8 @@ public class DuplicatesDialog extends JDialog {
             allEntries.add(e);
 
             File   f      = e.currentPath != null ? e.currentPath.toFile() : e.file;
-            long   sizeKb = f.exists() ? f.length() / 1024 : -1;
+            Long   sizeB  = sizesByFile.get(e);
+            long   sizeKb = (sizeB != null && sizeB >= 0) ? sizeB / 1024 : -1;
             String ext    = ext(f.getName()).toUpperCase();
             String sz     = sizeKb >= 1024
                 ? I18n.t("%s Mo", SZ.format(sizeKb / 1024.0))
@@ -225,7 +256,7 @@ public class DuplicatesDialog extends JDialog {
         // Pour chaque groupe : cocher tous SAUF le meilleur
         int idx = 0;
         for (DuplicateGroup group : groups) {
-            FileEntry best = DuplicateDetector.bestInGroup(group.files());
+            FileEntry best = bestByGroup.get(group);
             for (FileEntry e : group.files()) {
                 if (e != best) allBoxes.get(idx).setSelected(true);
                 idx++;
@@ -285,22 +316,37 @@ public class DuplicatesDialog extends JDialog {
             @Override protected Void doInBackground() {
                 java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
                 trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
-                List<File> deletedParents = new ArrayList<>();
+                // Map plutôt que List : associe chaque dossier parent à la racine de scan du
+                // fichier qui s'y trouvait, pour borner deleteEmptyAncestors() (voir plus bas —
+                // même raison que MainFrame.buildRenameJob(), remonter sans borne peut geler
+                // l'appli sur une bibliothèque multi-racines).
+                Map<File, Path> deletedParents = new LinkedHashMap<>();
+                int processed = 0;
                 for (FileEntry e : toDelete) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
                     boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    processed++;
+                    if (onProgress != null) onProgress.accept(processed, toDelete.size());
                     if (moved) {
                         publish(e);
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  🗑 %s → corbeille (doublon)", f.getName()), FileEntry.Status.TAGGED);
                         if (chkCleanDirs.isSelected() && f.getParentFile() != null)
-                            deletedParents.add(f.getParentFile());
+                            deletedParents.put(f.getParentFile(), e.scanRoot);
                         deleted++;
                     } else {
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  ✗ %s → échec de suppression", f.getName()), FileEntry.Status.ERROR);
                         errors++;
                     }
                 }
-                // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés
+                // Nettoyer les dossiers vides remontés depuis les parents des fichiers supprimés —
+                // même logique que FileRenamer utilise déjà après un renommage (cover.jpg/log
+                // opentagger_*.log/résidu AppleDouble laissés derrière comptent comme "vide", pas
+                // seulement un dossier littéralement sans aucun fichier — voir isDeletableLeftover).
                 if (chkCleanDirs.isSelected())
-                    for (File dir : deletedParents) dirsRemoved += cleanEmptyAncestors(dir);
+                    for (Map.Entry<File, Path> pe : deletedParents.entrySet())
+                        dirsRemoved += FileRenamer.deleteEmptyAncestors(pe.getKey().toPath(), pe.getValue());
                 return null;
             }
 
@@ -370,9 +416,12 @@ public class DuplicatesDialog extends JDialog {
             int moved = 0, errors = 0, dirsRemoved = 0;
 
             @Override protected Void doInBackground() {
-                List<File> oldParents = new ArrayList<>();
+                Map<File, Path> oldParents = new LinkedHashMap<>();
+                int processed = 0;
                 for (FileEntry e : toMove) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                    processed++;
+                    if (onProgress != null) onProgress.accept(processed, toMove.size());
                     try {
                         java.nio.file.Path srcPath = f.toPath();
                         java.nio.file.Path targetDir = srcPath.getParent().resolve("Doublons");
@@ -384,17 +433,25 @@ public class DuplicatesDialog extends JDialog {
                         for (int i = 1; java.nio.file.Files.exists(dest); i++)
                             dest = targetDir.resolve(stem + "_" + i + ext);
                         java.nio.file.Files.move(srcPath, dest);
+                        com.opentagger.PlaylistSync.onFileMoved(srcPath, dest);
+                        com.opentagger.ITunesXmlSyncQueue.onFileMoved(srcPath, dest);
                         e.currentPath = dest;
                         publish(e);
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  📦 %s → Doublons/ (doublon)", f.getName()), FileEntry.Status.TAGGED);
                         if (chkCleanDirs.isSelected() && f.getParentFile() != null)
-                            oldParents.add(f.getParentFile());
+                            oldParents.put(f.getParentFile(), e.scanRoot);
                         moved++;
                     } catch (Exception ex) {
+                        if (journalLine != null) journalLine.accept(I18n.t(
+                            "  ✗ %s → échec du déplacement : %s", f.getName(), ex.getMessage()), FileEntry.Status.ERROR);
                         errors++;
                     }
                 }
+                // Même logique que deleteSelected() ci-dessus — voir son commentaire.
                 if (chkCleanDirs.isSelected())
-                    for (File dir : oldParents) dirsRemoved += cleanEmptyAncestors(dir);
+                    for (Map.Entry<File, Path> pe : oldParents.entrySet())
+                        dirsRemoved += FileRenamer.deleteEmptyAncestors(pe.getKey().toPath(), pe.getValue());
                 return null;
             }
 
@@ -418,22 +475,6 @@ public class DuplicatesDialog extends JDialog {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Remonte les dossiers parents et supprime ceux qui sont vides. Retourne le nombre supprimé. */
-    private static int cleanEmptyAncestors(File dir) {
-        int count = 0;
-        while (dir != null && dir.isDirectory()) {
-            String[] contents = dir.list();
-            if (contents != null && contents.length == 0) {
-                if (dir.delete()) count++;
-                else break;
-                dir = dir.getParentFile();
-            } else {
-                break;
-            }
-        }
-        return count;
-    }
 
     private static String ext(String name) {
         int i = name.lastIndexOf('.');

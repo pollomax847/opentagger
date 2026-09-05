@@ -18,6 +18,13 @@ public class TagInfo {
     // resté invisible dans le tableau sans cette colonne.
     public int    durationSec         = 0;
 
+    // Durée déclarée par MusicBrainz pour l'enregistrement identifié (champ "length", ms → sec) —
+    // PAS un tag non plus, jamais écrit dans le fichier (TagWriter ne mappe que des FieldKey
+    // explicites). Sert uniquement à la détection d'incohérence (voir TaggingWorker.
+    // isDurationMismatch()) : un fichier bien plus court que ce que MusicBrainz annonce pour ce
+    // titre suggère un rip tronqué ou une mauvaise identification. 0 = non renseigné par MB.
+    public int    mbDurationSec       = 0;
+
     // ── Standard ────────────────────────────────────────────────────────────
     public String title               = "";
     public String artist              = "";
@@ -144,7 +151,9 @@ public class TagInfo {
     public String shazamCoverUrl      = "";
 
     // ── IDs & identifiants ───────────────────────────────────────────────────
-    public String comment             = "";    // MB disambiguation
+    // Désambiguïsation MB, description de podcast, ou tag COMMENT déjà présent dans le fichier —
+    // affiché/éditable dans DetailPanel (onglet Général).
+    public String comment             = "";
     public String isrc                = "";
     public String amazonId            = "";
     public String discogsId           = "";
@@ -153,6 +162,21 @@ public class TagInfo {
     public String roonTrackTag        = "";
     public String acoustidId          = "";
     public String acoustidFingerprint = "";
+    // Score de confiance AcoustID (0.0-1.0) du candidat ayant produit ce résultat — PAS un tag
+    // fichier (aucun FieldKey, jamais écrit sur disque), seulement transitoire en mémoire pour que
+    // TaggingWorker.acoustIdResultPlausible() puisse faire confiance à un match très fort même s'il
+    // ne ressemble pas aux tags déjà présents (qui peuvent eux-mêmes être faux à la source — voir
+    // AcoustIdClient.fetchBestFromMusicBrainz(), qui calculait déjà ce score puis le jetait avant
+    // ce correctif, 2026-08-09).
+    public double acoustidConfidence  = 0;
+
+    // Marqueur "déjà tagué par OpenTagger" écrit directement dans le fichier (tag custom
+    // OT_TAGGEDDATE, date ISO — voir TagWriter), en plus du suivi par MetadataCache (SQLite
+    // local). Portable et lisible par n'importe quel outil, contrairement au cache — utile si le
+    // cache est perdu/corrompu ou si le fichier est déplacé hors du suivi de l'appli (voir la
+    // fragilité déjà rencontrée sur file_history après un rename externe). Non éditable : réécrit
+    // à chaque enregistrement avec la date du jour, jamais lu depuis un champ UI.
+    public String taggedDate          = "";
 
     // Source de l'identification (MetadataCache.SOURCE_SONGREC/ACOUSTID/MBID/TEXT) — bookkeeping
     // interne, JAMAIS écrit dans le fichier (TagWriter ne mappe que des FieldKey explicites, pas
@@ -170,9 +194,20 @@ public class TagInfo {
     public String catalogNo           = "";
     public String releaseType         = "";    // Album, Single, EP, Broadcast…
     public String originalYear        = "";    // Première année de parution
+    // Label discographique + statut de parution + support physique/numérique — présents dans la
+    // réponse MB (label-info[].label.name, status, media[].format) mais jamais extraits ni écrits
+    // avant ce correctif : comparé côté à côté avec Picard sur un même fichier, ces 3 champs (plus
+    // barcode/catalogNo ci-dessus, qui existaient déjà mais n'étaient jamais renseignés) restaient
+    // vides dans OpenTagger alors que MusicBrainz les fournit pour la quasi-totalité des releases.
+    public String label               = "";    // Label discographique
+    public String releaseStatus       = "";    // Official, Bootleg, Promotion…
+    public String media               = "";    // CD, Digital Media, Vinyl…
 
     // ── IDs MusicBrainz ──────────────────────────────────────────────────────
     public String artistMbid          = "";
+    public String albumArtistMbid     = "";    // Id MusicBrainz de l'ARTISTE DE LA PARUTION — distinct
+                                                // d'artistMbid (l'artiste de la PISTE) : les deux peuvent
+                                                // diverger (piste avec featuring, compilation Various Artists…).
     public String releaseGroupMbid    = "";
     public String releaseMbid         = "";
     public String recordingMbid       = "";
@@ -186,6 +221,28 @@ public class TagInfo {
 
     // ── Statistiques d'écoute ────────────────────────────────────────────────
     public String listenbrainzPlayCount = "";  // nombre d'écoutes ListenBrainz (TXXX:LISTENBRAINZ_PLAYCOUNT)
+    public String lastfmPlayCount       = "";  // nombre d'écoutes Last.fm (TXXX:LASTFM_PLAYCOUNT)
+
+    /** Vrai si `s` ressemble à un placeholder générique plutôt qu'à une vraie valeur d'identité
+     *  (artiste/titre/album) — trop court pour être un nom réel ("1", "0", "-"), ou un des libellés
+     *  par défaut classiques d'un encodeur/outil de rip ("Unknown Artist", "Various", "Track 01"...).
+     *  Volontairement plus restreint que TaggingWorker.isGenericTag() (motifs de nom de fichier
+     *  hors de propos ici) — utilisé par TagWriter.mergeWithExisting() et InfoCompleterWorker pour
+     *  ne jamais faire confiance/perpétuer une valeur déjà cassée lue sur un fichier existant.
+     *  Repéré en direct (2026-08-13) : TPE1=ARTIST="1" sur un fichier par ailleurs parfaitement
+     *  identifié (TPE2/genre/ISRC/sort-names tous corrects) — recopié tel quel par
+     *  InfoCompleterWorker faute de validation, jamais corrigé depuis. */
+    public static boolean isGenericIdentityValue(String s) {
+        if (s == null) return true;
+        String low = s.trim().toLowerCase();
+        // <= 1 caractère (pas 2) : "U2" est un vrai nom d'artiste à 2 caractères, ne pas le
+        // rejeter sur la seule longueur. En revanche un très court nombre PUR ("1", "01") n'est
+        // quasiment jamais un vrai nom — "311" (3 chiffres) reste accepté, lui.
+        if (low.length() <= 1) return true;
+        if (low.length() <= 2 && low.matches("\\d+")) return true;
+        return low.matches("unknown artist|unknown|artist|artiste|various|various artists|"
+                          + "no artist|inconnu|track \\d+|piste \\d+|untitled|titre|title");
+    }
 
     /** Copie superficielle — tous les champs String sont indépendants (immutables). */
     public TagInfo copy() {
@@ -193,6 +250,8 @@ public class TagInfo {
             TagInfo c = new TagInfo();
             c.score = this.score;
             c.durationSec = this.durationSec;
+            c.mbDurationSec = this.mbDurationSec;
+            c.acoustidConfidence = this.acoustidConfidence;
             for (java.lang.reflect.Field f : TagInfo.class.getFields()) {
                 if (f.getType() == String.class) f.set(c, f.get(this));
             }

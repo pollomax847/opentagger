@@ -8,6 +8,7 @@ import com.opentagger.ui.CompilationClusterWorker.CompilationMatch;
 
 import javax.swing.*;
 import javax.swing.border.*;
+import javax.swing.table.*;
 import java.awt.*;
 import java.io.File;
 import java.util.ArrayList;
@@ -28,23 +29,45 @@ public class CompilationMatchDialog extends JDialog {
 
     private final FileTableModel        tableModel;
     private final List<CompilationMatch> matches;
-    /** Correspondance parallèle : boxes[i] ↔ matches.get(i) — même motif que DuplicatesDialog. */
-    private final List<JCheckBox> boxes = new ArrayList<>();
+    /** Correspondance parallèle : selected[i] ↔ matches.get(i) — état des cases à cocher, porté par
+     *  le TableModel plutôt que par un composant Swing par ligne (voir buildTable()). */
+    private final boolean[] selected;
+    private AbstractTableModel matchTableModel;
 
     public CompilationMatchDialog(Frame owner, List<CompilationMatch> matches, FileTableModel tableModel) {
         super(owner, I18n.t("Compilations trouvées — %d correspondance(s)", matches.size()), true);
         this.matches    = matches;
         this.tableModel = tableModel;
+        this.selected   = new boolean[matches.size()];
         setSize(760, 520);
         setMinimumSize(new Dimension(560, 320));
         setLocationRelativeTo(owner);
 
-        JScrollPane scroll = new JScrollPane(buildContent());
+        // JTable (rendu virtualisé — seules les lignes visibles ont un composant réel) plutôt qu'un
+        // JCheckBox + JPanel construits À LA MAIN pour CHAQUE correspondance et empilés dans un seul
+        // conteneur GridBagLayout : viable pour quelques dizaines de lignes, mais avec le mode "en
+        // attente jusqu'à la fin de session" (deferDialog, voir MainFrame.flushPendingCompilationMatches)
+        // qui peut accumuler des milliers de correspondances sur une session d'endurance de plusieurs
+        // heures, l'ouverture de cette fenêtre gelait l'EDT plusieurs minutes dans Component.
+        // addNotify()/updateZOrder() — la mise en page Swing d'un conteneur à des milliers d'enfants
+        // directs dégénère. Repéré en direct (2026-08-20) : appli complètement figée à l'ouverture,
+        // même le propre filet de sécurité SelfHealthMonitor (qui tourne sur ce même thread EDT) ne
+        // pouvait pas intervenir — seul un kill -9 manuel a permis de récupérer.
+        JPanel top = new JPanel(new BorderLayout());
+        top.setBorder(new EmptyBorder(10, 14, 0, 14));
+        JLabel intro = new JLabel(I18n.t("<html><b>Cochez les morceaux à relier à leur compilation.</b> "
+            + "Rien n'est écrit tant que vous ne cliquez pas sur \"Appliquer\".</html>"));
+        intro.putClientProperty("FlatLaf.style", "foreground: #cc7744; font: 11 $defaultFont");
+        intro.setBorder(new EmptyBorder(0, 0, 10, 0));
+        top.add(intro, BorderLayout.NORTH);
+
+        JScrollPane scroll = new JScrollPane(buildTable());
         scroll.getVerticalScrollBar().setUnitIncrement(18);
         scroll.setBorder(null);
+        top.add(scroll, BorderLayout.CENTER);
 
         getContentPane().setLayout(new BorderLayout());
-        getContentPane().add(scroll,        BorderLayout.CENTER);
+        getContentPane().add(top,           BorderLayout.CENTER);
         getContentPane().add(buildFooter(), BorderLayout.SOUTH);
 
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
@@ -53,49 +76,53 @@ public class CompilationMatchDialog extends JDialog {
                 new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
     }
 
-    private JPanel buildContent() {
-        JPanel outer = new JPanel();
-        outer.setLayout(new BoxLayout(outer, BoxLayout.Y_AXIS));
-        outer.setBorder(new EmptyBorder(10, 14, 10, 14));
+    private JTable buildTable() {
+        matchTableModel = new AbstractTableModel() {
+            @Override public int getRowCount() { return matches.size(); }
+            @Override public int getColumnCount() { return 2; }
+            @Override public String getColumnName(int col) {
+                return col == 0 ? "" : I18n.t("Piste  →  compilation");
+            }
+            @Override public Class<?> getColumnClass(int col) { return col == 0 ? Boolean.class : String.class; }
+            @Override public boolean isCellEditable(int row, int col) { return col == 0; }
+            @Override public void setValueAt(Object v, int row, int col) {
+                if (col != 0) return;
+                selected[row] = Boolean.TRUE.equals(v);
+                fireTableCellUpdated(row, col);
+            }
+            @Override public Object getValueAt(int row, int col) {
+                if (col == 0) return selected[row];
+                CompilationMatch m = matches.get(row);
+                String currentAlbum = m.entry().result != null && !m.entry().result.album.isBlank()
+                        ? m.entry().result.album : I18n.t("(album inconnu)");
+                return "<html><b>" + escapeHtml(m.entry().filename()) + "</b><br>"
+                        + "<span style='color:#a5d6a7'>" + escapeHtml(currentAlbum) + "  →  "
+                        + escapeHtml(m.matchedTitle()) + "</span></html>";
+            }
+        };
+        JTable t = new JTable(matchTableModel);
+        t.setRowHeight(38);
+        t.setShowGrid(false);
+        t.setFillsViewportHeight(true);
+        t.getColumnModel().getColumn(0).setMaxWidth(30);
+        t.getColumnModel().getColumn(0).setMinWidth(30);
+        // Tooltip = chemin complet, même info que le lblFile.setToolTipText() de la version
+        // précédente — un seul renderer partagé par colonne (JTable), pas un composant par ligne.
+        t.getColumnModel().getColumn(1).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable tbl, Object v, boolean sel,
+                    boolean focus, int row, int col) {
+                Component c = super.getTableCellRendererComponent(tbl, v, sel, focus, row, col);
+                File fichier = matches.get(row).entry().currentPath != null
+                        ? matches.get(row).entry().currentPath.toFile() : matches.get(row).entry().file;
+                setToolTipText(fichier.getAbsolutePath());
+                return c;
+            }
+        });
+        return t;
+    }
 
-        JLabel intro = new JLabel(I18n.t("<html><b>Cochez les morceaux à relier à leur compilation.</b> "
-            + "Rien n'est écrit tant que vous ne cliquez pas sur \"Appliquer\".</html>"));
-        intro.putClientProperty("FlatLaf.style", "foreground: #cc7744; font: 11 $defaultFont");
-        intro.setBorder(new EmptyBorder(0, 0, 10, 0));
-        outer.add(intro);
-
-        JPanel rows = new JPanel(new GridBagLayout());
-        int rowIdx = 0;
-        for (CompilationMatch m : matches) {
-            JCheckBox cb = new JCheckBox();
-            cb.setSelected(false); // jamais pré-coché — même convention que DuplicatesDialog
-            boxes.add(cb);
-
-            File fichier = m.entry().currentPath != null ? m.entry().currentPath.toFile() : m.entry().file;
-
-            JLabel lblFile = new JLabel(m.entry().filename());
-            lblFile.putClientProperty("FlatLaf.style", "font: bold 11 $defaultFont");
-            lblFile.setToolTipText(fichier.getAbsolutePath());
-
-            String currentAlbum = m.entry().result != null && !m.entry().result.album.isBlank()
-                    ? m.entry().result.album : I18n.t("(album inconnu)");
-            JLabel lblChange = new JLabel(currentAlbum + "  →  " + m.matchedTitle());
-            lblChange.putClientProperty("FlatLaf.style", "foreground: #a5d6a7; font: 11 $defaultFont");
-
-            GridBagConstraints gc = new GridBagConstraints();
-            gc.gridy = rowIdx++; gc.insets = new Insets(4, 0, 4, 8);
-            gc.gridx = 0; gc.weightx = 0; gc.fill = GridBagConstraints.NONE;
-            rows.add(cb, gc);
-            gc.gridx = 1; gc.weightx = 1; gc.fill = GridBagConstraints.HORIZONTAL; gc.gridwidth = 1;
-            gc.anchor = GridBagConstraints.WEST;
-            JPanel textCol = new JPanel();
-            textCol.setLayout(new BoxLayout(textCol, BoxLayout.Y_AXIS));
-            textCol.add(lblFile);
-            textCol.add(lblChange);
-            rows.add(textCol, gc);
-        }
-        outer.add(rows);
-        return outer;
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private JPanel buildFooter() {
@@ -105,8 +132,8 @@ public class CompilationMatchDialog extends JDialog {
         JButton btnClose = new JButton(I18n.t("Fermer"));
         btnApply.putClientProperty("FlatLaf.style", "background: #1b5e20");
 
-        btnAll  .addActionListener(e -> boxes.forEach(cb -> cb.setSelected(true)));
-        btnNone .addActionListener(e -> boxes.forEach(cb -> cb.setSelected(false)));
+        btnAll  .addActionListener(e -> { java.util.Arrays.fill(selected, true);  matchTableModel.fireTableDataChanged(); });
+        btnNone .addActionListener(e -> { java.util.Arrays.fill(selected, false); matchTableModel.fireTableDataChanged(); });
         btnApply.addActionListener(e -> applySelected());
         btnClose.addActionListener(e -> dispose());
 
@@ -136,8 +163,8 @@ public class CompilationMatchDialog extends JDialog {
 
     private void applySelected() {
         List<CompilationMatch> toApply = new ArrayList<>();
-        for (int i = 0; i < boxes.size(); i++) {
-            if (boxes.get(i).isSelected()) toApply.add(matches.get(i));
+        for (int i = 0; i < matches.size(); i++) {
+            if (selected[i]) toApply.add(matches.get(i));
         }
         if (toApply.isEmpty()) {
             JOptionPane.showMessageDialog(this,

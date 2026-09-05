@@ -91,15 +91,26 @@ public class LocalCorrector {
     // ── 2. Gestion du "feat." (scripts4 de scripter.properties) ────────────────
     // "Track Artist set to Album Artist and move any additional artists into title"
 
+    // Reste après le préfixe albumArtist qui indique vraiment un "feat." (le cas visé ci-dessous,
+    // "Khaled feat. Soprano") — PAS une collaboration à deux artistes crédités (" & ", " x ",
+    // " and "…), qui perdrait silencieusement le second artiste sans le récupérer nulle part (le
+    // nettoyage du titre juste en dessous ne reconnaît que feat./ft./featuring, pas "&"). Trouvé en
+    // direct (2026-08-13) sur "Riton & RAYE" (albumArtist "Riton") collapsé en "Riton" seul —
+    // startsWith() suffisait à déclencher le collapse pour N'IMPORTE QUEL second artiste, pas
+    // seulement un featuring.
+    private static final Pattern FEAT_REMAINDER = Pattern.compile(
+            "^\\s*[\\(\\[]?\\s*(feat\\.?|ft\\.?|featuring)\\b.*", Pattern.CASE_INSENSITIVE);
+
     public void correctFeaturedArtist(TagInfo info) {
         // Script 4 de Jaikoz : remplace l'artiste piste par l'artiste album UNIQUEMENT
-        // si l'artiste piste COMMENCE PAR l'artiste album (cas "Khaled feat. Soprano").
-        // Si les deux artistes sont complètement différents (compilation, split),
-        // on ne touche PAS à l'artiste — évite les remplacements erronés.
+        // si l'artiste piste COMMENCE PAR l'artiste album ET que le reste est un vrai "feat."
+        // (cas "Khaled feat. Soprano") — voir FEAT_REMAINDER ci-dessus pour pourquoi ce n'est plus
+        // un simple startsWith().
         if (!info.albumArtist.isBlank()
                 && !info.albumArtist.equalsIgnoreCase("Various Artists")
                 && !info.artist.equalsIgnoreCase(info.albumArtist)
-                && info.artist.toLowerCase().startsWith(info.albumArtist.toLowerCase())) {
+                && info.artist.toLowerCase().startsWith(info.albumArtist.toLowerCase())
+                && FEAT_REMAINDER.matcher(info.artist.substring(info.albumArtist.length())).matches()) {
             info.artist = info.albumArtist;
         }
 
@@ -140,7 +151,12 @@ public class LocalCorrector {
             if (sb.length() > 0) sb.append(' ');
             // Premier mot toujours en majuscule, articles/prép en minuscule sinon
             if (i == 0 || !LOWER_WORDS.contains(w.toLowerCase())) {
-                sb.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1));
+                // Le reste du mot n'était jusqu'ici jamais remis en minuscule — un nom de fichier
+                // ripé tout en MAJUSCULES ("METALLICA - ENTER SANDMAN") ressortait tel quel
+                // (seule la 1re lettre changeait), alors que la branche LOWER_WORDS juste en
+                // dessous fait bien .toLowerCase() sur tout le mot : incohérence entre les deux
+                // branches, pas un choix voulu.
+                sb.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1).toLowerCase());
             } else {
                 sb.append(w.toLowerCase());
             }
@@ -169,12 +185,34 @@ public class LocalCorrector {
         for (String g : genreList) {
             if (g.equalsIgnoreCase(input)) return g;
         }
-        // Correspondance partielle
         String lower = input.toLowerCase();
+
+        // Correspondance par MOT ENTIER (ex. "Rock" dans "Classic Rock") plutôt que sous-chaîne
+        // brute : avant ce correctif, le premier match par ORDRE DU FICHIER l'emportait, donc
+        // "Rock" (absent tel quel de genrelist.txt) se normalisait silencieusement en "Acid Rock"
+        // (première entrée contenant la sous-chaîne "rock", sans rapport avec la proximité réelle
+        // du genre) — "Rockabilly" aurait même pu gagner avant "Classic Rock" pour la même raison.
+        // Parmi les entrées où `input` apparaît comme mot entier, on garde la plus courte (la plus
+        // proche d'une correspondance exacte) ; à égalité, l'ordre du fichier tranche (déterministe).
+        String bestWordMatch = null;
         for (String g : genreList) {
-            if (g.toLowerCase().contains(lower) || lower.contains(g.toLowerCase())) return g;
+            for (String token : g.toLowerCase().split("[^\\p{L}\\p{N}]+")) {
+                if (token.equals(lower) && (bestWordMatch == null || g.length() < bestWordMatch.length())) {
+                    bestWordMatch = g;
+                }
+            }
         }
-        return null;
+        if (bestWordMatch != null) return bestWordMatch;
+
+        // Repli final : sous-chaîne brute, mais la plus COURTE (la plus proche de l'input) au lieu
+        // de la première rencontrée dans le fichier.
+        String bestSubstring = null;
+        for (String g : genreList) {
+            if (g.toLowerCase().contains(lower) || lower.contains(g.toLowerCase())) {
+                if (bestSubstring == null || g.length() < bestSubstring.length()) bestSubstring = g;
+            }
+        }
+        return bestSubstring;
     }
 
     // ── 5. Détection musique classique ──────────────────────────────────────
@@ -231,7 +269,8 @@ public class LocalCorrector {
 
     private void loadGenreList() {
         try (InputStream in = getClass().getResourceAsStream("/genrelist.txt");
-             BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+             BufferedReader reader = new BufferedReader(
+                     new InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String genre = line.replace(";", "").trim();
@@ -241,11 +280,19 @@ public class LocalCorrector {
     }
 
     private void loadClassicalNames() {
-        // Charge uniquement les noms (pas les UUIDs) depuis classical_conductors.txt
-        // pour ne pas trop alourdir la mémoire (classical_composers.txt fait 450 KB)
-        for (String resource : List.of("/classical_conductors.txt")) {
+        // Les 3 fichiers (composers/conductors/people, format "MBID = Nom", hérités de SongKong/
+        // Jaikoz) sont déjà embarqués dans les ressources du jar depuis juin, mais seul
+        // conductors.txt (728 noms) était réellement chargé — composers.txt (7752 noms !) et
+        // people.txt (6105 noms) restaient inutilisés. Raison d'origine ("ne pas alourdir la
+        // mémoire, composers.txt fait 450 Ko") ne tient pas : ~850 Ko de texte brut cumulés →
+        // quelques Mo une fois en Set<String>, négligeable pour cette appli. Repéré en direct
+        // (2026-08-14) après que l'utilisateur a pointé ces fichiers dans l'install SongKong
+        // d'origine — détection classique bien plus large maintenant (composers.txt en particulier
+        // couvre nettement plus de noms que les seuls chefs d'orchestre).
+        for (String resource : List.of("/classical_composers.txt", "/classical_conductors.txt", "/classical_people.txt")) {
             try (InputStream in = getClass().getResourceAsStream(resource);
-                 BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+                 BufferedReader reader = new BufferedReader(
+                         new InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     int eq = line.indexOf('=');

@@ -95,6 +95,15 @@ public class PodcastDialog extends JDialog {
                 new AbstractAction() { @Override public void actionPerformed(ActionEvent e) { dispose(); } });
     }
 
+    /** Arrête le retry en file d'attente (queueTagWriteWhenFree()) s'il est encore actif — sinon un
+     *  Timer resterait à tourner toutes les 10s après la fermeture du dialogue, tentant d'écrire
+     *  sur des matches dont l'utilisateur a explicitement fermé la fenêtre. */
+    @Override
+    public void dispose() {
+        if (queuedRetryTimer != null) queuedRetryTimer.stop();
+        super.dispose();
+    }
+
     // ── Builders UI ───────────────────────────────────────────────────────────
 
     private JPanel buildContent() {
@@ -315,6 +324,10 @@ public class PodcastDialog extends JDialog {
         pack();
     }
 
+    // Retry en file d'attente (bouton "Non" ci-dessous) — champ pour pouvoir l'arrêter proprement
+    // si le dialogue est fermé avant qu'il ne se déclenche (voir wireEvents()/windowClosing).
+    private javax.swing.Timer queuedRetryTimer;
+
     private void onTag() {
         if (currentFeed == null || currentMatches.isEmpty()) return;
 
@@ -325,6 +338,51 @@ public class PodcastDialog extends JDialog {
             I18n.t("Confirmer le taguage"), JOptionPane.YES_NO_OPTION);
         if (ok != JOptionPane.YES_OPTION) return;
 
+        // Bug trouvé en direct (2026-08-15) : WorkerHub.submit() lève IllegalStateException si un
+        // taguage (ou autre tâche LIBRARY_WRITE conflictuelle) tourne déjà — appelé plus bas SANS
+        // vérifier blockerLabels() avant, contrairement à MainFrame.saveAll()/startTagging() qui
+        // suivent tous les deux ce garde-fou. Le conflit lui-même est légitime (mêmes fichiers
+        // PENDING/SKIPPED que le taguage principal peut traiter au même instant) — pas à supprimer,
+        // juste à ne plus planter dessus. Retour utilisateur (même jour) : proposer un vrai choix
+        // plutôt qu'un simple message d'échec — arrêter le taguage principal maintenant pour écrire
+        // tout de suite, ou mettre en file d'attente pour écrire automatiquement dès que le taguage
+        // principal se libère (le taguage sur cette bibliothèque dure des jours, sans ça l'écriture
+        // n'aurait jamais d'occasion réelle de partir).
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.PODCAST_TAG);
+        if (!blockers.isEmpty()) {
+            int choice = JOptionPane.showConfirmDialog(this,
+                I18n.t("Bloqué par : %s.\n\nArrêter cette tâche maintenant et écrire les tags "
+                     + "podcast tout de suite (Oui), ou mettre en file d'attente pour écrire "
+                     + "automatiquement dès qu'elle se termine (Non) ?", String.join(", ", blockers)),
+                I18n.t("Tâche en cours"), JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+            if (choice == JOptionPane.CLOSED_OPTION) return;
+            if (choice == JOptionPane.YES_OPTION) {
+                mainFrame.cancelBlockersFor(WorkerHub.TaskKind.PODCAST_TAG);
+                doTagWrite();
+            } else {
+                queueTagWriteWhenFree();
+            }
+            return;
+        }
+
+        doTagWrite();
+    }
+
+    /** Réessaie toutes les 10s tant qu'un blocker existe, écrit dès que ça se libère. Arrêté par
+     *  windowClosing (voir wireEvents()) si l'utilisateur ferme le dialogue avant. */
+    private void queueTagWriteWhenFree() {
+        setBusy(true, I18n.t("En file d'attente — écriture dès que possible…"));
+        btnTag.setEnabled(false);
+        if (queuedRetryTimer != null) queuedRetryTimer.stop();
+        queuedRetryTimer = new javax.swing.Timer(10_000, e -> {
+            if (!WorkerHub.get().blockerLabels(WorkerHub.TaskKind.PODCAST_TAG).isEmpty()) return;
+            queuedRetryTimer.stop();
+            doTagWrite();
+        });
+        queuedRetryTimer.start();
+    }
+
+    private void doTagWrite() {
         btnTag.setEnabled(false);
         setBusy(true, I18n.t("Taguage en cours…"));
 

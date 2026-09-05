@@ -15,6 +15,8 @@ import java.util.List;
 
 public class LastFmClient {
 
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(LastFmClient.class.getName());
     private static final String BASE_URL = "https://ws.audioscrobbler.com/2.0/";
 
     // Tags Last.fm classifiés comme "mood"
@@ -54,7 +56,7 @@ public class LastFmClient {
         for (GenreFilter.Candidate c : allTags)
             if (!isMoodTag(c.name().toLowerCase())) genreCandidates.add(c);
 
-        List<String> genres = GenreFilter.filter(genreCandidates, Config.get().num("lastfm.max_genres", 3));
+        List<String> genres = GenreFilter.filter(genreCandidates, Config.get().genreMaxCount());
         if (!genres.isEmpty()) info.genre = joinGenres(genres);
     }
 
@@ -193,12 +195,80 @@ public class LastFmClient {
                 .timeout(HttpTimeouts.apiCall())
                 .GET()
                 .build();
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return null;
+        HttpResponse<String> response = sendWithThrottleRetry(request);
+        if (response == null || response.statusCode() != 200) return null;
         JsonNode root = mapper.readTree(response.body());
         if (root.has("error")) return null;
         cache.putLookup(cacheKey, response.body());
         return root;
+    }
+
+    /**
+     * Avant ce correctif : un 429 (quota Last.fm dépassé) ou toute autre erreur HTTP se traduisait
+     * en simple `return null`, indiscernable dans les logs d'un "genre non trouvé" légitime. Une
+     * seule retentative après le délai Retry-After (5s à défaut) suffit — Last.fm n'est qu'un
+     * repli parmi d'autres dans TagEnrichment.enrichGenre, pas la source principale.
+     */
+    private HttpResponse<String> sendWithThrottleRetry(HttpRequest request) throws Exception {
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 429) {
+            long waitMs = 5000;
+            try {
+                waitMs = Long.parseLong(response.headers().firstValue("Retry-After").orElse("5")) * 1000L;
+            } catch (NumberFormatException ignored) {}
+            LOG.info("Last.fm 429 (quota dépassé) — nouvelle tentative dans " + (waitMs / 1000) + "s");
+            Thread.sleep(waitMs);
+            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+        if (response.statusCode() != 200)
+            LOG.warning("Last.fm HTTP " + response.statusCode() + " : " + request.uri());
+        return response;
+    }
+
+    /**
+     * Récupère le classement des pistes les plus écoutées par {@code username} (user.getTopTracks),
+     * jusqu'à {@code maxTracks} pistes (pagination automatique, 1000/page — plafond confirmé en
+     * direct sur ws.audioscrobbler.com le 2026-08-29). Même architecture que
+     * ListenBrainzClient.fetchTopRecordingCounts() (un seul fetch en masse plutôt qu'un appel par
+     * fichier) — voir LastFmSyncWorker, son seul appelant.
+     *
+     * @return map recordingMbid → nombre d'écoutes (les pistes sans MBID résolu côté Last.fm — assez
+     *         fréquent, la résolution dépend des tags du scrobble d'origine — sont ignorées, pas une
+     *         erreur : rien à quoi les rattacher côté fichiers déjà identifiés par MBID).
+     */
+    public java.util.Map<String, Integer> fetchTopTrackCounts(String username, int maxTracks) throws Exception {
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+        int perPage = 1000;
+        int page = 1;
+        while (counts.size() < maxTracks) {
+            int want = Math.min(perPage, maxTracks - counts.size());
+            String url = BASE_URL + "?method=user.gettoptracks&user=" + encode(username)
+                    + "&api_key=" + Config.get().lastfmKey() + "&format=json"
+                    + "&limit=" + want + "&page=" + page;
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", Config.get().userAgent())
+                    .timeout(HttpTimeouts.apiCall())
+                    .GET()
+                    .build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200)
+                throw new Exception("Last.fm HTTP " + response.statusCode() + " : " + response.body());
+
+            JsonNode tracks = mapper.readTree(response.body()).path("toptracks").path("track");
+            if (!tracks.isArray() || tracks.isEmpty()) break;
+
+            for (JsonNode t : tracks) {
+                String mbid = t.path("mbid").asText("").trim();
+                int    n    = t.path("playcount").asInt(0);
+                if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
+            }
+
+            if (tracks.size() < want) break; // dernière page (moins de résultats que demandé)
+            page++;
+        }
+        return counts;
     }
 
     private boolean isMoodTag(String t) {

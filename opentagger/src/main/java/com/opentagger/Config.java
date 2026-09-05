@@ -112,7 +112,18 @@ public class Config {
     public boolean updateCheckEnabled() { return bool("update.check_enabled", true); }
     public long    lastUpdateCheckMs()  { try { return Long.parseLong(str("update.last_check_ms", "0")); } catch (Exception e) { return 0; } }
     public void    setLastUpdateCheckMs(long ms) { set("update.last_check_ms", String.valueOf(ms)); }
-    public boolean useAcoustId()       { return bool("acoustid.use_acoustid", true); }
+    // "match.use_acoustid" est un ALIAS de "acoustid.use_acoustid" (même réglage, deux noms) —
+    // la clé "match.use_acoustid" existait dans settings.properties depuis longtemps SANS être lue
+    // par aucun code, purement décorative (source de confusion signalée par l'utilisateur,
+    // 2026-08-11 : "je ne suis pas sûr que l'AcoustID n'est pas utilisé de partout", en la voyant à
+    // false dans son fichier alors qu'AcoustID était bien actif). "acoustid.use_acoustid" reste la
+    // clé canonique et prioritaire si les deux sont présentes ; sinon la clé présente, quel que
+    // soit son nom, est respectée — pour qu'aucune des deux ne redevienne un piège silencieux.
+    public boolean useAcoustId() {
+        if (props.getProperty("acoustid.use_acoustid") != null) return bool("acoustid.use_acoustid", true);
+        if (props.getProperty("match.use_acoustid")    != null) return bool("match.use_acoustid",    true);
+        return true;
+    }
     public String acoustidKey()        { return str("acoustid.api_key"); }
     public String discogsKey()         { return str("discogs.consumer_key"); }
     public String discogsSecret()      { return str("discogs.consumer_secret"); }
@@ -125,8 +136,28 @@ public class Config {
     public double trackMatchingThreshold() { return dbl("match.track_matching_threshold", 0.4); }
     public int    mbResultsLimit()     { return num("musicbrainz.results_limit", 5); }
     public boolean mbOnlyOfficial()    { return bool("musicbrainz.only_official", true); }
+
+    // --- Serveur MusicBrainz personnalisé (miroir) --- la clé musicbrainz.server existait déjà
+    // dans settings.properties mais n'était en réalité JAMAIS lue par MusicBrainzClient (BASE_URL
+    // y était codé en dur sur musicbrainz.org) — corrigé pour permettre un vrai miroir tiers (ex.
+    // service payant type Headphones Indexer, musicbrainz.codeshy.com, qui élimine les erreurs 503
+    // de contention en heure de pointe). Authentification HTTP Basic optionnelle (vide = aucune,
+    // comme pour l'API publique). mbRateLimitMs() reste à 1100 par défaut (voir le commentaire
+    // MB_MIN_INTERVAL_MS dans MusicBrainzClient — NE JAMAIS descendre en dessous sur la vraie API
+    // publique musicbrainz.org, risque de bannissement IP) ; à réduire/désactiver UNIQUEMENT si le
+    // serveur configuré est un miroir tiers avec sa propre capacité, jamais sur l'API publique.
+    public String  mbServer()          { return str("musicbrainz.server", "https://musicbrainz.org/ws/2"); }
+    public String  mbAuthUser()        { return str("musicbrainz.auth_user", ""); }
+    public String  mbAuthPass()        { return str("musicbrainz.auth_pass", ""); }
+    public int     mbRateLimitMs()     { return num("musicbrainz.rate_limit_ms", 1100); }
     public String discogsGenreSource() { return str("discogs.genre_source", "style_then_genre"); }
-    public int    discogsMaxGenres()   { return num("discogs.max_genres", 3); }
+    // Réglage unique partagé par Discogs/Last.fm/MusicBrainz — avant ce correctif (2026-09-01,
+    // retour utilisateur "trop d'options"), 3 réglages séparés (discogs.max_genres,
+    // lastfm.max_genres, mb.max_genres) réglés à la même valeur (3) dans la quasi-totalité des
+    // cas réels : personne ne veut un plafond différent selon le fournisseur qui a trouvé le
+    // genre. Fusionnés en un seul, exposé une seule fois dans les Préférences (onglet "Filtre de
+    // genres", déjà partagé pour la liste d'exclusion — voir taGenresFilter).
+    public int genreMaxCount() { return num("genre.max_count", 3); }
     public boolean fanartEnabled()     { return bool("fanart.download_cover", true); }
     public boolean lastfmEnabled()     { return bool("lastfm.use_tags", true); }
     // URL officielle artiste + lien Wikipedia — appel Last.fm SÉPARÉ de celui du genre/mood
@@ -141,14 +172,84 @@ public class Config {
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
     public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
     public String libraryRoot()                    { return str ("rename.library_root",            ""); }
+    // Case à cocher UI qui grise/dégrise tfLibraryRoot dans SettingsDialog (voir bindGate()) —
+    // défaut true pour ne rien changer au comportement des utilisateurs ayant déjà configuré ce
+    // dossier avant l'ajout de cette case.
+    public boolean useLibraryRootEnabled()         { return bool("rename.use_library_root",       true); }
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
     public String  skippedMoveFolder()             { return str ("skipped.move_folder",              ""); }
+    // Déplacement dédié des fichiers dont la durée ne correspond pas à celle déclarée par
+    // MusicBrainz (rip tronqué/mauvais match probable) — indépendant du déplacement générique
+    // SKIPPED/ERROR ci-dessus, désactivé par défaut (jamais de déplacement sans action explicite).
+    public boolean durationMismatchMoveEnabled()   { return bool("duration_mismatch.move_enabled", false); }
+    public String  durationMismatchMoveFolder()    { return str ("duration_mismatch.move_folder",      ""); }
     // Récupération vidéo (voir VideoScanner/VideoRecoveryWorker) automatique à chaque scan de
     // dossier (Ouvrir dossier/Rafraîchir) — activée par défaut à la demande explicite de
     // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop
     // pénible à déclencher lui-même à chaque fois.
     public boolean videoAutoRecover()              { return bool("video.auto_recover",           true); }
+    // Lance automatiquement l'identification (PAS l'enregistrement, qui reste toujours manuel —
+    // façon Picard, voir FileEntry.Status.IDENTIFIED) sur les fichiers PENDING dès qu'un scan de
+    // dossier se termine (manuel "Ouvrir dossier" ou dossiers de startup.folders au lancement) —
+    // désactivé par défaut, comme les autres auto-déclenchements du menu Tagger. Demandé le
+    // 2026-08-12 : après un redémarrage, le taguage ne reprenait jamais tout seul, obligeant à
+    // recliquer "Tagger" à chaque fois.
+    public boolean autoTagOnScan()                 { return bool("tagging.auto_start_on_scan",  false); }
+    // Défaut true (2026-08-16, demande utilisateur) : dernier recours quand AUCUNE méthode
+    // (cache/MBID/AcoustID/SongRec/recherche texte MB/AudD) n'a rien confirmé, mais que les tags
+    // déjà présents dans le fichier ont l'air valides (non vides, non génériques) — voir
+    // TaggingWorker.findTags() fin de méthode. Contrairement au bug de confiance aveugle déjà
+    // corrigé cette session (SongRec trust bug, qui acceptait des tags AVANT toute vérification),
+    // celui-ci n'intervient qu'EN DERNIER ; score volontairement bas (voir son usage) et source
+    // dédiée (MetadataCache.SOURCE_UNVERIFIED_TAGS) pour rester visible/filtrable séparément des
+    // identifications réellement confirmées.
+    public boolean trustReadableTagsFallback()     { return bool("tagging.trust_readable_tags_fallback", true); }
+    // Détection DJ mix / long format (2026-08-16, demande utilisateur) — voir TaggingWorker.
+    // findTags() étape 0.8. Défaut actif, seuil 20 min : sous ce seuil, un titre "long" (single
+    // étendu, morceau classique...) reste traité normalement ; au-dessus, quasiment toujours un mix
+    // continu/podcast/set live qui ne correspond à aucun enregistrement MB unique.
+    public boolean djMixDetectionEnabled()         { return bool("tagging.dj_mix_detection_enabled", true); }
+    public int     djMixMinDurationSec()           { return num("tagging.dj_mix_min_duration_sec", 1200); }
+    // Défaut true (2026-08-15) : scheduleAutoSaveFollowUp() (MainFrame) existait déjà avant ce
+    // réglage mais s'armait trop tard sur une grosse bibliothèque (voir son commentaire) — une fois
+    // corrigé, activé par défaut pour préserver le comportement voulu à l'origine (jamais rien ne
+    // reste IDENTIFIED en mémoire sans jamais être écrit). Désactivable pour repasser en contrôle
+    // 100% manuel (façon Picard strict) si préféré — voir chkAutoSaveEnabled.
+    public boolean autoSaveEnabled()               { return bool("tagging.auto_save_enabled",    true); }
+    // Défaut true (2026-08-16, demande utilisateur) : synchronise les playlists sidecar (.m3u/
+    // .m3u8/.pls) trouvées dans le dossier d'origine à chaque renommage/déplacement de fichier
+    // (FileRenamer.moveFile — voir PlaylistSync). Constat réel motivant : plusieurs .pls de la
+    // bibliothèque référençaient déjà un nom de fichier obsolète (mojibake jamais recorrigé), preuve
+    // que ces playlists pourrissent silencieusement sans ce correctif.
+    public boolean syncPlaylistsOnRename()         { return bool("tagging.sync_playlists_on_rename", true); }
+    // Défaut true (2026-08-16, demande utilisateur, choix explicite "automatique dans la cascade"
+    // plutôt qu'une action manuelle) : identification d'album entier par checksum de durées façon
+    // "Albunack Disc IDs" de SongKong — voir TaggingWorker.findTags() étape 0.6 et
+    // MusicBrainzClient.lookupByToc(), testé en direct contre l'API MusicBrainz publique.
+    public boolean discIdMatchingEnabled()         { return bool("tagging.discid_matching_enabled", true); }
+    // Nombre minimal de pistes consécutives (TrackNo 1..N sans trou) requis dans un dossier avant
+    // de tenter un lookup TOC — sous ce seuil, le checksum porte sur trop peu de données pour être
+    // discriminant (un simple single ou EP de 2 pistes produirait trop de faux positifs plausibles).
+    public int     discIdMinTracks()               { return num("tagging.discid_min_tracks", 3); }
+    // Défaut true (2026-08-16, demande utilisateur explicite "construit ça de façon auto") : devine
+    // une URL Bandcamp depuis artiste+titre (jamais de recherche réelle — bloquée, voir
+    // BandcampClient) en tout dernier recours dans TaggingWorker.findTags(), uniquement si RIEN
+    // d'autre n'a identifié le fichier, et seulement appliqué si le contenu récupéré correspond
+    // vraiment (TrackMatcher.titleSimilarity) — jamais de fausse donnée écrite sur un essai raté.
+    public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", true); }
+    // Substitution de préfixe pour convertir un chemin "Location" de l'XML iTunes (souvent un
+    // lecteur Windows, ex. "C:/Users/xxx/OneDrive/Musiques") vers le point de montage réel sur ce
+    // système (ex. "/mnt/Music") — voir ITunesLibraryImporter.resolveLocalPath(). Vide par défaut
+    // (aucune substitution) : l'utilisateur doit le configurer une fois pour son propre système,
+    // même logique que le script itunes_path_updater.py déjà utilisé pour ce même problème.
+    public String  itunesXmlPathFrom()             { return str("itunes.xml_path_from", ""); }
+    public String  itunesXmlPathTo()               { return str("itunes.xml_path_to",   ""); }
+    // Chemin du fichier XML lui-même — mémorisé pour ne pas le re-choisir via JFileChooser à
+    // chaque import/écriture (demande utilisateur 2026-08-16). Modifiable dans Préférences >
+    // iTunes, et mis à jour automatiquement dès qu'un fichier est choisi dans ITunesImportDialog/
+    // MainFrame.writeItunesXmlCorrections.
+    public String  itunesXmlFilePath()             { return str("itunes.xml_file_path", ""); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source
@@ -160,8 +261,6 @@ public class Config {
     // résultat est gardé tel quel et SongRec est sauté pour ce fichier.
     public boolean skipSongRecOnConfidentMb()      { return bool("tagging.skip_songrec_on_confident_mb", false); }
     public int     skipSongRecMinScore()           { return num ("tagging.skip_songrec_min_score",  90);    }
-    public boolean albumFirstPassEnabled()         { return bool("albums.album_first_pass",        true); }
-    public int     albumFirstPassMinFiles()        { return num ("albums.album_first_pass_min",    2);    }
 
     /** 3 états au lieu de 2 cases à cocher séparées ("Compléter aussi les fichiers incomplets" +
      * "Compléter les albums automatiquement après le taguage") — fusionnées le 2026-07-16 à la
@@ -237,6 +336,28 @@ public class Config {
     // --- Tags préservés ---
     public String  preservedTags()     { return str ("tags.preserved_tags",  ""); }
 
+    // --- Tags jamais modifiés --- différent de preservedTags ci-dessus (qui ne restaure l'ancienne
+    // valeur QUE si la nouvelle est vide) : ici le champ garde SA valeur d'origine quoi qu'il arrive,
+    // même si le taguage a trouvé une nouvelle valeur non vide (ex. protéger une RATING/COMMENT
+    // éditée à la main d'un écrasement silencieux — voir TagWriter.readNeverModifyTags()).
+    public String  neverModifyTags()   { return str ("tags.never_modify",    ""); }
+
+    // --- Auto-capitalisation --- opt-in (désactivée par défaut : des artistes/titres stylisés
+    // intentionnellement — "will.i.am", "MC5", "iamamiwhoami" — seraient sinon cassés sans que
+    // l'utilisateur l'ait demandé). Voir TitleCaseFixer.fix(), appelé depuis TaggingWorker une fois
+    // toutes les autres mutations (script, genre, translittération...) déjà appliquées.
+    public boolean capitalizeEnabled()        { return bool("capitalize.enabled", false); }
+    public String  capitalizeLowercaseWords() { return str("capitalize.lowercase_words",
+            "de,le,la,les,du,des,et,ou,à,au,aux,the,of,and,or,in,on,at,to,vs"); }
+    public String  capitalizeUppercaseWords() { return str("capitalize.uppercase_words", ""); }
+    public String  capitalizeKeepPrefixes()   { return str("capitalize.keep_prefixes", "Mc,Mac,O'"); }
+
+    // --- Portrait d'artiste --- opt-in, désactivé par défaut (même esprit que cover.save_to_file).
+    // Sidecar dans le dossier ALBUM (pas le dossier artiste, qui varie selon le masque de
+    // renommage actif — remonter d'un niveau serait fragile) — voir TagEnrichment.saveEntry().
+    public boolean artistPhotoEnabled()  { return bool("artist_photo.enabled",  false); }
+    public String  artistPhotoFilename() { return str ("artist_photo.filename", "artist"); }
+
     // --- Ponctuation & nettoyage ---
     public boolean correctPunctuation(){ return bool("tags.correct_punctuation", false); }
     public boolean removeId3v1()       { return bool("tags.remove_id3v1",        false); }
@@ -251,7 +372,7 @@ public class Config {
     // (installs qui l'avaient ajouté manuellement pendant la brève période où c'était une action
     // secondaire) est simplement ignorée sans erreur — comportement générique déjà en place pour
     // tout id inconnu (voir MainFrame.findToolbarAction()/SettingsDialog.load()).
-    public static final String DEFAULT_TOOLBAR_ACTIONS = "refreshFolders,transcode,submitAcoustId";
+    public static final String DEFAULT_TOOLBAR_ACTIONS = "refreshFolders,transcode,submitAcoustId,cdImport";
     public String[] toolbarActions() {
         String v = str("toolbar.actions", DEFAULT_TOOLBAR_ACTIONS);
         if (v.isBlank()) return new String[0];
@@ -303,11 +424,35 @@ public class Config {
         return order.toArray(new String[0]);
     }
 
-    // --- MB genres max ---
-    public int     mbMaxGenres()       { return num ("mb.max_genres",            3); }
+    // mb.max_genres fusionné dans genreMaxCount() (voir son commentaire) — 2026-09-01.
 
     // --- ReplayGain ---
     public boolean replayGainEnabled() { return bool("replaygain.enabled",       false); }
+
+    // --- Clé musicale ---
+    // Camelot (8A/8B…) plutôt que la notation standard (Cm/F#…) — utile pour le mixage DJ
+    // (compatibilité harmonique), voir comparaison avec OneTagger dans docs/files/.
+    public boolean writeCamelotKey()   { return bool("audio.camelot_key",        false); }
+
+    // --- Marqueur de taguage portable ---
+    // Tag OT_TAGGEDDATE écrit dans le fichier lui-même (pas seulement le cache SQLite local) —
+    // survit à un cache perdu/corrompu ou un fichier déplacé hors suivi. Toujours actif : aucune
+    // raison de désactiver un marqueur purement additif, contrairement aux options ci-dessus qui
+    // changent un format de sortie.
+
+    // --- Commande post-traitement ---
+    // Exécutée une fois à la fin d'un run de taguage complet (pas par fichier — bibliothèques de
+    // 100k+ fichiers, un hook par fichier serait ingérable) — ex: déclencher un scan Plex, un
+    // rebalance mergerfs. Chaîne vide = désactivé.
+    // Conservée uniquement pour la migration automatique vers PostTagCommands (liste) — ne plus
+    // écrire cette clé après la migration, voir PostTagCommands.load().
+    public String  postTagCommand()    { return str ("hooks.post_tag_command",   ""); }
+
+    // --- Scripts tagger (TaggerScript) ---
+    // Case globale "Activer les scripts" façon Picard (enable_tagger_scripts) — coupe tous les
+    // scripts d'un coup sans avoir à décocher chacun individuellement. Défaut true : ne change
+    // rien pour qui avait déjà des scripts actifs avant l'ajout de cette case.
+    public boolean scriptsEnabled()    { return bool("scripts.enabled",          true); }
 
     // --- Translittération artistes ---
     public boolean translateArtists()  { return bool("metadata.translate_artists", false); }
@@ -324,11 +469,12 @@ public class Config {
         return v.isBlank() ? new String[]{"en"} : v.split(",");
     }
 
-    /** Noms de séries de compilations (ex. "Stars 80", "NRJ", "Fun Radio", "RFM") que l'utilisateur
-     *  veut voir reliées à ses morceaux déjà tagués — voir ui.CompilationClusterWorker ("Grouper
-     *  par compilations…"), qui vérifie si le recording d'une piste existe aussi sur une release
-     *  dont le titre contient un de ces noms. Vide par défaut : aucune série ne correspond tant que
-     *  l'utilisateur n'en a pas explicitement listé dans les Réglages. */
+    /** Noms de séries de compilations (ex. "Stars 80", "NRJ", "Fun Radio", "RFM") — voir
+     *  ui.CompilationClusterWorker ("Grouper par compilations…"), qui matche par défaut n'importe
+     *  quelle release marquée "Compilation" par MusicBrainz (secondary-type officiel, automatique) ;
+     *  cette liste ne sert plus qu'à ajouter en complément un nom de titre précis, pour les rares cas
+     *  où MusicBrainz ne marquerait pas le secondary-type. Vide par défaut : la détection MB seule
+     *  suffit, aucune liste requise. */
     public String[] compilationSeriesNames() {
         String v = str("compilation.series_names", "");
         return v.isBlank() ? new String[0] : v.split(",");
@@ -342,6 +488,12 @@ public class Config {
     public String  transcodeFormat()        { return str ("transcode.format",          "mp3"); }
     public int     transcodeBitrate()       { return num ("transcode.bitrate_kbps",    320);   }
     public boolean transcodeDeleteSource()  { return bool("transcode.delete_source",   false); }
+    // Fichiers que ffmpeg refuse carrément d'ouvrir (moov atom manquant, flux corrompu, souvent
+    // carrément 0 octet — dégâts collatéraux constatés de l'incident disque plein du 2026-07-15)
+    // — confirmé par DEUX passes ffmpeg indépendantes (voir AudioTranscoder.verifyUnreadable()),
+    // jamais sur la foi d'un seul message d'erreur. Désactivé par défaut : envoyés à la corbeille
+    // système (récupérable), jamais supprimés définitivement, jamais sans activation explicite.
+    public boolean transcodeMoveUnreadableEnabled() { return bool("transcode.move_unreadable_enabled", false); }
 
     // --- Releases préférées (codes séparés par virgule) ---
     public String[] preferredCountries()    {
@@ -397,6 +549,24 @@ public class Config {
     public String listenbrainzUsername()  { return str("listenbrainz.username", ""); }
     public int    listenbrainzMaxTracks() { return num("listenbrainz.max_tracks", 1000); }
 
+    public String lastfmUsername()  { return str("lastfm.username", ""); }
+    public int    lastfmMaxTracks() { return num("lastfm.max_tracks", 1000); }
+
+    public boolean headphonesDbEnabled() { return bool("headphones.db_enabled", false); }
+    public String  headphonesDbPath()    { return str("headphones.db_path", System.getProperty("user.home") + "/headphones/headphones.db"); }
+    public String  headphonesUrl()       { return str("headphones.url", "http://127.0.0.1:8181"); }
+    public String  headphonesApiKey()    { return str("headphones.api_key", ""); }
+
+    public boolean beetsDbEnabled() { return bool("beets.db_enabled", false); }
+    public String  beetsDbPath()    { return str("beets.db_path", System.getProperty("user.home") + "/.config/beets/library.db"); }
+    public String  beetsMusicDir()  { return str("beets.music_dir", ""); }
+
+    /** Envoi automatique vers Headphones (queueAlbum) après chaque enregistrement réussi, si
+     *  l'album n'y est pas déjà connu — voir TagEnrichment.saveEntry() et HeadphonesClient. Demande
+     *  utilisateur explicite (2026-08-29), après avoir d'abord construit une version manuelle. */
+    public boolean headphonesAutoQueueEnabled()  { return bool("headphones.auto_queue_enabled", false); }
+    public int     headphonesAutoQueueMinScore() { return num("headphones.auto_queue_min_score", 90); }
+
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {
         props.setProperty(key, value != null ? value : "");
@@ -419,9 +589,13 @@ public class Config {
     // --- Chargement ---
 
     private void loadDefaults() {
-        try (InputStream in = getClass().getResourceAsStream("/settings.properties")) {
-            if (in != null) props.load(in);
-        } catch (IOException e) {
+        // Reader (pas InputStream) : props.load(InputStream) impose TOUJOURS ISO-8859-1 quel que
+        // soit le contenu réel du fichier — voir le commentaire détaillé de loadUserConfig()
+        // juste en dessous, même bug, même correctif.
+        try (Reader r = new java.io.InputStreamReader(
+                getClass().getResourceAsStream("/settings.properties"), java.nio.charset.StandardCharsets.UTF_8)) {
+            props.load(r);
+        } catch (Exception e) {
             System.err.println("[Config] Impossible de charger les defauts : " + e.getMessage());
         }
     }
@@ -429,8 +603,16 @@ public class Config {
     private void loadUserConfig() {
         Path path = Paths.get(CONFIG_FILE);
         if (!Files.exists(path)) return;
-        try (InputStream in = Files.newInputStream(path)) {
-            props.load(in);
+        // Reader en UTF-8 (pas Files.newInputStream + props.load(InputStream)) : la surcharge
+        // InputStream de Properties.load() est contractuellement figée en ISO-8859-1 (documenté
+        // dans le Javadoc de Properties), alors que SettingsDialog.save() écrit via
+        // Files.newBufferedWriter() — UTF-8 par défaut sous NIO.2. Résultat avant ce correctif :
+        // toute valeur accentuée sauvegardée depuis les Préférences (ex. "à" dans une liste de
+        // mots) revenait mojibake au chargement suivant ("Ã " au lieu de "à ", exactement le motif
+        // que corrige EncodingFixer sur les tags). Repéré en direct (2026-08-14) sur
+        // capitalize.lowercase_words juste après son premier enregistrement depuis l'UI.
+        try (Reader r = Files.newBufferedReader(path, java.nio.charset.StandardCharsets.UTF_8)) {
+            props.load(r);
         } catch (IOException e) {
             System.err.println("[Config] Impossible de charger " + CONFIG_FILE + " : " + e.getMessage());
         }

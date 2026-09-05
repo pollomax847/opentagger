@@ -31,9 +31,13 @@ public class PlaylistExporter {
                 Path    p  = e.currentPath != null ? e.currentPath : e.file.toPath();
                 if (!p.toFile().exists()) continue;
 
-                String artist   = ti.artist.isBlank() ? "?" : ti.artist;
-                String title    = ti.title.isBlank()  ? p.getFileName().toString() : ti.title;
-                int    duration = -1; // -1 = durée inconnue
+                String artist   = m3u(ti.artist.isBlank() ? "?" : ti.artist);
+                String title    = m3u(ti.title.isBlank()  ? p.getFileName().toString() : ti.title);
+                // ti.durationSec est déjà connu (colonne Durée du tableau principal) — avant ce
+                // correctif, -1 ("durée inconnue") était écrit systématiquement, alors que la
+                // plupart des lecteurs (VLC, Kodi, MediaMonkey) l'utilisent pour le temps total
+                // affiché / la barre de progression de la playlist.
+                int    duration = ti.durationSec > 0 ? ti.durationSec : -1;
 
                 pw.println("#EXTINF:" + duration + "," + artist + " - " + title);
                 pw.println(p.toAbsolutePath());
@@ -67,6 +71,9 @@ public class PlaylistExporter {
                     try { pw.println("      <trackNum>" + Integer.parseInt(ti.track) + "</trackNum>"); }
                     catch (NumberFormatException ignored) {}
                 }
+                // <duration> XSPF est en millisecondes — champ prévu par le format, jamais écrit
+                // avant ce correctif alors que ti.durationSec est disponible ici comme pour le M3U.
+                if (ti.durationSec > 0) pw.println("      <duration>" + (ti.durationSec * 1000) + "</duration>");
                 pw.println("    </track>");
                 count++;
             }
@@ -76,8 +83,24 @@ public class PlaylistExporter {
         return count;
     }
 
+    /**
+     * M3U n'a pas d'échappement (contrairement au XSPF/XML ci-dessous, déjà protégé par xml()) :
+     * le format est ligne-par-ligne, donc un saut de ligne ou caractère de contrôle dans un tag
+     * scrappé/corrompu (déjà vu ailleurs dans ce dépôt — voir MetadataCache.queryHash, un octet
+     * NUL trouvé dans un fichier source réel) casse la structure "#EXTINF:...,Artiste - Titre" en
+     * plusieurs lignes, dont l'une peut être interprétée comme un chemin de fichier fantôme par le
+     * lecteur qui ouvre la playlist.
+     */
+    private static String m3u(String s) {
+        return s.replaceAll("[\\r\\n\\p{Cntrl}]+", " ").trim();
+    }
+
     private static String xml(String s) {
-        return s.replace("&", "&amp;")
+        // Caractères de contrôle interdits par XML 1.0 (hors tabulation/LF/CR, autorisés) — un tag
+        // scrappé/corrompu contenant un octet de contrôle brut (même cause que m3u() ci-dessus)
+        // produirait sinon un XSPF que certains lecteurs XML stricts refusent d'ouvrir.
+        return s.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", "")
+                .replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
                 .replace("\"", "&quot;");

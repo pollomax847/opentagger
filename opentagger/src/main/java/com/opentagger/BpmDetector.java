@@ -40,7 +40,10 @@ public class BpmDetector {
         try {
             float[] energy = extractEnergyEnvelope(filePath);
             if (energy == null || energy.length < 100) return -1;
-            return computeBpmByAutocorrelation(energy, SAMPLE_RATE / FRAME_SIZE);
+            // Division entière avant ce correctif (8000/186 → 43 au lieu de 43,01...) alors que le
+            // paramètre attendu est un double fps, qui pilote ensuite TOUS les calculs de lag/BPM
+            // de l'autocorrélation — imprécision faible (~0,03%) mais réelle, pas volontaire.
+            return computeBpmByAutocorrelation(energy, (double) SAMPLE_RATE / FRAME_SIZE);
         } finally {
             DiskIoThrottle.release(gate);
         }

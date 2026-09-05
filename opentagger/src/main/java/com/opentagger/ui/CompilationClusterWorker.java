@@ -29,10 +29,16 @@ import java.util.function.Consumer;
  * prototype de cet outil écrivait directement et a été révisé après ce constat).
  *
  * Vérifie, pour chaque piste déjà taguée, si son {@code recordingMbid} existe aussi sur une release
- * dont le titre (ou celui de son release-group) contient un des noms configurés par l'utilisateur
- * ({@link Config#compilationSeriesNames()}) — sans ça, sortie immédiate (aucun coût réseau si rien
- * n'est configuré). Séquentiel, même raison que {@link AlbumClusterWorker} (peu de cache-miss réel
- * en pratique sur une bibliothèque déjà taguée) dont cette classe reprend la structure générale.
+ * dont le release-group est marqué "Compilation" par MusicBrainz lui-même (secondary-type officiel,
+ * déjà remonté dans {@link MusicBrainzClient.RecordingRelease#secondaryTypes()}) — détection
+ * automatique, sans dépendre d'une liste figée. Les noms de série configurés par l'utilisateur
+ * ({@link Config#compilationSeriesNames()}, ex. "Stars 80", "NRJ") restent utilisables en plus (par
+ * substring sur le titre), pour les rares cas où MusicBrainz ne marquerait pas le secondary-type,
+ * mais ne sont plus requis : liste vide = fonctionne quand même, uniquement via le tag MB. Demandé
+ * le 2026-07-28 après remarque que la liste manuelle ne couvrait pas les compilations déjà possédées
+ * mais absentes de la liste ("ça reste figé"). Séquentiel, même raison que {@link AlbumClusterWorker}
+ * (peu de cache-miss réel en pratique sur une bibliothèque déjà taguée) dont cette classe reprend la
+ * structure générale.
  */
 public class CompilationClusterWorker extends SwingWorker<List<CompilationClusterWorker.CompilationMatch>, String> {
 
@@ -41,32 +47,64 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
 
     private final FileTableModel   tableModel;
     private final Consumer<String> statusCallback;
+    private final Consumer<String> logLine;
     private final Consumer<List<CompilationMatch>> doneCallback;
+    // Barre de progression partagée (bas-droite de MainFrame) — absente jusqu'ici, même trou que
+    // AlbumCompletionWorker/AlbumClusterWorker (retour utilisateur, 2026-08-10). Unité = fichier
+    // TAGGED réellement examiné par checkEntry() (pas allEntries() en entier, qui inclut aussi
+    // tout ce qui n'est pas encore tagué — le dénominateur doit refléter le vrai travail restant,
+    // pas la taille totale de la bibliothèque chargée).
+    private final java.util.function.BiConsumer<Integer, Integer> onProgress;
+
+    /** logLine : ajoute une ligne PERSISTANTE au panneau Journal (contrairement à statusCallback,
+     *  écrasé à chaque nouveau message) — avant ce correctif, cette passe n'avait aucune trace
+     *  consultable après coup, chaque correspondance/erreur clignotait une fraction de seconde
+     *  dans la barre de statut puis disparaissait, écrasée par la suivante (retour utilisateur :
+     *  "recherche compilation n'a pas de journal"). */
+    public CompilationClusterWorker(FileTableModel tableModel, Consumer<String> statusCallback,
+                                     Consumer<String> logLine,
+                                     Consumer<List<CompilationMatch>> doneCallback) {
+        this(tableModel, statusCallback, logLine, doneCallback, null);
+    }
 
     public CompilationClusterWorker(FileTableModel tableModel, Consumer<String> statusCallback,
-                                     Consumer<List<CompilationMatch>> doneCallback) {
+                                     Consumer<String> logLine,
+                                     Consumer<List<CompilationMatch>> doneCallback,
+                                     java.util.function.BiConsumer<Integer, Integer> onProgress) {
         this.tableModel     = tableModel;
         this.statusCallback = statusCallback;
+        this.logLine        = logLine;
         this.doneCallback   = doneCallback;
+        this.onProgress     = onProgress;
     }
 
     @Override
     protected List<CompilationMatch> doInBackground() throws Exception {
         String[] seriesNames = Config.get().compilationSeriesNames();
-        if (seriesNames.length == 0) {
-            publish(I18n.t("Aucune série de compilation configurée — voir Réglages."));
-            return List.of();
-        }
-
         List<CompilationMatch> matches = new ArrayList<>();
         MetadataCache cache = new MetadataCache();
         try {
+            List<FileEntry> candidates = new ArrayList<>();
             for (FileEntry entry : tableModel.allEntries()) {
+                if (entry.status == FileEntry.Status.TAGGED && entry.result != null
+                        && !entry.result.recordingMbid.isBlank()) candidates.add(entry);
+            }
+            int total = candidates.size();
+            int done  = 0;
+            // Comptage manquant jusqu'à ce correctif — le résultat final ("N correspondance(s)
+            // trouvée(s)") était loggé, mais jamais la TAILLE du lot vérifié : impossible de
+            // distinguer "0 candidat examiné" (rien d'anormal, rien à vérifier) de "25000+ candidats
+            // examinés, 0 trouvé" (suspect) depuis l'extérieur — trouvé en direct 2026-08-31, le
+            // taguage.auto_save_enabled + le scan marquant directement les fichiers déjà tagués
+            // (sans passer par le pipeline d'identification visible) pouvaient produire un très
+            // grand bassin de candidats sans que rien ne le signale.
+            if (logLine != null) logLine.accept(I18n.t("  %d fichier(s) tagué(s) à vérifier", total));
+            for (FileEntry entry : candidates) {
                 if (isCancelled()) break;
-                if (entry.status != FileEntry.Status.TAGGED || entry.result == null
-                        || entry.result.recordingMbid.isBlank()) continue;
                 CompilationMatch match = checkEntry(entry, seriesNames, cache, new MusicBrainzClient());
                 if (match != null) matches.add(match);
+                done++;
+                if (onProgress != null) onProgress.accept(done, total);
             }
         } finally {
             cache.close();
@@ -107,28 +145,84 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
                 }
             }
 
-            publish(I18n.t("  trouvé : %s → %s", entry.filename(), match.releaseTitle()));
+            // Rien à proposer si le fichier a déjà exactement ces 4 champs — sans ce contrôle,
+            // une compilation déjà correctement reliée lors d'un run précédent (ou par ce run
+            // lui-même, ré-évaluée) remontait quand même comme "correspondance trouvée" avec la
+            // MÊME valeur des deux côtés de la flèche dans le dialogue de revue : bruit inutile
+            // dans une liste de 1500+ entrées, et laissait croire qu'il restait du travail à
+            // faire alors que non. Trouvé en direct (2026-08-06) : un second passage sur une
+            // bibliothèque déjà largement reliée proposait très majoritairement des "correspondances"
+            // qui étaient en réalité déjà en place.
+            boolean unchanged = match.releaseTitle().equals(entry.result.album)
+                    && Config.get().vaName().equals(entry.result.albumArtist)
+                    && "1".equals(entry.result.isCompilation)
+                    && match.releaseId().equals(entry.result.releaseMbid);
+            if (unchanged) return null;
+
+            // Pays affiché quand connu — permet de vérifier au fil du journal que la préférence
+            // releases.preferred_countries est bien respectée quand plusieurs compilations
+            // candidates existaient pour ce même enregistrement (voir findSeriesMatch()).
+            String foundMsg = match.country() != null && !match.country().isBlank()
+                    ? I18n.t("  trouvé : %s → %s (%s)", entry.filename(), match.releaseTitle(), match.country())
+                    : I18n.t("  trouvé : %s → %s", entry.filename(), match.releaseTitle());
+            publish(foundMsg);
+            if (logLine != null) logLine.accept(foundMsg);
             return new CompilationMatch(entry, updated, match.releaseTitle());
         } catch (Exception e) {
-            publish(I18n.t("  compilation erreur : %s", e.getMessage()));
+            String errMsg = I18n.t("  compilation erreur (%s) : %s", entry.filename(), e.getMessage());
+            publish(errMsg);
+            if (logLine != null) logLine.accept(errMsg);
             return null;
         }
     }
 
-    /** Cherche la première release dont le titre (ou celui de son release-group) contient,
-     *  insensible à la casse, un des noms de série configurés. */
+    /** Cherche, parmi TOUTES les releases marquées "Compilation" par MusicBrainz lui-même
+     *  (secondary-type officiel du release-group — détection automatique, aucune liste requise) ou
+     *  dont le titre (ou celui de son release-group) contient, insensible à la casse, un des noms
+     *  de série éventuellement configurés par l'utilisateur (complément optionnel), celle dont le
+     *  pays correspond le mieux à {@code releases.preferred_countries} — même réglage déjà utilisé
+     *  ailleurs dans l'appli (choix de release lors de l'identification normale, traduction) pour
+     *  privilégier un pays/une langue. Absent jusqu'à ce correctif : la toute première compilation
+     *  trouvée était retenue sans égard au pays, même si une compilation mieux alignée avec le pays
+     *  favori de l'utilisateur existait plus loin dans la liste — retour utilisateur (2026-09-01) :
+     *  "je choisis un pays favori dans les préférences, ça doit aussi s'appliquer aux compilations".
+     *  Repli sur la première trouvée (ordre MB d'origine) si aucune candidate n'a de pays connu ou
+     *  si aucune préférence n'est configurée — comportement identique à avant dans ce cas. */
     private static MusicBrainzClient.RecordingRelease findSeriesMatch(
             List<MusicBrainzClient.RecordingRelease> releases, String[] seriesNames) {
+        String[] preferredCountries = Config.get().preferredCountries();
+        List<MusicBrainzClient.RecordingRelease> candidates = new ArrayList<>();
         for (MusicBrainzClient.RecordingRelease r : releases) {
+            if (r.secondaryTypes() != null
+                    && r.secondaryTypes().stream().anyMatch(t -> t.equalsIgnoreCase("Compilation"))) {
+                candidates.add(r);
+                continue;
+            }
             String title = r.releaseTitle().toLowerCase(Locale.ROOT);
             String groupTitle = r.releaseGroupTitle().toLowerCase(Locale.ROOT);
             for (String series : seriesNames) {
                 String s = series.trim().toLowerCase(Locale.ROOT);
                 if (s.isBlank()) continue;
-                if (title.contains(s) || groupTitle.contains(s)) return r;
+                if (title.contains(s) || groupTitle.contains(s)) { candidates.add(r); break; }
             }
         }
-        return null;
+        if (candidates.isEmpty()) return null;
+        if (preferredCountries.length == 0) return candidates.get(0);
+
+        MusicBrainzClient.RecordingRelease best = null;
+        int bestRank = Integer.MAX_VALUE;
+        for (MusicBrainzClient.RecordingRelease r : candidates) {
+            String country = r.country();
+            if (country == null || country.isBlank()) continue;
+            for (int i = 0; i < preferredCountries.length; i++) {
+                if (preferredCountries[i].trim().equalsIgnoreCase(country.trim()) && i < bestRank) {
+                    best = r;
+                    bestRank = i;
+                    break;
+                }
+            }
+        }
+        return best != null ? best : candidates.get(0);
     }
 
     @Override
@@ -141,7 +235,9 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
         List<CompilationMatch> matches = List.of();
         if (!isCancelled()) {
             try { matches = get(); } catch (Exception ignored) {}
-            statusCallback.accept(I18n.t("Grouper par compilations — %d correspondance(s) trouvée(s).", matches.size()));
+            String summary = I18n.t("Grouper par compilations — %d correspondance(s) trouvée(s).", matches.size());
+            statusCallback.accept(summary);
+            if (logLine != null) logLine.accept(summary);
         }
         if (doneCallback != null) doneCallback.accept(matches);
     }
@@ -177,15 +273,30 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
             MetadataCache cache, String recordingMbid, MusicBrainzClient mb) throws Exception {
         String cacheKey = "recording-releases:" + recordingMbid;
         String cached = cache.getLookup(cacheKey);
+        // cached != null suffit seul : une entrée EXISTE, qu'elle représente 0 ou N releases, donc
+        // fiable telle quelle — le test précédent (!parsed.isEmpty()) ignorait un résultat cache
+        // légitimement vide (recording sans autre release, OU échec définitif désormais mis en cache
+        // via lastHttpErrorStatus, voir MusicBrainzClient.lookupRecordingReleases()) et repartait
+        // en réseau à chaque appel malgré un cache déjà rempli — trouvé en direct (2026-08-20) via un
+        // recording qui échouait en 301 sur le mirror : le correctif d'écriture seul ne suffisait
+        // pas tant que la lecture continuait de contourner le cache pour ce même cas.
         if (cached != null) {
-            List<MusicBrainzClient.RecordingRelease> parsed = mb.parseRecordingReleasesFromCache(cached);
-            if (!parsed.isEmpty()) return parsed;
+            return mb.parseRecordingReleasesFromCache(cached);
         }
         List<MusicBrainzClient.RecordingRelease> releases = mb.lookupRecordingReleases(recordingMbid);
-        if (!releases.isEmpty()) {
-            String raw = mb.lastRawJson();
-            if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
-        }
+        // Bug trouvé en direct (2026-08-15) : ne mettait en cache QUE si releases non vide — or
+        // lookupRecordingReleases() renvoie exactement la même liste vide, que ce soit un recording
+        // qui a légitimement 0 release, OU un échec réseau complet (getWithRetry() null sur 301/400/
+        // timeout — lastRawJson() reste alors "" par défaut, un NOUVEAU MusicBrainzClient() étant
+        // créé par entrée dans doInBackground(), donc jamais de valeur périmée d'un autre recording).
+        // Sans distinction, un recording qui échoue en permanence (ex. lien 301 non suivi côté
+        // mirror codeshy) n'était JAMAIS mis en cache et se re-questionnait à CHAQUE exécution — 332
+        // requêtes gaspillées vers le même recording sur cette seule session, la fréquence ayant
+        // explosé depuis que l'auto-enregistrement (donc "Grouper par compilations" auto-déclenché
+        // après chaque sauvegarde) tourne en continu. !raw.isBlank() suffit seul comme condition :
+        // vrai UNIQUEMENT si une réponse serveur a réellement été reçue (releases vide y compris).
+        String raw = mb.lastRawJson();
+        if (!raw.isBlank()) cache.putLookup(cacheKey, raw);
         return releases;
     }
 }

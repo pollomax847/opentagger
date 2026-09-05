@@ -33,10 +33,13 @@ public class RenamePreviewDialog extends JDialog {
      * Contrat du renommage exécuté en arrière-plan.
      * onProgress(n) : appelé sur l'EDT après chaque fichier (n = nombre traités)
      * onDone()      : appelé sur l'EDT à la fin
+     * @return un callback d'annulation — avant ce correctif, rien ne permettait d'arrêter le job
+     *         une fois lancé (le bouton Fermer, toujours actif, laissait le SwingWorker tourner en
+     *         arrière-plan sans que l'utilisateur ne puisse plus le suivre ni l'interrompre).
      */
     @FunctionalInterface
     public interface RenameJob {
-        void start(IntConsumer onProgress, Runnable onDone);
+        Runnable start(IntConsumer onProgress, Runnable onDone);
     }
 
     /** Un groupe d'aperçu — un album (artiste album + album) ou, à défaut de tags, un dossier. */
@@ -63,9 +66,11 @@ public class RenamePreviewDialog extends JDialog {
     // Composants footer
     private JButton      btnApply;
     private JButton      btnClose;
+    private JButton      btnCancel;
     private JProgressBar progressBar;
     private JLabel       lblProgress;
     private JPanel       progressPanel;
+    private Runnable     cancelJob;
 
     public RenamePreviewDialog(Frame owner, List<PreviewRow> rows, RenameJob job) {
         this(owner, rows, I18n.t("Aperçu du renommage"), job);
@@ -125,12 +130,27 @@ public class RenamePreviewDialog extends JDialog {
         progressPanel.add(lblProgress);
         progressPanel.setVisible(false);
 
+        btnCancel = new JButton(I18n.t("Annuler"));
+        btnCancel.setVisible(false);
+        btnCancel.addActionListener(e -> {
+            if (cancelJob != null) { cancelJob.run(); cancelJob = null; }
+            btnCancel.setVisible(false);
+            lblProgress.setText(I18n.t("Annulé."));
+        });
+
         btnApply.addActionListener(e -> startRename(job));
-        btnClose.addActionListener(e -> dispose());
+        // Fermer pendant un renommage en cours n'arrêtait avant ce correctif jamais le SwingWorker
+        // sous-jacent : le job continuait à écrire sur le disque après la fermeture de la fenêtre,
+        // invisible et non annulable.
+        btnClose.addActionListener(e -> {
+            if (cancelJob != null) { cancelJob.run(); cancelJob = null; }
+            dispose();
+        });
         getRootPane().setDefaultButton(btnApply);
 
         JPanel left  = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         left.add(progressPanel);
+        left.add(btnCancel);
 
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
         right.add(btnClose);
@@ -148,8 +168,9 @@ public class RenamePreviewDialog extends JDialog {
         btnApply.setText(I18n.t("En cours…"));
         progressBar.setValue(0);
         progressPanel.setVisible(true);
+        btnCancel.setVisible(true);
 
-        job.start(
+        cancelJob = job.start(
             // onProgress — appelé sur EDT après chaque fichier
             done -> {
                 progressBar.setValue(done);
@@ -158,6 +179,8 @@ public class RenamePreviewDialog extends JDialog {
             },
             // onDone — appelé sur EDT à la fin
             () -> {
+                cancelJob = null;
+                btnCancel.setVisible(false);
                 progressBar.setValue((int) willRenameCount);
                 progressBar.setString(I18n.t("Terminé"));
                 lblProgress.setText(I18n.t("✓ Terminé"));
@@ -171,16 +194,26 @@ public class RenamePreviewDialog extends JDialog {
 
     // ── Factory ───────────────────────────────────────────────────────────────
 
-    public static List<PreviewRow> compute(FileTableModel model, int maskIndex) {
-        return compute(model, maskIndex, null);
+    public static List<PreviewRow> compute(List<FileEntry> entries, int maskIndex) {
+        return compute(entries, maskIndex, null);
     }
 
-    public static List<PreviewRow> compute(FileTableModel model, int maskIndex, Path destRoot) {
+    /**
+     * @param entries snapshot déjà copié par l'appelant (voir MainFrame.renameTagged()/
+     *                organizeFiles()) — jamais {@code tableModel.allEntries()} directement : cette
+     *                méthode tourne dans doInBackground() (Files.exists() par fichier, coûteux),
+     *                pendant qu'un taguage actif peut continuer à muter la table en parallèle sur
+     *                l'EDT. Itérer la vue non-modifiable renvoyée par allEntries() (qui reste un
+     *                simple wrapper autour de la MÊME liste mutable, pas une copie) levait alors un
+     *                ConcurrentModificationException — repéré en direct 2026-09-02 ("Renommer les
+     *                fichiers tagués" cliqué pendant un taguage en cours). Le snapshot doit être pris
+     *                sur l'EDT, avant le lancement du SwingWorker, jamais ici.
+     */
+    public static List<PreviewRow> compute(List<FileEntry> entries, int maskIndex, Path destRoot) {
         FileRenamer renamer = new FileRenamer();
         List<PreviewRow> result = new ArrayList<>();
 
-        for (int i = 0; i < model.getRowCount(); i++) {
-            FileEntry e = model.get(i);
+        for (FileEntry e : entries) {
             if (e.status != FileEntry.Status.TAGGED) continue;
             if (e.currentPath == null) continue;
 
@@ -192,16 +225,25 @@ public class RenamePreviewDialog extends JDialog {
 
             try {
                 String newName = renamer.preview(e.activeTags(), maskIndex, ext);
-                Path newPath   = root.resolve(newName).normalize();
                 if (newName.isBlank()) {
                     result.add(new PreviewRow(e, current.toString(), "—", "—",
                         RowState.ERROR, I18n.t("Masque vide — tags incomplets ?")));
-                } else if (newPath.equals(current)) {
-                    result.add(new PreviewRow(e, current.toString(), curName,
-                        current.toString(), RowState.ALREADY_OK, ""));
                 } else {
-                    result.add(new PreviewRow(e, current.toString(), newName,
-                        newPath.toString(), RowState.WILL_RENAME, ""));
+                    // Simulation de la même résolution de collision que rename() (voir
+                    // FileRenamer.previewTarget()) — sans ça, un doublon déjà présent (une copie
+                    // au nom canonique, l'autre "(2)") s'annonçait "sera renommé" ici alors qu'en
+                    // réalité rename() ne fait rien pour lui (déjà à la meilleure place possible
+                    // compte tenu de la collision) : le total annoncé ne correspondait pas à ce qui
+                    // se passait vraiment une fois "Appliquer" cliqué — trouvé en direct 2026-08-01.
+                    String cheminSansExt = newName.substring(0, newName.length() - ext.length());
+                    Path resolved = FileRenamer.previewTarget(current, root, cheminSansExt, ext);
+                    if (resolved == null) {
+                        result.add(new PreviewRow(e, current.toString(), curName,
+                            current.toString(), RowState.ALREADY_OK, ""));
+                    } else {
+                        result.add(new PreviewRow(e, current.toString(), resolved.getFileName().toString(),
+                            resolved.toString(), RowState.WILL_RENAME, ""));
+                    }
                 }
             } catch (Exception ex) {
                 result.add(new PreviewRow(e, curName, "—", "—",

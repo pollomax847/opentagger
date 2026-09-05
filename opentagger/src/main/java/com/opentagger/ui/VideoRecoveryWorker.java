@@ -45,6 +45,12 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final List<File> videos;
     private final Path       scanRoot;
     private final Consumer<String> onProgress;
+    // Compteur numérique séparé du texte (onProgress ci-dessus) — pour la barre de progression
+    // partagée (bas-droite de MainFrame), absente jusqu'ici sur le déclenchement AUTOMATIQUE de ce
+    // worker (après chaque scan de dossier, voir MainFrame) alors que fileIdx/total étaient déjà
+    // connus ici (déjà utilisés dans le message texte "[fileIdx/total] nom"). Retour utilisateur,
+    // 2026-08-10.
+    private final java.util.function.BiConsumer<Integer, Integer> onNumericProgress;
 
     private final SongRecClient    songRec = new SongRecClient();
     private final AudDClient       audd     = new AudDClient();
@@ -53,7 +59,6 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final DeezerClient     deezer   = new DeezerClient();
     private final TagWriter        writer   = new TagWriter();
     private final FileRenamer      renamer  = new FileRenamer();
-    private final MetadataCache    cache    = new MetadataCache();
     private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
 
     private final AtomicInteger converted    = new AtomicInteger();
@@ -65,10 +70,23 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     // pas les fichiers déjà en cours de traitement dans le pool.
     private volatile ExecutorService pool;
 
+    // Pool de connexions SQLite — une par thread, voir SaveWorker.cachePool pour le diagnostic
+    // complet (2026-08-17) : même anti-motif "une connexion par fichier" que SaveWorker/
+    // InfoCompleterWorker avant leur correctif, moindre impact ici (bien moins de vidéos que de
+    // fichiers audio dans une bibliothèque) mais corrigé pour la même raison.
+    private final java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
+            new java.util.concurrent.LinkedBlockingQueue<>();
+
     public VideoRecoveryWorker(List<File> videos, Path scanRoot, Consumer<String> onProgress) {
-        this.videos     = videos;
-        this.scanRoot   = scanRoot;
-        this.onProgress = onProgress;
+        this(videos, scanRoot, onProgress, null);
+    }
+
+    public VideoRecoveryWorker(List<File> videos, Path scanRoot, Consumer<String> onProgress,
+                                java.util.function.BiConsumer<Integer, Integer> onNumericProgress) {
+        this.videos            = videos;
+        this.scanRoot          = scanRoot;
+        this.onProgress        = onProgress;
+        this.onNumericProgress = onNumericProgress;
     }
 
     /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final) — voir
@@ -88,6 +106,8 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
 
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
 
+        for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
+
         for (int i = 0; i < total; i++) {
             if (isCancelled()) break;
             final File video   = videos.get(i);
@@ -96,16 +116,20 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
         }
 
         pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception ignored) {}
+        try {
+            for (Future<?> f : futures) {
+                try { f.get(); } catch (Exception ignored) {}
+            }
+        } finally {
+            for (MetadataCache c : cachePool) c.close();
         }
-        cache.close();
         return null;
     }
 
     private void processOne(File video, int fileIdx, int total, int maskIndex) {
         if (isCancelled()) return;
         publish(I18n.t("[%s/%s] %s", fileIdx, total, video.getName()));
+        if (onNumericProgress != null) onNumericProgress.accept(fileIdx, total);
 
         TagInfo ti;
         try {
@@ -139,8 +163,17 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
                 throw new IOException("Extraction audio impossible (format déjà mp3 ?)");
             }
 
-            TagEnrichment.SaveResult res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
-                    deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+            // Connexion empruntée au pool (une par thread, voir cachePool) plutôt qu'ouverte/
+            // fermée à chaque vidéo.
+            TagEnrichment.SaveResult res;
+            MetadataCache cache = cachePool.poll();
+            if (cache == null) cache = new MetadataCache(); // filet de sécurité
+            try {
+                res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
+                        deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+            } finally {
+                cachePool.offer(cache);
+            }
 
             Path movedTo = moveToSubfolder(video, VideoScanner.CONVERTED_FOLDER);
             converted.incrementAndGet();

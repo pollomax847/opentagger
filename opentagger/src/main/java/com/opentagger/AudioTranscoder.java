@@ -108,4 +108,52 @@ public class AudioTranscoder {
 
         return dest;
     }
+
+    /** Signatures ffmpeg typiques d'une source qu'il ne parvient même pas à ouvrir/décoder —
+     *  corrompue ou téléchargement tronqué, PAS un problème de réglages (codec de sortie manquant,
+     *  bitrate invalide, disque plein...). Utilisé à la fois pour classer l'échec initial du
+     *  transcodage et pour la contre-vérification indépendante de verifyUnreadable() ci-dessous. */
+    public static boolean isUnreadableSourceError(String message) {
+        if (message == null) return false;
+        String m = message.toLowerCase();
+        return m.contains("moov atom not found")
+            || m.contains("invalid data found when processing input")
+            || m.contains("error opening input")
+            || m.contains("could not find codec parameters");
+    }
+
+    /**
+     * Contre-vérification INDÉPENDANTE avant tout déplacement automatique (voir Config.
+     * transcodeMoveUnreadableEnabled()) : un échec de transcodage peut avoir plein d'autres causes
+     * que la corruption de la source (codec de sortie manquant, bitrate invalide, sortie déjà
+     * existante verrouillée...) — on ne veut jamais isoler un fichier sur la seule foi de CE
+     * message d'erreur là. Ici, on redécode tout le flux vers le muxer "null" (aucune écriture sur
+     * le disque, ni fichier de sortie ni risque d'écraser quoi que ce soit) et on ne considère le
+     * fichier illisible que si CETTE tentative séparée échoue AUSSI avec une signature reconnue.
+     */
+    public boolean verifyUnreadable(Path source) {
+        try {
+            List<String> cmd = List.of(ffmpegPath, "-v", "error",
+                    "-i", source.toAbsolutePath().toString(), "-f", "null", "-");
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try (InputStream is = p.getInputStream()) { is.transferTo(out); }
+                catch (Exception ignored) {}
+            });
+
+            boolean finished = p.waitFor(2, TimeUnit.MINUTES);
+            if (!finished) { p.destroyForcibly(); return false; }
+            try { drain.join(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+
+            if (p.exitValue() == 0) return false; // ffmpeg a réussi à tout décoder → pas corrompu
+            String tail = out.toString(java.nio.charset.StandardCharsets.UTF_8);
+            return isUnreadableSourceError(tail);
+        } catch (Exception e) {
+            return false; // en cas de doute (ffmpeg introuvable, etc.) : NE PAS déplacer
+        }
+    }
 }

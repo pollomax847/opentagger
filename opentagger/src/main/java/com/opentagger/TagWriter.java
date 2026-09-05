@@ -26,10 +26,13 @@ import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -67,7 +70,15 @@ public class TagWriter {
                 copy.acoustidId          = "";
                 copy.acoustidFingerprint = "";
             }
-            FfmpegTagIO.write(fichier, copy);
+            // tags.preserved_tags (COMMENT/DISC_NO/DISC_TOTAL/RATING/TAGS...) : jusqu'à ce
+            // correctif, jamais appliqué sur ce chemin — FfmpegTagIO.write() réécrit tout
+            // (atomes/-map_metadata -1 selon le format), donc sans ça ce réglage n'avait AUCUN
+            // effet pour tout fichier Opus/AAC/WV/APE/WAV, contrairement au chemin jaudiotagger
+            // natif et aux fallbacks M4A.
+            applyPreservedToTagInfo(copy, readPreservedTagsViaFfmpeg(fichier));
+            applyNeverModify(copy, readNeverModifyTagsViaFfmpeg(fichier));
+            copy.taggedDate = java.time.LocalDate.now().toString();
+            FfmpegTagIO.write(fichier, copy, coverImage);
             if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
             return copy;
         }
@@ -85,6 +96,10 @@ public class TagWriter {
                 merged = Config.get().clearExistingTags()
                         ? info.copy()
                         : mergeWithExisting(info, tag);
+                // tags.never_modify : appliqué APRÈS le choix clearExistingTags/mergeWithExisting
+                // ci-dessus, dans les deux cas — un champ figé le reste même en mode "effacer les
+                // tags existants", qui sinon le perdrait purement et simplement.
+                applyNeverModify(merged, readNeverModifyTags(tag));
             } else {
                 merged = info.copy();
             }
@@ -96,6 +111,7 @@ public class TagWriter {
             merged.acoustidId          = "";
             merged.acoustidFingerprint = "";
         }
+        merged.taggedDate = java.time.LocalDate.now().toString();
 
         writeNative(fichier, merged, coverImage, preserved, Config.get().clearExistingTags());
 
@@ -157,8 +173,29 @@ public class TagWriter {
 
     // ── Écriture native jaudiotagger ──────────────────────────────────────────
 
+    /** Vrai pour .m4a ET .mp4 : même conteneur ISO-BMFF, même fragilité de parsing d'arbre
+     *  d'atomes côté jaudiotagger (vérifié en direct : un .mp4 audio produit exactement la même
+     *  classe d'exception — {@code Mp4AtomTree.buildChildrenOfNode}, "newPosition > limit" — que
+     *  les .m4a qui déclenchent la chaîne de repli ci-dessous). Seule l'extension diffère ; jusqu'à
+     *  ce correctif, .mp4 ne bénéficiait d'AUCUNE des 3 couches de réparation/repli réservées à
+     *  .m4a et échouait donc systématiquement dès que jaudiotagger butait sur ce genre de fichier. */
+    private static boolean isM4aFamily(File f) {
+        String n = f.getName().toLowerCase();
+        return n.endsWith(".m4a") || n.endsWith(".mp4");
+    }
+
+    /** Vérification a minima qu'une écriture M4A/MP4 "réussie" (aucune exception) a bien produit un
+     *  fichier exploitable, plutôt que de faire confiance à l'absence d'exception — voir writeNative().
+     *  AudioFileIO.read() suffit ici : il échoue déjà de façon fiable sur un fichier tronqué/vide
+     *  (mêmes classes d'exception que celles gérées par la chaîne de repli juste après). */
+    private static boolean isReadableM4a(File f) {
+        if (!f.exists() || f.length() == 0) return false;
+        try { AudioFileIO.read(f); return true; }
+        catch (Exception e) { return false; }
+    }
+
     /**
-     * Chaîne de fallback pour M4A :
+     * Chaîne de fallback pour M4A/MP4 :
      *  1. jaudiotagger natif          → tous les champs
      *  2. ffmpeg repair + retry       → tous les champs
      *  3. AtomicParsley               → tous les champs (cover, MBIDs, ReplayGain)
@@ -167,19 +204,57 @@ public class TagWriter {
     private void writeNative(File fichier, TagInfo i, Path coverImage,
                               Map<String, String> preserved,
                               boolean clearExisting) throws Exception {
+        // jaudiotagger réécrit l'arbre d'atomes M4A/MP4 DIRECTEMENT sur le fichier original (pas de
+        // temp+rename comme les autres formats, voir writeM4aViaFfmpeg/AtomicParsley plus bas) — si
+        // CETTE toute première tentative est interrompue (disque plein, mergerfs qui relocalise le
+        // fichier en cours d'écriture via moveonenospc, voir fstab MusicPool), le fichier peut se
+        // retrouver tronqué/vide AVANT même qu'une exception Java n'ait la moindre chance d'être
+        // levée. Sauvegarder seulement APRÈS avoir capté l'exception (comme avant ce correctif)
+        // arrivait déjà trop tard dans ce cas précis : la "sauvegarde" copiait un fichier déjà vide,
+        // et restoreBackup() en fin de chaîne restaurait ce même vide — aucune protection réelle.
+        // Trouvé en direct 2026-07-28 : plusieurs .m4a à 0 octet dans la bibliothèque, mtimes
+        // concordant avec l'incident disque plein déjà identifié (voir mémoire "Runaway yt-dlp
+        // playlist export script"). Sauvegarde prise AVANT la première tentative pour M4A/MP4
+        // uniquement (coût d'une copie par écriture, inutile pour les autres formats dont le
+        // mécanisme jaudiotagger générique est déjà temp+rename, donc déjà sûr par construction).
+        Path earlyBackup = isM4aFamily(fichier) ? backupBeforeRepair(fichier) : null;
         try {
             doWriteNative(fichier, i, coverImage, preserved, clearExisting);
+            // jaudiotagger n'a rien levé, mais une écriture interrompue en plein milieu (voir
+            // ci-dessus) peut malgré tout laisser un résultat tronqué/vide sans exception détectable
+            // — vérifié explicitement plutôt que de faire confiance à l'absence d'exception.
+            if (earlyBackup != null && !isReadableM4a(fichier)) {
+                throw new Exception("écriture jaudiotagger sans exception mais fichier résultant"
+                    + " illisible/vide (" + fichier.length() + " octet(s))");
+            }
+            deleteBackupQuietly(earlyBackup);
             return;
         } catch (Exception e) {
-            if (!fichier.getName().toLowerCase().endsWith(".m4a")) throw translateKnownJaudiotaggerBug(fichier, e);
+            if (!isM4aFamily(fichier)) throw translateKnownJaudiotaggerBug(fichier, e);
+            // Remettre le fichier dans son état d'avant la première tentative avant d'engager la
+            // chaîne de repli ci-dessous : sans ça, runFfmpegRepair()/AtomicParsley repartiraient
+            // d'un fichier potentiellement déjà tronqué/vide plutôt que de l'original intact.
+            if (earlyBackup != null) restoreBackup(fichier, earlyBackup);
+
+            // AudioScanner traite tous les .mp4 comme candidats audio (voir sa Javadoc) — un vrai
+            // clip vidéo échoue donc systématiquement ici et n'a de toute façon AUCUNE chance de
+            // réussir dans la chaîne de repli ci-dessous (repair/AtomicParsley/ffmpeg direct
+            // produisent tous un conteneur audio-only). Sans ce contrôle, chacune des 3 étapes
+            // suivantes tentait quand même sa chance avec son propre timeout de 120s — jusqu'à 6
+            // minutes brûlées PAR FICHIER PAR TENTATIVE D'ENREGISTREMENT sur une vidéo qui ne sera
+            // jamais taguable, constaté en direct (2026-08-08) sur des dizaines de clips musicaux
+            // dans le journal ("timeout | timeout | timeout" à répétition). AudioFormatCheck.
+            // hasVideoStream() existait déjà pour ce diagnostic mais n'était jusqu'ici appelé qu'
+            // après coup (TaggingWorker), jamais avant d'engager cette chaîne coûteuse à l'écriture.
+            if (fichier.getName().toLowerCase().endsWith(".mp4") && AudioFormatCheck.hasVideoStream(fichier)) {
+                throw new Exception("fichier vidéo (pas audio) — écriture de tags audio impossible, "
+                    + "voir la fonctionnalité de récupération vidéo");
+            }
         }
 
-        // jaudiotagger réécrit l'arbre d'atomes M4A directement sur le fichier original ; si sa
-        // propre vérification post-écriture a échoué (ci-dessus), le fichier peut déjà avoir une
-        // structure cassée AVANT même que les fallbacks ci-dessous ne s'exécutent. On sauvegarde
-        // donc l'état actuel pour pouvoir restaurer l'original si toute la chaîne échoue — avant
-        // ce correctif, un échec complet ne laissait aucun filet et aucune trace de la cause réelle
-        // (stderr jeté à /dev/null à chaque étape).
+        // Deuxième sauvegarde pour la chaîne de repli elle-même (repair ffmpeg/AtomicParsley/ffmpeg
+        // direct, chacun risqué à sa façon) — indépendante de earlyBackup ci-dessus, restaurée déjà
+        // à ce stade, donc à jour avec l'original intact.
         Path backup = backupBeforeRepair(fichier);
         StringBuilder diag = new StringBuilder();
         try {
@@ -193,12 +268,12 @@ public class TagWriter {
             }
             // Fallback 2 : AtomicParsley — full support (cover + MBIDs + ReplayGain)
             try {
-                writeM4aViaAtomicParsley(fichier, i, coverImage);
+                writeM4aViaAtomicParsley(fichier, i, coverImage, preserved);
                 deleteBackupQuietly(backup);
                 return;
             } catch (Exception e3) { diag.append(" | AtomicParsley: ").append(e3.getMessage()); }
             // Fallback 3 : ffmpeg — tags standards seulement (dernier recours)
-            writeM4aViaFfmpeg(fichier, i, coverImage);
+            writeM4aViaFfmpeg(fichier, i, coverImage, preserved);
             deleteBackupQuietly(backup);
         } catch (Exception finalError) {
             // Toute la chaîne a échoué : restaurer l'original plutôt que de laisser un fichier
@@ -408,7 +483,7 @@ public class TagWriter {
         // ── Audio / tempo / tonalité ──────────────────────────────────────────
         sf(tag, FieldKey.BPM,                i.bpm);
         sf(tag, FieldKey.FBPM,               i.fbpm);
-        sf(tag, FieldKey.KEY,                i.initialKey);
+        sf(tag, FieldKey.KEY,   Config.get().writeCamelotKey() ? toCamelot(i.initialKey) : i.initialKey);
         sf(tag, FieldKey.LANGUAGE,           i.language);
 
         // ── Humeur (Essentia) ─────────────────────────────────────────────────
@@ -457,9 +532,15 @@ public class TagWriter {
         sf(tag, FieldKey.CATALOG_NO,         i.catalogNo);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASE_TYPE, i.releaseType);
         sf(tag, FieldKey.ORIGINAL_YEAR,      i.originalYear);
+        // label/releaseStatus/media : champs MusicBrainz systématiquement extraits mais jamais
+        // écrits avant ce correctif (comparaison directe avec Picard sur un même fichier).
+        sf(tag, FieldKey.RECORD_LABEL,             i.label);
+        sf(tag, FieldKey.MUSICBRAINZ_RELEASE_STATUS, i.releaseStatus);
+        sf(tag, FieldKey.MEDIA,                    i.media);
 
         // ── IDs MusicBrainz ───────────────────────────────────────────────────
         sf(tag, FieldKey.MUSICBRAINZ_ARTISTID,         i.artistMbid);
+        sf(tag, FieldKey.MUSICBRAINZ_RELEASEARTISTID,  i.albumArtistMbid);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID, i.releaseGroupMbid);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASEID,        i.releaseMbid);
         sf(tag, FieldKey.MUSICBRAINZ_TRACK_ID,         i.recordingMbid);
@@ -473,6 +554,10 @@ public class TagWriter {
 
         // ── Statistiques d'écoute ───────────────────────────────────────────────
         setCustomField(tag, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+        setCustomField(tag, "LASTFM_PLAYCOUNT",       i.lastfmPlayCount);
+
+        // ── Marqueur de taguage (portable, indépendant du cache SQLite) ─────────
+        setCustomField(tag, "OT_TAGGEDDATE", i.taggedDate);
 
         // ── URLs ──────────────────────────────────────────────────────────────
         sf(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE,   i.artistOfficialUrl);
@@ -483,9 +568,15 @@ public class TagWriter {
         sf(tag, FieldKey.URL_WIKIPEDIA_RELEASE_SITE, i.releaseWikipediaUrl);
 
         // ── Tags preservés ────────────────────────────────────────────────────
+        // Uniquement si le taguage actuel n'a RIEN écrit dans ce champ : sinon, pour un champ que
+        // le pipeline renseigne parfois (DISC_NO/DISC_TOTAL/COMMENT — contrairement à RATING par ex.,
+        // jamais écrit par le taguage), l'ancienne valeur figée avant clearExistingTags écraserait
+        // systématiquement une valeur fraîche et correcte tout juste posée juste au-dessus.
         for (Map.Entry<String, String> e : preserved.entrySet()) {
             try {
-                sf(tag, FieldKey.valueOf(e.getKey().toUpperCase()), e.getValue());
+                FieldKey key = FieldKey.valueOf(e.getKey().toUpperCase());
+                String justWritten = getTagFirst(tag, key);
+                if (justWritten == null || justWritten.isBlank()) sf(tag, key, e.getValue());
             } catch (Exception ignored) {}
         }
 
@@ -507,14 +598,28 @@ public class TagWriter {
 
     /**
      * Écrit tous les champs M4A via AtomicParsley (fallback 2).
-     * Supporte : tags standards, sort fields, cover art, MusicBrainz IDs, ReplayGain,
-     * Acoustid, Discogs, flags custom — via atomes freeform ----:com.apple.iTunes:
+     * Parité quasi complète avec le chemin jaudiotagger natif (doWriteNative) — vérifiée champ par
+     * champ contre lui, pas seulement les groupes évidents (tags standards, sort fields, cover
+     * art, MusicBrainz IDs, ReplayGain, Acoustid, Discogs, flags, classique, contributeurs,
+     * artistes multiples, catalogue/année originale) — via atomes freeform ----:com.apple.iTunes:
+     * pour tout ce qui n'a pas de flag AtomicParsley dédié.
      */
-    private static void writeM4aViaAtomicParsley(File fichier, TagInfo i, Path coverImage)
+    private static void writeM4aViaAtomicParsley(File fichier, TagInfo i, Path coverImage,
+                                                  Map<String, String> preserved)
             throws Exception {
         List<String> cmd = new ArrayList<>();
         cmd.add("AtomicParsley");
         cmd.add(fichier.getAbsolutePath());
+
+        // COMMENT/DISC_NO/DISC_TOTAL : seuls champs de tags.preserved_tags concernés par ce
+        // fallback pour l'instant (voir effectivePreserved()) — repli sur l'ancienne valeur du
+        // fichier si le taguage n'a rien calculé, au lieu de la perdre silencieusement. Avant ce
+        // correctif, preserved n'était même pas transmis à ce fallback : tags.preserved_tags
+        // n'avait AUCUN effet pour tout fichier M4A retombant ici (DRM iTunes, atomes non
+        // standards...), contrairement au chemin jaudiotagger natif.
+        String comment    = effectivePreserved(i.comment,    "COMMENT",     preserved);
+        String discNo     = effectivePreserved(i.discNo,     "DISC_NO",     preserved);
+        String discTotal  = effectivePreserved(i.discTotal,  "DISC_TOTAL",  preserved);
 
         // Tags standards
         apField(cmd, "--title",       i.title);
@@ -524,7 +629,7 @@ public class TagWriter {
         apField(cmd, "--year",        i.year);
         apField(cmd, "--genre",       i.genre);
         apField(cmd, "--composer",    i.composer);
-        apField(cmd, "--comment",     i.comment);
+        apField(cmd, "--comment",     comment);
         apField(cmd, "--lyrics",      i.lyrics);
         apField(cmd, "--grouping",    i.grouping);
 
@@ -532,8 +637,8 @@ public class TagWriter {
             String trk = i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal;
             apField(cmd, "--tracknum", trk);
         }
-        if (!i.discNo.isBlank()) {
-            String dsk = i.discTotal.isBlank() ? i.discNo : i.discNo + "/" + i.discTotal;
+        if (!discNo.isBlank()) {
+            String dsk = discTotal.isBlank() ? discNo : discNo + "/" + discTotal;
             apField(cmd, "--disk", dsk);
         }
         if (!i.bpm.isBlank()) apField(cmd, "--bpm", i.bpm);
@@ -549,6 +654,16 @@ public class TagWriter {
         apSortOrder(cmd, "album",       i.albumSort);
         apSortOrder(cmd, "albumartist", i.albumArtistSort);
         apSortOrder(cmd, "composer",    i.composerSort);
+        // --sortOrder n'a que ces 5 types (voir --longhelp) : les 8 autres champs de tri n'ont
+        // aucun flag dédié, mêmes atomes freeform que le reste de la parité ci-dessous.
+        apFreeform(cmd, "CONDUCTOR_SORT", i.conductorSort);
+        apFreeform(cmd, "ORCHESTRA_SORT", i.orchestraSort);
+        apFreeform(cmd, "ENSEMBLE_SORT",  i.ensembleSort);
+        apFreeform(cmd, "CHOIR_SORT",     i.choirSort);
+        apFreeform(cmd, "LYRICIST_SORT",  i.lyricistSort);
+        apFreeform(cmd, "PRODUCER_SORT",  i.producerSort);
+        apFreeform(cmd, "ARRANGER_SORT",  i.arrangerSort);
+        apFreeform(cmd, "MIXER_SORT",     i.mixerSort);
 
         // Pochette
         if (coverImage != null && coverImage.toFile().exists())
@@ -559,6 +674,50 @@ public class TagWriter {
         apFreeform(cmd, "MusicBrainz Album Id",         i.releaseMbid);
         apFreeform(cmd, "MusicBrainz Release Group Id", i.releaseGroupMbid);
         apFreeform(cmd, "MusicBrainz Artist Id",        i.artistMbid);
+        apFreeform(cmd, "MusicBrainz Album Artist Id",  i.albumArtistMbid);
+
+        // Label/statut/support — mêmes champs que le chemin jaudiotagger normal (voir plus haut
+        // dans ce fichier), ajoutés ici aussi pour ne pas diverger sur le fallback M4A.
+        apFreeform(cmd, "LABEL",                     i.label);
+        apFreeform(cmd, "MusicBrainz Album Status",  i.releaseStatus);
+        apFreeform(cmd, "MEDIA",                     i.media);
+
+        // Parité avec le chemin jaudiotagger natif — jusqu'à ce correctif, ~30 champs manquaient
+        // ici (mood, pays, script, code-barres, ISRC, langue, note, tags, URLs, classique, empreinte
+        // AcoustID) alors qu'ils étaient bien calculés en mémoire par la cascade d'enrichissement :
+        // silencieusement perdus pour tout fichier retombant sur ce fallback (ex. M4A protégé par
+        // DRM iTunes — jaudiotagger natif y échoue systématiquement, AtomicParsley sait l'écrire).
+        // Noms d'atome vérifiés en décompilant Mp4FieldKey.class (mêmes constantes que jaudiotagger
+        // utilise lui-même pour M4A en écriture native), pas devinés.
+        apFreeform(cmd, "MOOD",              i.mood);
+        apFreeform(cmd, "MOOD_AGGRESSIVE",   i.moodAggressive);
+        apFreeform(cmd, "MOOD_ACOUSTIC",     i.moodAcoustic);
+        apFreeform(cmd, "MOOD_ELECTRONIC",   i.moodElectronic);
+        apFreeform(cmd, "MOOD_HAPPY",        i.moodHappy);
+        apFreeform(cmd, "MOOD_PARTY",        i.moodParty);
+        apFreeform(cmd, "MOOD_RELAXED",      i.moodRelaxed);
+        apFreeform(cmd, "MOOD_SAD",          i.moodSad);
+        apFreeform(cmd, "MOOD_VALENCE",      i.moodValence);
+        apFreeform(cmd, "MOOD_AROUSAL",      i.moodArousal);
+        apFreeform(cmd, "MOOD_DANCEABILITY", i.moodDanceability);
+        apFreeform(cmd, "MOOD_INSTRUMENTAL", i.moodInstrumental);
+        apFreeform(cmd, "COUNTRY",           i.country);
+        apFreeform(cmd, "SCRIPT",            i.script);
+        apFreeform(cmd, "BARCODE",           i.barcode);
+        apFreeform(cmd, "ISRC",              i.isrc);
+        apFreeform(cmd, "LANGUAGE",          i.language);
+        apFreeform(cmd, "RATING",            i.rating);
+        apFreeform(cmd, "TAGS",              i.tags);
+        apFreeform(cmd, "ACOUSTID_FINGERPRINT", i.acoustidFingerprint);
+        apFreeform(cmd, "CLASSICAL_CATALOG", i.classicalCatalog);
+        apFreeform(cmd, "MusicBrainz Album Type", i.releaseType);
+        apFreeform(cmd, "URL_OFFICIAL_ARTIST_SITE",   i.artistOfficialUrl);
+        apFreeform(cmd, "URL_WIKIPEDIA_ARTIST_SITE",  i.artistWikipediaUrl);
+        apFreeform(cmd, "URL_DISCOGS_ARTIST_SITE",    i.artistDiscogsUrl);
+        apFreeform(cmd, "URL_OFFICIAL_RELEASE_SITE",  i.releaseOfficialUrl);
+        apFreeform(cmd, "URL_WIKIPEDIA_RELEASE_SITE", i.releaseWikipediaUrl);
+        apFreeform(cmd, "URL_DISCOGS_RELEASE_SITE",   i.releaseDiscogsUrl);
+        apFreeform(cmd, "URL_LYRICS_SITE",            i.lyricsUrl);
 
         // ReplayGain
         apFreeform(cmd, "REPLAYGAIN_TRACK_GAIN", i.replayGainTrackGain);
@@ -581,6 +740,64 @@ public class TagWriter {
 
         // Statistiques d'écoute
         apFreeform(cmd, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+        apFreeform(cmd, "LASTFM_PLAYCOUNT",       i.lastfmPlayCount);
+
+        // Marqueur de taguage (portable, indépendant du cache SQLite)
+        apFreeform(cmd, "OT_TAGGEDDATE", i.taggedDate);
+
+        // Deuxième vague de parité (audit exhaustif comparant les ~119 champs du chemin
+        // jaudiotagger natif à ce fallback — la vague précédente, commentaire ci-dessus, avait
+        // rattrapé mood/pays/etc. mais en avait laissé ~46 autres de côté sans que rien ne le
+        // signale). Artistes multiples, contributeurs (hors composer déjà via --composer),
+        // classique (hors classicalCatalog/grouping déjà via --grouping/CLASSICAL_CATALOG),
+        // flags (hors isCompilation/isInstrumental déjà gérés), tempo fin/tonalité, IDs restants,
+        // catalogue/année originale.
+        apFreeform(cmd, "ARTISTS",      i.artists);
+        apFreeform(cmd, "ARTISTS_SORT", i.artistsSort);
+
+        apFreeform(cmd, "CONDUCTOR", i.conductor);
+        apFreeform(cmd, "ORCHESTRA", i.orchestra);
+        apFreeform(cmd, "ENSEMBLE",  i.ensemble);
+        apFreeform(cmd, "CHOIR",     i.choir);
+        apFreeform(cmd, "LYRICIST",  i.lyricist);
+        apFreeform(cmd, "PRODUCER",  i.producer);
+        apFreeform(cmd, "ARRANGER",  i.arranger);
+        apFreeform(cmd, "ENGINEER",  i.engineer);
+        apFreeform(cmd, "MIXER",     i.mixer);
+        apFreeform(cmd, "DJMIXER",   i.djMixer);
+
+        apFreeform(cmd, "WORK",                i.work);
+        apFreeform(cmd, "MusicBrainz Work Id",  i.workMbid);
+        apFreeform(cmd, "MOVEMENT",             i.movement);
+        apFreeform(cmd, "MOVEMENT_NO",          i.movementNo);
+        apFreeform(cmd, "MOVEMENT_TOTAL",       i.movementTotal);
+        apFreeform(cmd, "TITLE_MOVEMENT",       i.titleMovement);
+        apFreeform(cmd, "PART",                 i.part);
+        apFreeform(cmd, "PART_TYPE",            i.partType);
+        apFreeform(cmd, "PART_NUMBER",          i.partNo);
+        apFreeform(cmd, "PERIOD",               i.period);
+        apFreeform(cmd, "OPUS",                 i.opus);
+        apFreeform(cmd, "CLASSICAL_NICKNAME",   i.classicalNickname);
+        apFreeform(cmd, "SECTION",              i.section);
+        apFreeform(cmd, "OVERALL_WORK",         i.overallWork);
+
+        if ("1".equals(i.isClassical))     apFreeform(cmd, "IS_CLASSICAL",      "1");
+        if ("1".equals(i.isHD))            apFreeform(cmd, "IS_HD",             "1");
+        if ("1".equals(i.isLive))          apFreeform(cmd, "IS_LIVE",           "1");
+        if ("1".equals(i.isGreatestHits))  apFreeform(cmd, "IS_GREATEST_HITS",  "1");
+        if ("1".equals(i.isSoundtrack))    apFreeform(cmd, "IS_SOUNDTRACK",     "1");
+
+        apFreeform(cmd, "FBPM", i.fbpm);
+        // Même conversion Camelot que le chemin natif (voir doWriteNative) — sinon ce fallback
+        // écrirait la tonalité brute même quand l'utilisateur a demandé la notation Camelot.
+        apFreeform(cmd, "KEY", Config.get().writeCamelotKey() ? toCamelot(i.initialKey) : i.initialKey);
+
+        apFreeform(cmd, "AMAZON_ID",    i.amazonId);
+        apFreeform(cmd, "ROONALBUMTAG", i.roonAlbumTag);
+        apFreeform(cmd, "ROONTRACKTAG", i.roonTrackTag);
+
+        apFreeform(cmd, "CATALOG_NO",    i.catalogNo);
+        apFreeform(cmd, "ORIGINAL_YEAR", i.originalYear);
 
         cmd.add("--overWrite");
 
@@ -645,7 +862,8 @@ public class TagWriter {
      * disque, commentaire, compositeur, paroles, BPM, grouping.
      * Champs NON supportés : MusicBrainz IDs, ReplayGain, sort fields, moods, pochette.
      */
-    private static void writeM4aViaFfmpeg(File fichier, TagInfo i, Path coverImage)
+    private static void writeM4aViaFfmpeg(File fichier, TagInfo i, Path coverImage,
+                                           Map<String, String> preserved)
             throws Exception {
         // Sortie dans un fichier temporaire — créé avant la commande pour gérer le cas
         // où ffmpeg ne peut pas créer le fichier lui-même (permissions, espace disque)
@@ -661,6 +879,14 @@ public class TagWriter {
         cmd.add("-movflags"); cmd.add("+faststart"); // moov avant mdat — garanti lisible
         cmd.add("-map_metadata"); cmd.add("-1"); // effacer tags existants
 
+        // COMMENT/DISC_NO/DISC_TOTAL : -map_metadata -1 ci-dessus efface TOUT, y compris ces
+        // champs si le taguage n'a rien calculé pour eux — repli sur l'ancienne valeur du fichier
+        // (tags.preserved_tags) au lieu de la perdre silencieusement, même logique que le fallback
+        // AtomicParsley juste au-dessus.
+        String comment    = effectivePreserved(i.comment,    "COMMENT",     preserved);
+        String discNo     = effectivePreserved(i.discNo,     "DISC_NO",     preserved);
+        String discTotal  = effectivePreserved(i.discTotal,  "DISC_TOTAL",  preserved);
+
         // Champs standards ffmpeg → M4A
         ffMeta(cmd, "title",        i.title);
         ffMeta(cmd, "artist",       i.artist);
@@ -669,7 +895,7 @@ public class TagWriter {
         ffMeta(cmd, "date",         i.year);
         ffMeta(cmd, "genre",        i.genre);
         ffMeta(cmd, "composer",     i.composer);
-        ffMeta(cmd, "comment",      i.comment);
+        ffMeta(cmd, "comment",      comment);
         ffMeta(cmd, "lyrics",       i.lyrics);
         ffMeta(cmd, "grouping",     i.grouping);
 
@@ -679,8 +905,8 @@ public class TagWriter {
             ffMeta(cmd, "track", trk);
         }
         // Disque : "numéro/total"
-        if (!i.discNo.isBlank()) {
-            String dsk = i.discTotal.isBlank() ? i.discNo : i.discNo + "/" + i.discTotal;
+        if (!discNo.isBlank()) {
+            String dsk = discTotal.isBlank() ? discNo : discNo + "/" + discTotal;
             ffMeta(cmd, "disc", dsk);
         }
         if (!i.bpm.isBlank())           ffMeta(cmd, "bpm", i.bpm);
@@ -728,6 +954,27 @@ public class TagWriter {
         try {
             tag.setField(key, value);
         } catch (Exception ignored) {}
+    }
+
+    // Table Camelot Wheel — clé Essentia (lettre + dièse, ex "C#", "C#m") → notation Camelot
+    // (ex "3B"/"9A"), utilisée par les DJ pour le mixage harmonique. Essentia (EssentiaClient,
+    // tonal.key_key + key_scale) ne produit que des dièses, jamais de bémols — table volontairement
+    // limitée à ces 24 clés.
+    private static final Map<String, String> CAMELOT = Map.ofEntries(
+        Map.entry("C",  "8B"),  Map.entry("C#", "3B"),  Map.entry("D",  "10B"), Map.entry("D#", "5B"),
+        Map.entry("E",  "12B"), Map.entry("F",  "7B"),  Map.entry("F#", "2B"),  Map.entry("G",  "9B"),
+        Map.entry("G#", "4B"),  Map.entry("A",  "11B"), Map.entry("A#", "6B"),  Map.entry("B",  "1B"),
+        Map.entry("Cm", "5A"),  Map.entry("C#m","12A"), Map.entry("Dm", "7A"),  Map.entry("D#m","2A"),
+        Map.entry("Em", "9A"),  Map.entry("Fm", "4A"),  Map.entry("F#m","11A"), Map.entry("Gm", "6A"),
+        Map.entry("G#m","1A"),  Map.entry("Am", "8A"),  Map.entry("A#m","3A"),  Map.entry("Bm", "10A")
+    );
+
+    /** Notation Camelot (8A/8B…) pour une clé au format Essentia ("Cm"/"F#"…). Clé non reconnue
+     *  (bémol, format inattendu déjà présent dans un fichier tiers…) → renvoyée telle quelle plutôt
+     *  que vidée, pour ne jamais faire disparaître une information déjà là. */
+    private static String toCamelot(String key) {
+        if (key == null || key.isBlank()) return key;
+        return CAMELOT.getOrDefault(key.trim(), key);
     }
 
     /**
@@ -786,14 +1033,43 @@ public class TagWriter {
         } catch (Exception ignored) {}
     }
 
-    // ── Réparation M4A ────────────────────────────────────────────────────────
+    /**
+     * Contrepartie lecture de {@link #setCustomField} — même dispatch par type de tag, jamais
+     * d'exception propagée (comme {@code getTagFirst}). Public : appelé depuis MainFrame.readTags()
+     * pour afficher le marqueur OT_TAGGEDDATE au scan, sans re-tagger le fichier.
+     */
+    public static String getCustomField(Tag tag, String name) {
+        try {
+            if (tag instanceof AbstractID3v2Tag id3) {
+                for (org.jaudiotagger.tag.TagField field : id3.getFields("TXXX")) {
+                    if (field instanceof org.jaudiotagger.tag.id3.AbstractID3v2Frame frame
+                            && frame.getBody() instanceof FrameBodyTXXX txxx
+                            && name.equalsIgnoreCase(txxx.getDescription())) {
+                        return txxx.getText();
+                    }
+                }
+                return "";
+            } else if (tag instanceof Mp4Tag) {
+                String v = tag.getFirst("----:com.apple.iTunes:" + name);
+                return v != null ? v : "";
+            } else {
+                // FLAC / OGG — VorbisComment plain-text, même convention que setCustomField.
+                String v = tag.getFirst(name.toUpperCase());
+                return v != null ? v : "";
+            }
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    // ── Réparation M4A/MP4 ───────────────────────────────────────────────────
 
     /**
-     * Répare les M4A illisibles par jaudiotagger via ffmpeg -movflags +faststart.
+     * Répare les M4A/MP4 illisibles par jaudiotagger via ffmpeg -movflags +faststart.
      * Idempotent : si le fichier est déjà lisible ET écrivable, ne fait rien.
      */
     public static boolean repairM4aIfNeeded(File f) {
-        if (!f.getName().toLowerCase().endsWith(".m4a")) return false;
+        if (!isM4aFamily(f)) return false;
         try {
             AudioFileIO.read(f);
             return false; // lecture OK — on tente quand même l'écriture normalement
@@ -860,18 +1136,29 @@ public class TagWriter {
     }
 
     /** Retire les caractères de contrôle (dont NUL) qu'un tag scrappé peut contenir : un NUL dans
-     *  un argument fait planter ProcessBuilder ("invalid null character in command"). */
-    private static String sanitizeArg(String value) {
+     *  un argument fait planter ProcessBuilder ("invalid null character in command"). Package-privé
+     *  (pas private) : réutilisé tel quel par FfmpegTagIO.meta(), qui construisait ses arguments
+     *  ffmpeg sans cette protection — un NUL réel dans un tag (Discogs/Last.fm scrappés, ou tag
+     *  préexistant corrompu) faisait planter net l'écriture Opus/AAC/WV/WAV, contrairement au
+     *  chemin AtomicParsley qui l'avait déjà. */
+    static String sanitizeArg(String value) {
         return value.replaceAll("[\\x00-\\x1F\\x7F]", "");
     }
 
     // ── Merge et preserved — lecture jaudiotagger ─────────────────────────────
+
+    // Champs d'identité où une valeur existante "1", "0", "Unknown"... ne doit JAMAIS être
+    // recopiée en secours — contrairement à TRACK/DISC_NO/YEAR où un court nombre est légitime.
+    // Voir TagInfo.isGenericIdentityValue() pour le pourquoi (bug réel trouvé le 2026-08-13).
+    private static final Set<FieldKey> IDENTITY_FIELDS = EnumSet.of(
+            FieldKey.ARTIST, FieldKey.ALBUM_ARTIST, FieldKey.TITLE, FieldKey.ALBUM);
 
     private TagInfo mergeWithExisting(TagInfo info, Tag tag) {
         TagInfo m = info.copy();
         for (FieldKey key : FieldKey.values()) {
             String existing = getTagFirst(tag, key);
             if (existing == null || existing.isBlank()) continue;
+            if (IDENTITY_FIELDS.contains(key) && TagInfo.isGenericIdentityValue(existing)) continue;
             try {
                 Field f = fieldFor(key);
                 if (f == null) continue;
@@ -888,6 +1175,60 @@ public class TagWriter {
         return m;
     }
 
+    /** Champs listés dans tags.never_modify : capture leur valeur ACTUELLE sur le tag existant,
+     *  même si elle est vide — contrairement à readPreservedTags(), rien n'est filtré ici, le champ
+     *  doit rester figé tel quel, y compris "figé à vide" si c'était déjà le cas. */
+    private Map<String, String> readNeverModifyTags(Tag tag) {
+        String raw = Config.get().neverModifyTags();
+        Map<String, String> result = new LinkedHashMap<>();
+        if (raw.isBlank()) return result;
+        for (String name : raw.split("\\|")) {
+            name = name.trim();
+            if (name.isBlank()) continue;
+            try {
+                FieldKey key = FieldKey.valueOf(name.toUpperCase());
+                result.put(key.name(), getTagFirst(tag, key));
+            } catch (IllegalArgumentException ignored) {}
+        }
+        return result;
+    }
+
+    /** Équivalent de {@link #readNeverModifyTags(Tag)} pour Opus/AAC/WV/APE/WAV — même raison que
+     *  {@link #readPreservedTagsViaFfmpeg(File)} : pas de Tag jaudiotagger disponible sur ces
+     *  formats, relecture de l'ancien fichier via FfmpegTagIO.read(). */
+    private Map<String, String> readNeverModifyTagsViaFfmpeg(File fichier) {
+        String raw = Config.get().neverModifyTags();
+        Map<String, String> result = new LinkedHashMap<>();
+        if (raw.isBlank()) return result;
+        TagInfo old;
+        try { old = FfmpegTagIO.read(fichier); } catch (Exception e) { return result; }
+        for (String name : raw.split("\\|")) {
+            name = name.trim();
+            if (name.isBlank()) continue;
+            try {
+                FieldKey key = FieldKey.valueOf(name.toUpperCase());
+                Field f = fieldFor(key);
+                if (f == null) continue;
+                String val = (String) f.get(old);
+                result.put(key.name(), val == null ? "" : val);
+            } catch (Exception ignored) {}
+        }
+        return result;
+    }
+
+    /** Force en place, sur une TagInfo pas encore écrite, les valeurs figées de
+     *  {@link #readNeverModifyTags(Tag)}/{@link #readNeverModifyTagsViaFfmpeg(File)} —
+     *  inconditionnel (contrairement à applyPreservedToTagInfo()) : le champ garde sa valeur
+     *  d'origine même si le taguage venait d'y écrire quelque chose de nouveau et non vide. */
+    private void applyNeverModify(TagInfo target, Map<String, String> frozen) {
+        for (Map.Entry<String, String> e : frozen.entrySet()) {
+            try {
+                Field f = fieldFor(FieldKey.valueOf(e.getKey()));
+                if (f != null) f.set(target, e.getValue());
+            } catch (Exception ignored) {}
+        }
+    }
+
     private Map<String, String> readPreservedTags(Tag tag) {
         String raw = Config.get().str("tags.preserved_tags", "");
         Map<String, String> result = new LinkedHashMap<>();
@@ -898,17 +1239,72 @@ public class TagWriter {
             try {
                 FieldKey key = FieldKey.valueOf(name.toUpperCase());
                 String val = getTagFirst(tag, key);
-                if (val != null && !val.isBlank()) result.put(name, val);
+                // Clé = nom canonique de l'enum (pas la casse tapée par l'utilisateur dans le
+                // réglage) — les fallbacks M4A (writeM4aViaAtomicParsley/writeM4aViaFfmpeg) font
+                // des lookups directs par ce nom, voir effectivePreserved().
+                if (val != null && !val.isBlank()) result.put(key.name(), val);
             } catch (IllegalArgumentException ignored) {}
         }
         return result;
+    }
+
+    /** Équivalent de {@link #readPreservedTags(Tag)} pour Opus/AAC/WV/APE/WAV — jaudiotagger n'a
+     *  AUCUN lecteur pour ces formats (voir write()), donc pas de Tag jaudiotagger disponible ici ;
+     *  on relit l'ancien fichier via FfmpegTagIO.read() lui-même, seule source possible pour savoir
+     *  ce qu'il y avait avant que FfmpegTagIO.write() ne l'écrase. */
+    private Map<String, String> readPreservedTagsViaFfmpeg(File fichier) {
+        String raw = Config.get().str("tags.preserved_tags", "");
+        Map<String, String> result = new LinkedHashMap<>();
+        if (raw.isBlank()) return result;
+        TagInfo old;
+        try { old = FfmpegTagIO.read(fichier); } catch (Exception e) { return result; }
+        for (String name : raw.split("\\|")) {
+            name = name.trim();
+            if (name.isBlank()) continue;
+            try {
+                FieldKey key = FieldKey.valueOf(name.toUpperCase());
+                Field f = fieldFor(key);
+                if (f == null) continue;
+                String val = (String) f.get(old);
+                if (val != null && !val.isBlank()) result.put(key.name(), val);
+            } catch (Exception ignored) {}
+        }
+        return result;
+    }
+
+    /** Applique en place, sur une TagInfo pas encore écrite, les valeurs préservées d'
+     *  {@link #readPreservedTagsViaFfmpeg(File)} — seulement pour les champs que le taguage actuel
+     *  a laissés vides, même logique que la boucle "Tags preservés" de doWriteNative(). */
+    private void applyPreservedToTagInfo(TagInfo copy, Map<String, String> preserved) {
+        for (Map.Entry<String, String> e : preserved.entrySet()) {
+            try {
+                Field f = fieldFor(FieldKey.valueOf(e.getKey()));
+                if (f == null) continue;
+                String current = (String) f.get(copy);
+                if (current == null || current.isBlank()) f.set(copy, e.getValue());
+            } catch (Exception ignored) {}
+        }
     }
 
     private String getTagFirst(Tag tag, FieldKey key) {
         try { return tag.getFirst(key); } catch (Exception e) { return ""; }
     }
 
-    private static final Map<FieldKey, Field> KEY_TO_FIELD = new HashMap<>();
+    /** Valeur fraîchement calculée par le taguage si non vide, sinon la valeur préservée de
+     *  l'ancien tag pour ce champ (voir tags.preserved_tags) — utilisé par les fallbacks M4A
+     *  (AtomicParsley/ffmpeg), même logique que la boucle "Tags preservés" de doWriteNative(). */
+    private static String effectivePreserved(String current, String fieldKeyName, Map<String, String> preserved) {
+        if (current != null && !current.isBlank()) return current;
+        String p = preserved.get(fieldKeyName);
+        return (p != null && !p.isBlank()) ? p : (current != null ? current : "");
+    }
+
+    // ConcurrentHashMap : fieldFor() est appelé depuis mergeWithExisting() sur le chemin par
+    // défaut (clearExistingTags=false), et write() tourne en parallèle (SaveWorker/BatchProcessor,
+    // plusieurs threads sur un même writer partagé) — un HashMap classique ici s'exposait au même
+    // risque de corruption sous computeIfAbsent() concurrent que celui déjà évité pour aliasCache
+    // dans TaggingWorker/InfoCompleterWorker/AlbumCompletionWorker/BatchProcessor.
+    private static final Map<FieldKey, Field> KEY_TO_FIELD = new ConcurrentHashMap<>();
 
     private Field fieldFor(FieldKey key) {
         return KEY_TO_FIELD.computeIfAbsent(key, k -> {
@@ -957,6 +1353,8 @@ public class TagWriter {
                 case MUSICBRAINZ_ARTISTID         -> "artistMbid";
                 case MUSICBRAINZ_RELEASEID        -> "releaseMbid";
                 case MUSICBRAINZ_RELEASE_GROUP_ID -> "releaseGroupMbid";
+                case RATING             -> "rating";
+                case TAGS               -> "tags";
                 default -> null;
             };
             if (name == null) return null;

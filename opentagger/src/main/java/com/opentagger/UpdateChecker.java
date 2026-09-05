@@ -125,9 +125,34 @@ public class UpdateChecker {
         if (os.contains("win")) {
             Path pending = Paths.get(current.toString() + ".new");
             Files.move(downloadedJar, pending, StandardCopyOption.REPLACE_EXISTING);
-        } else {
+            return;
+        }
+        try {
             Files.move(downloadedJar, current,
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            // downloadedJar vient de Files.createTempFile() (répertoire temp système, ex. /tmp —
+            // souvent un montage séparé, parfois tmpfs) : rien ne garantit qu'il soit sur le même
+            // système de fichiers que `current` (ex. ~/.local/share/opentagger ou un checkout de
+            // dev), et ATOMIC_MOVE l'exige — vécu en vrai par l'utilisateur (AtomicMoveNotSupported
+            // -Exception, "Lien physique inter-périphérique invalide"). PAS de repli par simple
+            // Files.copy() par-dessus `current` : ce jar est potentiellement EN COURS D'EXÉCUTION
+            // (c'est lui-même qui vient de se télécharger sa propre mise à jour) — écrire dans le
+            // même inode pendant qu'une classe pas encore chargée pourrait l'être plus tard dans
+            // cette session corromprait le process vivant, pas seulement le prochain lancement.
+            // On copie donc d'abord vers un fichier temporaire sur le MÊME système de fichiers que
+            // `current` (son propre répertoire parent), puis on termine par un rename — atomique
+            // par construction puisque même device. Seule la copie initiale traverse les systèmes
+            // de fichiers ; le remplacement du jar vivant reste, lui, toujours un rename atomique.
+            Path sameDeviceTemp = Files.createTempFile(current.getParent(), "opentagger-update-", ".jar");
+            try {
+                Files.copy(downloadedJar, sameDeviceTemp, StandardCopyOption.REPLACE_EXISTING);
+                Files.move(sameDeviceTemp, current,
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } finally {
+                Files.deleteIfExists(sameDeviceTemp);
+                Files.deleteIfExists(downloadedJar);
+            }
         }
     }
 

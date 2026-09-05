@@ -31,10 +31,14 @@ public class CaaClient {
         return p != null ? p : downloadFromReleaseGroup(info, cache);
     }
 
-    /** Pochette liée à l'édition exacte (la plus précise) — un des 2 niveaux CAA séparément activables. */
+    /** Pochette liée à l'édition exacte (la plus précise) — un des 2 niveaux CAA séparément activables.
+     *  1200px (pas 500px) : demande utilisateur (2026-08-29) — le CAA garantit cette variante pour
+     *  quasiment toute image (générée automatiquement à l'import), donc le repli sur "front" (taille
+     *  originale, parfois plusieurs Mo/plusieurs milliers de px) ne sert plus que pour les rares
+     *  images sans variante 1200 encore générée. */
     public Path downloadFromRelease(TagInfo info, MetadataCache cache) {
         if (info.releaseMbid.isBlank()) return null;
-        Path p = tryDownload("/release/" + info.releaseMbid + "/front-500", cache);
+        Path p = tryDownload("/release/" + info.releaseMbid + "/front-1200", cache);
         if (p != null) return p;
         return tryDownload("/release/" + info.releaseMbid + "/front", cache); // fallback taille complète
     }
@@ -42,7 +46,7 @@ public class CaaClient {
     /** Pochette partagée entre toutes les éditions du même album — l'autre niveau CAA. */
     public Path downloadFromReleaseGroup(TagInfo info, MetadataCache cache) {
         if (info.releaseGroupMbid.isBlank()) return null;
-        Path p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front-500", cache);
+        Path p = tryDownload("/release-group/" + info.releaseGroupMbid + "/front-1200", cache);
         if (p != null) return p;
         return tryDownload("/release-group/" + info.releaseGroupMbid + "/front", cache);
     }
@@ -69,9 +73,9 @@ public class CaaClient {
             if (body == null || body.length < 512) return null; // réponse trop courte → erreur
 
             // Vérifier la signature JPEG/PNG pour éviter d'écrire du HTML comme image
-            if (!isImageBytes(body)) return null;
+            String ext = imageExtension(body);
+            if (ext == null) return null;
 
-            String ext = ".jpg";
             cache.putCachedImage(cacheKey, body, ext);
             return writeTempFile(body, ext);
         } catch (Exception e) {
@@ -86,13 +90,21 @@ public class CaaClient {
         return tmp;
     }
 
-    /** Vérifie que les premiers octets correspondent à JPEG (FFD8FF) ou PNG (89504E47). */
-    private static boolean isImageBytes(byte[] b) {
-        if (b.length < 4) return false;
+    /**
+     * Signature JPEG (FFD8FF) ou PNG (89504E47) → extension réelle, ou null si ni l'un ni
+     * l'autre (réponse d'erreur HTML/JSON). Le CAA sert aussi bien du JPEG que du PNG — avant ce
+     * correctif, l'extension était forcée à ".jpg" quel que soit le résultat de cette vérification
+     * (calculée puis jetée), et cette extension de fichier temporaire est relue plus loin pour
+     * déduire le MIME type écrit dans le tag (TagWriter.writeCoverOnly(), TagEnrichment.saveEntry()
+     * pour "copier la pochette en fichier à côté") : une pochette réellement en PNG se faisait donc
+     * embarquer/enregistrer avec un MIME type/extension "image/jpeg" erroné.
+     */
+    private static String imageExtension(byte[] b) {
+        if (b.length < 4) return null;
         // JPEG
-        if ((b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xD8 && (b[2] & 0xFF) == 0xFF) return true;
+        if ((b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xD8 && (b[2] & 0xFF) == 0xFF) return ".jpg";
         // PNG
-        if ((b[0] & 0xFF) == 0x89 && (b[1] & 0xFF) == 0x50 && (b[2] & 0xFF) == 0x4E && (b[3] & 0xFF) == 0x47) return true;
-        return false;
+        if ((b[0] & 0xFF) == 0x89 && (b[1] & 0xFF) == 0x50 && (b[2] & 0xFF) == 0x4E && (b[3] & 0xFF) == 0x47) return ".png";
+        return null;
     }
 }

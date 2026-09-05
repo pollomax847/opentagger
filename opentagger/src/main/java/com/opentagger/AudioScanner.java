@@ -6,8 +6,11 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 
 public class AudioScanner {
+
+    private static final Logger LOG = Logger.getLogger(AudioScanner.class.getName());
 
     private static final Set<String> EXTENSIONS = Set.of(
         ".mp3", ".flac", ".m4a", ".ogg", ".wav",
@@ -39,7 +42,18 @@ public class AudioScanner {
     private void scanRecursif(File dossier, Consumer<File> onFound, BooleanSupplier cancelled) {
         if (cancelled.getAsBoolean()) return;
         File[] contenu = dossier.listFiles();
-        if (contenu == null) return;
+        if (contenu == null) {
+            // listFiles() renvoie null (jamais une exception) sur erreur E/S ou permission refusée
+            // — jusqu'ici avalé en silence, ce sous-arbre entier disparaissait du scan sans la
+            // moindre trace, aucun moyen de savoir que ça s'était produit. Repéré en direct
+            // (2026-08-20) : /home/paulceline/Musique (1579 fichiers audio réels) n'avait que 141
+            // entrées en cache, toutes des fichiers isolés à la racine — aucune ne venait des
+            // sous-dossiers d'artistes, cohérent avec des échecs listFiles() répétés sur ce dossier,
+            // qui partage le même disque physique que le cache SQLite de l'appli (contention E/S),
+            // contrairement à MyBook/Toshiba montés sur des disques séparés.
+            if (dossier.exists()) LOG.warning("scan: listFiles() a échoué (E/S ou permission) : " + dossier.getAbsolutePath());
+            return;
+        }
 
         for (File f : contenu) {
             if (cancelled.getAsBoolean()) return;
