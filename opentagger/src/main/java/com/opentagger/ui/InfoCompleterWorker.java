@@ -282,6 +282,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
         if (!ti.genre.equals(genreBefore)) { log(I18n.t("  genre=%s", ti.genre)); changed = true; }
 
+        // ── 2a. Infos artiste (biographie/vrai nom/URLs) — jamais câblé dans ce pipeline avant
+        // ce correctif (même divergence que d'habitude entre InfoCompleterWorker et les 6 autres
+        // pipelines d'enrichissement, voir TaggingWorker/BatchProcessor/App.java/MatchDialog).
+        String artistInfoBefore = ti.artistBio + "|" + ti.artistRealName + "|" + ti.artistDiscogsUrl
+                + "|" + ti.artistOfficialUrl + "|" + ti.artistWikipediaUrl;
+        TagEnrichment.enrichArtistInfo(ti, discogs, lastFm, cache);
+        String artistInfoAfter = ti.artistBio + "|" + ti.artistRealName + "|" + ti.artistDiscogsUrl
+                + "|" + ti.artistOfficialUrl + "|" + ti.artistWikipediaUrl;
+        if (!artistInfoAfter.equals(artistInfoBefore)) changed = true;
+
         // ── 2b. Opus/Catalogue/Mouvement/Œuvre globale (classique) ─────────
         // detectClassical() (remplit ti.isClassical, la case "Musique classique" du panneau) était
         // absent de ce pipeline — TaggingWorker/BatchProcessor/MatchDialog/App.java l'appellent via

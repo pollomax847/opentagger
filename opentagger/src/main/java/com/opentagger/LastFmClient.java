@@ -60,12 +60,14 @@ public class LastFmClient {
         if (!genres.isEmpty()) info.genre = joinGenres(genres);
     }
 
-    /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible). */
+    /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible), et
+     *  sa biographie (bio.summary) en repli si Discogs n'en a pas fourni une (voir DiscogsClient.
+     *  enrichArtistInfo(), appelé en premier dans la cascade TagEnrichment.enrichArtistInfo()). */
     public void enrichArtistUrls(TagInfo info, MetadataCache cache) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
         if (!Config.get().lastfmArtistUrlsEnabled()) return;
         if (Config.get().lastfmKey().isBlank()) return;
-        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank()) return;
+        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank() && !info.artistBio.isBlank()) return;
         if (info.artist.isBlank()) return;
 
         // Clé de cache SANS l'api_key (contrairement à l'URL réellement appelée) — un secret n'a
@@ -97,6 +99,19 @@ public class LastFmClient {
                 }
             }
         }
+        if (info.artistBio.isBlank()) {
+            String summary = artist.path("bio").path("summary").asText("").trim();
+            if (!summary.isBlank()) info.artistBio = cleanBio(summary);
+        }
+    }
+
+    /** Last.fm ajoute systématiquement un lien de renvoi HTML en fin de résumé
+     *  ("&lt;a href="...""&gt;Read more on Last.fm&lt;/a&gt;.") — retiré, ainsi que toute autre
+     *  balise HTML éventuelle (le champ visé, TagInfo.artistBio, est du texte brut partout ailleurs). */
+    private String cleanBio(String summary) {
+        String s = summary.replaceAll("(?i)<a[^>]*>.*?</a>\\.?", "");
+        s = s.replaceAll("<[^>]+>", "");
+        return s.trim();
     }
 
     /** Enrichit le mood d'un TagInfo depuis les tags Last.fm. Ne modifie mood que si vide. */

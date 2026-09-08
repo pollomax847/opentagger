@@ -138,6 +138,16 @@ public class TagInfo {
     public String moodDanceability    = "";    // "danceable"/"not_danceable"
     public String moodInstrumental    = "";    // "instrumental"/"vocal"
 
+    // ── Informations artiste (biographie / vrai nom) ─────────────────────────
+    // Cascade Discogs (profil, par nom exact) → Last.fm (bio.summary) en repli — voir
+    // TagEnrichment.enrichArtistInfo(). Pas de FieldKey jaudiotagger dédié (aucun standard ID3/MP4
+    // n'existe pour une biographie) : écrit en TXXX/atome freeform "ARTIST_BIO" via setCustomField()
+    // (TagWriter), comme LISTENBRAINZ_PLAYCOUNT/OT_TAGGEDDATE.
+    public String artistBio           = "";
+    // Vrai nom derrière un nom de scène/pseudonyme (ex. "Robert Zimmerman" pour Bob Dylan) —
+    // uniquement Discogs (champ "realname" de sa ressource /artists/{id}), Last.fm ne l'expose pas.
+    public String artistRealName      = "";
+
     // ── URLs ─────────────────────────────────────────────────────────────────
     public String artistOfficialUrl   = "";
     public String artistWikipediaUrl  = "";

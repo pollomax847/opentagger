@@ -321,6 +321,9 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // seulement recordingMbid — ajouté quand même pour cohérence avec les autres pipelines
             // et pour rester correct si ReleaseTrack gagne un jour ce champ.
             TagEnrichment.enrichClassicalWork(ti, mb, cache);
+            // Infos artiste (biographie/vrai nom/URLs) — jamais câblé dans ce pipeline avant ce
+            // correctif (même divergence qu'InfoCompleterWorker).
+            TagEnrichment.enrichArtistInfo(ti, discogs, lastFm, cache);
 
             // Empreinte AcoustID : calculée systématiquement après toute identification
             // réussie (TaggingWorker/BatchProcessor/App/MatchDialog le font déjà, comme

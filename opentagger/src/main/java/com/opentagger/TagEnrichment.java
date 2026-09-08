@@ -34,6 +34,17 @@ public final class TagEnrichment {
         }
     }
 
+    /** Cascade d'informations artiste : Discogs (profil résolu par nom exact — biographie, vrai
+     *  nom, URL) en premier, puis Last.fm inconditionnellement en complément — contrairement à
+     *  enrichGenre ci-dessus, lastFm.enrichArtistUrls() n'est PAS un simple repli : il peuple aussi
+     *  artistOfficialUrl/artistWikipediaUrl (jamais fournis par Discogs), donc doit tourner même
+     *  si Discogs a déjà rempli la biographie (ses propres gardes internes par champ évitent tout
+     *  travail redondant). Même garde silencieuse sur erreur réseau que enrichGenre. */
+    public static void enrichArtistInfo(TagInfo ti, DiscogsClient discogs, LastFmClient lastFm, MetadataCache cache) {
+        try { discogs.enrichArtistInfo(ti, cache); } catch (Exception ignored) {}
+        try { lastFm.enrichArtistUrls(ti, cache); } catch (Exception ignored) {}
+    }
+
     /**
      * Opus/Catalogue/Mouvement/Œuvre globale pour une piste classique, via le Work MB déjà lié à
      * l'enregistrement (voir {@link MusicBrainzClient#resolveClassicalWork}). Gate sur
@@ -229,9 +240,10 @@ public final class TagEnrichment {
      * @param log        callback optionnel pour les messages de soumission MusicBrainz (peut être null)
      */
     public static SaveResult saveEntry(File fichier, TagInfo ti, CaaClient caa, FanArtClient fanArt,
-                                        DeezerClient deezer, TagWriter writer, FileRenamer renamer,
-                                        MetadataCache cache, MusicBrainzOAuth mbOauth, Path scanRoot,
-                                        int maskIndex, java.util.function.Consumer<String> log) throws Exception {
+                                        DeezerClient deezer, DiscogsClient discogs, TagWriter writer,
+                                        FileRenamer renamer, MetadataCache cache, MusicBrainzOAuth mbOauth,
+                                        Path scanRoot, int maskIndex,
+                                        java.util.function.Consumer<String> log) throws Exception {
         Path cover = resolveCover(ti, fichier, caa, fanArt, deezer, cache);
         TagInfo written;
         try {
@@ -258,6 +270,12 @@ public final class TagEnrichment {
                 Path artistPhoto = null;
                 try {
                     artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
+                    // Repli Discogs (nom exact) quand FanArt n'a rien — le cas le plus courant étant
+                    // l'absence d'artistMbid (identification SongRec/texte seule, voir sa javadoc sur
+                    // FanArtClient.downloadArtistPhoto) plutôt qu'un artiste réellement sans photo.
+                    if (artistPhoto == null && discogs != null) {
+                        artistPhoto = discogs.downloadArtistPhotoFallback(ti, cache);
+                    }
                     if (artistPhoto != null) {
                         String fname = Config.get().artistPhotoFilename();
                         String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";

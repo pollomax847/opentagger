@@ -119,13 +119,16 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
                     // Corbeille système (récupérable), jamais suppression définitive — voir
                     // MainFrame.deleteErrorFiles() pour le même choix sur les fichiers illisibles
                     // détectés manuellement.
+                    // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05) : sur cette machine
+                    // Desktop.moveToTrash() n'est jamais supporté, donc l'ancien code ici laissait
+                    // simplement le fichier en place avec un message d'échec — pas dangereux comme
+                    // les autres sites (pas de f.delete() de repli ici), mais le repli local de
+                    // TrashHelper fait maintenant réellement le travail plutôt que de renoncer.
                     boolean trashed = false;
                     if (unreadable && Config.get().transcodeMoveUnreadableEnabled()) {
                         try {
-                            Desktop desktop = Desktop.getDesktop();
-                            if (desktop.isSupported(Desktop.Action.MOVE_TO_TRASH)) {
-                                trashed = desktop.moveToTrash(curPath.toFile());
-                            }
+                            trashed = com.opentagger.TrashHelper.moveToTrash(curPath.toFile());
+                            if (!trashed) msg = msg + " (corbeille échouée)";
                         } catch (Exception trashEx) {
                             msg = msg + " (corbeille échouée: " + trashEx.getMessage() + ")";
                         }

@@ -35,6 +35,23 @@ public class FileRenamer {
             new java.util.concurrent.Semaphore(
                     Math.max(1, Config.get().num("rename.max_concurrent_cross_device_moves", 1)));
 
+    // Sémaphore SÉPARÉ pour TrashHelper (voir moveFile(Path,Path,Semaphore) ci-dessous) — trouvé en
+    // direct (2026-09-07) : "supprimer" (corbeille) et le renommage automatique du pipeline de
+    // taguage partageaient CROSS_DEVICE_COPY_LIMIT (un seul permis par défaut), donc une suppression
+    // demandée par l'utilisateur restait bloquée indéfiniment en Semaphore.acquire() derrière le flux
+    // quasi-continu de renommages cross-device de la passe de re-taguage en cours (confirmé par
+    // thread-dump : 2 threads de MainFrame.deleteSelectedFiles() parqués sur ce même sémaphore,
+    // pendant que 4 autres threads tenaient déjà la queue de renommage) — d'où "la suppression ne
+    // fonctionne plus" côté utilisateur alors qu'elle n'était en réalité que privée de tour
+    // indéfiniment. Même rationnel de protection anti-thrashing (un disque mécanique ne peut être
+    // qu'à un endroit à la fois) donc toujours throttlé — mais dans SA PROPRE file, pour ne plus
+    // jamais faire attendre une action interactive derrière un pipeline automatique en arrière-plan.
+    // Package-privé (pas private), même raison que moveFile() : TrashHelper le passe explicitement
+    // à moveFile(Path,Path,Semaphore) pour ne jamais partager la file d'attente du pipeline auto.
+    static final java.util.concurrent.Semaphore TRASH_MOVE_LIMIT =
+            new java.util.concurrent.Semaphore(
+                    Math.max(1, Config.get().num("rename.max_concurrent_cross_device_moves", 1)));
+
     // Un verrou par nom de destination CONTESTÉ (pas un verrou global — voir lockFor()) couvrant
     // "vérifier que la cible est libre" + "déplacer" dans rename()/moveToFolder() : sans lui, deux
     // threads du pool batch (batch.threads) visant le même nom de destination (deux fichiers
@@ -498,6 +515,15 @@ public class FileRenamer {
             }
 
             moveFile(fichier, cible);
+            // moveMatchingLrc()/moveLocalCoverIfPresent() manquaient ici (2026-09-05, repéré en
+            // direct : des .lrc orphelins datés d'APRÈS le correctif du 2026-08-13 sur rename(),
+            // retrouvés dans /mnt/Music à côté de RIEN — leur audio associé introuvable au même
+            // nom). Cette méthode déplace aussi des fichiers déjà tagués (durée incohérente, non
+            // identifié re-quarantainé…) qui peuvent très bien avoir un .lrc/une pochette locale
+            // écrits lors d'un passage précédent — même besoin que rename(), simplement oublié ici
+            // lors de l'ajout initial du suivi.
+            moveMatchingLrc(fichier, nom, cible);
+            moveLocalCoverIfPresent(fichier.getParent(), cible.getParent());
         }
         return cible;
     }
@@ -535,6 +561,7 @@ public class FileRenamer {
             }
 
             moveFile(fichier, cible);
+            moveMatchingLrc(fichier, nom, cible); // même besoin que rename()/moveToFolder(), voir leurs commentaires
         }
         return cible;
     }
@@ -547,7 +574,15 @@ public class FileRenamer {
      * dupliquer aux 3 sites d'appel : garantit qu'un futur 4e appelant de moveFile() hérite de la
      * synchronisation des playlists sans action supplémentaire.
      */
-    private static void moveFile(Path src, Path dst) throws IOException {
+    // Package-privé (pas private) : réutilisé par TrashHelper pour son repli local — voir son
+    // commentaire de classe pour le pourquoi (Desktop.moveToTrash() indisponible sur cette machine).
+    static void moveFile(Path src, Path dst) throws IOException {
+        moveFile(src, dst, CROSS_DEVICE_COPY_LIMIT);
+    }
+
+    /** Variante avec sémaphore explicite — voir TRASH_MOVE_LIMIT ci-dessus pour le pourquoi (isoler
+     *  TrashHelper de la file d'attente du pipeline de renommage automatique). */
+    static void moveFile(Path src, Path dst, java.util.concurrent.Semaphore crossDeviceLimit) throws IOException {
         try {
             Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
@@ -557,7 +592,7 @@ public class FileRenamer {
             // ne fassent toutes converger leurs copies en même temps sur un même disque mécanique
             // de destination.
             try {
-                CROSS_DEVICE_COPY_LIMIT.acquire();
+                crossDeviceLimit.acquire();
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Déplacement cross-device interrompu : " + src, ie);
@@ -581,7 +616,7 @@ public class FileRenamer {
                 }
                 Files.delete(src);
             } finally {
-                CROSS_DEVICE_COPY_LIMIT.release();
+                crossDeviceLimit.release();
             }
         }
         PlaylistSync.onFileMoved(src, dst);

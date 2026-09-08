@@ -350,6 +350,10 @@ public final class FfmpegTagIO {
         meta(cmd, "URL_WIKIPEDIA_RELEASE_SITE", i.releaseWikipediaUrl);
         meta(cmd, "URL_DISCOGS_RELEASE_SITE",   i.releaseDiscogsUrl);
 
+        // ── Informations artiste (Discogs/Last.fm) ──────────────────────────
+        meta(cmd, "ARTIST_BIO",      i.artistBio);
+        meta(cmd, "ARTIST_REALNAME", i.artistRealName);
+
         if (!i.track.isBlank())
             meta(cmd, "track", i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal);
         if (!i.discNo.isBlank())

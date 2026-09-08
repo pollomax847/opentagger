@@ -5,6 +5,8 @@ import org.jaudiotagger.audio.AudioFile;
 import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
+import org.jaudiotagger.tag.TagField;
+import org.jaudiotagger.tag.id3.AbstractID3v2Frame;
 import org.jaudiotagger.tag.id3.AbstractID3v2Tag;
 import org.jaudiotagger.tag.id3.ID3v22Frame;
 import org.jaudiotagger.tag.id3.ID3v22Tag;
@@ -559,6 +561,10 @@ public class TagWriter {
         // ── Marqueur de taguage (portable, indépendant du cache SQLite) ─────────
         setCustomField(tag, "OT_TAGGEDDATE", i.taggedDate);
 
+        // ── Informations artiste (Discogs/Last.fm, voir TagEnrichment.enrichArtistInfo) ─────────
+        setCustomField(tag, "ARTIST_BIO",      i.artistBio);
+        setCustomField(tag, "ARTIST_REALNAME", i.artistRealName);
+
         // ── URLs ──────────────────────────────────────────────────────────────
         sf(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE,   i.artistOfficialUrl);
         sf(tag, FieldKey.URL_WIKIPEDIA_ARTIST_SITE,  i.artistWikipediaUrl);
@@ -744,6 +750,10 @@ public class TagWriter {
 
         // Marqueur de taguage (portable, indépendant du cache SQLite)
         apFreeform(cmd, "OT_TAGGEDDATE", i.taggedDate);
+
+        // Informations artiste (Discogs/Last.fm, voir TagEnrichment.enrichArtistInfo)
+        apFreeform(cmd, "ARTIST_BIO",      i.artistBio);
+        apFreeform(cmd, "ARTIST_REALNAME", i.artistRealName);
 
         // Deuxième vague de parité (audit exhaustif comparant les ~119 champs du chemin
         // jaudiotagger natif à ce fallback — la vague précédente, commentaire ci-dessus, avait
@@ -998,9 +1008,32 @@ public class TagWriter {
         } catch (Exception ignored) {}
     }
 
-    /** Ajoute (ou remplace) une frame TXXX dans un tag ID3v2. */
+    /**
+     * Ajoute (ou remplace) une frame TXXX dans un tag ID3v2.
+     *
+     * {@code id3.setFrame(frame)} — utilisé ici avant ce correctif — remplace TOUTES les frames
+     * TXXX déjà présentes par la seule qu'on lui passe (une seule frame "TXXX" survit par appel à
+     * write(), quelle que soit sa description) : confirmé en direct (2026-09-06) qu'appeler
+     * setCustomField() plusieurs fois de suite pour des champs DIFFÉRENTS (ex. ARTIST_BIO puis
+     * ARTIST_REALNAME, ou les 5 champs PODCAST_*) ne laissait sur le disque QUE le dernier appelé
+     * — tous les autres étaient silencieusement écrasés. {@code id3.addField(frame)} corrige ce
+     * problème (chaque description coexiste), mais en introduit un autre : appelé une seconde fois
+     * pour la MÊME description (ex. un re-taguage qui change ARTIST_BIO), il FUSIONNE l'ancienne et
+     * la nouvelle valeur en un seul champ texte multi-valeur au lieu de remplacer — confirmé aussi
+     * en direct. Il faut donc retirer explicitement toute frame TXXX de même description AVANT
+     * d'ajouter la nouvelle, ci-dessous — les deux comportements de jaudiotagger pris isolément sont
+     * corrects individuellement, mais aucun des deux ne fait ce qu'on attend d'un set/replace.
+     */
     private static void writeTxxx(AbstractID3v2Tag id3, String description, String value) {
         try {
+            List<TagField> existing = id3.getFields("TXXX");
+            if (existing != null) {
+                existing.removeIf(field ->
+                    field instanceof AbstractID3v2Frame frame
+                    && frame.getBody() instanceof FrameBodyTXXX txxx
+                    && description.equalsIgnoreCase(txxx.getDescription()));
+            }
+
             FrameBodyTXXX body = new FrameBodyTXXX((byte) 0, description, value);
             // Choisir la version de frame selon le tag existant. Un tag ID3v2.2 attend des
             // ID3v22Frame (identifiants 3 caractères, ex. "TXX") — lui donner une ID3v23Frame/
@@ -1011,15 +1044,15 @@ public class TagWriter {
             if (id3 instanceof ID3v24Tag) {
                 ID3v24Frame frame = new ID3v24Frame("TXXX");
                 frame.setBody(body);
-                id3.setFrame(frame);
+                id3.addField(frame);
             } else if (id3 instanceof ID3v22Tag) {
                 ID3v23Frame tmp = new ID3v23Frame("TXXX");
                 tmp.setBody(body);
-                id3.setFrame(new ID3v22Frame(tmp));
+                id3.addField(new ID3v22Frame(tmp));
             } else {
                 ID3v23Frame frame = new ID3v23Frame("TXXX");
                 frame.setBody(body);
-                id3.setFrame(frame);
+                id3.addField(frame);
             }
         } catch (Exception ignored) {}
     }

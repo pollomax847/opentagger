@@ -311,11 +311,12 @@ public class DuplicatesDialog extends JDialog {
         setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR));
         new SwingWorker<Void, FileEntry>() {
             int deleted = 0, errors = 0, dirsRemoved = 0;
-            boolean trashSupported;
 
             @Override protected Void doInBackground() {
-                java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-                trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05) : Desktop.moveToTrash()
+                // n'est PAS supporté sur cette machine, l'ancien code ici tombait donc dans un
+                // f.delete() en silence (suppression définitive malgré le message affiché à
+                // l'utilisateur). Point de passage unique qui ne supprime jamais définitivement.
                 // Map plutôt que List : associe chaque dossier parent à la racine de scan du
                 // fichier qui s'y trouvait, pour borner deleteEmptyAncestors() (voir plus bas —
                 // même raison que MainFrame.buildRenameJob(), remonter sans borne peut geler
@@ -324,7 +325,7 @@ public class DuplicatesDialog extends JDialog {
                 int processed = 0;
                 for (FileEntry e : toDelete) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    boolean moved = com.opentagger.TrashHelper.moveToTrash(f);
                     processed++;
                     if (onProgress != null) onProgress.accept(processed, toDelete.size());
                     if (moved) {
@@ -359,8 +360,7 @@ public class DuplicatesDialog extends JDialog {
 
             @Override protected void done() {
                 setCursor(java.awt.Cursor.getDefaultCursor());
-                String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-                String msg = I18n.t("%d fichier(s) %s", deleted, where)
+                String msg = I18n.t("%d fichier(s) déplacé(s) dans la corbeille", deleted)
                     + (dirsRemoved > 0 ? I18n.t(", %d dossier(s) vide(s) supprimé(s)", dirsRemoved) : "")
                     + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "") + ".";
                 LOG.info("[Doublons] " + msg);

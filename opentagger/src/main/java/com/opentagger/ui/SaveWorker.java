@@ -3,6 +3,7 @@ package com.opentagger.ui;
 import com.opentagger.CaaClient;
 import com.opentagger.Config;
 import com.opentagger.DeezerClient;
+import com.opentagger.DiscogsClient;
 import com.opentagger.FanArtClient;
 import com.opentagger.FileRenamer;
 import com.opentagger.I18n;
@@ -53,6 +54,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     private final CaaClient         caa      = new CaaClient();
     private final FanArtClient      fanArt   = new FanArtClient();
     private final DeezerClient      deezer   = new DeezerClient();
+    private final DiscogsClient     discogs  = new DiscogsClient();
     private final TagWriter         writer   = new TagWriter();
     private final FileRenamer       renamer  = new FileRenamer();
     private final MusicBrainzOAuth  mbOauth  = new MusicBrainzOAuth();
@@ -158,7 +160,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         if (cache == null) cache = new MetadataCache(); // filet de sécurité, ne devrait jamais arriver
         try {
             TagEnrichment.SaveResult res = TagEnrichment.saveEntry(
-                    fichier, ti, caa, fanArt, deezer, writer, renamer, cache, mbOauth,
+                    fichier, ti, caa, fanArt, deezer, discogs, writer, renamer, cache, mbOauth,
                     entry.scanRoot, maskIndex, msg -> log("  " + msg));
 
             // "Pochette non trouvée" ne peut être établi qu'ICI (résolution différée jusqu'à

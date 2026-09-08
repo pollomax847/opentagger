@@ -119,7 +119,18 @@ public class AudioTranscoder {
         return m.contains("moov atom not found")
             || m.contains("invalid data found when processing input")
             || m.contains("error opening input")
-            || m.contains("could not find codec parameters");
+            || m.contains("could not find codec parameters")
+            // Deux signatures manquantes trouvées en direct (2026-09-07) sur de vrais fichiers de
+            // cette bibliothèque, jusque-là jamais reconnues donc jamais proposées à la corbeille —
+            // elles se contentaient d'échouer en boucle silencieusement à chaque tentative de
+            // transcodage. "decode error rate" : seuil de robustesse propre à ffmpeg (n'apparaît que
+            // si une fraction significative des paquets échoue à décoder, pas un faux positif
+            // transitoire). "failed to configure output pad" : échec du graphe de filtres
+            // (auto_aresample) constaté sur plusieurs .m4a de cette bibliothèque — toujours
+            // recontrôlé indépendamment par verifyUnreadable() avant tout déplacement, donc pas plus
+            // risqué que les 4 signatures déjà en place.
+            || m.contains("decode error rate")
+            || m.contains("failed to configure output pad");
     }
 
     /**

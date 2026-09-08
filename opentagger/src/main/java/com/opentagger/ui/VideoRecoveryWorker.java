@@ -57,6 +57,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final CaaClient        caa      = new CaaClient();
     private final FanArtClient     fanArt   = new FanArtClient();
     private final DeezerClient     deezer   = new DeezerClient();
+    private final DiscogsClient    discogs  = new DiscogsClient();
     private final TagWriter        writer   = new TagWriter();
     private final FileRenamer      renamer  = new FileRenamer();
     private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
@@ -170,7 +171,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
             if (cache == null) cache = new MetadataCache(); // filet de sécurité
             try {
                 res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
-                        deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+                        deezer, discogs, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
             } finally {
                 cachePool.offer(cache);
             }

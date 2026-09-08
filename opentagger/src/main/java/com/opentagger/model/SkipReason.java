@@ -4,5 +4,5 @@ package com.opentagger.model;
  *  d'affectation de ces statuts dans TaggingWorker.processEntry()/findTags(). En mémoire
  *  uniquement (comme le reste de FileEntry), jamais persisté. */
 public enum SkipReason {
-    FILE_MISSING, NOT_IDENTIFIED, LOW_SCORE, DURATION_MISMATCH, ERROR_GENERIC
+    FILE_MISSING, NOT_IDENTIFIED, LOW_SCORE, DURATION_MISMATCH, ERROR_GENERIC, NETWORK_ERROR
 }

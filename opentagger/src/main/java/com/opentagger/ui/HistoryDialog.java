@@ -51,6 +51,14 @@ public class HistoryDialog extends JDialog {
     private final JTable        corrTable;
     private final DefaultTableModel corrModel;
 
+    // Garde de ré-entrance + bouton retenu comme champ (2026-09-06) : rien n'empêchait avant ce
+    // correctif de relancer "Rattraper les tags…" par-dessus une exécution déjà en cours — confirmé
+    // en direct par thread-dump que l'utilisateur avait ainsi 3 passages concurrents sur les mêmes
+    // ~127k fichiers, faute d'un retour visuel clair pendant l'exécution (le titre statique donnait
+    // l'impression que "rien ne se passe").
+    private final JButton       btnBackfill = new JButton(I18n.t("Rattraper les tags depuis l'historique…"));
+    private volatile boolean    backfillRunning = false;
+
     public HistoryDialog(Frame owner) {
         super(owner, I18n.t("Historique de taguage — OpenTagger"), false);
         setSize(960, 620);
@@ -149,11 +157,14 @@ public class HistoryDialog extends JDialog {
         btnClose    .addActionListener(e -> dispose());
         btnPurge    .addActionListener(e -> confirmPurge());
         btnCleanScan.addActionListener(e -> confirmCleanScanCache());
+        btnBackfill .addActionListener(e -> confirmBackfillTags());
         btnExport   .addActionListener(e -> exportJson());
         btnImport   .addActionListener(e -> importJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder l'historique dans un fichier JSON (partage/sauvegarde)"));
         btnImport.setToolTipText(I18n.t("Fusionner un fichier JSON d'historique (les entrées existantes ne sont pas écrasées)"));
         btnCleanScan.setToolTipText(I18n.t("Supprime du cache de scan les entrées dont le fichier n'existe plus sur disque (déplacé/supprimé) — peut prendre plusieurs minutes sur une grosse bibliothèque"));
+        btnBackfill.setToolTipText(I18n.t("Réécrit sur le disque les tags déjà connus dans cet historique, sans ré-identifier"
+                + " (aucun appel réseau) — utile après un correctif qui empêchait certains champs de bien s'enregistrer"));
 
         JPanel p = new JPanel(new BorderLayout(0, 0));
         p.setBorder(new CompoundBorder(
@@ -168,6 +179,7 @@ public class HistoryDialog extends JDialog {
         right.add(Box.createHorizontalStrut(8));
         right.add(btnClose);
         right.add(btnCleanScan);
+        right.add(btnBackfill);
         right.add(btnPurge);
         p.add(buildStats(), BorderLayout.WEST);
         p.add(right,        BorderLayout.EAST);
@@ -374,6 +386,92 @@ public class HistoryDialog extends JDialog {
                     JOptionPane.showMessageDialog(HistoryDialog.this,
                         I18n.t("%d entrée(s) obsolète(s) supprimée(s) du cache de scan.", n),
                         I18n.t("Nettoyage terminé"), JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(HistoryDialog.this,
+                        I18n.t("Erreur : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
+    }
+
+    private record BackfillResult(int total, int written, int missing, int failed) {}
+
+    /**
+     * Réécrit sur le disque, pour chaque fichier connu de file_history, le TagInfo déjà mémorisé
+     * dans tagging_history — sans ré-identification (aucun appel réseau, aucune requête
+     * MusicBrainz/Discogs/Last.fm/AcoustID/SongRec). Créé le 2026-09-06 pour rattraper le correctif
+     * TagWriter.writeTxxx() (voir son commentaire) : avant ce correctif, seul le DERNIER champ TXXX
+     * personnalisé écrit par un même enregistrement survivait sur le disque (ReplayGain/Discogs
+     * ID/playcounts/OT_TAGGEDDATE/biographie artiste s'écrasaient silencieusement entre eux) — la
+     * valeur correcte est cependant restée intacte dans tagging_history (sérialisée en mémoire AVANT
+     * l'écriture disque, donc jamais affectée par ce bug), donc récupérable ici sans repasser par
+     * une identification complète. Ne couvre que les fichiers déjà passés par "Enregistrer tout"
+     * (SaveWorker/VideoRecoveryWorker, les deux seuls appelants de TagEnrichment.saveEntry()) — les
+     * fichiers tagués uniquement via le CLI/BatchProcessor n'ont jamais alimenté ces deux tables.
+     */
+    private void confirmBackfillTags() {
+        if (backfillRunning) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Un rattrapage est déjà en cours — patiente jusqu'à la pop-up de résultat."),
+                I18n.t("Déjà en cours"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        int choice = JOptionPane.showConfirmDialog(this,
+            I18n.t("Réécrit sur le disque les tags déjà connus dans cet historique (biographie artiste,\n"
+                 + "ReplayGain, IDs Discogs/Apple Music, compteurs d'écoute...), pour rattraper un correctif\n"
+                 + "qui empêchait certains d'entre eux de bien s'enregistrer sur le fichier lui-même.\n\n"
+                 + "Aucune ré-identification, aucun appel réseau — juste une réécriture depuis les données\n"
+                 + "déjà connues. Ne couvre que les fichiers passés par \"Enregistrer tout\"."),
+            I18n.t("Rattraper les tags depuis l'historique"), JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+
+        backfillRunning = true;
+        btnBackfill.setEnabled(false);
+        setTitle(I18n.t("Historique de taguage — OpenTagger (rattrapage des tags en cours…)"));
+        new SwingWorker<BackfillResult, Integer>() {
+            @Override protected BackfillResult doInBackground() {
+                java.util.Map<String, String> fileHistory = cache.loadFileHistoryMap();
+                java.util.Map<String, com.opentagger.model.TagInfo> taggingHistory = cache.loadTaggingHistoryMap();
+                com.opentagger.TagWriter writer = new com.opentagger.TagWriter();
+
+                int total = 0, written = 0, missing = 0, failed = 0;
+                for (var entry : fileHistory.entrySet()) {
+                    total++;
+                    com.opentagger.model.TagInfo ti = taggingHistory.get(entry.getValue());
+                    if (ti == null) { missing++; continue; }
+                    File f = new File(entry.getKey());
+                    if (!f.isFile()) { missing++; continue; }
+                    try {
+                        writer.write(f, ti, null);
+                        written++;
+                    } catch (Exception ex) {
+                        failed++;
+                    }
+                    // Un lot de ~127k fichiers peut prendre plusieurs minutes — le titre statique
+                    // précédent ("rattrapage en cours…") ne changeait jamais, indiscernable d'un
+                    // blocage réel (retour utilisateur direct : "rien ne se passe"). Publié tous les
+                    // 100 fichiers seulement : appeler publish() par fichier sérialiserait inutilement
+                    // sur l'EDT un traitement qui, lui, reste volontairement mono-thread (écritures
+                    // disque séquentielles, pas de pool comme les autres pipelines).
+                    if (total % 100 == 0) publish(total);
+                }
+                return new BackfillResult(total, written, missing, failed);
+            }
+            @Override protected void process(java.util.List<Integer> chunks) {
+                int n = chunks.get(chunks.size() - 1);
+                setTitle(I18n.t("Historique de taguage — OpenTagger (rattrapage des tags en cours… %d)", n));
+            }
+            @Override protected void done() {
+                backfillRunning = false;
+                btnBackfill.setEnabled(true);
+                setTitle(I18n.t("Historique de taguage — OpenTagger"));
+                try {
+                    BackfillResult r = get();
+                    JOptionPane.showMessageDialog(HistoryDialog.this,
+                        I18n.t("%d fichier(s) réécrit(s) sur %d connu(s) dans l'historique.\n"
+                             + "%d introuvable(s)/sans correspondance, %d échec(s).",
+                             r.written(), r.total(), r.missing(), r.failed()),
+                        I18n.t("Rattrapage terminé"), JOptionPane.INFORMATION_MESSAGE);
                 } catch (Exception ex) {
                     JOptionPane.showMessageDialog(HistoryDialog.this,
                         I18n.t("Erreur : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);

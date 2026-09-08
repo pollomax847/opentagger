@@ -1744,7 +1744,8 @@ public class SettingsDialog extends JDialog {
             "Un fichier que ffmpeg ne parvient même pas à ouvrir (\"moov atom not found\", \"Invalid "
             + "data found\"...), confirmé par une seconde vérification indépendante (décodage seul, "
             + "rien écrit sur le disque), est presque toujours corrompu ou vide (0 octet) — "
-            + "irrécupérable en l'état. Envoyé à la corbeille système, jamais supprimé définitivement."));
+            + "irrécupérable en l'état. Envoyé dans %s, jamais supprimé définitivement.",
+            com.opentagger.TrashHelper.destinationDescription()));
 
         JPanel inner = new JPanel(new GridBagLayout());
         inner.setBorder(BorderFactory.createTitledBorder(

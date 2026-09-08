@@ -458,7 +458,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // Repéré en direct 2026-08-28 : "Eric Volta - Blood Burgundy" accepté à 85% comme
                     // "Art Department - Bpm Continuous Dj Mix", effaçant titre/artiste/album/année
                     // corrects. Un titre de piste individuelle ne ressemble normalement jamais à ça.
-                    if (isContinuousMixTitle(candidate.title)) continue;
+                    // Le garde-fou titre ne doit intervenir QUE quand la durée MB est absente (voir
+                    // le commentaire plus haut : isDurationMismatch() exempte mbDurationSec<=0, donc
+                    // sans lui un candidat "mix DJ" sans durée renseignée passerait sans protection).
+                    // Trouvé en direct (2026-09-07) : ICE MC "MEGAMIX" — un VRAI single "Megamix"
+                    // officiel de l'artiste (pas un mix DJ tiers qui le contient), dont mbDurationSec
+                    // EST renseigné et colle presque exactement à la durée du fichier (9:28 vs 9:27,
+                    // 8:44 vs 8:44) — inconditionnel, ce garde-fou l'excluait quand même avant même de
+                    // tester sa durée, donnant le message contradictoire "durée incohérente" affichant
+                    // en fait des durées quasi identiques (héritées de results.get(0), jamais celui
+                    // réellement écarté ici).
+                    if (isContinuousMixTitle(candidate.title) && candidate.mbDurationSec <= 0) continue;
                     candidate.durationSec = entry.current.durationSec;
                     if (!FileEntry.isDurationMismatch(entry.current.durationSec, candidate.mbDurationSec)) {
                         durationOk = candidate;
@@ -623,7 +633,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (best.mood.isBlank()) {
                 try { lastFm.enrichMood(best, cache); log(I18n.t("  mood←lastfm=%s", best.mood)); } catch (Exception ignored) {}
             }
-            try { lastFm.enrichArtistUrls(best, cache); } catch (Exception ignored) {}
+            TagEnrichment.enrichArtistInfo(best, discogs, lastFm, cache);
 
             if (bpmEnabled && best.bpm.isBlank()) {
                 step.accept(I18n.t("BPM…"));
@@ -728,12 +738,36 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         } catch (Exception ex) {
             entry.status     = FileEntry.Status.ERROR;
-            entry.skipReason = com.opentagger.model.SkipReason.ERROR_GENERIC;
+            // NETWORK_ERROR distingué d'ERROR_GENERIC (2026-09-05, retour utilisateur après une
+            // coupure réseau réelle qui a fait échouer des dizaines de fichiers d'affilée avec
+            // ConnectException/HTTP connect timed out) : avant ce correctif, les deux tombaient
+            // dans le même seau "Erreur", impossible à distinguer d'un vrai bug/fichier corrompu
+            // sans relire chaque message un par un. Ne relance PAS automatiquement ici (une
+            // coupure prolongée referait échouer un retry immédiat tout aussi vite) — sert juste à
+            // pouvoir filtrer/resélectionner ces fichiers après coup (Rapport Non identifiés) pour
+            // un "Forcer le re-taguage" ciblé une fois la connexion revenue, plutôt que fouiller
+            // dans des milliers de lignes de journal pour savoir lesquels retenter.
+            entry.skipReason = isNetworkException(ex)
+                    ? com.opentagger.model.SkipReason.NETWORK_ERROR
+                    : com.opentagger.model.SkipReason.ERROR_GENERIC;
             File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
             entry.message = (ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName())
                     + videoHintIfAny(f);
             log(I18n.t("  ✗ ERROR %s : %s", entry.filename(), entry.message));
         }
+    }
+
+    /** Vrai si l'exception (ou une de ses causes) est une panne réseau typique (coupure, DNS,
+     *  timeout) plutôt qu'un vrai bug/fichier corrompu — voir le commentaire du catch ci-dessus. */
+    private static boolean isNetworkException(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof java.net.ConnectException
+                    || c instanceof java.net.UnknownHostException
+                    || c instanceof java.net.SocketTimeoutException
+                    || c instanceof java.net.http.HttpTimeoutException
+                    || c instanceof javax.net.ssl.SSLException) return true;
+        }
+        return false;
     }
 
     /** Indice "ceci est peut-être une vidéo" pour un ".mp4" en échec d'identification — voir
@@ -1123,7 +1157,29 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 if (tl == null) {
                     pinnedTracklistFailed.add(pinnedMbid);
                 } else {
+                    // findTrackInRelease() (numéro de piste EXACT) ne vérifie jamais le titre —
+                    // volontairement, pour rester fiable sur le TOC (étape 0.6, album entier
+                    // confirmé par empreinte de durées, voir son propre appel de cette même
+                    // méthode). Mais ici, la release vient d'être ÉPINGLÉE par un AUTRE fichier du
+                    // groupe (confiance bien moindre qu'un TOC) : un simple partage de NUMÉRO DE
+                    // PISTE avec une piste de cette release ne prouve rien de bon sens — repéré en
+                    // direct 2026-09-05 sur "02 - Dj Kheops-2-I M Still Feel Like Danc.mp3", épinglé
+                    // par numéro de piste "2" sur une release totalement sans rapport (même piste
+                    // au titre charabia "_ _ _ _..." déjà vue comme faux positif ailleurs cette
+                    // session), auto-enregistrable (score=92 > match.min_score_auto=90). Même
+                    // garde-fou que findTrackInReleaseByTitle() : si LE FICHIER a un titre
+                    // exploitable, il doit rester plausible face au titre de la piste trouvée par
+                    // numéro — sinon on retombe sur findTrackInReleaseByTitle() (qui, lui, cherche
+                    // la VRAIE meilleure correspondance sur toute la tracklist).
                     MusicBrainzClient.ReleaseTrack myTrack = findTrackInRelease(tl, fichier);
+                    if (myTrack != null) {
+                        String titleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+                        if (!titleTag.isBlank() && !isGenericTag(titleTag)
+                                && TrackMatcher.titleSimilarity(titleTag.toLowerCase(), myTrack.title().toLowerCase())
+                                   < GROUP_PIN_TITLE_MATCH_THRESHOLD) {
+                            myTrack = null;
+                        }
+                    }
                     if (myTrack == null) myTrack = findTrackInReleaseByTitle(tl, fichier);
                     if (myTrack != null) {
                         TagInfo t = new TagInfo();
@@ -1603,7 +1659,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 if (!ytInfo.artist.isBlank()) fbArtist = ytInfo.artist;
                 fbTitle = ytInfo.title;
             }
-            if (!fbArtist.isBlank() && !fbTitle.isBlank()) {
+            // isContinuousMixTitle() : sans ce garde-fou (2026-09-03, repéré en direct sur "00-02
+            // Disco - Classic 80's Megamix - (Rick Astley, Pet Shop Boys...).mp3"), ce repli
+            // acceptait "Disco" comme artiste — un résidu du découpage naïf "Genre - Titre" du nom
+            // de fichier sur le premier " - ", parseFilename() n'ayant aucun moyen de distinguer un
+            // vrai artiste d'un mot de genre ici. Déjà utilisé ailleurs dans la cascade (ligne
+            // ~461) pour ne jamais épingler un mix DJ continu à UNE piste précise ; manquait
+            // seulement à ce dernier recours. Un mix continu reste "Non identifié" plutôt que
+            // recevoir un artiste inventé à score=50.
+            if (!fbArtist.isBlank() && !fbTitle.isBlank() && !isContinuousMixTitle(fbTitle)) {
                 TagInfo fallback = new TagInfo();
                 fallback.artist      = fbArtist;
                 fallback.title       = fbTitle;
@@ -1704,33 +1768,39 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 srMb = mb.searchRecording(sr.artist, sr.title);
                 if (!srMb.isEmpty()) cache.putRecordingSearch(srHash, mb.lastRawJson());
             }
-            if (!srMb.isEmpty() && srMb.get(0).score >= 50
-                    && !(existingTags.durationSec > 0
-                         && FileEntry.isDurationMismatch(existingTags.durationSec, srMb.get(0).mbDurationSec))) {
-                TagInfo best = srMb.get(0);
-                // SongRec comble ce que MB n'a pas (genre, année Shazam, album Shazam)
-                if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
-                if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
-                if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
-                if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
-                best.score = 90;
-                log(I18n.t("  SongRec→MB: %s – %s [%s] score=%s", best.artist, best.title, best.album, best.score));
-                lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
-                return srMb;
-            } else if (!srMb.isEmpty() && srMb.get(0).score >= 50) {
-                // Durée incohérente avec CE candidat SongRec→MB précis (empreinte audio
-                // fiable sur un passage court/dégradé, mauvais enregistrement matché malgré
-                // un bon score texte — ex. un extrait DJ-pool de 1min30 reconnu comme un
-                // morceau totalement différent) : ne PAS s'arrêter ici comme avant (l'appelant
-                // finissait alors "Durée incohérente" sans jamais tenter la recherche texte
-                // basée sur le nom de fichier/tags, alors que CELLE-CI aurait pu trouver le
-                // bon enregistrement — repéré en direct 2026-08-11 sur "16741 - Dr. Dre -
-                // What's The Difference.mp3", matché à tort à "Breathe" de Blu Cantrell). On
-                // laisse tomber vers les étapes suivantes (titre nettoyé, texte) au lieu de
-                // rendre ce résultat.
-                log(I18n.t("  SongRec→MB : durée incohérente (%ds vs %ds) → poursuite vers les autres méthodes",
-                        existingTags.durationSec, srMb.get(0).mbDurationSec));
-                songRecDurationSuspect = true;
+            if (!srMb.isEmpty() && srMb.get(0).score >= 50) {
+                boolean durationOk = !(existingTags.durationSec > 0
+                        && FileEntry.isDurationMismatch(existingTags.durationSec, srMb.get(0).mbDurationSec));
+                if (durationOk && songRecResultPlausible(fichier, srMb.get(0))) {
+                    TagInfo best = srMb.get(0);
+                    // SongRec comble ce que MB n'a pas (genre, année Shazam, album Shazam)
+                    if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
+                    if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
+                    if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
+                    if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
+                    best.score = 90;
+                    log(I18n.t("  SongRec→MB: %s – %s [%s] score=%s", best.artist, best.title, best.album, best.score));
+                    lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
+                    return srMb;
+                } else if (!durationOk) {
+                    // Durée incohérente avec CE candidat SongRec→MB précis (empreinte audio
+                    // fiable sur un passage court/dégradé, mauvais enregistrement matché malgré
+                    // un bon score texte — ex. un extrait DJ-pool de 1min30 reconnu comme un
+                    // morceau totalement différent) : ne PAS s'arrêter ici comme avant (l'appelant
+                    // finissait alors "Durée incohérente" sans jamais tenter la recherche texte
+                    // basée sur le nom de fichier/tags, alors que CELLE-CI aurait pu trouver le
+                    // bon enregistrement — repéré en direct 2026-08-11 sur "16741 - Dr. Dre -
+                    // What's The Difference.mp3", matché à tort à "Breathe" de Blu Cantrell). On
+                    // laisse tomber vers les étapes suivantes (titre nettoyé, texte) au lieu de
+                    // rendre ce résultat.
+                    log(I18n.t("  SongRec→MB : durée incohérente (%ds vs %ds) → poursuite vers les autres méthodes",
+                            existingTags.durationSec, srMb.get(0).mbDurationSec));
+                    songRecDurationSuspect = true;
+                } else {
+                    // Implausible (songRecResultPlausible() a déjà loggé le détail) : même repli
+                    // que la durée incohérente ci-dessus, ne pas accepter aveuglément.
+                    songRecDurationSuspect = true;
+                }
             }
             // MB échoue avec le titre complet → réessayer sans qualificatif entre
             // parenthèses (ex. "Le coach (feat. Vincenzo)" → "Le coach") : SongRec/Shazam
@@ -1741,27 +1811,31 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             String cleanTitle = sr.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
             if (!cleanTitle.equals(sr.title) && !cleanTitle.isBlank()) {
                 List<TagInfo> srMbClean = mb.searchRecording(sr.artist, cleanTitle);
-                if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50
-                        && !(existingTags.durationSec > 0
-                             && FileEntry.isDurationMismatch(existingTags.durationSec, srMbClean.get(0).mbDurationSec))) {
-                    TagInfo best = srMbClean.get(0);
-                    if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
-                    if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
-                    if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
-                    if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
-                    best.score = 90;
-                    log(I18n.t("  SongRec→MB (titre nettoyé '%s'): %s – %s [%s] score=%s",
-                            cleanTitle, best.artist, best.title, best.album, best.score));
-                    lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
-                    return srMbClean;
-                } else if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50) {
-                    // Même garde-fou que srMb ci-dessus.
-                    log(I18n.t("  SongRec→MB (titre nettoyé) : durée incohérente (%ds vs %ds) → poursuite",
-                            existingTags.durationSec, srMbClean.get(0).mbDurationSec));
-                    songRecDurationSuspect = true;
+                if (!srMbClean.isEmpty() && srMbClean.get(0).score >= 50) {
+                    boolean durationOk = !(existingTags.durationSec > 0
+                            && FileEntry.isDurationMismatch(existingTags.durationSec, srMbClean.get(0).mbDurationSec));
+                    if (durationOk && songRecResultPlausible(fichier, srMbClean.get(0))) {
+                        TagInfo best = srMbClean.get(0);
+                        if (best.genre.isBlank()   && !sr.genre.isBlank())   best.genre  = sr.genre;
+                        if (best.year.isBlank()    && !sr.year.isBlank())    best.year   = sr.year;
+                        if (best.album.isBlank()   && !sr.album.isBlank())   best.album  = sr.album;
+                        if (best.comment.isBlank() && !sr.comment.isBlank()) best.comment= sr.comment;
+                        best.score = 90;
+                        log(I18n.t("  SongRec→MB (titre nettoyé '%s'): %s – %s [%s] score=%s",
+                                cleanTitle, best.artist, best.title, best.album, best.score));
+                        lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
+                        return srMbClean;
+                    } else if (!durationOk) {
+                        // Même garde-fou que srMb ci-dessus.
+                        log(I18n.t("  SongRec→MB (titre nettoyé) : durée incohérente (%ds vs %ds) → poursuite",
+                                existingTags.durationSec, srMbClean.get(0).mbDurationSec));
+                        songRecDurationSuspect = true;
+                    } else {
+                        songRecDurationSuspect = true;
+                    }
                 }
             }
-            if (!songRecDurationSuspect) {
+            if (!songRecDurationSuspect && songRecResultPlausible(fichier, sr)) {
                 // MB n'a rien enrichi : garder le résultat SongRec seul
                 sr.score = 85;
                 log(I18n.t("  SongRec seul (MB sans match): %s – %s", sr.artist, sr.title));
@@ -1770,6 +1844,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
                 TagEnrichment.enrichGenre(sr, discogs, lastFm, cache);
                 TagEnrichment.enrichClassicalWork(sr, mb, cache);
+                TagEnrichment.enrichArtistInfo(sr, discogs, lastFm, cache);
                 lastFindTagsSource.set(MetadataCache.SOURCE_SONGREC);
                 return List.of(sr);
             }
@@ -1837,6 +1912,47 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return true;
     }
 
+    /**
+     * Garde-fou avant d'accepter un résultat SongRec — jusqu'ici trySongRec() n'avait AUCUNE
+     * vérification de plausibilité (contrairement à AcoustID ci-dessus), seulement un score MB≥50
+     * et une cohérence de durée — deux contrôles qui ne détectent rien quand le mauvais candidat a
+     * une durée proche de l'original (cas réel trouvé en direct 2026-09-03 lors d'un lot "Forcer le
+     * re-taguage" : "1-Magnets_(Sg_Lewis_Remix).mp3", 1:23, tags quasi vides, matché par SongRec à
+     * "Frank Wilson – Do I Love You (Indeed I Do)" [Northern Soul, 1965] — un score=90 accepté tel
+     * quel malgré un nom de fichier sans aucun rapport).
+     *
+     * <p>Contrairement à acoustIdResultPlausible(), compare contre le NOM DE FICHIER plutôt que le
+     * tag ARTIST existant : reste utile même en re-taguage forcé (qui vide volontairement les tags
+     * lus, mais n'a jamais traité le nom de fichier comme une donnée à ignorer — voir l'étape 3 de
+     * findTags(), qui s'y appuie déjà en dernier recours y compris en mode forcé). Compare à la fois
+     * l'artiste ET le titre analysés du nom de fichier (parseFilename()) — contrairement au titre
+     * seul jugé peu fiable pour AcoustID (faux positif par référence entre guillemets dans un nom de
+     * compilation/DJ-set, voir le commentaire ci-dessus), ce risque ne s'applique pas ici : un nom
+     * de fichier de piste individuelle ne contient normalement pas ce genre de référence imbriquée.
+     * Retient la MEILLEURE similarité des deux signaux disponibles plutôt que d'exiger les deux, pour
+     * rester tolérant aux noms de fichiers qui ne suivent pas le format "Artiste - Titre" (beaucoup
+     * n'ont qu'un des deux, voir parseFilename()). */
+    private boolean songRecResultPlausible(File fichier, TagInfo candidate) {
+        String[] fn = parseFilename(fichier);
+        String fnArtist = fn[0], fnTitle = fn[1];
+        boolean hasArtist = !fnArtist.isBlank() && !isGenericTag(fnArtist);
+        boolean hasTitle  = !fnTitle.isBlank()  && !isGenericTag(fnTitle);
+        if (!hasArtist && !hasTitle) return true; // rien d'exploitable dans le nom de fichier
+
+        double bestSim = 0;
+        if (hasArtist) bestSim = Math.max(bestSim,
+                TrackMatcher.titleSimilarity(fnArtist.toLowerCase(), candidate.artist.toLowerCase()));
+        if (hasTitle) bestSim = Math.max(bestSim,
+                TrackMatcher.titleSimilarity(fnTitle.toLowerCase(), candidate.title.toLowerCase()));
+
+        if (bestSim < 0.3) {
+            log(I18n.t("  SongRec SUSPECT (nom de fichier \"%s\" sans rapport avec \"%s – %s\"), ignoré",
+                    fichier.getName(), candidate.artist, candidate.title));
+            return false;
+        }
+        return true;
+    }
+
     /** Retourne true si le tag est générique/inutile pour une recherche. */
     private static final java.util.Set<String> GENERIC_TITLES_WITHOUT_ARTIST = java.util.Set.of(
         "intro", "outro", "skit", "interlude", "bonus", "hidden track",
@@ -1872,10 +1988,18 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private boolean isGenericTag(String s) {
         if (s == null || s.isBlank()) return true;
         String low = s.trim().toLowerCase();
-        // Tags par défaut des encodeurs/téléchargeurs
+        // Tags par défaut des encodeurs/téléchargeurs — "artiste inconnu"/"unknown album"/
+        // "album inconnu" ajoutés (2026-09-05, repéré en direct sur un lot de 53245 fichiers) :
+        // équivalents français/ordre inversé de "unknown artist"/"inconnu" déjà couverts, mais
+        // absents tels quels — low.matches() exige une correspondance de la CHAÎNE ENTIÈRE, donc
+        // "artiste inconnu" (2 mots) ne matchait NI "artiste" NI "inconnu" seuls, ni "unknown
+        // artist" (bon ordre, mauvaise langue). Résultat vu en direct : "Artiste Inconnu – Album
+        // Inconnu (28- 1" et "Unknown Album – Beres Hammond - Still Going Strong" acceptés tels
+        // quels comme artiste/titre par le repli SOURCE_UNVERIFIED_TAGS (score=50).
         if (low.matches("unknown artist|unknown|artist|artiste|musique|musiques|music|inconnu|"
-                       + "various|various artists|no artist|piste \\d+|track \\d+|"
-                       + "titre|title|untitled|inconnu - -.*")) return true;
+                       + "various|various artists|no artist|no album|piste \\d+|track \\d+|"
+                       + "titre|title|untitled|inconnu - -.*|artiste inconnu|album inconnu|"
+                       + "unknown album")) return true;
         // Patterns "Unknown Artist_NNN", "Unknown_42", "Musique Ii"
         if (low.matches("unknown\\s?artist[_\\s]\\d+")) return true;
         if (low.matches("musique\\s+ii?")) return true;

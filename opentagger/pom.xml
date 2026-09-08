@@ -6,7 +6,7 @@
 
   <groupId>com.opentagger</groupId>
   <artifactId>opentagger</artifactId>
-  <version>0.9.17</version>
+  <version>0.9.18</version>
 
   <name>OpenTagger</name>
   <description>Alternative open-source à Jaikoz pour taguer les fichiers audio</description>
@@ -50,6 +50,15 @@
     <dependency>
       <groupId>com.formdev</groupId>
       <artifactId>flatlaf</artifactId>
+      <version>3.4</version>
+    </dependency>
+
+    <!-- Pack de thèmes prêts à l'emploi (Nord, Dracula, Solarized, Material…) — voir
+         MainFrame.THEMES / le menu "Affichage → Thème". Même version que flatlaf ci-dessus :
+         le pack dépend des internes du coeur, un décalage de version casse le chargement. -->
+    <dependency>
+      <groupId>com.formdev</groupId>
+      <artifactId>flatlaf-intellij-themes</artifactId>
       <version>3.4</version>
     </dependency>
 

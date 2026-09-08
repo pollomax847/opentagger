@@ -121,6 +121,11 @@ public class DetailPanel extends JPanel {
     private final JTextField tfArtistOfficialUrl   = tf(36);
     private final JTextField tfArtistWikipediaUrl  = tf(36);
     private final JTextField tfArtistDiscogsUrl    = tf(36);
+    private final JTextField tfArtistRealName      = tf(36);
+    // Biographie (Discogs profil → Last.fm bio.summary en repli, voir TagEnrichment.
+    // enrichArtistInfo()) — texte potentiellement long, JTextArea comme taLyrics plutôt qu'un
+    // JTextField à une ligne.
+    private final JTextArea  taArtistBio           = new JTextArea(4, 36);
     private final JTextField tfReleaseOfficialUrl  = tf(36);
     private final JTextField tfReleaseWikipediaUrl = tf(36);
     private final JTextField tfReleaseDiscogsUrl   = tf(36);
@@ -298,6 +303,9 @@ public class DetailPanel extends JPanel {
         set(tfArtistOfficialUrl,   t.artistOfficialUrl);
         set(tfArtistWikipediaUrl,  t.artistWikipediaUrl);
         set(tfArtistDiscogsUrl,    t.artistDiscogsUrl);
+        set(tfArtistRealName,      t.artistRealName);
+        taArtistBio.setText(t.artistBio);
+        taArtistBio.setCaretPosition(0);
         set(tfReleaseOfficialUrl,  t.releaseOfficialUrl);
         set(tfReleaseWikipediaUrl, t.releaseWikipediaUrl);
         set(tfReleaseDiscogsUrl,   t.releaseDiscogsUrl);
@@ -409,8 +417,9 @@ public class DetailPanel extends JPanel {
         // Paroles, IDs — laisser vide en mode multi
         taLyrics.setText("");
         set(tfLyricsUrl, "");
+        taArtistBio.setText("");
         for (JTextField tf : new JTextField[]{
-            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
+            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl, tfArtistRealName,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
             tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate}) {
@@ -529,6 +538,8 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfArtistOfficialUrl)).isBlank())      t.artistOfficialUrl    = v;
             if (!(v = g(tfArtistWikipediaUrl)).isBlank())     t.artistWikipediaUrl   = v;
             if (!(v = g(tfArtistDiscogsUrl)).isBlank())       t.artistDiscogsUrl     = v;
+            if (!(v = g(tfArtistRealName)).isBlank())         t.artistRealName       = v;
+            if (!(v = taArtistBio.getText()).isBlank())       t.artistBio            = v;
             if (!(v = g(tfReleaseOfficialUrl)).isBlank())     t.releaseOfficialUrl   = v;
             if (!(v = g(tfReleaseWikipediaUrl)).isBlank())    t.releaseWikipediaUrl  = v;
             if (!(v = g(tfReleaseDiscogsUrl)).isBlank())      t.releaseDiscogsUrl    = v;
@@ -631,6 +642,8 @@ public class DetailPanel extends JPanel {
         t.artistOfficialUrl   = g(tfArtistOfficialUrl);
         t.artistWikipediaUrl  = g(tfArtistWikipediaUrl);
         t.artistDiscogsUrl    = g(tfArtistDiscogsUrl);
+        t.artistRealName      = g(tfArtistRealName);
+        t.artistBio           = taArtistBio.getText();
         t.releaseOfficialUrl  = g(tfReleaseOfficialUrl);
         t.releaseWikipediaUrl = g(tfReleaseWikipediaUrl);
         t.releaseDiscogsUrl   = g(tfReleaseDiscogsUrl);
@@ -645,6 +658,7 @@ public class DetailPanel extends JPanel {
         clearHighlights();
         for (JTextField tf : allTextFields()) tf.setText("");
         taLyrics.setText("");
+        taArtistBio.setText("");
         for (JCheckBox cb : new JCheckBox[]{
             chkClassical, chkHD, chkLive, chkCompilation,
             chkGreatestHits, chkSoundtrack, chkInstrumental}) {
@@ -846,6 +860,8 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Site officiel :"),          tfArtistOfficialUrl);
         fields.put(I18n.t("Wikipedia artiste :"),      tfArtistWikipediaUrl);
         fields.put(I18n.t("Discogs artiste :"),        tfArtistDiscogsUrl);
+        fields.put(I18n.t("Vrai nom :"),               tfArtistRealName);
+        fields.put(I18n.t("Biographie :"),             bioArea());
         fields.put(I18n.t("─── URLs release ───"),     sep());
         fields.put(I18n.t("Site officiel release :"),  tfReleaseOfficialUrl);
         fields.put(I18n.t("Wikipedia release :"),      tfReleaseWikipediaUrl);
@@ -888,6 +904,18 @@ public class DetailPanel extends JPanel {
     private JLabel sep() {
         JLabel l = new JLabel(" ");
         return l;
+    }
+
+    /** taArtistBio dans son propre JScrollPane borné — formPanel() ne fait qu'un fill=HORIZONTAL
+     *  sur ses composants (voir sa boucle), une JTextArea nue y prendrait sa hauteur préférée sans
+     *  jamais pouvoir défiler si le texte dépasse ses 4 lignes visibles. */
+    private JScrollPane bioArea() {
+        taArtistBio.setLineWrap(true);
+        taArtistBio.setWrapStyleWord(true);
+        JScrollPane sp = new JScrollPane(taArtistBio,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        sp.setPreferredSize(new java.awt.Dimension(1, 70));
+        return sp;
     }
 
     private JScrollPane scroll(JPanel p) {
@@ -1045,6 +1073,9 @@ public class DetailPanel extends JPanel {
         // Paroles
         hlArea(taLyrics, taLyrics.getText(), before.lyrics);
         hl(tfLyricsUrl, g(tfLyricsUrl), before.lyricsUrl);
+        // Infos artiste
+        hlArea(taArtistBio, taArtistBio.getText(), before.artistBio);
+        hl(tfArtistRealName, g(tfArtistRealName), before.artistRealName);
     }
 
     /** Remet tous les champs à leur couleur par défaut. */
@@ -1059,6 +1090,7 @@ public class DetailPanel extends JPanel {
             // les champs read-only (MB IDs, mood) restent avec leur propre bg
         }
         if (taLyrics != null) taLyrics.setBackground(defTa);
+        if (taArtistBio != null) taArtistBio.setBackground(defTa);
         if (defCb != null) {
             for (JCheckBox cb : new JCheckBox[]{
                     chkClassical, chkHD, chkLive, chkCompilation,
@@ -1113,7 +1145,7 @@ public class DetailPanel extends JPanel {
             tfMood, tfMoodAggressive, tfMoodAcoustic, tfMoodElectronic,
             tfMoodHappy, tfMoodSad, tfMoodRelaxed, tfMoodDance, tfMoodParty,
             tfLyricsUrl,
-            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
+            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl, tfArtistRealName,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
             tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate,

@@ -43,7 +43,7 @@ public final class ProcessUtils {
 
             boolean done = proc.waitFor(timeoutSec, TimeUnit.SECONDS);
             if (!done) {
-                proc.destroyForcibly();
+                killWithDescendants(proc);
                 reader.cancel(true);
                 return null;
             }
@@ -65,9 +65,21 @@ public final class ProcessUtils {
             return result.get();
 
         } catch (Exception e) {
-            if (proc != null) proc.destroyForcibly();
+            if (proc != null) killWithDescendants(proc);
             return null;
         }
+    }
+
+    /** {@code Process.destroyForcibly()} ne tue QUE le processus directement lancé par la JVM —
+     *  si ce processus a lui-même forké un enfant (constaté en direct 2026-09-06 sur le binaire
+     *  "songrec" : deux instances retrouvées orphelines, PPID=1/init, tournant depuis 17h+), ce
+     *  petit-enfant survit et devient orphelin, jamais nettoyé. {@link ProcessHandle#descendants()}
+     *  (disponible depuis Java 9) parcourt tout l'arbre de processus du système, indépendamment du
+     *  {@link Process} Java qui l'a lancé — capturé AVANT de tuer le parent, pour ne rater aucun
+     *  enfant déjà forké à cet instant. */
+    private static void killWithDescendants(Process proc) {
+        proc.descendants().forEach(ProcessHandle::destroyForcibly);
+        proc.destroyForcibly();
     }
 
     public static byte[] readWithTimeout(ProcessBuilder pb) {

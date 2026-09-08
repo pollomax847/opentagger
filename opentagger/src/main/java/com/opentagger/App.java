@@ -16,6 +16,11 @@ import java.util.logging.Logger;
 public class App {
 
     public static void main(String[] args) throws Exception {
+        // Nettoyage des .wav temporaires orphelins d'une session précédente (voir son commentaire)
+        // — fait en tout premier, avant tout le reste : rien d'autre n'en dépend, et plus tôt c'est
+        // fait, moins de risque de collision avec un nouveau fichier temporaire de CETTE session.
+        cleanupStaleSongRecTempFiles();
+
         // Doit s'exécuter avant la construction du moindre composant Swing — un composant déjà
         // instancié ne change pas de texte si la langue change après coup (voir I18n.java).
         I18n.setLanguage(Config.get().uiLanguage());
@@ -211,12 +216,13 @@ public class App {
         MetadataCache cache = new MetadataCache();
         System.out.println("Recherche du genre (Discogs → Last.fm)...");
         LastFmClient lastFm = new LastFmClient();
-        TagEnrichment.enrichGenre(choisi, new DiscogsClient(), lastFm, cache);
+        DiscogsClient discogs = new DiscogsClient();
+        TagEnrichment.enrichGenre(choisi, discogs, lastFm, cache);
         TagEnrichment.enrichClassicalWork(choisi, new MusicBrainzClient(), cache);
         if (!choisi.genre.isBlank()) System.out.println("  Genre trouvé : " + choisi.genre);
-        // Mood + URLs artiste Last.fm — même gap : absents du CLI jusqu'à présent.
+        // Mood + infos artiste (bio/URLs) — même gap : absents du CLI jusqu'à présent.
         if (choisi.mood.isBlank()) { try { lastFm.enrichMood(choisi, cache); } catch (Exception ignored) {} }
-        try { lastFm.enrichArtistUrls(choisi, cache); } catch (Exception ignored) {}
+        TagEnrichment.enrichArtistInfo(choisi, discogs, lastFm, cache);
 
         // Paroles — même gap : absentes du CLI jusqu'à présent.
         try { new LyricsClient().enrich(choisi); } catch (Exception ignored) {}
@@ -293,6 +299,24 @@ public class App {
         try {
             FileRenamer.moveToFolder(fichier.toPath(), java.nio.file.Paths.get(folder));
         } catch (Exception ignored) {}
+    }
+
+    /** {@link SongRecClient#recognizeAt} crée un .wav temporaire ("ot_shazam_*.wav" dans /tmp) qu'il
+     *  supprime dans un bloc finally — jamais exécuté si la JVM est tuée (kill -TERM, redémarrage de
+     *  l'app) pendant un appel SongRec en cours. Confirmé en direct 2026-09-06 : 56 fichiers, 22Mo,
+     *  accumulés sur plusieurs redémarrages. Balayé au démarrage plutôt que réparé à la source (une
+     *  JVM tuée de force ne peut de toute façon jamais garantir l'exécution de son propre finally). */
+    private static void cleanupStaleSongRecTempFiles() {
+        File tmpDir = new File(System.getProperty("java.io.tmpdir", "/tmp"));
+        File[] stale = tmpDir.listFiles((dir, name) -> name.startsWith("ot_shazam_") && name.endsWith(".wav"));
+        if (stale == null || stale.length == 0) return;
+        int deleted = 0;
+        for (File f : stale) {
+            if (f.delete()) deleted++;
+        }
+        if (deleted > 0) {
+            System.out.println("[OT] Nettoyage : " + deleted + " fichier(s) .wav temporaire(s) orphelin(s) supprimé(s) (/tmp).");
+        }
     }
 
     /** Fusionne les dossiers CLI avec les dossiers de démarrage configurés dans les préférences. */

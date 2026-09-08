@@ -159,7 +159,8 @@ public class DurationMismatchReviewDialog extends JDialog {
         JButton btnClose   = new JButton(I18n.t("Fermer"));
         btnMatch.setToolTipText(I18n.t("Ouvre la correspondance manuelle (double-clic sur une ligne fait la même chose)"));
         btnForce.setToolTipText(I18n.t("Relance une identification complète (SongRec/AcoustID) sur la sélection, ou sur tout le lot si rien n'est sélectionné"));
-        btnTrash.setToolTipText(I18n.t("Déplace les fichiers sélectionnés vers la corbeille système — jamais de suppression définitive"));
+        btnTrash.setToolTipText(I18n.t("Déplace les fichiers sélectionnés vers %s — jamais de suppression définitive",
+                com.opentagger.TrashHelper.destinationDescription()));
         btnMatch.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(this, I18n.t("Sélectionnez une ligne.")); return; }
@@ -249,12 +250,14 @@ public class DurationMismatchReviewDialog extends JDialog {
                 I18n.t("Confirmer la suppression"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (ok != JOptionPane.YES_OPTION) return;
 
-        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+        // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05) : Desktop.moveToTrash() n'est PAS
+        // supporté sur cette machine, et l'ancien code ici tombait donc dans un f.delete() en
+        // silence (suppression définitive malgré le message affiché à l'utilisateur). Remplacé par
+        // un point de passage unique qui ne supprime jamais définitivement.
         int deleted = 0, failDel = 0;
         for (FileEntry entry : toTrash) {
             File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
-            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+            boolean moved = com.opentagger.TrashHelper.moveToTrash(f);
             if (moved) {
                 deleted++;
                 int idx = tableModel.indexOf(entry);
@@ -263,8 +266,7 @@ public class DurationMismatchReviewDialog extends JDialog {
                 failDel++;
             }
         }
-        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-        owner.setStatus(I18n.t("%d fichier(s) %s%s", deleted, where,
+        owner.setStatus(I18n.t("%d fichier(s) déplacé(s) dans la corbeille%s", deleted,
                 failDel > 0 ? I18n.t(", %d échec(s)", failDel) : ""));
         load();
     }
