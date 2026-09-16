@@ -19,23 +19,8 @@ public class LastFmClient {
             java.util.logging.Logger.getLogger(LastFmClient.class.getName());
     private static final String BASE_URL = "https://ws.audioscrobbler.com/2.0/";
 
-    // Tags Last.fm classifiés comme "mood"
-    private static final String[][] MOOD_MAP = {
-        {"happy", "upbeat", "feel good", "feel-good", "joyful", "cheerful", "fun", "positive"},
-        {"sad", "melancholic", "melancholy", "depressing", "heartbreak", "emotional", "tearjerker"},
-        {"chill", "chillout", "relax", "relaxed", "calm", "peaceful", "soothing", "mellow", "laid back"},
-        {"energetic", "energy", "pump up", "adrenaline", "workout", "running", "power"},
-        {"aggressive", "angry", "rage", "intense", "harsh"},
-        {"romantic", "love", "romance", "sensual"},
-        {"party", "dance", "danceable", "club", "rave"},
-        {"dark", "haunting", "gloomy", "atmospheric", "noir"},
-        {"acoustic", "unplugged", "folk acoustic"},
-        {"instrumental", "no vocals"},
-    };
-    private static final String[] MOOD_LABELS = {
-        "Happy", "Sad", "Relaxed", "Energetic", "Aggressive",
-        "Romantic", "Party", "Dark", "Acoustic", "Instrumental"
-    };
+    // Classification mood (mots-clés → label) déplacée dans MoodClassifier (2026-09-13), partagée
+    // avec MusicBrainzClient/DiscogsClient — voir sa Javadoc pour le pourquoi.
 
     private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
@@ -121,21 +106,36 @@ public class LastFmClient {
         if (!info.mood.isBlank()) return;
 
         List<GenreFilter.Candidate> allTags = fetchAllTags(info, cache);
-
+        List<String> names = new java.util.ArrayList<>();
         for (GenreFilter.Candidate c : allTags) {
-            String t = c.name().toLowerCase().trim();
-            if (t.equals("instrumental") || t.equals("no vocals")) {
-                info.isInstrumental = "1";
-            }
-            for (int i = 0; i < MOOD_MAP.length; i++) {
-                for (String kw : MOOD_MAP[i]) {
-                    if (t.contains(kw)) {
-                        info.mood = MOOD_LABELS[i];
-                        return;
-                    }
-                }
-            }
+            names.add(c.name());
+            if (MoodClassifier.isInstrumentalTag(c.name())) info.isInstrumental = "1";
         }
+        info.mood = MoodClassifier.classify(names);
+    }
+
+    /**
+     * Enrichit les mots-clés (info.tags) depuis les mêmes tags Last.fm bruts déjà récupérés pour le
+     * genre/mood — jusqu'ici calculés puis systématiquement jetés (enrichGenres()/enrichMood() ne
+     * consomment cette liste QUE pour en dériver genre/mood, jamais les noms bruts eux-mêmes), champ
+     * "Mots-clés" resté vide pour tout le monde malgré la donnée déjà en main (2026-09-13, trouvé
+     * par audit). Gate indépendant de enrichGenres()/enrichMood() (qui s'arrêtent dès que genre/mood
+     * sont déjà connus, souvent avant même d'arriver ici) — les mots-clés doivent rester tentés
+     * même dans ce cas. fetchAllTags() est mis en cache par instance (voir son commentaire) : aucun
+     * appel réseau de plus si enrichGenres()/enrichMood() ont déjà tourné juste avant sur le même
+     * TagInfo/la même instance, comme c'est toujours le cas dans la cascade (TagEnrichment.
+     * enrichGenre() puis enrichMood(), tous deux avec le même LastFmClient partagé pour ce fichier).
+     */
+    public void enrichTags(TagInfo info, MetadataCache cache) throws Exception {
+        if (!Config.get().lastfmEnabled()) return;
+        if (Config.get().lastfmKey().isBlank()) return;
+        if (!info.tags.isBlank()) return;
+
+        List<GenreFilter.Candidate> allTags = fetchAllTags(info, cache);
+        if (allTags.isEmpty()) return;
+        List<String> names = new ArrayList<>();
+        for (GenreFilter.Candidate c : allTags) names.add(c.name());
+        info.tags = joinGenres(names);
     }
 
     /** Récupère tous les tags bruts Last.fm avec leur popularité (morceau puis artiste en fallback). */
@@ -287,10 +287,7 @@ public class LastFmClient {
     }
 
     private boolean isMoodTag(String t) {
-        for (String[] group : MOOD_MAP)
-            for (String kw : group)
-                if (t.contains(kw)) return true;
-        return false;
+        return !MoodClassifier.classify(List.of(t)).isEmpty();
     }
 
     private String joinGenres(List<String> tags) {

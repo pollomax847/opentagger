@@ -263,9 +263,12 @@ public final class TagEnrichment {
             }
 
             // Portrait d'artiste (artist.jpg à côté de cover.jpg dans le dossier album) — opt-in,
-            // voir Config.artistPhotoEnabled(). Pas de case "overwrite" séparée (contrairement à la
-            // pochette) : un fichier déjà présent suffit, évite un re-téléchargement à chaque piste
-            // du même artiste/album.
+            // voir Config.artistPhotoEnabled(). Par défaut, un fichier déjà présent suffit (évite un
+            // re-téléchargement à chaque piste du même artiste/album) ; artist_photo.overwrite_file
+            // (même esprit que cover.overwrite_file) permet de forcer le remplacement — nécessaire
+            // depuis qu'on sait qu'une mauvaise identification passée (mauvais artistMbid) peut avoir
+            // écrit la photo d'un artiste sans rapport, sans qu'aucun mécanisme ne la corrige ensuite
+            // (voir aussi l'action manuelle "Régénérer le portrait d'artiste").
             if (Config.get().artistPhotoEnabled() && fanArt != null) {
                 Path artistPhoto = null;
                 try {
@@ -280,7 +283,7 @@ public final class TagEnrichment {
                         String fname = Config.get().artistPhotoFilename();
                         String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
                         Path dest = fichier.toPath().resolveSibling(fname + ext);
-                        if (!java.nio.file.Files.exists(dest))
+                        if (!java.nio.file.Files.exists(dest) || Config.get().artistPhotoOverwrite())
                             java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                     }
                 } catch (Exception ignored) {

@@ -1,0 +1,191 @@
+{
+  "version" : 1,
+  "exported" : "2026-09-13T10:47:48.243144396Z",
+  "app_version" : "0.9.18",
+  "totals" : {
+    "total" : 34341,
+    "identified" : 1561,
+    "tagged" : 4438,
+    "not_identified_or_skipped" : 91,
+    "errors" : 2,
+    "pending" : 28249
+  },
+  "skip_reasons" : {
+    "NOT_IDENTIFIED" : 58,
+    "DURATION_MISMATCH" : 33,
+    "UNKNOWN_LEGACY_SESSION" : 2
+  },
+  "duration_mismatch" : {
+    "probably_broken_short" : 12,
+    "to_review_manually" : 21,
+    "worst_gaps_sample" : [ {
+      "file" : "Captivating Lady.mp3",
+      "file_sec" : 14988,
+      "mb_sec" : 29,
+      "title" : "Captivating Lady"
+    }, {
+      "file" : "SE-1205.mp3",
+      "file_sec" : 2982,
+      "mb_sec" : 74,
+      "title" : "SE-1205"
+    }, {
+      "file" : "VARIOUS ARTISTS - Cloud_City.mp3",
+      "file_sec" : 8,
+      "mb_sec" : 279,
+      "title" : "Cloud_City"
+    }, {
+      "file" : "02 - Track 2.mp3",
+      "file_sec" : 29,
+      "mb_sec" : 228,
+      "title" : "Track 2"
+    }, {
+      "file" : "Céline Dion-Say Yes.mp3",
+      "file_sec" : 31,
+      "mb_sec" : 212,
+      "title" : "Céline Dion-Say Yes"
+    }, {
+      "file" : "Various Artists - Cat On A Leash.mp3",
+      "file_sec" : 56,
+      "mb_sec" : 319,
+      "title" : "Cat On A Leash"
+    }, {
+      "file" : "09 - Dishonest Corset.mp3",
+      "file_sec" : 70,
+      "mb_sec" : 293,
+      "title" : "Dishonest Corset"
+    }, {
+      "file" : "Chebba.mp3",
+      "file_sec" : 82,
+      "mb_sec" : 340,
+      "title" : "Chebba"
+    }, {
+      "file" : "Cold_Heart_(Claptone_Remix).mp3",
+      "file_sec" : 85,
+      "mb_sec" : 309,
+      "title" : "Cold_Heart_(Claptone_Remix)"
+    }, {
+      "file" : "07 - Not Fade Away.mp3",
+      "file_sec" : 419,
+      "mb_sec" : 136,
+      "title" : "Not Fade Away"
+    }, {
+      "file" : "06 - St Stephen.mp3",
+      "file_sec" : 139,
+      "mb_sec" : 397,
+      "title" : "St Stephen"
+    }, {
+      "file" : "08 - St Stephen.mp3",
+      "file_sec" : 143,
+      "mb_sec" : 397,
+      "title" : "St Stephen"
+    }, {
+      "file" : "Tiësto - Goldrush - 01 - Goldrush.mp3",
+      "file_sec" : 563,
+      "mb_sec" : 211,
+      "title" : "Goldrush"
+    }, {
+      "file" : "Can't_Fake_the_Feeling.mp3",
+      "file_sec" : 71,
+      "mb_sec" : 167,
+      "title" : "Can't_Fake_the_Feeling"
+    }, {
+      "file" : "4-17 I Don't Know.mp3",
+      "file_sec" : 81,
+      "mb_sec" : 182,
+      "title" : "I Don't Know"
+    }, {
+      "file" : "1.12 Communication.mp3",
+      "file_sec" : 285,
+      "mb_sec" : 129,
+      "title" : "Track 12"
+    }, {
+      "file" : "Tiësto - I Can’t Wait - 01 - I Can’t Wait.mp3",
+      "file_sec" : 376,
+      "mb_sec" : 172,
+      "title" : "I Can’t Wait"
+    }, {
+      "file" : "09 - In The Midnight Hour.mp3",
+      "file_sec" : 499,
+      "mb_sec" : 950,
+      "title" : "In The Midnight Hour"
+    }, {
+      "file" : "12 - Good Lovin.mp3",
+      "file_sec" : 909,
+      "mb_sec" : 487,
+      "title" : "Good Lovin"
+    }, {
+      "file" : "DJ Shadow - Hardcore (Instrumental) Hip Hop + Fully Charged on Planet X - 05 - Fully Charged on Planet X (instrumental).mp3",
+      "file_sec" : 120,
+      "mb_sec" : 221,
+      "title" : "Fully Charged on Planet X (instrumental)"
+    }, {
+      "file" : "02 WITHOUT YOU.mp3",
+      "file_sec" : 111,
+      "mb_sec" : 200,
+      "title" : "WITHOUT YOU"
+    }, {
+      "file" : "The Beach Boys - Wouldn't It Be Nice (2013 Stereo Mix).mp3",
+      "file_sec" : 154,
+      "mb_sec" : 276,
+      "title" : "Wouldn't It Be Nice (2013 Stereo Mix)"
+    }, {
+      "file" : "01 - Hard To Handle.mp3",
+      "file_sec" : 404,
+      "mb_sec" : 245,
+      "title" : "Hard To Handle"
+    }, {
+      "file" : "DJ Shadow - Hardcore (Instrumental) Hip Hop + Fully Charged on Planet X - 04 - Fully Charged on Planet X.mp3",
+      "file_sec" : 358,
+      "mb_sec" : 221,
+      "title" : "Fully Charged on Planet X"
+    }, {
+      "file" : "05 - I Know You Rider.mp3",
+      "file_sec" : 293,
+      "mb_sec" : 185,
+      "title" : "I Know You Rider"
+    }, {
+      "file" : "10 - Dancing In The Streets.mp3",
+      "file_sec" : 738,
+      "mb_sec" : 479,
+      "title" : "Dancing In The Streets"
+    }, {
+      "file" : "4-13 Little Honda.mp3",
+      "file_sec" : 73,
+      "mb_sec" : 112,
+      "title" : "Little Honda"
+    }, {
+      "file" : "4-08 She Belongs to Me.mp3",
+      "file_sec" : 88,
+      "mb_sec" : 131,
+      "title" : "She Belongs to Me"
+    }, {
+      "file" : "12-22 Back in the U.S.S.R. [live].mp3",
+      "file_sec" : 166,
+      "mb_sec" : 239,
+      "title" : "Back in the U.S.S.R. [live]"
+    }, {
+      "file" : "12-24 Rockin' All Over the World [live].mp3",
+      "file_sec" : 166,
+      "mb_sec" : 238,
+      "title" : "Rockin' All Over the World [live]"
+    } ]
+  },
+  "identification_sources" : {
+    "acoustid" : 294,
+    "text" : 465,
+    "songrec" : 19,
+    "group_pin" : 420,
+    "unknown" : 4375,
+    "unverified_tags" : 72,
+    "discid" : 186,
+    "mbid" : 109,
+    "beets" : 59
+  },
+  "error_sample" : [ {
+    "file" : "Jam & Spoon, Plavka vs David May, Amfree - right in the night 2013 (extended mix) ☆KlubowaMuza.net☆mp3MANIAslovakia☆.mp3",
+    "message" : "No audio header found within Jam & Spoon, Plavka vs David May, Amfree - right in the night 2013 (extended mix) ☆KlubowaMuza.net☆mp3MANIAslovakia☆.mp3"
+  }, {
+    "file" : "Jam & Spoon Feat. Plavka Vs. David May & Amfree - Right in the Night 2013 (Bodybangers Remix).mp3",
+    "message" : "No audio header found within Jam & Spoon Feat. Plavka Vs. David May & Amfree - Right in the Night 2013 (Bodybangers Remix).mp3"
+  } ]
+}

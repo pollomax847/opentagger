@@ -116,6 +116,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkCapitalize;
     private JTextField tfCapitalizeLowercase, tfCapitalizeUppercase, tfCapitalizePrefixes;
     private JCheckBox  chkArtistPhoto;
+    private JCheckBox  chkArtistPhotoOverwrite;
     private JTextField tfArtistPhotoFilename;
     private JCheckBox  chkMbUseGenres;
     private JSpinner   spMbMinGenreUsage;
@@ -144,6 +145,10 @@ public class SettingsDialog extends JDialog {
     private JList<String>            lstScripts;
     private int                      currentScriptIndex = -1;
     private JCheckBox                chkScriptsEnabled;
+    // Affiché (désactivé) tant qu'aucun script n'est sélectionné, à la place d'un JTextArea vide —
+    // voir le commentaire à son utilisation dans buildScriptPanel().
+    private static final String NO_SCRIPT_PLACEHOLDER =
+        I18n.t("← Sélectionnez un script à gauche, ou cliquez « + Nouveau » pour en créer un.");
     private java.util.List<String> postTagCommands = new java.util.ArrayList<>();
     private DefaultListModel<String> lstPostTagCommandsModel = new DefaultListModel<>();
     private JList<String>            lstPostTagCommands;
@@ -311,7 +316,8 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Tags"),         scrollWrap(buildTagsPanel()));
         tabs.addTab(I18n.t("Renommage"),    scrollWrap(buildRenamePanel()));
         tabs.addTab(I18n.t("Audio / Transcodage"), scrollWrap(buildAudioPanel()));
-        tabs.addTab(I18n.t("Script"),       scrollWrap(buildScriptPanel()));
+        tabs.addTab(I18n.t("Scripts de tags"),  scrollWrap(buildScriptPanel()));
+        tabs.addTab(I18n.t("Automatisation"),   scrollWrap(buildAutomationPanel()));
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
         tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
         tabs.addTab(I18n.t("iTunes"),       scrollWrap(buildItunesPanel()));
@@ -1273,11 +1279,16 @@ public class SettingsDialog extends JDialog {
             "Désactivé par défaut. Nécessite une clé FanArt.tv (onglet APIs). Écrit un fichier à "
             + "côté de la pochette, dans le dossier de l'album (pas remonté au dossier artiste, qui "
             + "dépend du masque de renommage actif)."));
+        chkArtistPhotoOverwrite = new JCheckBox(I18n.t("Écraser le fichier si déjà existant"));
+        chkArtistPhotoOverwrite.setToolTipText(I18n.t(
+            "Sans cette option, un artist.jpg déjà présent n'est jamais remplacé — y compris s'il a"
+            + " été écrit lors d'une identification erronée. Utilisez aussi \"Régénérer le portrait"
+            + " d'artiste\" pour forcer un seul dossier sans tout réactiver."));
         tfArtistPhotoFilename = tf();
         JPanel artistPhotoInner = form(new String[]{
-            "", "Nom du fichier (sans extension) :"
+            "", "", "Nom du fichier (sans extension) :"
         }, new JComponent[]{
-            chkArtistPhoto, tfArtistPhotoFilename
+            chkArtistPhoto, chkArtistPhotoOverwrite, tfArtistPhotoFilename
         }, "Portrait d'artiste");
 
         // ── Fournisseurs de pochette : ordre + activation (pas d'ajout/suppression,
@@ -1893,6 +1904,15 @@ public class SettingsDialog extends JDialog {
                 BorderFactory.createEtchedBorder(), I18n.t("Script sélectionné")));
         scriptBox.add(lblDesc, BorderLayout.NORTH);
         scriptBox.add(scriptScroll, BorderLayout.CENTER);
+        // Placeholder tant qu'aucun script n'est sélectionné : la zone reste DÉSACTIVÉE (on ne veut
+        // pas qu'on puisse taper dans le vide, ce texte serait perdu au premier changement de
+        // sélection) mais un JTextArea désactivé + vide est visuellement indiscernable d'un bug —
+        // ce texte, lui, reste visible même désactivé et explique quoi faire. Trouvé en direct :
+        // sans ça, "je tape un script et rien ne s'enregistre" est le comportement ATTENDU (il n'y a
+        // tout simplement aucun script sélectionné pour recevoir le texte), pas un bug du moteur
+        // Nashorn — confirmé par un test direct (TaggerScript.apply() fonctionne correctement sur
+        // le vrai jar packagé).
+        taTaggerScript.setDisabledTextColor(java.awt.Color.GRAY);
 
         // ── Liste des scripts (plusieurs scripts nommés, activables individuellement,
         // dans l'esprit des greffons Picard) ────────────────────────────────────────
@@ -1929,7 +1949,7 @@ public class SettingsDialog extends JDialog {
             scriptDefs.remove(sel);
             currentScriptIndex = -1;
             refreshScriptsList();
-            taTaggerScript.setText("");
+            taTaggerScript.setText(NO_SCRIPT_PLACEHOLDER);
             taTaggerScript.setEnabled(false);
         });
         btnToggleScript.addActionListener(e -> {
@@ -1956,7 +1976,7 @@ public class SettingsDialog extends JDialog {
             if (sel == currentScriptIndex) return;
             flushCurrentScriptEdits();
             currentScriptIndex = sel;
-            taTaggerScript.setText(sel >= 0 && sel < scriptDefs.size() ? scriptDefs.get(sel).code() : "");
+            taTaggerScript.setText(sel >= 0 && sel < scriptDefs.size() ? scriptDefs.get(sel).code() : NO_SCRIPT_PLACEHOLDER);
             taTaggerScript.setEnabled(sel >= 0);
         });
 
@@ -1976,10 +1996,30 @@ public class SettingsDialog extends JDialog {
         centerSplit.add(scriptsListPanel, BorderLayout.WEST);
         centerSplit.add(scriptBox,        BorderLayout.CENTER);
 
-        // ── Commande(s) après taguage — déplacée depuis l'onglet Démarrage, étendue en liste
-        // (voir PostTagCommands, remplace l'ancien champ texte unique hooks.post_tag_command) ────
+        JPanel south = new JPanel(new BorderLayout(0, 10));
+        south.add(exBox, BorderLayout.CENTER);
+
+        JPanel outer = new JPanel(new BorderLayout(0, 10));
+        outer.setBorder(new EmptyBorder(10, 10, 10, 10));
+        outer.add(chkScriptsEnabled, BorderLayout.NORTH);
+        outer.add(centerSplit, BorderLayout.CENTER);
+        outer.add(south, BorderLayout.SOUTH);
+        return outer;
+    }
+
+    /**
+     * Onglet "Automatisation" — extrait de l'ex-onglet "Script" unique (2026-09-13) : les scripts
+     * de tags (JavaScript, ci-dessus) et les commandes après taguage (shell, ici) sont deux
+     * fonctionnalités sans rapport qui se ressemblaient assez pour être confondues ("je mets un
+     * script et rien ne s'enregistre" — l'utilisateur tapait en fait dans le mauvais des deux,
+     * ou dans la zone de script désactivée faute d'avoir cliqué "+ Nouveau" d'abord, voir
+     * NO_SCRIPT_PLACEHOLDER). Un exemple concret et copiable est affiché directement (Navidrome/
+     * Plex, le besoin réel qui a motivé ce correctif) plutôt qu'une simple case vide qui suppose
+     * une syntaxe shell déjà connue.
+     */
+    private JPanel buildAutomationPanel() {
         lstPostTagCommands = new JList<>(lstPostTagCommandsModel);
-        lstPostTagCommands.setVisibleRowCount(4);
+        lstPostTagCommands.setVisibleRowCount(6);
         JScrollPane postTagScroll = new JScrollPane(lstPostTagCommands);
 
         JButton btnAddCmd    = new JButton("+ " + I18n.t("Ajouter"));
@@ -2023,15 +2063,27 @@ public class SettingsDialog extends JDialog {
         postTagPanel.add(postTagScroll, BorderLayout.CENTER);
         postTagPanel.add(postTagBtns,  BorderLayout.SOUTH);
 
-        JPanel south = new JPanel(new BorderLayout(0, 10));
-        south.add(exBox,       BorderLayout.NORTH);
-        south.add(postTagPanel, BorderLayout.SOUTH);
+        // Exemples concrets, copiables tels quels (juste remplacer USER/MDP/TOKEN) — le besoin réel
+        // qui a motivé cet onglet séparé : rafraîchir la bibliothèque d'un serveur de streaming
+        // (Navidrome/Plex) juste après un taguage, sans avoir à connaître curl/les API par cœur.
+        JTextArea taExamples = new JTextArea(
+            "# Navidrome — relance un scan de bibliothèque (API Subsonic) :\n"
+          + "curl \"http://127.0.0.1:4533/rest/startScan?u=USER&p=MDP&v=1.16.1&c=opentagger&f=json\"\n\n"
+          + "# Plex — rafraîchit une section de bibliothèque (token + ID de section requis) :\n"
+          + "curl \"http://127.0.0.1:32400/library/sections/ID/refresh?X-Plex-Token=TOKEN\"");
+        taExamples.setEditable(false);
+        taExamples.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        taExamples.setBackground(postTagPanel.getBackground());
+        taExamples.setBorder(new EmptyBorder(4, 4, 4, 4));
+        JPanel exBox = new JPanel(new BorderLayout());
+        exBox.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(),
+                I18n.t("Exemples — Navidrome / Plex (copier une ligne, ajuster USER/MDP/TOKEN/ID)")));
+        exBox.add(taExamples, BorderLayout.CENTER);
 
         JPanel outer = new JPanel(new BorderLayout(0, 10));
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
-        outer.add(chkScriptsEnabled, BorderLayout.NORTH);
-        outer.add(centerSplit, BorderLayout.CENTER);
-        outer.add(south, BorderLayout.SOUTH);
+        outer.add(postTagPanel, BorderLayout.CENTER);
+        outer.add(exBox,        BorderLayout.SOUTH);
         return outer;
     }
 
@@ -2532,8 +2584,9 @@ public class SettingsDialog extends JDialog {
         chkCoverSaveToFile   .setSelected(cfg.coverSaveToFile());
         chkCoverOverwriteFile.setSelected(cfg.coverOverwriteFile());
         tfCoverFilename      .setText(cfg.coverFilename());
-        chkArtistPhoto       .setSelected(cfg.artistPhotoEnabled());
-        tfArtistPhotoFilename.setText(cfg.artistPhotoFilename());
+        chkArtistPhoto         .setSelected(cfg.artistPhotoEnabled());
+        chkArtistPhotoOverwrite.setSelected(cfg.artistPhotoOverwrite());
+        tfArtistPhotoFilename  .setText(cfg.artistPhotoFilename());
 
         // ─ Fournisseurs de pochette : ordre + activation ─
         coverProviderOrder.clear();
@@ -2586,7 +2639,7 @@ public class SettingsDialog extends JDialog {
         if (!scriptDefs.isEmpty()) {
             lstScripts.setSelectedIndex(0);
         } else {
-            taTaggerScript.setText("");
+            taTaggerScript.setText(NO_SCRIPT_PLACEHOLDER);
             taTaggerScript.setEnabled(false);
         }
 
@@ -2791,8 +2844,9 @@ public class SettingsDialog extends JDialog {
         p.setProperty("cover.save_to_file",        String.valueOf(chkCoverSaveToFile.isSelected()));
         p.setProperty("cover.overwrite_file",      String.valueOf(chkCoverOverwriteFile.isSelected()));
         p.setProperty("cover.filename",            tfCoverFilename.getText().trim().isEmpty() ? "cover" : tfCoverFilename.getText().trim());
-        p.setProperty("artist_photo.enabled",      String.valueOf(chkArtistPhoto.isSelected()));
-        p.setProperty("artist_photo.filename",     tfArtistPhotoFilename.getText().trim().isEmpty() ? "artist" : tfArtistPhotoFilename.getText().trim());
+        p.setProperty("artist_photo.enabled",        String.valueOf(chkArtistPhoto.isSelected()));
+        p.setProperty("artist_photo.overwrite_file", String.valueOf(chkArtistPhotoOverwrite.isSelected()));
+        p.setProperty("artist_photo.filename",       tfArtistPhotoFilename.getText().trim().isEmpty() ? "artist" : tfArtistPhotoFilename.getText().trim());
         p.setProperty("tags.correct_punctuation",  String.valueOf(chkCorrectPunctuation.isSelected()));
         p.setProperty("tags.remove_id3v1",         String.valueOf(chkRemoveId3v1.isSelected()));
         String[] id3Versions = {"keep", "2.3", "2.4"};

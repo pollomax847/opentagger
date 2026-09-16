@@ -394,6 +394,33 @@ public class MusicBrainzClient {
         String status = release.path("status").asText("").trim();
         if (!status.isBlank() && info.releaseStatus.isBlank()) info.releaseStatus = status;
 
+        // ASIN — champ de premier niveau, TOUJOURS présent dans la réponse si MB le connaît, sans
+        // inc= particulier (vérifié en direct, ex. Thriller de Michael Jackson : "asin":"B00002663R")
+        // — jamais lu jusqu'ici malgré ce même appel /release déjà fait pour barcode/statut/label
+        // juste au-dessus (2026-09-13, trouvé par audit).
+        String asin = release.path("asin").asText("").trim();
+        if (!asin.isBlank() && info.amazonId.isBlank()) info.amazonId = asin;
+
+        // URLs officiel/Wikipedia de la PARUTION — présent seulement si inc=url-rels a été demandé.
+        // "wikidata" (pas littéralement "wikipedia" — MB ne lie jamais directement un release à un
+        // article Wikipedia, seulement à sa fiche Wikidata, qui elle-même pointe vers Wikipedia)
+        // est le type de relation réellement utilisé, vérifié en direct (Dark Side of the Moon).
+        // "official homepage" existe aussi comme type MB valide pour une release, absent de cet
+        // exemple précis mais présent sur d'autres — les deux jamais lus jusqu'ici (2026-09-13,
+        // trouvé par audit).
+        JsonNode relUrls = release.path("relations");
+        if (relUrls.isArray()) {
+            for (JsonNode r : relUrls) {
+                String type = r.path("type").asText("");
+                String url  = r.path("url").path("resource").asText("").trim();
+                if (url.isBlank()) continue;
+                if ("official homepage".equals(type) && info.releaseOfficialUrl.isBlank())
+                    info.releaseOfficialUrl = url;
+                else if ("wikidata".equals(type) && info.releaseWikipediaUrl.isBlank())
+                    info.releaseWikipediaUrl = url;
+            }
+        }
+
         // label-info : présent seulement si inc=labels a été demandé — un release peut avoir
         // plusieurs labels (co-productions), on garde le premier comme le fait Picard.
         JsonNode labelInfo = release.path("label-info");
@@ -830,6 +857,30 @@ public class MusicBrainzClient {
             if (info.track.isBlank() && !info.releaseMbid.isBlank()) {
                 fillTrackPositionFromRelease(info.recordingMbid, info.releaseMbid, info);
             }
+
+            // Label/code-barres/statut/URLs manquants malgré une release trouvée : "labels"/
+            // "url-rels" ne sont pas des inc= valides sur /recording (voir le commentaire au-dessus
+            // de cette méthode), donc extractReleaseDetails(chosen, ...) ci-dessus n'a jamais pu les
+            // voir — et la release EMBARQUÉE dans la réponse recording est de toute façon plus
+            // sommaire qu'un vrai lookup /release (repéré en direct 2026-09-13 : label/code-barres/
+            // statut présents côté MusicBrainz pour "Hurts – Wonderful Life '25" mais absents du
+            // fichier tagué via ce chemin AcoustID → lookupRecording ; URLs officiel/Wikipedia trouvé
+            // par le même audit, même cause). Un second appel LÉGER (juste labels+url-rels, pas tout
+            // le reste déjà obtenu) comble ce trou spécifique à ce chemin, sans le payer sur les
+            // autres (recherche texte/discid, qui demandent déjà +labels+url-rels dès le 1er appel).
+            if (!info.releaseMbid.isBlank()
+                    && (info.label.isBlank() || info.barcode.isBlank() || info.releaseStatus.isBlank()
+                        || info.releaseOfficialUrl.isBlank() || info.releaseWikipediaUrl.isBlank())) {
+                try {
+                    String relUrl = mbBaseUrl() + "/release/" + info.releaseMbid + "?fmt=json&inc=labels+url-rels";
+                    HttpResponse<String> relResp = getWithRetry(relUrl);
+                    if (relResp != null) {
+                        extractReleaseDetails(mapper.readTree(relResp.body()), info);
+                    }
+                } catch (Exception ignored) {
+                    // best-effort — ne doit jamais faire échouer l'identification pour ces champs cosmétiques
+                }
+            }
         }
         // originalYear : date de première sortie du recording
         String frd = rec.path("first-release-date").asText("").trim();
@@ -837,8 +888,7 @@ public class MusicBrainzClient {
 
         // Genres MB (folksonomy) — uniquement si mb.use_genres=true
         if (Config.get().bool("mb.use_genres", false)) {
-            String mbGenre = parseMbGenres(rec.path("genres"));
-            if (!mbGenre.isBlank()) info.genre = mbGenre;
+            parseMbGenres(rec.path("genres"), info);
         }
 
         // Relations ARs (compositeur, chef d'orchestre, producteur…)
@@ -913,15 +963,32 @@ public class MusicBrainzClient {
      * Parse les genres folksonomy MB. Filtre par vote minimum et liste noire.
      * Format API : [{"name":"rock","count":15,"disambiguation":""},…]
      */
-    private String parseMbGenres(JsonNode genres) {
-        if (!genres.isArray() || genres.isEmpty()) return "";
+    /**
+     * Peuple info.genre depuis la folksonomie MB (comme avant) et, en plus (2026-09-13), info.mood
+     * si encore vide — sur la liste BRUTE complète, pas seulement les genres retenus après filtre
+     * (un tag mood pertinent, ex. "melancholic", n'est pas forcément dans le top N genre). Aucun
+     * appel réseau supplémentaire : ces tags sont déjà récupérés pour le genre, MusicBrainz étant le
+     * premier maillon de la cascade d'identification (avant même Discogs/Last.fm) — donc le mood est
+     * ici disponible plus tôt et sans coût, contrairement au chemin Last.fm dédié plus loin dans la
+     * cascade (voir TaggingWorker : le if (best.mood.isBlank()) avant l'appel Last.fm rend cette
+     * priorité automatique, sans changement nécessaire côté appelant).
+     */
+    private void parseMbGenres(JsonNode genres, TagInfo info) {
+        if (!genres.isArray() || genres.isEmpty()) return;
         java.util.List<GenreFilter.Candidate> candidates = new java.util.ArrayList<>();
+        java.util.List<String> rawNames = new java.util.ArrayList<>();
         for (JsonNode g : genres) {
             String name  = g.path("name").asText("").trim();
             int    count = g.path("count").asInt(0);
             candidates.add(new GenreFilter.Candidate(name, count));
+            rawNames.add(name);
         }
-        return String.join(", ", GenreFilter.filter(candidates, Config.get().genreMaxCount()));
+        String joined = String.join(", ", GenreFilter.filter(candidates, Config.get().genreMaxCount()));
+        if (!joined.isBlank()) info.genre = joined;
+        if (info.mood.isBlank()) {
+            String mood = MoodClassifier.classify(rawNames);
+            if (!mood.isBlank()) info.mood = mood;
+        }
     }
 
     /**
@@ -1011,7 +1078,22 @@ public class MusicBrainzClient {
         if (info.workMbid.isBlank()) return;
         JsonNode work = fetchWork(info.workMbid, cache);
         if (work == null) return;
-        info.isClassical = "1";
+        // isClassical="1" DÉPLACÉ en fin de méthode (2026-09-13, voir sa nouvelle affectation
+        // plus bas) : le mettre ici, dès qu'un Work MB existe, était une fausse coïncidence — le
+        // type d'entité "Work" de MusicBrainz couvre TOUTE composition (une chanson pop a aussi
+        // son Work, notamment pour le suivi des droits d'auteur), pas seulement le classique. Trouvé
+        // en direct sur de vrais faux positifs : "Stromae – Alors on danse", "James Brown – I Feel
+        // Good", "Anita Ward – Ring My Bell", "Foo Fighters – Run" tous marqués isClassical=1 avec
+        // leur propre titre recopié tel quel dans le champ "work" — aucun rapport avec le classique.
+
+        // Surnom (ex. "The Four Seasons" pour Vivaldi) — le champ "disambiguation" du Work MB EST
+        // par convention son surnom usuel, vérifié en direct (Le quattro stagioni de Vivaldi :
+        // disambiguation="The Four Seasons"). Jamais lu jusqu'ici : les 3 lectures existantes de
+        // "disambiguation" dans ce fichier portent toutes sur la ressource RECORDING (→ info.comment),
+        // jamais sur cette ressource WORK déjà récupérée ici pour tout fichier classique (2026-09-13,
+        // trouvé par audit — zéro appel réseau de plus).
+        String nickname = work.path("disambiguation").asText("").trim();
+        if (!nickname.isBlank() && info.classicalNickname.isBlank()) info.classicalNickname = nickname;
 
         String catalogSourceTitle = work.path("title").asText("").trim();
         JsonNode parentRel = findPartsRelation(work.path("relations"), "backward");
@@ -1043,6 +1125,21 @@ public class MusicBrainzClient {
         }
 
         extractOpusCatalog(work.path("attributes"), catalogSourceTitle, info);
+
+        // Grouping (convention iTunes/Picard, sert au regroupement par œuvre dans un lecteur) —
+        // simple copie de l'œuvre déjà résolue ci-dessus, jamais recopiée jusqu'ici malgré sa
+        // présence en mémoire sur ce même TagInfo (2026-09-13, trouvé par audit — zéro appel réseau).
+        if (info.grouping.isBlank()) {
+            info.grouping = !info.overallWork.isBlank() ? info.overallWork : catalogSourceTitle;
+        }
+
+        // Preuve réelle de nature classique, pas juste "un Work existe" (voir commentaire plus
+        // haut) : soit une structure en mouvements (relation "parts", quasi jamais présente hors
+        // classique — symphonies, concertos, sonates...), soit un numéro de catalogue/opus détecté
+        // (BWV/K./D./Hob./RV/Wq/HWV/BuxWV/opus, via attribut structuré MB ou motif du titre).
+        if (parentRel != null || !info.opus.isBlank() || !info.classicalCatalog.isBlank()) {
+            info.isClassical = "1";
+        }
     }
 
     private JsonNode fetchWork(String workMbid, MetadataCache cache) throws Exception {

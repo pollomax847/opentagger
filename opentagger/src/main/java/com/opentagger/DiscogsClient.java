@@ -62,6 +62,18 @@ public class DiscogsClient {
             if (!filtered.isEmpty()) info.genre = String.join(", ", filtered);
         }
 
+        // Mood depuis les mêmes genre/style Discogs (2026-09-13) — indépendant du bloc ci-dessus
+        // (qui s'arrête dès que info.genre est déjà connu, ex. via MusicBrainz plus tôt dans la
+        // cascade) : le mood doit rester tenté même quand le genre l'est déjà, tant qu'AUCUNE des
+        // trois sources (MB/Discogs/Last.fm, voir MoodClassifier) ne l'a encore trouvé. Aucun appel
+        // réseau de plus : "hit" est déjà résolu ci-dessus pour ce même fichier.
+        if (info.mood.isBlank()) {
+            List<String> allTags = new ArrayList<>(extraireTableau(hit.path("style")));
+            allTags.addAll(extraireTableau(hit.path("genre")));
+            String mood = MoodClassifier.classify(allTags);
+            if (!mood.isBlank()) info.mood = mood;
+        }
+
         // Barcode (tableau dans les résultats Discogs)
         if (info.barcode.isBlank()) {
             JsonNode barcodes = hit.path("barcode");

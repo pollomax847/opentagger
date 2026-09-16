@@ -220,8 +220,21 @@ public class LocalCorrector {
     public void detectClassical(TagInfo info) {
         if (!classicalNames.isEmpty()) {
             String artist = info.artist.toLowerCase();
-            boolean found = classicalNames.stream()
-                    .anyMatch(name -> artist.contains(name.toLowerCase()));
+            // Bornes de mot (\b), pas un simple contains() — trouvé en direct (audit 2026-09-13,
+            // agent dédié) : classical_composers/conductors/people.txt (SongKong/Jaikoz, ~14000
+            // noms cumulés) contiennent des entrées courtes ("Ravi", "Jami", "Ovid"...), et
+            // artist.contains("ravi") matche n'importe quel artiste dont le nom CONTIENT ces lettres
+            // ailleurs qu'un vrai mot — "Travis Scott" (2 Chainz feat. Travis Scott, Rosalía &
+            // Travis Scott, Mgk/Yungblud & Travis Barker...) était marqué isClassical=1 à cause de
+            // "ravi" niché dans "tRAVIs", vérifié sur de vrais fichiers déjà corrompus dans
+            // cache.db. Écrit directement sur le disque (IS_CLASSICAL) sans aucun garde de score,
+            // contrairement aux autres correctifs de faux positifs du jour.
+            boolean found = classicalNames.stream().anyMatch(name -> {
+                String n = name.toLowerCase();
+                return !n.isBlank() && java.util.regex.Pattern
+                        .compile("\\b" + java.util.regex.Pattern.quote(n) + "\\b")
+                        .matcher(artist).find();
+            });
             if (found) info.isClassical = "1";
         }
         // Script 3 : Set Classical Genre

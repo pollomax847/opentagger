@@ -61,8 +61,13 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
+    // Instance unique partagée entre threads, même choix que TaggingWorker.replayGain (voir son
+    // commentaire) : ReplayGainAnalyzer n'a pas d'état d'appel-à-appel, contrairement à
+    // MusicBrainzClient/LastFmClient (instance fraîche par tâche, voir plus bas).
+    private final com.opentagger.ReplayGainAnalyzer replayGain = new com.opentagger.ReplayGainAnalyzer();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
+    private final boolean rgEnabled    = Config.get().replayGainEnabled() && com.opentagger.ReplayGainAnalyzer.isAvailable();
 
     private final AtomicInteger doneCount = new AtomicInteger();
 
@@ -310,6 +315,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             try { lastFm.enrichMood(ti, cache); if (!ti.mood.isBlank()) { log(I18n.t("  mood←lastfm=%s", ti.mood)); changed = true; } } catch (Exception ignored) {}
         }
 
+        // ── 3c. Mots-clés (mêmes tags Last.fm que ci-dessus, voir enrichTags()) ─
+        if (ti.tags.isBlank()) {
+            try { lastFm.enrichTags(ti, cache); if (!ti.tags.isBlank()) changed = true; } catch (Exception ignored) {}
+        }
+
         // ── 3b. Translittération artiste (si nom non-Latin et option activée) ───
         String artistBeforeTranslit = ti.artist;
         TagEnrichment.translateArtist(ti, mb, aliasCache);
@@ -322,6 +332,24 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         if (ti.bpm.isBlank() && bpmEnabled) {
             int bpm = bpmDet.detect(fichier.getAbsolutePath());
             if (bpm > 0) { ti.bpm = String.valueOf(bpm); log(I18n.t("  bpm=%s", bpm)); changed = true; }
+        }
+
+        // ── 4b. ReplayGain — absent de ce pipeline jusqu'à ce correctif (2026-09-13), ajouté au
+        // même moment que le "Mode Express" (voir Config.setExpressMode()) : c'est le seul des 3
+        // réglages coupés par ce mode qui n'avait ENCORE aucune passe de rattrapage (photo d'artiste
+        // → "Rafraîchir tags..." ; paroles/genre/bio → déjà juste au-dessus/en-dessous dans ce même
+        // fichier). Ne fait QUE peupler les champs ici (comme BPM/paroles ci-dessus) — l'écriture
+        // réelle sur le fichier attend, comme le reste de cette passe, un futur "Enregistrer tout".
+        if (ti.replayGainTrackGain.isBlank() && rgEnabled) {
+            try {
+                com.opentagger.ReplayGainAnalyzer.RGResult rg = replayGain.analyze(fichier.getAbsolutePath());
+                if (rg != null) {
+                    ti.replayGainTrackGain = rg.trackGain();
+                    ti.replayGainTrackPeak = rg.trackPeak();
+                    log(I18n.t("  replaygain=%s", rg.trackGain()));
+                    changed = true;
+                }
+            } catch (Exception ignored) {}
         }
 
         // ── 5. Paroles ─────────────────────────────────────────────────────

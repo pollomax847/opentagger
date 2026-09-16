@@ -61,6 +61,20 @@ public class TagWriter {
         Config.silenceJaudiotaggerLogging();
         long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
 
+        // Musepack (.mpc) : ni jaudiotagger ("No Reader associated with this extension:mpc",
+        // vérifié en direct — CannotReadException, pas même une entrée dans son enum
+        // SupportedFileFormat) ni FfmpegTagIO (voir sa Javadoc) ne savent écrire ce format.
+        // Contrairement à Opus/AAC/WV/APE ci-dessous (dont FfmpegTagIO prend le relais), il n'existe
+        // ICI aucun chemin d'écriture — le seul filet de sécurité réel est transcode.auto_before_tag
+        // (TaggingWorker convertit alors le fichier en amont via ffmpeg, qui sait décoder le
+        // Musepack). Sans ce réglage, autant échouer avec un message clair tout de suite plutôt que
+        // de laisser filer le CannotReadException brut de jaudiotagger jusqu'à l'appelant.
+        if (fichier.getName().toLowerCase().endsWith(".mpc")) {
+            throw new Exception("Écriture .mpc (Musepack) impossible : ni jaudiotagger ni ffmpeg ne"
+                + " savent réécrire ce format en place. Activez \"transcoder automatiquement avant"
+                + " taguage\" dans Préférences pour convertir ce fichier avant l'écriture des tags.");
+        }
+
         // Opus/AAC/WV/APE : jaudiotagger 3.0.1 n'a aucun lecteur pour ces formats (vérifié en
         // décompilant le jar, voir FfmpegTagIO) — inutile de tenter AudioFileIO.read()/writeNative()
         // en sachant qu'ils vont échouer, on part directement sur le contournement ffmpeg. Pas de

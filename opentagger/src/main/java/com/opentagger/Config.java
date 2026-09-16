@@ -355,8 +355,46 @@ public class Config {
     // --- Portrait d'artiste --- opt-in, désactivé par défaut (même esprit que cover.save_to_file).
     // Sidecar dans le dossier ALBUM (pas le dossier artiste, qui varie selon le masque de
     // renommage actif — remonter d'un niveau serait fragile) — voir TagEnrichment.saveEntry().
-    public boolean artistPhotoEnabled()  { return bool("artist_photo.enabled",  false); }
-    public String  artistPhotoFilename() { return str ("artist_photo.filename", "artist"); }
+    public boolean artistPhotoEnabled()   { return bool("artist_photo.enabled",   false); }
+    public String  artistPhotoFilename()  { return str ("artist_photo.filename", "artist"); }
+    // Désactivé par défaut, comme cover.overwrite_file : sans ça, un artist.jpg déjà écrit par une
+    // identification erronée d'une piste précédente (mauvais artistMbid → mauvaise photo FanArt.tv)
+    // n'était jamais remplacé, même après correction du tag — voir "Régénérer le portrait d'artiste".
+    public boolean artistPhotoOverwrite() { return bool("artist_photo.overwrite_file", false); }
+
+    // --- Mode Express --- désactive en un clic les 3 étapes les plus coûteuses par fichier et sans
+    // valeur immédiate pour parcourir vite un gros arriéré (photo d'artiste et paroles : appel
+    // réseau par piste ; ReplayGain : analyse audio complète par ffmpeg, coûteuse en CPU) — demandé
+    // le 2026-09-13 pour rattraper les dizaines de milliers de fichiers en attente. Genre/bio ne
+    // sont PAS coupés : valeur immédiate, coût réseau bien plus faible (mis en cache par artiste,
+    // pas par piste). Sauvegarde l'état précédent de chaque clé avant de la couper, pour le
+    // restaurer exactement (pas juste tout réactiver) en repassant en mode Complet. ReplayGain n'a
+    // aucune passe de rattrapage existante (contrairement à photo d'artiste, couverte par
+    // "Rafraîchir tags..." — voir MainFrame.refreshSelectedMeta — et paroles/genre/bio, couverts par
+    // InfoCompleterWorker) : voir son ajout à InfoCompleterWorker au même correctif.
+    private static final String[] EXPRESS_MODE_KEYS = {
+        "artist_photo.enabled", "lyrics.enabled", "replaygain.enabled"
+    };
+
+    public boolean expressModeActive() { return bool("express_mode.active", false); }
+
+    public synchronized void setExpressMode(boolean on) {
+        if (on == expressModeActive()) return;
+        if (on) {
+            for (String key : EXPRESS_MODE_KEYS) {
+                props.setProperty("express_mode.saved." + key, str(key, "false"));
+                props.setProperty(key, "false");
+            }
+        } else {
+            for (String key : EXPRESS_MODE_KEYS) {
+                String saved = props.getProperty("express_mode.saved." + key);
+                if (saved != null) props.setProperty(key, saved);
+                props.remove("express_mode.saved." + key);
+            }
+        }
+        props.setProperty("express_mode.active", String.valueOf(on));
+        persist();
+    }
 
     // --- Ponctuation & nettoyage ---
     public boolean correctPunctuation(){ return bool("tags.correct_punctuation", false); }

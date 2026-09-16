@@ -14,6 +14,7 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.BiConsumer;
 import java.util.concurrent.ExecutorService;
@@ -122,6 +123,69 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // (retour utilisateur : "j'ai cliqué sur arrêter et l'application continue de tagguer").
     private volatile ExecutorService pool;
 
+    // ── Détection de compilation par DOSSIER ────────────────────────────────────
+    // Trouvé en direct (2026-09-09) : "Vendée 93" (11 pistes, 7 artistes distincts) éclaté entre 3
+    // releases MusicBrainz différentes — le garde-fou "préservation des compilations" juste plus bas
+    // (origWasCompilation) ne se déclenche QUE si CE fichier précis porte déjà IS_COMPILATION=1 ou
+    // ALBUM_ARTIST="Various Artists". Ici l'artiste album valait "Didier Barbelivien" (un des
+    // contributeurs, pas "Various Artists") sur la plupart des pistes — cas très fréquent pour une
+    // bibliothèque rippée sans grand soin, jamais couvert par les 3 signaux existants, qui reposent
+    // tous sur LE TAG DE CE FICHIER. Le signal le plus fiable est structurel : plusieurs fichiers du
+    // MÊME DOSSIER partageant le MÊME tag album mais des artistes tous différents ne peuvent être
+    // qu'une compilation, quoi que dise le tag ALBUM_ARTIST de chacun pris isolément. Calculé UNE
+    // FOIS sur tout le lot avant de lancer le pool (voir doInBackground()) — jamais réévalué depuis
+    // un thread de traitement, donc pas de souci de concurrence sur ce Set une fois rempli.
+    private static final int COMPILATION_MIN_FILES   = 3;
+    private static final int COMPILATION_MIN_ARTISTS = 3;
+    private Set<String> compilationFolderKeys = Set.of();
+
+    /** Clé (dossier parent, album normalisé) — même normalisation que cleanSearchTerm() plus bas
+     *  pour que la clé calculée ici et celle recherchée dans processEntry() coïncident toujours. */
+    private static String compilationKey(Path parent, String album) {
+        return parent + "\u0001" + album.trim().toLowerCase();
+    }
+
+    private void precomputeCompilationFolders(List<FileEntry> all) {
+        // artiste (en minuscules) par clé dossier/album — Set pour dédupliquer avant de compter.
+        Map<String, Set<String>> artistsByKey = new java.util.HashMap<>();
+        Map<String, Integer> fileCountByKey = new java.util.HashMap<>();
+        for (FileEntry e : all) {
+            if (e.current == null || e.current.album.isBlank() || e.current.artist.isBlank()) continue;
+            Path dir = e.currentPath != null ? e.currentPath.getParent()
+                    : (e.file != null ? e.file.toPath().getParent() : null);
+            if (dir == null) continue;
+            // cleanSearchTerm() ICI aussi (pas juste côté lookup dans folderLooksLikeCompilation) :
+            // sans ça, un album taggé avec underscores/suffixe qualité ("Vendee_93_320k") calculait
+            // une clé jamais égale à celle recherchée au runtime (qui, elle, passe déjà par
+            // cleanSearchTerm() — voir origAlbum dans processEntry()), silencieusement invalidant
+            // toute la détection pour ce dossier précis.
+            String key = compilationKey(dir, cleanSearchTerm(e.current.album));
+            artistsByKey.computeIfAbsent(key, k -> new java.util.HashSet<>())
+                    .add(e.current.artist.trim().toLowerCase());
+            fileCountByKey.merge(key, 1, Integer::sum);
+        }
+        java.util.Set<String> result = new java.util.HashSet<>();
+        for (var en : artistsByKey.entrySet()) {
+            if (fileCountByKey.get(en.getKey()) >= COMPILATION_MIN_FILES
+                    && en.getValue().size() >= COMPILATION_MIN_ARTISTS) {
+                result.add(en.getKey());
+            }
+        }
+        compilationFolderKeys = result;
+        if (!result.isEmpty()) {
+            log(I18n.t("  %d dossier(s) détecté(s) comme compilation par la diversité des artistes",
+                    result.size()));
+        }
+    }
+
+    /** Interrogé UNIQUEMENT depuis la préservation de compilation ci-dessous — voir son commentaire
+     *  pour pourquoi ce signal existe. {@code origAlbum} déjà nettoyé par cleanSearchTerm() côté
+     *  appelant, cohérent avec la normalisation appliquée dans compilationKey() côté calcul. */
+    private boolean folderLooksLikeCompilation(File fichier, String origAlbum) {
+        if (origAlbum.isBlank() || fichier.getParentFile() == null) return false;
+        return compilationFolderKeys.contains(compilationKey(fichier.getParentFile().toPath(), origAlbum));
+    }
+
     public TaggingWorker(List<FileEntry> entries, boolean useAcoustId,
                          Consumer<String> onProgress, Consumer<FileEntry> onUpdate) {
         this(entries, useAcoustId, onProgress, onUpdate, (done, total) -> {});
@@ -180,6 +244,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // les pistes manquantes du même album parmi les PENDING/SKIPPED), mais SANS jamais deviner
         // à l'aveugle une release pour un dossier dont rien n'est encore identifié.
         List<FileEntry> toProcess = queue;
+
+        // Voir son commentaire de classe pour le pourquoi — DOIT s'exécuter avant la boucle de
+        // soumission au pool juste en dessous : c'est cet ordre (pas un mécanisme de concurrence)
+        // qui garantit que compilationFolderKeys est visible, déjà rempli, de chaque thread du pool.
+        precomputeCompilationFolders(entries);
 
         int threads = Math.max(1, Config.get().num("batch.threads", 6));
         pool = Executors.newFixedThreadPool(threads);
@@ -600,17 +669,32 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     "1".equals(origIsCompilation.trim())
                     || Config.get().vaName().equalsIgnoreCase(origAlbumArtist)
                     || "Various Artists".equalsIgnoreCase(origAlbumArtist);
+                // Signal structurel (2026-09-09) : voir folderLooksLikeCompilation() pour le
+                // pourquoi. Indépendant des 3 signaux ci-dessus (qui reposent tous sur le tag
+                // ALBUM_ARTIST/IS_COMPILATION de CE fichier précis) — seulement consulté si aucun
+                // d'eux n'a déjà tranché.
+                boolean folderIsCompilation = !origWasCompilation
+                        && folderLooksLikeCompilation(fichier, origAlbum);
                 // MB n'a pas retourné de release compilation → restaurer contexte original
-                if (origWasCompilation && !origAlbum.isBlank() && !"1".equals(best.isCompilation)) {
-                    log(I18n.t("  compilation restaurée : album='%s' albumArtist='%s'",
-                        origAlbum, origAlbumArtist));
+                if ((origWasCompilation || folderIsCompilation)
+                        && !origAlbum.isBlank() && !"1".equals(best.isCompilation)) {
+                    // Signal structurel : ne JAMAIS reprendre l'artiste album DE CE FICHIER — ce
+                    // n'est que l'un des contributeurs de la compilation (ex. "Didier Barbelivien"
+                    // sur "Vendée 93"), pas l'artiste de la compilation elle-même. C'est justement
+                    // cette confusion qui a fait rater les 3 signaux ci-dessus pour ce cas réel.
+                    // Signal déjà explicite (Various Artists/IS_COMPILATION) : comportement
+                    // inchangé, le tag de ce fichier fait toujours foi.
+                    String restoredAlbumArtist = folderIsCompilation
+                        ? Config.get().vaName()
+                        : (origAlbumArtist.isBlank() ? Config.get().vaName() : origAlbumArtist);
+                    log(I18n.t("  compilation restaurée (%s) : album='%s' albumArtist='%s'",
+                        folderIsCompilation ? "dossier" : "tag", origAlbum, restoredAlbumArtist));
                     com.opentagger.CompilationRestoreLog.record(
                         fichier.getAbsolutePath(), lastFindTagsSource.get(),
-                        origAlbum, origAlbumArtist.isBlank() ? Config.get().vaName() : origAlbumArtist,
+                        origAlbum, restoredAlbumArtist,
                         best.album, best.albumArtist);
                     best.album         = origAlbum;
-                    best.albumArtist   = origAlbumArtist.isBlank()
-                        ? Config.get().vaName() : origAlbumArtist;
+                    best.albumArtist   = restoredAlbumArtist;
                     best.isCompilation = "1";
                     // track#, disc#, MBID, artist, title restent ceux de MB
                 }
@@ -632,6 +716,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             if (best.mood.isBlank()) {
                 try { lastFm.enrichMood(best, cache); log(I18n.t("  mood←lastfm=%s", best.mood)); } catch (Exception ignored) {}
+            }
+            if (best.tags.isBlank()) {
+                try { lastFm.enrichTags(best, cache); } catch (Exception ignored) {}
             }
             TagEnrichment.enrichArtistInfo(best, discogs, lastFm, cache);
 
@@ -1060,6 +1147,28 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     discIdFailedFolders.add(folder);
                 } else {
                     MusicBrainzClient.ReleaseTrack myTrack = findTrackInRelease(tl, fichier);
+                    // Garde-fou ajouté après un vrai faux positif en direct (2026-09-13) : "(1974)
+                    // Open Our Eyes" (Earth, Wind & Fire, 11 pistes, déjà correctement tagué) a été
+                    // apparié par TOC à "The Columbia Masters" — un coffret SANS RAPPORT dont le
+                    // nombre de pistes et la durée totale tombaient par coïncidence dans la
+                    // tolérance de 5% de matchFolderByToc(). Le commentaire ci-dessous prétendait
+                    // qu'un checksum sur tout l'album se passait de vérification de titre ; ce cas
+                    // réel prouve le contraire. Même garde-fou que celui déjà en place pour la
+                    // release "épinglée par groupe" plus bas (étape 0.65, moins fiable en principe)
+                    // : si CE fichier a déjà un titre exploitable, il doit rester plausible face au
+                    // titre trouvé par numéro de piste — sinon repli sur findTrackInReleaseByTitle()
+                    // (vraie meilleure correspondance sur toute la tracklist), qui peut aussi bien
+                    // échouer et laisser ce fichier retomber dans la suite normale de la cascade.
+                    if (myTrack != null) {
+                        String existingTitleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+                        if (!existingTitleTag.isBlank() && !isGenericTag(existingTitleTag)
+                                && TrackMatcher.titleSimilarity(existingTitleTag.toLowerCase(), myTrack.title().toLowerCase())
+                                   < GROUP_PIN_TITLE_MATCH_THRESHOLD) {
+                            log(I18n.t("  TOC ⚠ titre existant '%s' incompatible avec '%s' (numéro de piste seul) → repli titre",
+                                    existingTitleTag, myTrack.title()));
+                            myTrack = findTrackInReleaseByTitle(tl, fichier);
+                        }
+                    }
                     if (myTrack != null) {
                         TagInfo t = new TagInfo();
                         t.artist           = myTrack.artist();
@@ -1517,6 +1626,109 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         // NOTE: Le fallback "titre seul" est désactivé — trop de faux positifs.
 
+        // 5b-bis-3. Fallback "Titre by Compositeur" — convention fréquente sur du contenu classique/
+        // domaine public (ex. "Granada by Isaac Albeniz.mp3", repéré en direct 2026-09-13 parmi les
+        // "Non identifié" d'une session réelle). parseFilename() ne connaît que " - " comme
+        // séparateur ; ce nom entier partait tel quel comme titre unique, introuvable tel quel.
+        // Volontairement en DERNIER recours (jamais en remplacement de la recherche du nom complet
+        // ci-dessus) : " by " apparaît aussi dans de vrais titres légitimes ("Stand By Me", "Walk On
+        // By") — un split systématique aurait empêché ces titres d'être cherchés tels quels et
+        // risqué une identification erronée. Ici, la recherche du texte complet a déjà échoué, donc
+        // rien à perdre à tenter la variante scindée.
+        if (!nonLatinInput && results.isEmpty() && artist.isBlank() && !title.isBlank()) {
+            java.util.regex.Matcher byM = java.util.regex.Pattern
+                    .compile("(?i)^(.+?)\\s+by\\s+(.+)$").matcher(title);
+            if (byM.matches()) {
+                String byTitle    = byM.group(1).trim();
+                String byComposer = byM.group(2).trim();
+                if (!byTitle.isBlank() && !byComposer.isBlank()
+                        && !isGenericTag(byTitle) && !isGenericTag(byComposer)
+                        && !TagEnrichment.hasNonLatinChars(byComposer)) {
+                    log(I18n.t("  MB fallback 'titre by compositeur': '%s' / '%s'", byTitle, byComposer));
+                    results = mb.searchRecording(byComposer, byTitle);
+                    log(I18n.t("  MB 'by' → %s résultat(s)", results.size()));
+                    if (!results.isEmpty()) {
+                        // Score plafonné à 50 (comme "unverified_tags" ailleurs dans ce fichier) : un
+                        // découpage devinable depuis un nom de fichier n'a pas la fiabilité d'une
+                        // recherche sur des tags déjà propres — searchRecording() renvoie pourtant
+                        // toujours 100 par construction. Sans ce plafond, un résultat par coïncidence
+                        // faux mais plausible franchirait match.min_score_auto (90) et s'enregistrerait
+                        // sans aucune revue humaine — repéré en vérifiant ce correctif (2026-09-13),
+                        // jamais vu en conditions réelles mais même risque que le bug TOC du jour même.
+                        for (TagInfo r : results) r.score = 50;
+                        cache.putRecordingSearch(MetadataCache.queryHash(byComposer, byTitle), mb.lastRawJson());
+                        return results;
+                    }
+                }
+            }
+        }
+
+        // 5b-bis-4. Fallback segments séparés par un tiret SANS espaces autour — ex. "Unknown_
+        // Artist-Hans_Zimmer-Swords_Crossed.mp3" (repéré en direct 2026-09-13, même lot que le
+        // fallback "by" ci-dessus) : parseFilename() ne coupe que sur " - " (avec espaces), donc
+        // "Hans Zimmer"/"Swords Crossed" restaient noyés dans un seul bloc non identifiable. Exige
+        // AU MOINS 3 segments (pas juste 2) : un simple mot composé à tiret ("Spider-Man", "T-Rex")
+        // ne doit jamais être scindé — seul un enchaînement de plusieurs segments signale une vraie
+        // convention "PréfixeIgnoré-Artiste-Titre". Chaque segment retenu doit en plus contenir un
+        // espace (donc être lui-même multi-mots) : "Hans Zimmer"/"Swords Crossed" passent, un
+        // hypothétique "A-B-C" à segments mono-mots resterait rejeté, même heuristique que le
+        // fallback bare-hyphen déjà existant plus haut (potArtist.contains(" ")).
+        if (!nonLatinInput && results.isEmpty() && artist.isBlank() && !title.isBlank() && title.contains("-")) {
+            String[] segs = title.split("-");
+            if (segs.length >= 3) {
+                String hyTitle  = segs[segs.length - 1].trim();
+                String hyArtist = segs[segs.length - 2].trim();
+                if (hyTitle.contains(" ") && hyArtist.contains(" ")
+                        && !isGenericTag(hyTitle) && !isGenericTag(hyArtist)
+                        && !TagEnrichment.hasNonLatinChars(hyArtist)) {
+                    log(I18n.t("  MB fallback segments tiret sans espaces: '%s' / '%s'", hyArtist, hyTitle));
+                    results = mb.searchRecording(hyArtist, hyTitle);
+                    log(I18n.t("  MB segments tiret → %s résultat(s)", results.size()));
+                    if (!results.isEmpty()) {
+                        // Score plafonné — voir le commentaire identique sur le fallback "by" ci-dessus.
+                        // Risque encore un peu plus réel ici : un nom propre à tiret ("Anna-Maria
+                        // Jopek") pourrait être coupé au mauvais endroit et tronquer un vrai artiste.
+                        for (TagInfo r : results) r.score = 50;
+                        cache.putRecordingSearch(MetadataCache.queryHash(hyArtist, hyTitle), mb.lastRawJson());
+                        return results;
+                    }
+                }
+            }
+        }
+
+        // 5b-bis-5. Fallback tiret asymétrique (espace d'un seul côté) — ex. "24. Savage- Don't Cry
+        // Tonight [Saint Paul DJ Remix].mp3" (repéré en direct 2026-09-13, même lot que les deux
+        // fallbacks ci-dessus). On arrive ici seulement si parseFilename() n'a trouvé aucun " - "
+        // (espaces des deux côtés) — donc si un tiret a un espace d'UN SEUL côté ("X- Y" ou "X -Y"),
+        // ce n'est ni le cas symétrique déjà géré ailleurs, ni un mot composé ambigu du type
+        // "Spider-Man" (aucun espace des deux côtés, jamais touché ici). Un espacement asymétrique
+        // est un signal bien plus fort qu'un simple tiret nu : contrairement au fallback 3-segments
+        // ci-dessus, celui-ci accepte un split à 2 segments SEULEMENT parce que ce signal est déjà
+        // suffisamment distinctif pour ne pas exiger un 3ᵉ segment de confirmation.
+        if (!nonLatinInput && results.isEmpty() && artist.isBlank() && !title.isBlank()) {
+            java.util.regex.Matcher asymM = java.util.regex.Pattern
+                    .compile("^(.+?)\\s+-(\\S.*)$|^(.+\\S)-\\s+(.+)$").matcher(title);
+            if (asymM.matches()) {
+                String asymArtist = (asymM.group(1) != null ? asymM.group(1) : asymM.group(3)).trim();
+                String asymTitle  = (asymM.group(2) != null ? asymM.group(2) : asymM.group(4)).trim();
+                if (!asymArtist.isBlank() && !asymTitle.isBlank()
+                        && !isGenericTag(asymArtist) && !isGenericTag(asymTitle)
+                        && !TagEnrichment.hasNonLatinChars(asymArtist)
+                        && (asymArtist.contains(" ") || asymArtist.length() >= 5)) {
+                    log(I18n.t("  MB fallback tiret asymétrique: '%s' / '%s'", asymArtist, asymTitle));
+                    results = mb.searchRecording(asymArtist, asymTitle);
+                    log(I18n.t("  MB tiret asymétrique → %s résultat(s)", results.size()));
+                    if (!results.isEmpty()) {
+                        // Score plafonné — voir les deux commentaires identiques sur les fallbacks
+                        // "by" / segments tiret ci-dessus.
+                        for (TagInfo r : results) r.score = 50;
+                        cache.putRecordingSearch(MetadataCache.queryHash(asymArtist, asymTitle), mb.lastRawJson());
+                        return results;
+                    }
+                }
+            }
+        }
+
         // 5b-bis. Fallback titre + album : artiste vide mais album connu dans les tags existants
         // Typique : fichier avec artist="0"/vide mais title+album corrects (ex: M4A mal encodé)
         if (!nonLatinInput && results.isEmpty() && artist.isBlank()
@@ -1525,6 +1737,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             results = mb.searchRecording("", title, existingAlbum);
             log(I18n.t("  MB titre+album → %s résultat(s)", results.size()));
             if (!results.isEmpty()) {
+                // Score plafonné à 50 (même raison que les 3 repêchages "5b-bis-3/4/5" plus haut,
+                // trouvé manquant ici par audit dédié 2026-09-13) : une recherche SANS ARTISTE, sur
+                // un titre+album pouvant être génériques ("Greatest Hits"...), renvoie plusieurs
+                // candidats sans rapport à score=100 — vérifié en direct sur l'API MB réelle :
+                // recording:"Yesterday" AND release:"Greatest Hits" renvoie Gheorghe Zamfir, The
+                // Golden Strings et Marianne Faithfull à score=100, LE VRAI Beatles ne scorant que
+                // 95 (donc classé derrière). Sans ce plafond, un résultat coïncidemment faux
+                // franchissait match.min_score_auto (90) et s'enregistrait sans revue humaine.
+                for (TagInfo r : results) r.score = 50;
                 cache.putRecordingSearch(MetadataCache.queryHash(title, existingAlbum), mb.lastRawJson());
                 return results;
             }
@@ -1985,7 +2206,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return artist == null ? null : YOUTUBE_TOPIC_SUFFIX.matcher(artist).replaceAll("");
     }
 
-    private boolean isGenericTag(String s) {
+    private static boolean isGenericTag(String s) {
         if (s == null || s.isBlank()) return true;
         String low = s.trim().toLowerCase();
         // Tags par défaut des encodeurs/téléchargeurs — "artiste inconnu"/"unknown album"/
@@ -2069,12 +2290,18 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      *   album manquant           → +2
      *   année/genre manquants    → +1 chacun
      */
+    // Un placeholder ("Unknown Artist", "Inconnu"...) est aussi peu exploitable qu'un champ VIDE —
+    // même poids que isBlank() ci-dessous. Absent jusqu'à ce correctif (2026-09-13) : la priorisation
+    // ne comptait que les champs blancs, alors qu'isGenericTag() est déjà utilisé partout ailleurs
+    // dans ce fichier pour ne JAMAIS faire confiance à ces valeurs pendant l'identification — un
+    // fichier "Unknown Artist" n'était donc pas priorisé pour un rattrapage, contrairement à ce que
+    // son statut réel (aussi peu identifié qu'un champ vide) mériterait.
     private static int incompletenessScore(com.opentagger.model.TagInfo t) {
         if (t == null) return 10;
         int s = 0;
-        if (t.title.isBlank())  s += 3;
-        if (t.artist.isBlank()) s += 3;
-        if (t.album.isBlank())  s += 2;
+        if (t.title.isBlank()  || isGenericTag(t.title))  s += 3;
+        if (t.artist.isBlank() || isGenericTag(t.artist)) s += 3;
+        if (t.album.isBlank()  || isGenericTag(t.album))  s += 2;
         if (t.year.isBlank())   s += 1;
         if (t.genre.isBlank())  s += 1;
         return s;

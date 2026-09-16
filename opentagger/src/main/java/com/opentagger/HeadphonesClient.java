@@ -156,6 +156,16 @@ public class HeadphonesClient {
 
     private static List<Row> fetchRowsWithHardTimeout(String path, long timeoutMs) {
         final List<Row>[] result = new List[]{ null };
+        // Référence exposée au thread appelant pour pouvoir annuler la requête depuis l'EXTÉRIEUR
+        // si le timeout expire (voir plus bas) — trouvé en direct (2026-09-13) via lsof que ce
+        // timeout était purement cosmétique : worker.join(timeoutMs) abandonne juste l'ATTENTE,
+        // le thread worker (daemon) continue de tourner indéfiniment avec sa Connection/Statement
+        // grands ouverts jusqu'à ce que le SELECT se termine de lui-même. Sur un fichier de 6,8 Go
+        // sans index couvrant, sous la contention d'écriture WAL de Headphones, ce SELECT dépasse
+        // les 30s bien plus souvent qu'espéré — chaque dépassement laissait un FD orphelin sur
+        // headphones.db, jusqu'à en accumuler 8 en 6h de fonctionnement continu, empêchant
+        // wal_checkpoint(TRUNCATE) de purger un WAL de 1,18 Go même Headphones à l'arrêt.
+        final Statement[] stmtHolder = new Statement[1];
         Thread worker = new Thread(() -> {
             List<Row> rows = new ArrayList<>();
             // mode=ro : connexion strictement en lecture, ne prend jamais de verrou d'écriture sur
@@ -168,23 +178,45 @@ public class HeadphonesClient {
                 String sql = "SELECT ArtistName, AlbumTitle, TrackTitle, TrackID FROM alltracks "
                            + "WHERE Location IS NOT NULL AND Location != '' "
                            + "AND TrackID IS NOT NULL AND TrackID != ''";
-                try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-                    while (rs.next()) {
-                        // nz() : AlbumTitle notamment peut être NULL (piste hors album) — un TagInfo
-                        // avec un champ String null casse toute l'appli en aval (NPE dans
-                        // LocalCorrector, isBlank() appelé sans garde) — même bug que BeetsClient,
-                        // corrigé en même temps (2026-08-30).
-                        rows.add(new Row(nz(rs.getString(1)), nz(rs.getString(2)), nz(rs.getString(3)), nz(rs.getString(4))));
+                try (Statement st = conn.createStatement()) {
+                    stmtHolder[0] = st;
+                    try (ResultSet rs = st.executeQuery(sql)) {
+                        while (rs.next()) {
+                            // nz() : AlbumTitle notamment peut être NULL (piste hors album) — un
+                            // TagInfo avec un champ String null casse toute l'appli en aval (NPE
+                            // dans LocalCorrector, isBlank() appelé sans garde) — même bug que
+                            // BeetsClient, corrigé en même temps (2026-08-30).
+                            rows.add(new Row(nz(rs.getString(1)), nz(rs.getString(2)), nz(rs.getString(3)), nz(rs.getString(4))));
+                        }
                     }
                 }
                 result[0] = rows;
             } catch (Exception ignored) {
+                // Inclut SQLITE_INTERRUPT levée par stmt.cancel() ci-dessous en cas de timeout —
+                // ignorée volontairement, result[0] reste null et le repli List.of() s'applique.
                 result[0] = List.of();
             }
         }, "headphones-db-read");
         worker.setDaemon(true);
         worker.start();
         try { worker.join(timeoutMs); } catch (InterruptedException ignored) {}
+        if (worker.isAlive()) {
+            // Statement.cancel() est LE mécanisme JDBC/SQLite officiel pour interrompre une requête
+            // en cours depuis un AUTRE thread (sqlite3_interrupt() en interne) — vérifié en direct
+            // (repro isolé) : rend la main en <1ms, force le SELECT à lever SQLITE_INTERRUPT dans
+            // le thread worker, qui ferme alors lui-même Connection/Statement via son propre
+            // try-with-resources, libérant le descripteur OS immédiatement. À l'inverse,
+            // Connection.close() appelé depuis ce thread PENDANT que le worker est au milieu
+            // d'executeQuery() se bloque indéfiniment (confirmé, jamais retourné même après 30s) —
+            // ne jamais utiliser cette voie pour annuler depuis l'extérieur.
+            try {
+                Statement st = stmtHolder[0];
+                if (st != null) st.cancel();
+            } catch (Exception ignored) {
+                // Le worker a pu terminer/fermer son Statement entre isAlive()==true et cancel()
+                // (course bénigne) — sans conséquence, result[0] reflète alors le vrai résultat.
+            }
+        }
         return result[0] != null ? result[0] : List.of();
     }
 

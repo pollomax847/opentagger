@@ -1026,6 +1026,25 @@ public class MainFrame extends JFrame {
             }
         });
         m.add(chkForceAcoustId);
+
+        // Basculement rapide avant un gros rattrapage de bibliothèque — voir Config.setExpressMode()
+        // pour le détail de ce qui est coupé/restauré et pourquoi.
+        StayOpenCheckBoxMenuItem chkExpressMode = new StayOpenCheckBoxMenuItem(
+            I18n.t("Mode Express (coupe photo d'artiste / paroles / ReplayGain)"));
+        chkExpressMode.setSelected(Config.get().expressModeActive());
+        chkExpressMode.setToolTipText(I18n.t(
+            "Désactive temporairement les 3 étapes les plus lentes par fichier, pour parcourir vite "
+            + "un gros arriéré. L'état précédent de chaque réglage est restauré en repassant en mode "
+            + "Complet. Genre/bio/identification ne sont pas affectés."));
+        chkExpressMode.addActionListener(e -> {
+            boolean on = chkExpressMode.isSelected();
+            Config.get().setExpressMode(on);
+            setStatus(on
+                ? I18n.t("Mode Express activé — photo d'artiste, paroles et ReplayGain désactivés.")
+                : I18n.t("Mode Complet restauré — réglages précédents rétablis."));
+        });
+        m.add(chkExpressMode);
+
         // Fusion 2026-07-16 des anciennes cases "Compléter aussi les fichiers tagués mais
         // incomplets" et "Compléter les albums automatiquement après le taguage" — elles
         // s'enchaînaient déjà l'une après l'autre (voir onTaggingDone()), mais deux cases séparées
@@ -2612,7 +2631,7 @@ public class MainFrame extends JFrame {
         headerMenu.add(miTagAlbum); headerMenu.add(miRevealAlbum);
 
         table.addMouseListener(new MouseAdapter() {
-            @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
+            @Override public void mousePressed(MouseEvent e)  { lastManualTableClickMs = System.currentTimeMillis(); maybeShow(e); }
             @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
 
             // Plier/déplier CE groupe précis en cliquant dessus — pas seulement via "Tout
@@ -2845,7 +2864,20 @@ public class MainFrame extends JFrame {
      * automatiquement, mais un appel explicite ici documente l'intention et reste sans risque
      * (idempotent).
      */
+    // Horodatage du dernier clic MANUEL de l'utilisateur dans le tableau — voir son usage dans
+    // followProcessing() juste en dessous. Mis à jour par un mousePressed dédié (jamais déclenché
+    // par un setRowSelectionInterval() programmatique, qui ne génère aucun événement souris réel).
+    private volatile long lastManualTableClickMs = 0;
+    // Fenêtre pendant laquelle le suivi automatique se met en pause après un clic manuel — retour
+    // utilisateur (2026-09-13) : suivre parcourait/resélectionnait sans arrêt PENDANT qu'il essayait
+    // de cliquer une ligne précise en direct (un run de 40000+ fichiers en cours), rendant impossible
+    // toute navigation manuelle dans le tableau tant qu'un taguage tournait. Le suivi reste utile
+    // pour la surveillance sans surveillance active (retour visuel qu'on avance) — seul le CONFLIT
+    // avec une interaction manuelle récente est corrigé ici, pas le mécanisme lui-même.
+    private static final long FOLLOW_PAUSE_AFTER_CLICK_MS = 60_000;
+
     private void followProcessing(FileEntry entry) {
+        if (System.currentTimeMillis() - lastManualTableClickMs < FOLLOW_PAUSE_AFTER_CLICK_MS) return;
         int viewRow;
         if (viewMode == ViewMode.GROUPED) {
             // Ligne de son groupe si déplié, sinon la ligne d'en-tête du groupe — jamais forcé
@@ -7039,7 +7071,7 @@ public class MainFrame extends JFrame {
             java.util.Map<String, Object> wrapper = new java.util.LinkedHashMap<>();
             wrapper.put("version", 1);
             wrapper.put("exported", java.time.Instant.now().toString());
-            wrapper.put("app_version", com.opentagger.Config.get().str("app.version", ""));
+            wrapper.put("app_version", com.opentagger.Config.get().appVersion());
             wrapper.put("totals", totals);
             wrapper.put("skip_reasons", skipReasons);
             wrapper.put("duration_mismatch", durationMismatch);

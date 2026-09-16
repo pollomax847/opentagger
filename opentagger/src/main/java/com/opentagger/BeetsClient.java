@@ -139,6 +139,13 @@ public class BeetsClient {
 
     private static List<Row> fetchRowsWithHardTimeout(String dbPath, long timeoutMs) {
         final List<Row>[] result = new List[]{ null };
+        // Voir HeadphonesClient.fetchRowsWithHardTimeout() (même pattern, corrigé le même jour) :
+        // worker.join(timeoutMs) n'annulait rien, juste l'attente — le thread daemon continuait de
+        // tourner avec sa Connection/Statement ouverts jusqu'à la fin naturelle du SELECT, laissant
+        // un FD orphelin sur beets.db à chaque dépassement du timeout. Statement.cancel() (via la
+        // référence exposée ci-dessous) est le fix vérifié : rend la main en <1ms, force le worker à
+        // lever SQLITE_INTERRUPT et à fermer lui-même ses ressources via son propre try-with-resources.
+        final Statement[] stmtHolder = new Statement[1];
         Thread worker = new Thread(() -> {
             List<Row> rows = new ArrayList<>();
             String url = "jdbc:sqlite:file:" + dbPath + "?mode=ro";
@@ -150,41 +157,53 @@ public class BeetsClient {
                            + "mb_trackid, mb_albumid, mb_releasegroupid, mb_artistid, isrc, "
                            + "track, disc, composer, work, bpm FROM items "
                            + "WHERE artist IS NOT NULL AND artist != '' AND title IS NOT NULL AND title != ''";
-                try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-                    while (rs.next()) {
-                        byte[] pathBytes = rs.getBytes(1);
-                        String relPath = pathBytes != null ? new String(pathBytes, StandardCharsets.UTF_8) : "";
-                        int trackNo = rs.getInt(13);
-                        int discNo  = rs.getInt(14);
-                        int bpmVal  = rs.getInt(17);
-                        rows.add(new Row(
-                            relPath,
-                            nz(rs.getString(2)),
-                            nz(rs.getString(3)),
-                            nz(rs.getString(4)),
-                            nz(rs.getString(5)),
-                            nz(rs.getString(6)),
-                            nz(rs.getString(7)),
-                            nz(rs.getString(8)),
-                            nz(rs.getString(9)),
-                            nz(rs.getString(10)),
-                            nz(rs.getString(11)),
-                            nz(rs.getString(12)),
-                            trackNo > 0 ? String.valueOf(trackNo) : "",
-                            discNo > 0 ? String.valueOf(discNo) : "",
-                            nz(rs.getString(15)),
-                            nz(rs.getString(16)),
-                            bpmVal > 0 ? String.valueOf(bpmVal) : ""));
+                try (Statement st = conn.createStatement()) {
+                    stmtHolder[0] = st;
+                    try (ResultSet rs = st.executeQuery(sql)) {
+                        while (rs.next()) {
+                            byte[] pathBytes = rs.getBytes(1);
+                            String relPath = pathBytes != null ? new String(pathBytes, StandardCharsets.UTF_8) : "";
+                            int trackNo = rs.getInt(13);
+                            int discNo  = rs.getInt(14);
+                            int bpmVal  = rs.getInt(17);
+                            rows.add(new Row(
+                                relPath,
+                                nz(rs.getString(2)),
+                                nz(rs.getString(3)),
+                                nz(rs.getString(4)),
+                                nz(rs.getString(5)),
+                                nz(rs.getString(6)),
+                                nz(rs.getString(7)),
+                                nz(rs.getString(8)),
+                                nz(rs.getString(9)),
+                                nz(rs.getString(10)),
+                                nz(rs.getString(11)),
+                                nz(rs.getString(12)),
+                                trackNo > 0 ? String.valueOf(trackNo) : "",
+                                discNo > 0 ? String.valueOf(discNo) : "",
+                                nz(rs.getString(15)),
+                                nz(rs.getString(16)),
+                                bpmVal > 0 ? String.valueOf(bpmVal) : ""));
+                        }
                     }
                 }
                 result[0] = rows;
             } catch (Exception ignored) {
+                // Inclut SQLITE_INTERRUPT levée par stmt.cancel() ci-dessous en cas de timeout.
                 result[0] = List.of();
             }
         }, "beets-db-read");
         worker.setDaemon(true);
         worker.start();
         try { worker.join(timeoutMs); } catch (InterruptedException ignored) {}
+        if (worker.isAlive()) {
+            try {
+                Statement st = stmtHolder[0];
+                if (st != null) st.cancel();
+            } catch (Exception ignored) {
+                // Course bénigne : le worker a pu terminer entre isAlive()==true et cancel().
+            }
+        }
         return result[0] != null ? result[0] : List.of();
     }
 }
