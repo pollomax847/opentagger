@@ -399,6 +399,37 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // paramètres portent volontairement les mêmes noms que les champs de classe : ça masque les
     // champs dans toute cette méthode sans avoir à réécrire le moindre appel mb.xxx()/lastFm.xxx()
     // du corps existant.
+    /**
+     * Point de passage UNIQUE pour "ce fichier a été identifié, mais ne doit JAMAIS être
+     * auto-enregistré — revue manuelle nécessaire" (2026-09-19, refactor demandé après audit :
+     * "un seul point de décision centralisé, plutôt que des scores/statuts modifiés à plusieurs
+     * endroits dispersés").
+     *
+     * Existe précisément parce que le bug du jour (voir Javadoc historique de
+     * shouldSkipForGroupMismatch, conservée ci-dessous) a montré qu'un garde-fou qui se contente
+     * de manipuler {@code TagInfo.score} À LA MAIN, sans passer par ici, peut sembler bloquer
+     * l'auto-enregistrement alors qu'il ne bloque RIEN en pratique — le seul mécanisme prouvé
+     * fonctionner (vérifié par les deux appelants existants ET par saveAll()/SaveWorker, qui ne
+     * consultent jamais score) est {@code FileEntry.Status.SKIPPED}. TOUT futur garde-fou de cette
+     * famille (un candidat trouvé, mais jugé pas assez fiable pour l'auto-enregistrement) doit
+     * appeler cette méthode plutôt que réécrire entry.status/skipReason/message/candidates à la
+     * main — la seule garantie que "revue manuelle nécessaire" veut vraiment dire ça.
+     *
+     * @param results   candidats déjà trouvés (conservés pour une revue manuelle éventuelle, voir
+     *                  entry.candidates — même usage que la revue "Non identifiés")
+     * @param reason    catégorie pour le rapport "Non identifiés" (voir SkipReason)
+     * @param userMsg   message affiché à l'utilisateur (colonne Message du tableau)
+     * @param logMsg    ligne de journal (déjà formatée via I18n.t() par l'appelant)
+     */
+    private void skipForManualReview(FileEntry entry, List<TagInfo> results,
+                                      com.opentagger.model.SkipReason reason, String userMsg, String logMsg) {
+        entry.candidates = results;
+        entry.status     = FileEntry.Status.SKIPPED;
+        entry.skipReason = reason;
+        entry.message    = userMsg;
+        log(logMsg);
+    }
+
     private void processEntry(FileEntry entry, Consumer<String> step,
                                MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm,
                                MetadataCache cache) {
@@ -507,12 +538,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             boolean unverifiedFallback = MetadataCache.SOURCE_UNVERIFIED_TAGS.equals(lastFindTagsSource.get())
                     || MetadataCache.SOURCE_BANDCAMP.equals(lastFindTagsSource.get());
             if (best.score < seuil && !unverifiedFallback) {
-                entry.candidates = results;
-                entry.status     = FileEntry.Status.SKIPPED;
-                entry.skipReason = com.opentagger.model.SkipReason.LOW_SCORE;
-                entry.message = I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size())
-                        + videoHintIfAny(fichier);
-                log(I18n.t("  SKIPPED score trop bas"));
+                skipForManualReview(entry, results, com.opentagger.model.SkipReason.LOW_SCORE,
+                        I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size())
+                                + videoHintIfAny(fichier),
+                        I18n.t("  SKIPPED score trop bas"));
                 return;
             }
 
@@ -609,20 +638,35 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // correspond, le code retombe SILENCIEUSEMENT sur une identification indépendante,
             // potentiellement une AUTRE release entière (voir son propre commentaire, "bonus track,
             // single..."). Plutôt qu'un rejet dur du dossier entier (collatéral réel : un bonus
-            // track légitime existe, voir ce même commentaire), ce garde-fou plafonne juste le
-            // score sous le seuil d'auto-enregistrement (match.min_score_auto=90) quand une piste
-            // contredit une release DÉJÀ CORROBORÉE par au moins 2 pistes de son groupe — jamais
-            // silencieusement auto-enregistrée sur une release différente dans ce cas, mais jamais
-            // bloquée non plus : une vraie exception (single/bonus/édition différente) reste
-            // enregistrable après revue manuelle. Seuil de corroboration (pas juste "un pin
-            // existe") : le regroupement se fait par DOSSIER pour des fichiers pas encore identifiés
-            // (voir AlbumGrouping.key()) — un dossier "fourre-tout" (Téléchargements, Singles...)
-            // n'est pas un vrai album, et une SEULE piste ne prouve rien sur les autres qui
-            // partagent juste le même dossier par coïncidence. Exemptés du plafond : SOURCE_DISCID
-            // (checksum sur CE dossier précis, déjà prioritaire sur le pin lui-même) et SOURCE_MBID
-            // (MBID déjà connu avec certitude, ex. tag existant fiable) — les deux seules sources
-            // qui prouvent réellement l'appartenance à une autre release plutôt que de simplement
-            // la suggérer.
+            // track légitime existe, voir ce même commentaire), ce garde-fou SKIPPE le fichier
+            // (comme le seuil de score standard juste au-dessus, ligne ~509) quand une piste
+            // contredit une release DÉJÀ CORROBORÉE par au moins 2 pistes de son groupe.
+            //
+            // CORRECTIF CRITIQUE (2026-09-19, trouvé par audit dédié le jour même du déploiement
+            // initial) : la toute première version de ce garde-fou plafonnait juste best.score=50
+            // en pensant que ça suffirait à empêcher l'auto-enregistrement (commentaire d'origine :
+            // "jamais silencieusement auto-enregistrée... reste enregistrable après revue
+            // manuelle") — FAUX. Le seul test de seuil du pipeline (ligne 509, "best.score < seuil")
+            // a déjà été passé PLUS TÔT dans cette même méthode, avant ce bloc ; rien ne le
+            // re-vérifie après coup. entry.status passait ensuite IDENTIFIED sans condition de
+            // score (voir plus bas), FileEntry.selected vaut true par défaut et n'est jamais
+            // recalculé selon le score, et saveAll()/SaveWorker ne consultent JAMAIS score — donc
+            // un fichier "plafonné à 50" suivait EXACTEMENT le même chemin d'auto-enregistrement
+            // qu'un match à 100%, sans la moindre friction. Vérifié : jamais déclenché en
+            // production entre le déploiement initial et ce correctif (aucune occurrence de
+            // "contredit la release du groupe" dans les logs), donc aucun dégât réel confirmé —
+            // mais le filet de sécurité documenté n'en existait pas moins pas. Fixé en réutilisant
+            // le MÊME mécanisme que le seuil de score standard (SKIPPED, pas juste un score
+            // modifié) : seul chemin déjà prouvé bloquer réellement saveAll().
+            //
+            // Seuil de corroboration (pas juste "un pin existe") : le regroupement se fait par
+            // DOSSIER pour des fichiers pas encore identifiés (voir AlbumGrouping.key()) — un
+            // dossier "fourre-tout" (Téléchargements, Singles...) n'est pas un vrai album, et une
+            // SEULE piste ne prouve rien sur les autres qui partagent juste le même dossier par
+            // coïncidence. Exemptés : SOURCE_DISCID (checksum sur CE dossier précis, déjà
+            // prioritaire sur le pin lui-même) et SOURCE_MBID (MBID déjà connu avec certitude) —
+            // les deux seules sources qui prouvent réellement l'appartenance à une autre release
+            // plutôt que de simplement la suggérer.
             if (Config.get().discIdMatchingEnabled() && groupKey != null && !best.releaseMbid.isBlank()) {
                 String pinned = groupPinnedRelease.get(groupKey);
                 if (pinned != null && pinned.equals(best.releaseMbid)) {
@@ -631,11 +675,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 } else if (pinned != null) {
                     int agreement = groupPinAgreement.getOrDefault(groupKey,
                             new java.util.concurrent.atomic.AtomicInteger()).get();
-                    if (shouldCapForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)) {
-                        log(I18n.t("  ⚠ contredit la release du groupe [%s] (%d piste(s) concordantes) — "
-                                + "score plafonné, revue manuelle nécessaire",
-                                pinned.substring(0, Math.min(8, pinned.length())), agreement));
-                        best.score = 50;
+                    if (shouldSkipForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)) {
+                        String pinnedShort = pinned.substring(0, Math.min(8, pinned.length()));
+                        skipForManualReview(entry, results, com.opentagger.model.SkipReason.GROUP_MISMATCH,
+                                I18n.t("Contredit la release du groupe [%s] (%d piste(s) concordantes) — score=%s%%",
+                                        pinnedShort, agreement, best.score) + videoHintIfAny(fichier),
+                                I18n.t("  ⚠ contredit la release du groupe [%s] (%d piste(s) concordantes) — "
+                                        + "SKIPPED, revue manuelle nécessaire", pinnedShort, agreement));
+                        return;
                     }
                 }
             }
@@ -1070,8 +1117,27 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      *  disponible (voir detectDiscHint()), cherche D'ABORD restreint à ce disque — seulement pour
      *  départager une collision réelle (même numéro de piste sur 2 disques) ; repli sur la
      *  recherche non restreinte si rien ne correspond sur le disque indiqué (indice possiblement
-     *  faux, ou pistes numérotées en continu sur toute la release plutôt que par disque). */
+     *  faux, ou pistes numérotées en continu sur toute la release plutôt que par disque) — SAUF si
+     *  {@code discRestrictedOnly}, voir son Javadoc. */
     private MusicBrainzClient.ReleaseTrack findTrackInRelease(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
+        return findTrackInRelease(tl, fichier, false);
+    }
+
+    /** @param discRestrictedOnly si {@code true} et qu'un indice de disque existe, N'ACCEPTE QUE
+     *  la correspondance sur CE disque précis — jamais le repli non restreint. Écart trouvé par
+     *  audit dédié (2026-09-19) : le repli "TOUTE la tracklist par numéro de piste, sans vérifier
+     *  le titre" est sûr pour le TOC (étape 0.6, album entier déjà confirmé par checksum de
+     *  durées), mais dangereux pour le pin de groupe (étape 0.65, release proposée par UNE seule
+     *  autre piste) — un coffret CD1/CD2 mal nommé fusionné à tort avec une AUTRE compilation (ex.
+     *  deux volumes d'une série radio classés "CD1"/"CD2" par erreur) pouvait alors matcher un
+     *  fichier de CD2 sur une piste de la release mono-disque épinglée par CD1, par pure
+     *  coïncidence de numéro — sans jamais passer par la vérification de titre de
+     *  findTrackInReleaseByTitle(). Les appelants TOC passent {@code false} (comportement
+     *  inchangé, contexte déjà fiable) ; l'appelant "Cohérence de groupe" passe {@code true} : sans
+     *  disque correspondant, on préfère retourner {@code null} et laisser le vrai garde-fou de
+     *  titre (findTrackInReleaseByTitle(), seuil 0.7) trancher plutôt qu'un simple hasard de numéro. */
+    private MusicBrainzClient.ReleaseTrack findTrackInRelease(
+            MusicBrainzClient.ReleaseTracklist tl, File fichier, boolean discRestrictedOnly) {
         String trackTag = readTag(fichier, FieldKey.TRACK);
         if (trackTag == null || trackTag.isBlank()) return null;
         int tn;
@@ -1081,6 +1147,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         if (discHint > 0) {
             for (MusicBrainzClient.ReleaseTrack t : tl.tracks())
                 if (t.trackNo() == tn && t.disc() == discHint) return t;
+            if (discRestrictedOnly) return null;
         }
         for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) if (t.trackNo() == tn) return t;
         return null;
@@ -1417,8 +1484,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // exploitable, il doit rester plausible face au titre de la piste trouvée par
                     // numéro — sinon on retombe sur findTrackInReleaseByTitle() (qui, lui, cherche
                     // la VRAIE meilleure correspondance sur toute la tracklist).
+                    // discRestrictedOnly=true (2026-09-19, audit compilations/coffrets) : ici la
+                    // release n'a été confirmée que par UNE autre piste (contexte le moins fiable,
+                    // voir SOURCE_GROUP_PIN) — si un indice de disque existe mais ne correspond à
+                    // rien sur cette release, mieux vaut retomber sur findTrackInReleaseByTitle()
+                    // (vraie vérification) que sur un simple hasard de numéro de piste tous disques
+                    // confondus. Voir la Javadoc de findTrackInRelease(tl, fichier, boolean).
                     MusicBrainzClient.ReleaseTrack myTrack = findTrackByRecordingMbid(tl, fichier);
-                    if (myTrack == null) myTrack = findTrackInRelease(tl, fichier);
+                    if (myTrack == null) myTrack = findTrackInRelease(tl, fichier, true);
                     if (myTrack != null) {
                         String titleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
                         if (!titleTag.isBlank() && !isGenericTag(titleTag)
@@ -2347,8 +2420,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     /** Cœur de décision du garde-fou "une seule release par groupe" (voir son appelant, dans la
      *  boucle principale, pour le contexte complet) — extrait en méthode statique pure pour être
      *  testable isolément (reflection, comme le reste de la discipline de test de cette session)
-     *  sans devoir invoquer toute la chaîne findTags()/MusicBrainzClient. */
-    static boolean shouldCapForGroupMismatch(int agreementOnPinnedRelease, String source, int currentScore) {
+     *  sans devoir invoquer toute la chaîne findTags()/MusicBrainzClient. Renommée de
+     *  shouldCapForGroupMismatch (2026-09-19) : son appelant ne "plafonne" plus un score qui
+     *  n'était de toute façon jamais revérifié, il SKIPPE réellement le fichier — voir le
+     *  commentaire d'appel pour le bug que ça corrige. */
+    static boolean shouldSkipForGroupMismatch(int agreementOnPinnedRelease, String source, int currentScore) {
         boolean trustedSource = MetadataCache.SOURCE_DISCID.equals(source)
                 || MetadataCache.SOURCE_MBID.equals(source);
         return agreementOnPinnedRelease >= 2 && !trustedSource && currentScore > 50;

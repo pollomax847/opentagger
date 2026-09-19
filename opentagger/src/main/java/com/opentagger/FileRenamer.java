@@ -629,6 +629,30 @@ public class FileRenamer {
                 Thread.currentThread().interrupt();
                 throw new IOException("Déplacement cross-device interrompu : " + src, ie);
             }
+            // Visibilité (2026-09-19) : trouvé en direct via jstack qu'une SEULE copie cross-device
+            // bloquée (thread RUNNABLE dans Files.copy()/directCopy0, 17+ minutes, sans la moindre
+            // erreur ni ligne de log) suffit à geler TOUT le pipeline d'enregistrement — un seul
+            // permis sur CROSS_DEVICE_COPY_LIMIT (volontaire, voir son commentaire), donc chaque
+            // thread SaveWorker suivant reste juste parqué sur crossDeviceLimit.acquire() sans
+          // qu'AUCUNE trace n'indique où ni pourquoi (716 fichiers accumulés, zéro "Enregistré",
+            // seul un jstack a permis de trouver le vrai coupable). Java ne peut pas interrompre
+            // proprement un Files.copy() natif déjà en cours (pas de vrai fix possible côté
+            // annulation ici) — ce garde-fou n'empêche donc pas un futur blocage, mais le rend enfin
+            // VISIBLE dans le journal normal plutôt que de nécessiter un jstack manuel à chaque fois.
+            final java.util.concurrent.atomic.AtomicBoolean stillCopying = new java.util.concurrent.atomic.AtomicBoolean(true);
+            final long copyStartMs = System.currentTimeMillis();
+            Thread watchdog = new Thread(() -> {
+                try { Thread.sleep(60_000); } catch (InterruptedException ignored) { return; }
+                if (stillCopying.get()) {
+                    System.out.println("[OT] ⚠ Copie cross-device bloquée depuis plus de 60s (src="
+                            + src + ", dst=" + dst + ") — le pipeline d'enregistrement est gelé "
+                            + "derrière elle (CROSS_DEVICE_COPY_LIMIT=1 permis). Probable contention "
+                            + "disque/montage lent, pas un bug applicatif — voir si le disque de "
+                            + "destination répond normalement.");
+                }
+            }, "cross-device-copy-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
             try {
                 long srcSize = Files.size(src);
                 // PAS de COPY_ATTRIBUTES : sur un point de montage FUSE (ex. pool mergerfs monté
@@ -648,6 +672,13 @@ public class FileRenamer {
                 }
                 Files.delete(src);
             } finally {
+                stillCopying.set(false);
+                watchdog.interrupt();
+                long elapsedMs = System.currentTimeMillis() - copyStartMs;
+                if (elapsedMs > 60_000) {
+                    System.out.println("[OT] Copie cross-device terminée après " + (elapsedMs / 1000)
+                            + "s (anormalement long) : " + src);
+                }
                 crossDeviceLimit.release();
             }
         }

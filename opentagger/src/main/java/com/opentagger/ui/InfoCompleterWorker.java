@@ -131,10 +131,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 }));
             }
 
-            pool.shutdown();
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
+            // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+            // "blocages silencieux") — voir AlbumCompletionWorker pour le même correctif et son
+            // pourquoi complet : sans timeout, un seul item bloqué gèle ce thread pour toujours,
+            // sans la moindre trace.
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
             for (MetadataCache c : cachePool) c.close();
         }

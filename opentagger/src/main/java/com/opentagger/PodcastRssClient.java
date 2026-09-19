@@ -3,7 +3,6 @@ package com.opentagger;
 import org.w3c.dom.*;
 
 import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.*;
 import java.time.*;

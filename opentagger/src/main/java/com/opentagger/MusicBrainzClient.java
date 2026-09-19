@@ -550,7 +550,16 @@ public class MusicBrainzClient {
             }
         }
         if (best != null) return best;
-        if (onlyOfficial) return null;
+        // Repli sur releases.get(0) SEULEMENT si rien n'a été explicitement exclu par l'utilisateur
+        // (2026-09-19, audit dédié "garde-fous qui ne bloquent en réalité rien") : avant ce
+        // correctif, si allowedPrimary/excludedSecondary rejetaient TOUTES les releases (seul
+        // onlyOfficial était pris en compte ici), le code retombait quand même sur la toute première
+        // release renvoyée par MusicBrainz — potentiellement EXACTEMENT le type que l'utilisateur a
+        // demandé d'exclure (ex. "Compilation"/"Live" dans releases.excluded_secondary_types), si cet
+        // enregistrement n'existe QUE sous ce type chez MB. Inactif chez cet utilisateur pour
+        // l'instant (ces deux réglages sont vides dans settings.properties), mais un piège réel dès
+        // qu'ils seraient renseignés.
+        if (onlyOfficial || allowedPrimary.length > 0 || excludedSecondary.length > 0) return null;
         return releases.get(0);
     }
 

@@ -116,11 +116,11 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
             futures.add(pool.submit(() -> processOne(video, fileIdx, total, maskIndex)));
         }
 
-        pool.shutdown();
         try {
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
+            // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+            // "blocages silencieux") — voir AlbumCompletionWorker pour le même correctif et son
+            // pourquoi complet.
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
             for (MetadataCache c : cachePool) c.close();
         }

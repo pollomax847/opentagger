@@ -35,7 +35,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 public class MainFrame extends JFrame {
 
@@ -83,7 +82,6 @@ public class MainFrame extends JFrame {
     private JButton    btnTagAll, btnSaveAll, btnCancel, btnTranscode, btnRefresh;
     // Conteneur des boutons secondaires personnalisables — voir populateSecondaryToolbar().
     private JPanel     secondaryToolbarPanel;
-    private JCheckBox  chkAcoustId;
     private JLabel     lblMask;
 
     // ── Stats live (chips cliquables = filtre statut, remplace l'ancien menu déroulant) ───
@@ -767,10 +765,10 @@ public class MainFrame extends JFrame {
                     futures.add(pool.submit(() -> processOne(e, new com.opentagger.MusicBrainzClient())));
                 }
 
-                pool.shutdown();
-                for (java.util.concurrent.Future<?> f : futures) {
-                    try { f.get(); } catch (Exception ignored) {}
-                }
+                // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+                // "blocages silencieux") — voir AlbumCompletionWorker pour le même correctif et son
+                // pourquoi complet.
+                WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
                 cache.close();
                 return null;
             }
@@ -4265,6 +4263,26 @@ public class MainFrame extends JFrame {
                 // pas pendant qu'il patientait en file, ce qui aurait inutilement prolongé la
                 // période où le filtre est indisponible pour les autres scans déjà en cours.
                 publish(new Object[]{ PHASE1_START_MARKER });
+                // Watchdog de visibilité (2026-09-19, audit dédié "blocages silencieux", même
+                // signature que le cas déjà corrigé sur FileRenamer.moveFile) : dossier.listFiles()
+                // dans AudioScanner.scanRecursif() est un appel natif SANS AUCUN timeout possible
+                // côté Java — un montage USB/réseau qui décroche EN PLEIN milieu du parcours
+                // bloquerait ce thread pour toujours, sans la moindre ligne de log, et avec
+                // seulement 2 permis sur phase1Semaphore, les AUTRES dossiers de démarrage ne
+                // commenceraient jamais à scanner non plus. Ne peut pas annuler le blocage
+                // (même limite que le cas FileRenamer), juste le rendre visible.
+                final java.util.concurrent.atomic.AtomicBoolean stillScanning =
+                        new java.util.concurrent.atomic.AtomicBoolean(true);
+                Thread scanWatchdog = new Thread(() -> {
+                    try { Thread.sleep(120_000); } catch (InterruptedException ignored) { return; }
+                    if (stillScanning.get()) {
+                        System.out.println("[OT] ⚠ Scan de \"" + dir + "\" bloqué depuis plus de 120s — "
+                                + "probable montage lent/déconnecté (dossier de démarrage) ; les autres "
+                                + "dossiers de démarrage peuvent aussi attendre derrière (2 permis max).");
+                    }
+                }, "scan-watchdog");
+                scanWatchdog.setDaemon(true);
+                scanWatchdog.start();
                 try {
                 new AudioScanner().scan(dir, f -> {
                     if (isCancelled()) return;
@@ -4337,6 +4355,8 @@ public class MainFrame extends JFrame {
                     });
                 }, this::isCancelled);
                 } finally {
+                    stillScanning.set(false);
+                    scanWatchdog.interrupt();
                     phase1Semaphore.release();
                 }
                 if (!batch.isEmpty()) publish(new Object[]{ new ArrayList<>(batch) });
@@ -5635,8 +5655,14 @@ public class MainFrame extends JFrame {
                             }
                         }));
                     }
-                    pool.shutdown();
-                    for (java.util.concurrent.Future<?> f : futures) { try { f.get(); } catch (Exception ignored) {} }
+                    // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit
+                    // dédié "blocages silencieux") : le correctif du 2026-09-04 juste au-dessus a
+                    // ajouté la parallélisation ET le log de progression, mais pas de VRAI timeout
+                    // sur cette boucle — un seul item bloqué pouvait donc reproduire exactement le
+                    // même blocage silencieux de 4h+ qu'à l'origine, juste sans le symptôme
+                    // "aucune activité" (le log de progression aurait quand même stagné au dernier
+                    // multiple de 500, mais rien ne l'aurait signalé comme anormal).
+                    WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
                 } finally {
                     for (MetadataCache c : cachePool) c.close();
                 }

@@ -12,7 +12,6 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Vue arborescence par album du tableau principal — regroupe les {@link FileEntry} déjà exposés

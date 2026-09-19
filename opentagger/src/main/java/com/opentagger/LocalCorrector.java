@@ -324,7 +324,4 @@ public class LocalCorrector {
         }
     }
 
-    public Set<String> getGenreList() { return Collections.unmodifiableSet(genreList); }
-    public int genreCount()            { return genreList.size(); }
-    public int classicalNamesCount()   { return classicalNames.size(); }
 }

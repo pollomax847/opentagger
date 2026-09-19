@@ -70,6 +70,7 @@ public final class WorkerHub {
 
         public TaskKind kind()      { return kind; }
         public String   label()     { return label; }
+        public Instant  startTime() { return startTime; }
         public boolean  isRunning() { return !worker.isDone(); }
 
         /** Toujours passer par ici, jamais worker.cancel(true) en direct : cancelAction est le

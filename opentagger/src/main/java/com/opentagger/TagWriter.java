@@ -19,7 +19,6 @@ import org.jaudiotagger.tag.images.Artwork;
 import org.jaudiotagger.tag.images.ArtworkFactory;
 import org.jaudiotagger.tag.mp4.Mp4Tag;
 import org.jaudiotagger.tag.mp4.field.Mp4TagTextField;
-import org.jaudiotagger.tag.vorbiscomment.VorbisCommentTag;
 import org.jaudiotagger.tag.vorbiscomment.VorbisCommentTagField;
 
 import java.io.File;
@@ -157,20 +156,6 @@ public class TagWriter {
         tag.setField(art);
         audio.commit();
         if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
-    }
-
-    /** Écrit uniquement les champs ReplayGain Track sans toucher aux autres tags. */
-    public void writeReplayGain(File fichier, String trackGain, String trackPeak) {
-        if ((trackGain == null || trackGain.isBlank())
-                && (trackPeak == null || trackPeak.isBlank())) return;
-        try {
-            repairM4aIfNeeded(fichier);
-            AudioFile audio = AudioFileIO.read(fichier);
-            Tag tag = audio.getTagOrCreateAndSetDefault();
-            setCustomField(tag, "REPLAYGAIN_TRACK_GAIN", trackGain);
-            setCustomField(tag, "REPLAYGAIN_TRACK_PEAK", trackPeak);
-            audio.commit();
-        } catch (Exception ignored) {}
     }
 
     /** Écrit uniquement les champs ReplayGain Album sans toucher aux autres tags. */

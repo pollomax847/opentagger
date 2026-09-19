@@ -14,7 +14,6 @@ import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
 import javax.swing.*;
-import java.io.File;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -130,10 +129,17 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                 if (e.status == FileEntry.Status.TAGGED || e.status == FileEntry.Status.IDENTIFIED) {
                     // N'utiliser comme ancre de release que les fichiers identifiés par source FIABLE.
                     // SOURCE_TEXT = recherche texte = releaseMbid potentiellement faux → faux positifs.
-                    // Pour TAGGED, la source vient du cache SQLite (renseigné à l'Enregistrement) ;
-                    // pour IDENTIFIED (jamais passé par cache.recordFileTagging(), qui n'a lieu qu'à
-                    // l'Enregistrement), elle vient directement du TagInfo en mémoire — voir
-                    // TagInfo.identificationSource, persisté par tous les pipelines d'identification.
+                    // SOURCE_GROUP_PIN exclu aussi (2026-09-19, audit dédié compilations/coffrets) :
+                    // sa propre Javadoc (MetadataCache.java) dit explicitement que SEULE une piste du
+                    // groupe a été vérifiée, les autres suivent SANS vérification individuelle — une
+                    // ancre construite là-dessus propagerait une éventuelle mauvaise release épinglée
+                    // à TOUTE la bibliothèque via findCandidate() plus bas (portée bien plus large
+                    // qu'un simple dossier scindé, voir le garde-fou de TaggingWorker pour le contexte
+                    // complet du risque). Pour TAGGED, la source vient du cache SQLite (renseigné à
+                    // l'Enregistrement) ; pour IDENTIFIED (jamais passé par cache.recordFileTagging(),
+                    // qui n'a lieu qu'à l'Enregistrement), elle vient directement du TagInfo en
+                    // mémoire — voir TagInfo.identificationSource, persisté par tous les pipelines
+                    // d'identification.
                     String source;
                     if (e.status == FileEntry.Status.TAGGED) {
                         String path = (e.currentPath != null ? e.currentPath : e.file.toPath()).toString();
@@ -141,7 +147,8 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                     } else {
                         source = e.result != null ? e.result.identificationSource : null;
                     }
-                    if (MetadataCache.SOURCE_TEXT.equals(source) || source == null || source.isBlank()) continue;
+                    if (MetadataCache.SOURCE_TEXT.equals(source) || MetadataCache.SOURCE_GROUP_PIN.equals(source)
+                            || source == null || source.isBlank()) continue;
 
                     TagInfo ref    = e.result != null ? e.result : e.current;
                     String rMbid   = ref != null ? ref.releaseMbid   : "";
@@ -218,10 +225,15 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                         relMbid, found, cache, candidateIndex, new MusicBrainzClient(), new LastFmClient())));
             }
 
-            pool.shutdown();
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
+            // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+            // "blocages silencieux") : sans timeout, un seul item bloqué (appel réseau non borné,
+            // sous-processus qui ne rend jamais la main) gèle ce thread doInBackground() pour
+            // toujours — et comme ALBUM_COMPLETION bloque explicitement TAGGING dans
+            // WorkerHub.conflictsWith(), ça peut geler tout le re-taguage en cours sans la moindre
+            // trace, exactement la même signature que le bug FileRenamer/CROSS_DEVICE_COPY_LIMIT
+            // trouvé plus tôt aujourd'hui — mais ici un vrai garde-fou existait déjà, juste jamais
+            // branché à cet appelant.
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
             cache.close();
         }

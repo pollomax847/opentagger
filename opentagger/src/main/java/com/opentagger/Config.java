@@ -130,12 +130,17 @@ public class Config {
     public String fanartKey()          { return str("fanart.api_key"); }
     public String lastfmKey()          { return str("lastfm.api_key"); }
     public String contact()            { return str("app.contact"); }
-    public int    minScoreAuto()       { return num("autocorrector.min_score", 85); }
+    // Défaut remonté de 85 à 90 (2026-09-19, audit code mort) : "match.min_score_auto=90" traînait
+    // dans settings.properties (avec un commentaire explicite "seuil pour appliquer automatiquement")
+    // depuis longtemps, cité comme LE seuil réel dans des dizaines de commentaires à travers tout le
+    // projet (TaggingWorker.java notamment) — mais cette clé n'était lue par AUCUN code : le vrai
+    // seuil appliqué était "autocorrector.min_score", une clé différente, absente de
+    // settings.properties, donc silencieusement repliée sur son défaut de 85. 90 était la valeur
+    // manifestement voulue de longue date ; ce correctif aligne enfin le comportement réel dessus.
+    public int    minScoreAuto()       { return num("autocorrector.min_score", 90); }
     // Seuil du score composite pondéré fichier↔piste (TrackMatcher), même valeur par défaut que
     // Picard (picard/options.py: track_matching_threshold = 0.4) — voir TrackMatcher.findBestTrack().
     public double trackMatchingThreshold() { return dbl("match.track_matching_threshold", 0.4); }
-    public int    mbResultsLimit()     { return num("musicbrainz.results_limit", 5); }
-    public boolean mbOnlyOfficial()    { return bool("musicbrainz.only_official", true); }
 
     // --- Serveur MusicBrainz personnalisé (miroir) --- la clé musicbrainz.server existait déjà
     // dans settings.properties mais n'était en réalité JAMAIS lue par MusicBrainzClient (BASE_URL
@@ -170,7 +175,6 @@ public class Config {
     public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
-    public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
     public String libraryRoot()                    { return str ("rename.library_root",            ""); }
     // Case à cocher UI qui grise/dégrise tfLibraryRoot dans SettingsDialog (voir bindGate()) —
     // défaut true pour ne rien changer au comportement des utilisateurs ayant déjà configuré ce
@@ -308,9 +312,6 @@ public class Config {
         for (String s : v.split(",")) if (!s.isBlank()) order.add(s.trim());
         if (order.isEmpty()) order.add("FORMAT");
         return order;
-    }
-    public void setDuplicateCriteriaOrder(java.util.List<String> order) {
-        set("duplicates.criteria_order", String.join(",", order));
     }
 
     public String userAgent() {

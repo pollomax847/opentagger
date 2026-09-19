@@ -95,6 +95,7 @@ public class NonIdentifiedReportDialog extends JDialog {
             case DURATION_MISMATCH -> I18n.t("Durée incohérente avec MusicBrainz");
             case ERROR_GENERIC    -> I18n.t("Erreur (transcodage, fichier corrompu…)");
             case NETWORK_ERROR    -> I18n.t("Erreur réseau (coupure/timeout) — probablement à réessayer");
+            case GROUP_MISMATCH   -> I18n.t("Contredit la release des autres pistes du dossier — revue manuelle");
         };
     }
 
