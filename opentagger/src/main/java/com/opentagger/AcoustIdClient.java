@@ -88,14 +88,24 @@ public class AcoustIdClient {
         return results;
     }
 
-    /** Un MBID candidat associé au score de confiance AcoustID du résultat qui l'a produit. */
-    private record MbidCandidate(String mbid, double acoustidScore) {}
+    /** Un MBID candidat associé au score de confiance AcoustID du résultat qui l'a produit, et au
+     *  nombre de soumissions indépendantes ayant lié cette empreinte à ce MBID précis ("sources",
+     *  écart trouvé vs SongKong — AcoustidHelper.getRecordingsWithMostSources() — analyse du jar
+     *  décompilé 2026-09-18). Déjà demandé dans la requête (meta=...+sources+...) mais jamais lu
+     *  jusqu'ici — vérifié en direct (curl réel, 2026-09-18) : le champ existe bien à
+     *  results[].recordings[].sources. Utilisé UNIQUEMENT comme second critère de tri, jamais
+     *  comme filtre dur : un vrai test en direct sur un remix peu commun a donné sources=1 pour un
+     *  match pourtant clairement correct (le nom du remix apparaît tel quel dans la réponse) — sur
+     *  une bibliothèque avec beaucoup de contenu rare/remix comme celle-ci, rejeter ou pénaliser un
+     *  score juste pour un faible nombre de sources produirait de vrais faux négatifs. */
+    private record MbidCandidate(String mbid, double acoustidScore, int sources) {}
 
     private List<MbidCandidate> parseMbids(JsonNode root) {
         // MusicBrainz ne renvoie aucun score pour un lookup direct par ID (TagInfo.score y est
         // toujours 100) : le seul signal de confiance disponible pour départager plusieurs MBIDs
         // candidats est celui d'AcoustID lui-même, capturé ici avant d'être perdu.
-        java.util.Map<String, Double> bestScoreByMbid = new java.util.LinkedHashMap<>();
+        java.util.Map<String, Double> bestScoreByMbid   = new java.util.LinkedHashMap<>();
+        java.util.Map<String, Integer> sourcesByMbid    = new java.util.LinkedHashMap<>();
         for (JsonNode result : root.path("results")) {
             // Seuil abaissé à 0.5 comme Picard — AcoustID peut donner 0.6-0.8 sur fichiers bruités
             double score = result.path("score").asDouble();
@@ -104,11 +114,20 @@ public class AcoustIdClient {
                 String mbid = recording.path("id").asText("");
                 if (mbid.isBlank()) continue;
                 bestScoreByMbid.merge(mbid, score, Math::max);
+                sourcesByMbid.merge(mbid, recording.path("sources").asInt(0), Math::max);
             }
         }
         List<MbidCandidate> mbids = new ArrayList<>();
-        bestScoreByMbid.forEach((mbid, score) -> mbids.add(new MbidCandidate(mbid, score)));
-        mbids.sort((a, b) -> Double.compare(b.acoustidScore(), a.acoustidScore()));
+        bestScoreByMbid.forEach((mbid, score) ->
+                mbids.add(new MbidCandidate(mbid, score, sourcesByMbid.getOrDefault(mbid, 0))));
+        // Score AcoustID en premier (mesure la qualité acoustique du matching, le signal principal
+        // établi de longue date) ; sources en second, seulement pour départager une VRAIE égalité
+        // de score entre deux MBID différents pour la même empreinte — jamais pour reclasser un
+        // score par ailleurs meilleur derrière un score moins bon juste parce que plus "corroboré".
+        mbids.sort((a, b) -> {
+            int byScore = Double.compare(b.acoustidScore(), a.acoustidScore());
+            return byScore != 0 ? byScore : Integer.compare(b.sources(), a.sources());
+        });
         return mbids;
     }
 

@@ -107,6 +107,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // "cohérence d'album" côté Préférences, pas la peine d'en exposer un second).
     private final java.util.Map<String, String> groupPinnedRelease =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // Nombre de pistes ayant CONFIRMÉ le pin de leur groupe (même releaseMbid que le pin, pin
+    // initial inclus) — voir son usage au garde-fou "une seule release par groupe" plus bas : un
+    // pin établi par une SEULE piste isolée est une preuve trop faible pour pénaliser tout le reste
+    // d'un dossier "fourre-tout" (Téléchargements, Singles...) où le partage de dossier ne
+    // présuppose PAS un vrai album cohérent — contrairement à un pin corroboré par plusieurs
+    // pistes indépendantes, bien plus probablement un vrai album (cas Vendée 93 : 11 pistes).
+    private final java.util.Map<String, java.util.concurrent.atomic.AtomicInteger> groupPinAgreement =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<String, MusicBrainzClient.ReleaseTracklist> pinnedTracklistCache =
             new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<String> pinnedTracklistFailed =
@@ -445,6 +453,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // processEntry), pour rester identique à la clé qu'a utilisée la vue arborescence au
             // moment où l'utilisateur a cliqué le groupe.
             String groupKey = com.opentagger.AlbumGrouping.key(entry);
+            // Coffret multi-CD (écart SongKong, voir DISC_FOLDER_PATTERN/detectDiscHint()) : pour
+            // un fichier pas encore identifié (donc AlbumGrouping.key() est retombé sur le dossier,
+            // voir sa Javadoc), si CE dossier est lui-même un sous-dossier "CD1"/"Disc 2"/... son
+            // parent (le dossier du coffret) devient la clé de groupe à la place — pour que CD1 et
+            // CD2 partagent le MÊME groupPinnedRelease au lieu d'être traités comme deux groupes
+            // sans rapport. Ajustement LOCAL à l'identification uniquement (pas dans AlbumGrouping
+            // lui-même, partagé avec 3 autres classes d'AFFICHAGE — pas de risque de changer leur
+            // regroupement visuel pour un correctif qui ne concerne que le matching).
+            if (groupKey.startsWith("folder::")) {
+                File parentDir = fichier.getParentFile();
+                if (parentDir != null && DISC_FOLDER_PATTERN.matcher(parentDir.getName()).find()) {
+                    File grandParent = parentDir.getParentFile();
+                    if (grandParent != null) groupKey = "folder::" + grandParent;
+                }
+            }
 
             log(I18n.t("  findTags..."));
             List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm, cache, groupKey);
@@ -574,6 +597,47 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // deux déjà validés individuellement — jamais pire que le comportement sans épinglage.
             if (Config.get().discIdMatchingEnabled() && !best.releaseMbid.isBlank()) {
                 groupPinnedRelease.putIfAbsent(groupKey, best.releaseMbid);
+            }
+
+            // Garde-fou "une seule release par groupe" (écart trouvé vs SongKong, dont la doc
+            // annonce un rejet strict "toutes les pistes doivent matcher une seule release" —
+            // comparaison 2026-09-18). Directement lié au bug déjà connu "Vendée 93" (11 pistes
+            // dispersées sur 3 releases MB sans rapport, ~309 dossiers de la bibliothèque ont la
+            // même forme vulnérable) : le mécanisme groupPinnedRelease existant (juste au-dessus)
+            // épingle une release dès qu'une piste la trouve, mais ne fait QUE proposer cette
+            // release aux pistes suivantes (étape 0.65) — si aucune piste de la release épinglée ne
+            // correspond, le code retombe SILENCIEUSEMENT sur une identification indépendante,
+            // potentiellement une AUTRE release entière (voir son propre commentaire, "bonus track,
+            // single..."). Plutôt qu'un rejet dur du dossier entier (collatéral réel : un bonus
+            // track légitime existe, voir ce même commentaire), ce garde-fou plafonne juste le
+            // score sous le seuil d'auto-enregistrement (match.min_score_auto=90) quand une piste
+            // contredit une release DÉJÀ CORROBORÉE par au moins 2 pistes de son groupe — jamais
+            // silencieusement auto-enregistrée sur une release différente dans ce cas, mais jamais
+            // bloquée non plus : une vraie exception (single/bonus/édition différente) reste
+            // enregistrable après revue manuelle. Seuil de corroboration (pas juste "un pin
+            // existe") : le regroupement se fait par DOSSIER pour des fichiers pas encore identifiés
+            // (voir AlbumGrouping.key()) — un dossier "fourre-tout" (Téléchargements, Singles...)
+            // n'est pas un vrai album, et une SEULE piste ne prouve rien sur les autres qui
+            // partagent juste le même dossier par coïncidence. Exemptés du plafond : SOURCE_DISCID
+            // (checksum sur CE dossier précis, déjà prioritaire sur le pin lui-même) et SOURCE_MBID
+            // (MBID déjà connu avec certitude, ex. tag existant fiable) — les deux seules sources
+            // qui prouvent réellement l'appartenance à une autre release plutôt que de simplement
+            // la suggérer.
+            if (Config.get().discIdMatchingEnabled() && groupKey != null && !best.releaseMbid.isBlank()) {
+                String pinned = groupPinnedRelease.get(groupKey);
+                if (pinned != null && pinned.equals(best.releaseMbid)) {
+                    groupPinAgreement.computeIfAbsent(groupKey, k -> new java.util.concurrent.atomic.AtomicInteger())
+                            .incrementAndGet();
+                } else if (pinned != null) {
+                    int agreement = groupPinAgreement.getOrDefault(groupKey,
+                            new java.util.concurrent.atomic.AtomicInteger()).get();
+                    if (shouldCapForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)) {
+                        log(I18n.t("  ⚠ contredit la release du groupe [%s] (%d piste(s) concordantes) — "
+                                + "score plafonné, revue manuelle nécessaire",
+                                pinned.substring(0, Math.min(8, pinned.length())), agreement));
+                        best.score = 50;
+                    }
+                }
             }
 
             log(I18n.t("  ✓ identifié : %s – %s (score=%s)", best.artist, best.title, best.score));
@@ -953,14 +1017,71 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
     }
 
+    // Motif "CDx"/"Disc x"/"Disque x" — écart trouvé vs SongKong (BoxSetScorer.groupByMedium,
+    // analyse du jar décompilé 2026-09-18) : sur un coffret multi-CD organisé en sous-dossiers
+    // physiques ("Album/CD1/", "Album/CD2/"), findTrackInRelease()/findTrackInReleaseByTitle()
+    // cherchaient jusqu'ici dans TOUTE la tracklist de la release (tous disques confondus) — un
+    // "track 5" sur CD1 et un "track 5" sur CD2 sont pourtant deux pistes DIFFÉRENTES de la même
+    // release MusicBrainz (medium différent), risque réel de collision numéro de piste ou de titre
+    // partagé (intro/bonus répété par disque, fréquent sur les captations live). Volontairement
+    // PAS le repli "chiffre final du nom de dossier" de SongKong (trop ambigu — "Bootleg 2019" n'a
+    // rien d'un numéro de disque) : seuls le motif explicite CD/Disc/Disque et le tag DISC_NO déjà
+    // présent sur le fichier sont retenus, aucun risque de faux indice.
+    private static final java.util.regex.Pattern DISC_FOLDER_PATTERN =
+            java.util.regex.Pattern.compile("(?i)\\b(?:cd|dis[ck]|disque)\\s*0*(\\d+)\\b");
+
+    /** Numéro de disque probable pour ce fichier (0 = aucun indice fiable) : priorité au tag
+     *  DISC_NO déjà présent sur LE FICHIER lui-même (le plus direct), repli sur le nom du dossier
+     *  parent immédiat s'il correspond au motif CD/Disc/Disque — voir DISC_FOLDER_PATTERN. */
+    private int detectDiscHint(File fichier) {
+        String discTag = readTag(fichier, FieldKey.DISC_NO);
+        if (discTag != null && !discTag.isBlank()) {
+            try { return Integer.parseInt(discTag.split("/")[0].trim()); }
+            catch (NumberFormatException ignored) {}
+        }
+        File parent = fichier.getParentFile();
+        if (parent != null) {
+            java.util.regex.Matcher m = DISC_FOLDER_PATTERN.matcher(parent.getName());
+            if (m.find()) {
+                try { return Integer.parseInt(m.group(1)); } catch (NumberFormatException ignored) {}
+            }
+        }
+        return 0;
+    }
+
+    /** Piste MB dont le recordingMbid correspond EXACTEMENT au tag MUSICBRAINZ_TRACK_ID déjà
+     *  présent sur le fichier — {@code null} si le tag est absent ou qu'aucune piste ne correspond.
+     *  Écart trouvé vs Picard (analyse du code source cloné, 2026-09-18) : {@code Album.
+     *  _match_files()} essaie TOUJOURS ce tier "identifiants" (MBID exact) avant tout scoring flou
+     *  numéro/titre — un identifiant déjà connu et fiable (venant par ex. d'AcoustID/Shazam à une
+     *  étape précédente de findTags(), ou d'un tag déjà correct) ne doit jamais être ignoré au
+     *  profit d'une correspondance approximative. Toujours tenté en premier par les deux appelants
+     *  ci-dessous, avant findTrackInRelease()/findTrackInReleaseByTitle(). */
+    private MusicBrainzClient.ReleaseTrack findTrackByRecordingMbid(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
+        String mbidTag = readTag(fichier, FieldKey.MUSICBRAINZ_TRACK_ID);
+        if (mbidTag == null || mbidTag.isBlank()) return null;
+        String mbid = mbidTag.trim();
+        for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) if (mbid.equalsIgnoreCase(t.recordingMbid())) return t;
+        return null;
+    }
+
     /** Piste MB correspondant au numéro TRACK du fichier — {@code null} si le tag est absent/
-     *  illisible ou qu'aucune piste de la release ne porte ce numéro. */
+     *  illisible ou qu'aucune piste de la release ne porte ce numéro. Si un indice de disque est
+     *  disponible (voir detectDiscHint()), cherche D'ABORD restreint à ce disque — seulement pour
+     *  départager une collision réelle (même numéro de piste sur 2 disques) ; repli sur la
+     *  recherche non restreinte si rien ne correspond sur le disque indiqué (indice possiblement
+     *  faux, ou pistes numérotées en continu sur toute la release plutôt que par disque). */
     private MusicBrainzClient.ReleaseTrack findTrackInRelease(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
         String trackTag = readTag(fichier, FieldKey.TRACK);
         if (trackTag == null || trackTag.isBlank()) return null;
         int tn;
         try { tn = Integer.parseInt(trackTag.split("/")[0].trim()); }
         catch (NumberFormatException e) { return null; }
+        int discHint = detectDiscHint(fichier);
+        if (discHint > 0) {
+            for (MusicBrainzClient.ReleaseTrack t : tl.tracks())
+                if (t.trackNo() == tn && t.disc() == discHint) return t;
+        }
         for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) if (t.trackNo() == tn) return t;
         return null;
     }
@@ -987,8 +1108,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private MusicBrainzClient.ReleaseTrack findTrackInReleaseByTitle(MusicBrainzClient.ReleaseTracklist tl, File fichier) {
         String titleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
         if (titleTag.isBlank() || isGenericTag(titleTag)) return null;
+        // Indice de disque (voir detectDiscHint()) : un titre identique/proche peut légitimement
+        // se répéter sur plusieurs disques d'un même coffret (intro, outro, bonus track répété) —
+        // restreindre au disque indiqué quand disponible évite de choisir la mauvaise occurrence.
+        int discHint = detectDiscHint(fichier);
         MusicBrainzClient.ReleaseTrack bestTrack = null;
         double bestSim = 0;
+        for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) {
+            if (discHint > 0 && t.disc() != discHint) continue;
+            double sim = TrackMatcher.titleSimilarity(titleTag.toLowerCase(), t.title().toLowerCase());
+            if (sim > bestSim) { bestSim = sim; bestTrack = t; }
+        }
+        if (bestTrack != null && bestSim >= GROUP_PIN_TITLE_MATCH_THRESHOLD) return bestTrack;
+        if (discHint == 0) return null; // déjà cherché sans restriction ci-dessus, rien trouvé
+        // Repli non restreint : l'indice de disque était peut-être faux (dossier mal nommé), ou le
+        // vrai medium correspondant n'a simplement pas cette piste — ne jamais bloquer un match par
+        // ailleurs valable à cause d'un indice qui s'avère trompeur.
+        bestTrack = null; bestSim = 0;
         for (MusicBrainzClient.ReleaseTrack t : tl.tracks()) {
             double sim = TrackMatcher.titleSimilarity(titleTag.toLowerCase(), t.title().toLowerCase());
             if (sim > bestSim) { bestSim = sim; bestTrack = t; }
@@ -1146,7 +1282,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 if (tl == null) {
                     discIdFailedFolders.add(folder);
                 } else {
-                    MusicBrainzClient.ReleaseTrack myTrack = findTrackInRelease(tl, fichier);
+                    MusicBrainzClient.ReleaseTrack myTrack = findTrackByRecordingMbid(tl, fichier);
+                    if (myTrack == null) myTrack = findTrackInRelease(tl, fichier);
                     // Garde-fou ajouté après un vrai faux positif en direct (2026-09-13) : "(1974)
                     // Open Our Eyes" (Earth, Wind & Fire, 11 pistes, déjà correctement tagué) a été
                     // apparié par TOC à "The Columbia Masters" — un coffret SANS RAPPORT dont le
@@ -1280,7 +1417,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // exploitable, il doit rester plausible face au titre de la piste trouvée par
                     // numéro — sinon on retombe sur findTrackInReleaseByTitle() (qui, lui, cherche
                     // la VRAIE meilleure correspondance sur toute la tracklist).
-                    MusicBrainzClient.ReleaseTrack myTrack = findTrackInRelease(tl, fichier);
+                    MusicBrainzClient.ReleaseTrack myTrack = findTrackByRecordingMbid(tl, fichier);
+                    if (myTrack == null) myTrack = findTrackInRelease(tl, fichier);
                     if (myTrack != null) {
                         String titleTag = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
                         if (!titleTag.isBlank() && !isGenericTag(titleTag)
@@ -2206,7 +2344,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return artist == null ? null : YOUTUBE_TOPIC_SUFFIX.matcher(artist).replaceAll("");
     }
 
-    private static boolean isGenericTag(String s) {
+    /** Cœur de décision du garde-fou "une seule release par groupe" (voir son appelant, dans la
+     *  boucle principale, pour le contexte complet) — extrait en méthode statique pure pour être
+     *  testable isolément (reflection, comme le reste de la discipline de test de cette session)
+     *  sans devoir invoquer toute la chaîne findTags()/MusicBrainzClient. */
+    static boolean shouldCapForGroupMismatch(int agreementOnPinnedRelease, String source, int currentScore) {
+        boolean trustedSource = MetadataCache.SOURCE_DISCID.equals(source)
+                || MetadataCache.SOURCE_MBID.equals(source);
+        return agreementOnPinnedRelease >= 2 && !trustedSource && currentScore > 50;
+    }
+
+    // Package-private (pas private) depuis le 2026-09-18 : réutilisé tel quel par
+    // CompletenessReportDialog pour rester cohérent avec la définition de "champ incomplet" déjà
+    // établie ici (incompletenessScore()) plutôt que d'en dupliquer une variante légèrement
+    // différente dans un nouveau fichier.
+    static boolean isGenericTag(String s) {
         if (s == null || s.isBlank()) return true;
         String low = s.trim().toLowerCase();
         // Tags par défaut des encodeurs/téléchargeurs — "artiste inconnu"/"unknown album"/
@@ -2250,6 +2402,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private String cleanSearchTerm(String s) {
         if (s == null) return "";
         return s
+            // Apostrophes/guillemets typographiques → droits (écart trouvé vs SongKong,
+            // EquivalentCharsSimplifier, analyse du jar décompilé 2026-09-18) : contrairement à
+            // TrackMatcher.titleSimilarity() (déjà insensible à cette variation — son tokenizer \W+
+            // traite les deux formes comme un même séparateur, vérifié en direct), CETTE chaîne part
+            // en recherche TEXTE côté serveur MusicBrainz — sa tokenisation à lui échappe à notre
+            // contrôle, donc une différence ici peut réellement réduire le rappel de la recherche.
+            // "Rock ’n’ Roll" (apostrophe typographique, héritage Windows/Discogs/rip web) normalisé
+            // en "Rock 'n' Roll" avant l'envoi, pas juste dans le titre déjà démontré insensible.
+            .replaceAll("[‘’‚ʼ]", "'")
+            .replaceAll("[“”„]", "\"")
+            .replaceAll("[‐‑‒–—―]", "-")
             .replaceAll("(?i)[_\\s]*[\\[(]?\\d{2,3}k[\\])]?$", "")         // _320k, (128k)
             .replaceAll("(?i)[_\\s]*\\(?(HQ|HD|FLAC|MP3|WAV|320|256|192|128)\\)?$", "")
             .replaceAll("(?i)\\s*\\[?OFFICIAL.*$", "")

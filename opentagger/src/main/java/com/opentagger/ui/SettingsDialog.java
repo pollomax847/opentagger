@@ -266,6 +266,8 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet Démarrage ──────────────────────────────────────────────────────
     private DefaultListModel<String> startupFolderModel;
+    private DefaultListModel<String> excludedFolderModel;
+    private DefaultListModel<String> duplicateCriteriaModel;
     private JComboBox<String> cmbLanguage;
     private JCheckBox chkUpdateCheck;
     private JCheckBox chkCloseMinimizes;
@@ -434,6 +436,58 @@ public class SettingsDialog extends JDialog {
         inner.add(scroll, BorderLayout.CENTER);
         inner.add(buttons, BorderLayout.SOUTH);
 
+        // Dossiers exclus du scan (2026-09-18, écart vs SongKong excluded_folder.txt) — même
+        // idiome JList+boutons que ci-dessus, en plus compact (pas de rendu "disque introuvable" :
+        // un chemin exclu qui n'existe plus ne pose aucun problème, contrairement à un dossier de
+        // démarrage manquant). Jamais parcouru par AudioScanner ni par "Nettoyer les dossiers
+        // orphelins" — utile ici où le pool mergerfs partage ses disques avec d'autres services.
+        excludedFolderModel = new DefaultListModel<>();
+        JList<String> exList = new JList<>(excludedFolderModel);
+        exList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        exList.setFont(exList.getFont().deriveFont(12f));
+        JScrollPane exScroll = new JScrollPane(exList);
+        exScroll.setPreferredSize(new Dimension(400, 100));
+
+        JButton btnExAdd = new JButton("+ " + I18n.t("Ajouter…"));
+        JButton btnExRemove = new JButton("− " + I18n.t("Supprimer"));
+        btnExRemove.setEnabled(false);
+        exList.addListSelectionListener(e -> btnExRemove.setEnabled(!exList.isSelectionEmpty()));
+        btnExAdd.addActionListener(e -> {
+            JFileChooser fc = new JFileChooser();
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            fc.setMultiSelectionEnabled(true);
+            fc.setDialogTitle(I18n.t("Choisir les dossiers à ne jamais parcourir"));
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+                for (java.io.File f : fc.getSelectedFiles())
+                    if (!excludedFolderModel.contains(f.getAbsolutePath()))
+                        excludedFolderModel.addElement(f.getAbsolutePath());
+            }
+        });
+        btnExRemove.addActionListener(e -> {
+            for (String s : exList.getSelectedValuesList()) excludedFolderModel.removeElement(s);
+        });
+        JPanel exButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        exButtons.add(btnExAdd);
+        exButtons.add(btnExRemove);
+
+        JLabel exHint = new JLabel(I18n.t(
+            "<html><i>Ces dossiers (et leur contenu) ne seront jamais parcourus, ni au scan ni par "
+            + "«Nettoyer les dossiers orphelins» — utile pour les dossiers de travail d'autres "
+            + "applications sur les mêmes disques.</i></html>"));
+        exHint.setBorder(new EmptyBorder(8, 0, 4, 0));
+        exHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+
+        JPanel innerExcluded = new JPanel(new BorderLayout(0, 6));
+        innerExcluded.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Dossiers exclus du scan")));
+        innerExcluded.add(exHint,    BorderLayout.NORTH);
+        innerExcluded.add(exScroll,  BorderLayout.CENTER);
+        innerExcluded.add(exButtons, BorderLayout.SOUTH);
+
+        JPanel folderPanels = new JPanel(new GridLayout(2, 1, 0, 8));
+        folderPanels.add(inner);
+        folderPanels.add(innerExcluded);
+
         cmbLanguage = new JComboBox<>(new String[]{"Français", "English"});
         JPanel langPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         langPanel.setBorder(BorderFactory.createTitledBorder(
@@ -472,7 +526,7 @@ public class SettingsDialog extends JDialog {
         JPanel outer = new JPanel(new BorderLayout());
         outer.setBorder(new EmptyBorder(10, 10, 10, 10));
         outer.add(topPanels, BorderLayout.NORTH);
-        outer.add(inner, BorderLayout.CENTER);
+        outer.add(folderPanels, BorderLayout.CENTER);
         return outer;
     }
 
@@ -1082,6 +1136,66 @@ public class SettingsDialog extends JDialog {
                 new JComponent[]{chkDjMixDetection, chkDiscIdMatching, chkBandcampGuess, chkSyncPlaylists},
                 I18n.t("Derniers recours"));
 
+        // Critères anti-doublons, ordre configurable (2026-09-18, écart vs SongKong) — voir
+        // DuplicateDetector.Criterion pour le détail. Ordre = priorité de départage décroissante ;
+        // les éléments non déplacés restent dans l'ordre déjà connu de l'utilisateur (FORMAT,
+        // BITRATE, DURATION, FILENAME, CREATED, comportement historique si jamais touché).
+        java.util.Map<String, String> criterionLabels = java.util.Map.of(
+            "FORMAT",   I18n.t("Format (sans perte d'abord : FLAC/ALAC > MP3...)"),
+            "BITRATE",  I18n.t("Débit binaire (plus élevé = mieux)"),
+            "DURATION", I18n.t("Durée (plus longue = plus probablement complète)"),
+            "FILENAME", I18n.t("Nom de fichier (plus court = probablement l'original)"),
+            "CREATED",  I18n.t("Date du fichier (plus ancienne = probablement l'original)"));
+        duplicateCriteriaModel = new DefaultListModel<>();
+        JList<String> dupList = new JList<>(duplicateCriteriaModel);
+        dupList.setFont(dupList.getFont().deriveFont(12f));
+        dupList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override public Component getListCellRendererComponent(JList<?> l, Object value, int index,
+                    boolean isSelected, boolean cellHasFocus) {
+                JLabel c = (JLabel) super.getListCellRendererComponent(l, value, index, isSelected, cellHasFocus);
+                c.setText((index + 1) + ". " + criterionLabels.getOrDefault((String) value, (String) value));
+                return c;
+            }
+        });
+        JScrollPane dupScroll = new JScrollPane(dupList);
+        dupScroll.setPreferredSize(new Dimension(500, 110));
+
+        JButton btnDupUp   = new JButton("↑ " + I18n.t("Monter"));
+        JButton btnDupDown = new JButton("↓ " + I18n.t("Descendre"));
+        btnDupUp.addActionListener(e -> {
+            int i = dupList.getSelectedIndex();
+            if (i > 0) {
+                String v = duplicateCriteriaModel.remove(i);
+                duplicateCriteriaModel.add(i - 1, v);
+                dupList.setSelectedIndex(i - 1);
+            }
+        });
+        btnDupDown.addActionListener(e -> {
+            int i = dupList.getSelectedIndex();
+            if (i >= 0 && i < duplicateCriteriaModel.size() - 1) {
+                String v = duplicateCriteriaModel.remove(i);
+                duplicateCriteriaModel.add(i + 1, v);
+                dupList.setSelectedIndex(i + 1);
+            }
+        });
+        JPanel dupButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        dupButtons.add(btnDupUp);
+        dupButtons.add(btnDupDown);
+
+        JLabel dupHint = new JLabel(I18n.t(
+            "<html><i>Ordre utilisé pour choisir le «meilleur» fichier d'un groupe de "
+            + "doublons (Détecter les doublons…) — le 1er critère départage en priorité, les "
+            + "suivants seulement en cas d'égalité.</i></html>"));
+        dupHint.setBorder(new EmptyBorder(8, 0, 4, 0));
+        dupHint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
+
+        JPanel dupPanel = new JPanel(new BorderLayout(0, 6));
+        dupPanel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), I18n.t("Critères de détection des doublons")));
+        dupPanel.add(dupHint,    BorderLayout.NORTH);
+        dupPanel.add(dupScroll,  BorderLayout.CENTER);
+        dupPanel.add(dupButtons, BorderLayout.SOUTH);
+
         JPanel combined = new JPanel();
         combined.setLayout(new BoxLayout(combined, BoxLayout.Y_AXIS));
         combined.add(matchPanel);
@@ -1093,6 +1207,7 @@ public class SettingsDialog extends JDialog {
         combined.add(transPanel);
         combined.add(priorityInner);
         combined.add(lastResortPanel);
+        combined.add(dupPanel);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.add(combined, BorderLayout.NORTH);
@@ -2491,6 +2606,13 @@ public class SettingsDialog extends JDialog {
         for (String f : cfg.startupFolders())
             if (!f.isBlank()) startupFolderModel.addElement(f);
 
+        excludedFolderModel.clear();
+        for (String f : cfg.excludedFolders())
+            if (!f.isBlank()) excludedFolderModel.addElement(f);
+
+        duplicateCriteriaModel.clear();
+        for (String c : cfg.duplicateCriteriaOrder()) duplicateCriteriaModel.addElement(c);
+
         tfFfmpegPath    .setText(cfg.str("audio.ffmpeg_path",          "ffmpeg"));
         tfEssentiaPath  .setText(cfg.str("audio.essentia_path",        "essentia_streaming_extractor_music"));
         tfFpcalcPath    .setText(cfg.str("audio.fpcalc_path",          ""));
@@ -2741,6 +2863,17 @@ public class SettingsDialog extends JDialog {
             sb.append(startupFolderModel.get(i));
         }
         p.setProperty("startup.folders", sb.toString());
+
+        StringBuilder sbEx = new StringBuilder();
+        for (int i = 0; i < excludedFolderModel.size(); i++) {
+            if (i > 0) sbEx.append("|");
+            sbEx.append(excludedFolderModel.get(i));
+        }
+        p.setProperty("scan.excluded_folders", sbEx.toString());
+
+        java.util.List<String> dupOrder = new java.util.ArrayList<>();
+        for (int i = 0; i < duplicateCriteriaModel.size(); i++) dupOrder.add(duplicateCriteriaModel.get(i));
+        p.setProperty("duplicates.criteria_order", String.join(",", dupOrder));
 
         p.setProperty("audio.ffmpeg_path",             tfFfmpegPath.getText().trim());
         p.setProperty("audio.essentia_path",           tfEssentiaPath.getText().trim());

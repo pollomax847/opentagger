@@ -58,11 +58,25 @@ public class AudioScanner {
         for (File f : contenu) {
             if (cancelled.getAsBoolean()) return;
             if (f.isDirectory()) {
+                if (isExcluded(f)) continue;
                 scanRecursif(f, onFound, cancelled);
             } else if (isAudio(f)) {
                 onFound.accept(f);
             }
         }
+    }
+
+    /** true si {@code dir} correspond à un préfixe configuré dans Config.excludedFolders() —
+     *  comparaison par préfixe de chemin absolu normalisé (pas juste égalité stricte), pour qu'un
+     *  dossier exclu écarte aussi tous ses descendants sans avoir à les lister un par un. */
+    private boolean isExcluded(File dir) {
+        String[] excluded = Config.get().excludedFolders();
+        if (excluded.length == 0) return false;
+        String path = dir.getAbsolutePath();
+        for (String prefix : excluded) {
+            if (!prefix.isBlank() && (path.equals(prefix) || path.startsWith(prefix + File.separator))) return true;
+        }
+        return false;
     }
 
     private boolean isAudio(File f) {

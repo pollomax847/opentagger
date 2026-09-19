@@ -146,6 +146,52 @@ public class DuplicateDetector {
      */
     public static int qualityScore(FileEntry e) {
         File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+        return formatRank(f) + bitrateScore(e, f);
+    }
+
+    /** Critères disponibles pour départager un groupe de doublons, dans l'ordre configuré par
+     *  l'utilisateur (Préférences → Doublons) — écart trouvé vs SongKong (2026-09-18) : cette appli
+     *  laisse choisir ET classer 5 critères (Format/Débit/Durée/Nom de fichier/Date de création),
+     *  ici câblé en dur sur Format puis Débit uniquement jusqu'à ce correctif. FILENAME/CREATED
+     *  restent des heuristiques raisonnables plutôt qu'une vérité établie (un nom de fichier plus
+     *  court ou une date plus ancienne ne PROUVENT rien) — d'où leur priorité par défaut plus basse
+     *  que FORMAT/BITRATE, seuls signaux objectifs de qualité audio réelle. */
+    public enum Criterion { FORMAT, BITRATE, DURATION, FILENAME, CREATED }
+
+    /** Valeur du critère pour ce fichier — toujours "plus grand = meilleur" quel que soit le
+     *  critère (signe inversé pour FILENAME/CREATED, où c'est la plus PETITE valeur brute qui est
+     *  préférable), pour pouvoir chaîner tous les critères avec le même Comparator générique. */
+    private static long criterionValue(Criterion c, FileEntry e, File f) {
+        return switch (c) {
+            case FORMAT   -> formatRank(f);
+            case BITRATE  -> bitrateScore(e, f);
+            // Plus long = plus probablement complet (un doublon tronqué/coupé a une durée plus
+            // courte que l'original) — même logique de "complétude" que DurationMismatchReviewDialog.
+            case DURATION -> e.activeTags().durationSec;
+            // Plus court = probablement l'original plutôt qu'une copie suffixée "(2)"/"(3)" issue
+            // d'une fusion de dossiers (motif réel rencontré cette même nuit sur "Ride It (remixes)").
+            case FILENAME -> -f.getName().length();
+            // Plus ancien = probablement l'original plutôt qu'une copie re-déposée plus tard.
+            case CREATED  -> -f.lastModified();
+        };
+    }
+
+    /** Comparateur combiné, un critère à la fois dans l'ordre donné (le premier départage en
+     *  priorité, les suivants ne servent qu'en cas d'égalité stricte du précédent) — voir
+     *  Config.duplicateCriteriaOrder() pour la source de cet ordre. */
+    public static Comparator<FileEntry> buildComparator(List<Criterion> order) {
+        Comparator<FileEntry> cmp = null;
+        for (Criterion c : order) {
+            Comparator<FileEntry> step = Comparator.comparingLong(e -> {
+                File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+                return criterionValue(c, e, f);
+            });
+            cmp = (cmp == null) ? step : cmp.thenComparing(step);
+        }
+        return cmp != null ? cmp : Comparator.comparingInt(DuplicateDetector::qualityScore);
+    }
+
+    private static int formatRank(File f) {
         String extension = ext(f.getName()).toLowerCase();
         // ALAC (Apple Lossless) est TOUJOURS stocké avec l'extension .m4a sur disque — il n'existe
         // pas d'extension ".alac" en pratique, donc le cas "alac" ci-dessous ne pouvait jamais
@@ -157,7 +203,7 @@ public class DuplicateDetector {
         // pour lire le vrai type d'encodage ; repli silencieux sur le score .m4a par défaut si la
         // lecture échoue (fichier verrouillé/corrompu) ou si c'est bien de l'AAC.
         if ("m4a".equals(extension) && isActuallyAlac(f)) extension = "alac";
-        int formatScore = switch (extension) {
+        return switch (extension) {
             case "flac" -> 1_000_000;
             case "alac" -> 900_000;
             case "m4a"  -> 700_000;
@@ -167,7 +213,6 @@ public class DuplicateDetector {
             case "wma"  -> 300_000;
             default     -> 100_000;
         };
-        return formatScore + bitrateScore(e, f);
     }
 
     /**
@@ -187,11 +232,27 @@ public class DuplicateDetector {
         return (int) Math.min(f.length() / 1024, 999);
     }
 
-    /** Fichier avec le meilleur score de qualité dans le groupe. */
+    /** Fichier avec le meilleur score de qualité dans le groupe, selon l'ordre de critères
+     *  configuré (Config.duplicateCriteriaOrder() — Format+Débit par défaut, comportement
+     *  inchangé si l'utilisateur n'a jamais touché ce réglage). */
     public static FileEntry bestInGroup(List<FileEntry> files) {
-        return files.stream()
-            .max(Comparator.comparingInt(DuplicateDetector::qualityScore))
-            .orElse(files.get(0));
+        return bestInGroup(files, parseCriteriaOrder(com.opentagger.Config.get().duplicateCriteriaOrder()));
+    }
+
+    /** Config.duplicateCriteriaOrder() renvoie des noms bruts (Config ne dépend pas de cette
+     *  classe UI) — valeurs inconnues/obsolètes silencieusement ignorées plutôt que de planter sur
+     *  un settings.properties édité à la main ou issu d'une version antérieure. */
+    public static List<Criterion> parseCriteriaOrder(List<String> names) {
+        List<Criterion> order = new ArrayList<>();
+        for (String s : names) {
+            try { order.add(Criterion.valueOf(s)); } catch (IllegalArgumentException ignored) {}
+        }
+        if (order.isEmpty()) order.add(Criterion.FORMAT);
+        return order;
+    }
+
+    public static FileEntry bestInGroup(List<FileEntry> files, List<Criterion> order) {
+        return files.stream().max(buildComparator(order)).orElse(files.get(0));
     }
 
     /** Précalcule bestInGroup() pour chaque groupe en une seule passe — à appeler UNIQUEMENT en
@@ -203,8 +264,9 @@ public class DuplicateDetector {
      *  double [...] fige l'application"). Calculé une seule fois ici et réutilisé ensuite par
      *  DuplicatesDialog (buildGroup ET smartSelect) au lieu de rappeler bestInGroup(). */
     public static Map<DuplicateGroup, FileEntry> computeBestMap(List<DuplicateGroup> groups) {
+        List<Criterion> order = parseCriteriaOrder(com.opentagger.Config.get().duplicateCriteriaOrder());
         Map<DuplicateGroup, FileEntry> map = new LinkedHashMap<>();
-        for (DuplicateGroup g : groups) map.put(g, bestInGroup(g.files()));
+        for (DuplicateGroup g : groups) map.put(g, bestInGroup(g.files(), order));
         return map;
     }
 

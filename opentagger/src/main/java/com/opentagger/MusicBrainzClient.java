@@ -534,11 +534,34 @@ public class MusicBrainzClient {
                 }
             }
 
-            if (best == null || score > bestScore) { bestScore = score; best = r; }
+            if (best == null || score > bestScore) {
+                bestScore = score; best = r;
+            } else if (score == bestScore) {
+                // Départage par date à égalité stricte de score — écart trouvé vs OneTagger
+                // (crates/onetagger-tagger/src/lib.rs: sort_tracks, MultipleMatchesSort::
+                // {Oldest,Newest}, analyse du code source cloné 2026-09-18) : sans ce tie-break,
+                // seul l'ordre de retour de l'API MusicBrainz départageait deux releases par
+                // ailleurs identiques pour ce score — pas une vraie politique délibérée. Réutilise
+                // musicbrainz.preferred_year, une clé de réglage déjà présente dans
+                // settings.properties ("original") mais jamais lue nulle part avant ce correctif —
+                // "original" = préférer la date la PLUS ANCIENNE (probable édition d'origine,
+                // convention habituelle de taguage), toute autre valeur = la plus récente.
+                best = preferByYear(best, r);
+            }
         }
         if (best != null) return best;
         if (onlyOfficial) return null;
         return releases.get(0);
+    }
+
+    private JsonNode preferByYear(JsonNode a, JsonNode b) {
+        String dateA = a.path("date").asText("");
+        String dateB = b.path("date").asText("");
+        if (dateA.isBlank()) return dateB.isBlank() ? a : b;
+        if (dateB.isBlank()) return a;
+        boolean preferOldest = "original".equalsIgnoreCase(Config.get().str("musicbrainz.preferred_year", "original"));
+        int cmp = dateA.compareTo(dateB); // format ISO (YYYY ou YYYY-MM-DD) : comparable en texte
+        return preferOldest ? (cmp <= 0 ? a : b) : (cmp >= 0 ? a : b);
     }
 
     private void extractMediaInfo(JsonNode release, TagInfo info) {
@@ -999,6 +1022,10 @@ public class MusicBrainzClient {
      */
     private void extractRelations(JsonNode relations, TagInfo info) {
         if (!relations.isArray()) return;
+        // Solistes "Instrument: Nom" (ex. "Piano: Glenn Gould") — accumulés ici puis joints une
+        // seule fois à la fin (voir plus bas), pas directement dans info.performers à chaque tour
+        // de boucle pour ne pas avoir à re-parser la chaîne déjà écrite à chaque nouvelle relation.
+        List<String> performerCredits = new ArrayList<>();
         for (JsonNode rel : relations) {
             String type = rel.path("type").asText("").toLowerCase().trim();
             if (type.isBlank()) continue;
@@ -1036,10 +1063,34 @@ public class MusicBrainzClient {
                 case "choir", "chorus master"      -> { if (info.choir.isBlank())      { info.choir       = name; info.choirSort       = sortName; } }
                 case "engineer", "recording", "mastering", "balance"
                                                    -> { if (info.engineer.isBlank())   info.engineer      = name; }
-                case "performer", "instrument", "vocal"
-                                                   -> { /* géré par artist-credits */ }
+                case "remixer"                     -> { if (info.remixer.isBlank())   { info.remixer     = name; info.remixerSort     = sortName; } }
+                case "performer", "instrument", "vocal" -> {
+                    // Ex. attributs=["piano"] → "Piano: Glenn Gould" ; relation "performer" pure
+                    // (sans attribut, cas rare) → juste le nom, sans préfixe.
+                    JsonNode attrs = rel.path("attributes");
+                    String instrument = (attrs.isArray() && !attrs.isEmpty())
+                            ? attrs.get(0).asText("").trim() : "";
+                    String credit = instrument.isBlank()
+                            ? name
+                            : Character.toUpperCase(instrument.charAt(0)) + instrument.substring(1) + ": " + name;
+                    if (!credit.isBlank()) performerCredits.add(credit);
+                    // "choir"/"ensemble" comme TYPE de relation (cases juste au-dessus, "chorus
+                    // master" excepté) sont du code probablement mort côté MusicBrainz — vérifié
+                    // contre picard/mbjson.py: _ARTIST_REL_TYPES (analyse du code source Picard
+                    // cloné, 2026-09-18) : ni l'un ni l'autre n'y figure comme vrai type de relation.
+                    // Le crédit chœur remonte en réalité ici, comme ATTRIBUT d'une relation
+                    // "performer"/"vocal" (ex. "choir vocals") — routé en plus vers info.choir
+                    // (champ dédié déjà câblé partout) plutôt que seulement noyé dans performers.
+                    if (info.choir.isBlank() && instrument.toLowerCase().contains("choir")) {
+                        info.choir = name;
+                        info.choirSort = sortName;
+                    }
+                }
                 default -> {}
             }
+        }
+        if (info.performers.isBlank() && !performerCredits.isEmpty()) {
+            info.performers = String.join("; ", performerCredits);
         }
     }
 
@@ -1137,7 +1188,8 @@ public class MusicBrainzClient {
         // haut) : soit une structure en mouvements (relation "parts", quasi jamais présente hors
         // classique — symphonies, concertos, sonates...), soit un numéro de catalogue/opus détecté
         // (BWV/K./D./Hob./RV/Wq/HWV/BuxWV/opus, via attribut structuré MB ou motif du titre).
-        if (parentRel != null || !info.opus.isBlank() || !info.classicalCatalog.isBlank()) {
+        if ((parentRel != null || !info.opus.isBlank() || !info.classicalCatalog.isBlank())
+                && !ClassicalExceptions.isException(info.releaseMbid, info.releaseGroupMbid)) {
             info.isClassical = "1";
         }
     }

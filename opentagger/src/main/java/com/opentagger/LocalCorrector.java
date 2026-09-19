@@ -235,7 +235,13 @@ public class LocalCorrector {
                         .compile("\\b" + java.util.regex.Pattern.quote(n) + "\\b")
                         .matcher(artist).find();
             });
-            if (found) info.isClassical = "1";
+            // Exception ciblée par MBID (voir ClassicalExceptions) : une release peut avoir un
+            // artiste au nom coïncidant avec un chef/compositeur classique sans être elle-même
+            // classique — repli par identifiant précis là où le garde à bornes de mot ne peut pas
+            // trancher.
+            if (found && !ClassicalExceptions.isException(info.releaseMbid, info.releaseGroupMbid)) {
+                info.isClassical = "1";
+            }
         }
         // Script 3 : Set Classical Genre
         if ("1".equals(info.isClassical) && info.genre.isBlank()) {

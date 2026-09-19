@@ -351,6 +351,8 @@ public class FileRenamer {
         engine.put("genre",           safe(info.genre));
         engine.put("composer",        safe(info.composer));
         engine.put("conductor",       safe(info.conductor));
+        engine.put("performer",       safe(info.performers));
+        engine.put("remixer",         safe(info.remixer));
         // overallWork prime sur work (mouvement d'une œuvre parente vs pièce autonome) — même
         // logique que ClassicalDisplay.summarize(), voir son commentaire pour le détail des champs.
         engine.put("work",            safe(info.overallWork.isBlank() ? info.work : info.overallWork));
@@ -433,6 +435,33 @@ public class FileRenamer {
     // n'affecte en pratique que les cas déjà à risque.
     static final int MAX_SEGMENT_LENGTH = 180; // package-privé : réutilisé par TagWriter.translateKnownJaudiotaggerBug()
 
+    // Écart trouvé vs SongKong (analyse du jar décompilé, 2026-09-18) : SongKong mesure sa propre
+    // limite de segment en OCTETS UTF-8 (getBytes(UTF_8).length), pas en caractères — la vraie
+    // limite du système de fichiers (255 octets sur ext4) EST en octets. MAX_SEGMENT_LENGTH
+    // ci-dessus tronque à 180 CARACTÈRES, qui ne protège plus une fois qu'on dépasse ~1,4 octet/
+    // caractère en moyenne — exactement le cas d'un texte français riche en accents (chaque
+    // caractère accentué encode sur 2 octets en UTF-8), le type de contenu le plus fréquent ici.
+    private static final int MAX_SEGMENT_BYTES = 255;
+
+    /** Tronque {@code s} pour ne jamais dépasser {@code maxBytes} une fois encodé en UTF-8, sans
+     *  jamais couper une séquence multi-octets au milieu (ce qui produirait un caractère de
+     *  remplacement "�" illisible plutôt qu'un nom simplement plus court). Coupe caractère par
+     *  caractère (pas point de code — un émoji/caractère combiné coupé au milieu resterait un
+     *  nom de fichier moche mais valide, pas un vrai risque comme une coupure d'octet UTF-8). */
+    private static String truncateToUtf8Bytes(String s, int maxBytes) {
+        if (s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= maxBytes) return s;
+        int bytes = 0;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            int charBytes = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes + charBytes > maxBytes) break;
+            sb.append(c);
+            bytes += charBytes;
+        }
+        return sb.toString().trim();
+    }
+
     private String sanitize(String s) {
         if (s == null || s.isBlank()) return "";
         // Retirer l'extension audio si le tag la contient (ex: title="Song.mp3")
@@ -456,8 +485,11 @@ public class FileRenamer {
                 .replaceAll("\\.{2,}", ".")
                 .replaceAll("\\s+", " ")
                 .trim();
-        return cleaned.length() > MAX_SEGMENT_LENGTH
-                ? cleaned.substring(0, MAX_SEGMENT_LENGTH).trim() : cleaned;
+        if (cleaned.length() > MAX_SEGMENT_LENGTH) cleaned = cleaned.substring(0, MAX_SEGMENT_LENGTH).trim();
+        // Second passage en octets UTF-8 : le cap en caractères ci-dessus ne suffit plus dès qu'un
+        // segment est riche en caractères accentués (voir MAX_SEGMENT_BYTES) — sans effet sur le
+        // cas courant déjà couvert par les 180 caractères.
+        return truncateToUtf8Bytes(cleaned, MAX_SEGMENT_BYTES);
     }
 
     private String pad(String track) {
@@ -660,7 +692,15 @@ public class FileRenamer {
         // — ce qui restait ici est donc un doublon réel, jamais la seule copie existante.
         if (localCoverCandidateNames().contains(name)) return true;
         if (name.startsWith("opentagger_") && name.endsWith(".log")) return true;
-        return name.startsWith("._");
+        if (name.startsWith("._")) return true;
+        // Résidus système/tiers bien connus (liste SongKong delete_files.txt, écart trouvé en
+        // audit 2026-09-18) : Thumbs.db/desktop.ini (Windows, fréquents sur les dossiers réseau
+        // partagés), cddbinfo.txt (résidu de ripper CD), AMGReport.log (rapport SongKong/AMG). PDF/
+        // image génériques volontairement PAS ajoutés ici : contrairement à Thumbs.db, un PDF ou une
+        // image dans un dossier d'album peut être un vrai livret voulu par l'utilisateur, pas du
+        // résidu — cohérent avec la préférence déjà établie de rester non-destructif face au doute.
+        return name.equals("thumbs.db") || name.equals("desktop.ini")
+            || name.equals("cddbinfo.txt") || name.equals("amgreport.log");
     }
 
     // ── CLI ───────────────────────────────────────────────────────────────────

@@ -72,6 +72,8 @@ public class DetailPanel extends JPanel {
     private final JTextField tfEngineer    = tf(24);
     private final JTextField tfMixer       = tf(24);
     private final JTextField tfDjMixer     = tf(24);
+    private final JTextField tfPerformers  = tf(24);
+    private final JTextField tfRemixer     = tf(24);
     private final JTextField tfTitleSort       = tf(24);
     private final JTextField tfArtistSort      = tf(24);
     private final JTextField tfAlbumSort       = tf(24);
@@ -263,6 +265,8 @@ public class DetailPanel extends JPanel {
         set(tfEngineer,       t.engineer);
         set(tfMixer,          t.mixer);
         set(tfDjMixer,        t.djMixer);
+        set(tfPerformers,     t.performers);
+        set(tfRemixer,        t.remixer);
         set(tfTitleSort,      t.titleSort);
         set(tfArtistSort,     t.artistSort);
         set(tfAlbumSort,      t.albumSort);
@@ -380,6 +384,8 @@ public class DetailPanel extends JPanel {
         setM(tfEngineer,       tags, t -> t.engineer);
         setM(tfMixer,          tags, t -> t.mixer);
         setM(tfDjMixer,        tags, t -> t.djMixer);
+        setM(tfPerformers,     tags, t -> t.performers);
+        setM(tfRemixer,        tags, t -> t.remixer);
         setM(tfTitleSort,      tags, t -> t.titleSort);
         setM(tfArtistSort,     tags, t -> t.artistSort);
         setM(tfAlbumSort,      tags, t -> t.albumSort);
@@ -521,6 +527,8 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfEngineer)).isBlank())         t.engineer         = v;
             if (!(v = g(tfMixer)).isBlank())            t.mixer            = v;
             if (!(v = g(tfDjMixer)).isBlank())          t.djMixer          = v;
+            if (!(v = g(tfPerformers)).isBlank())       t.performers       = v;
+            if (!(v = g(tfRemixer)).isBlank())          t.remixer          = v;
             if (!(v = g(tfTitleSort)).isBlank())        t.titleSort        = v;
             if (!(v = g(tfArtistSort)).isBlank())       t.artistSort       = v;
             if (!(v = g(tfAlbumSort)).isBlank())        t.albumSort        = v;
@@ -615,6 +623,8 @@ public class DetailPanel extends JPanel {
         t.engineer         = g(tfEngineer);
         t.mixer            = g(tfMixer);
         t.djMixer          = g(tfDjMixer);
+        t.performers       = g(tfPerformers);
+        t.remixer          = g(tfRemixer);
         t.titleSort        = g(tfTitleSort);
         t.artistSort       = g(tfArtistSort);
         t.albumSort        = g(tfAlbumSort);
@@ -719,6 +729,8 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Ingénieur son :"),      tfEngineer);
         fields.put(I18n.t("Mixage :"),             tfMixer);
         fields.put(I18n.t("DJ Mixer :"),           tfDjMixer);
+        fields.put(I18n.t("Interprètes (solistes) :"), tfPerformers);
+        fields.put(I18n.t("Remixeur :"),               tfRemixer);
         fields.put(I18n.t("─── Tris ───"),         sep());
         fields.put(I18n.t("Tri titre :"),          tfTitleSort);
         fields.put(I18n.t("Tri artiste :"),        tfArtistSort);
@@ -1040,6 +1052,8 @@ public class DetailPanel extends JPanel {
         hl(tfEngineer,        g(tfEngineer),        before.engineer);
         hl(tfMixer,           g(tfMixer),           before.mixer);
         hl(tfDjMixer,         g(tfDjMixer),         before.djMixer);
+        hl(tfPerformers,      g(tfPerformers),      before.performers);
+        hl(tfRemixer,         g(tfRemixer),         before.remixer);
         hl(tfTitleSort,       g(tfTitleSort),       before.titleSort);
         hl(tfArtistSort,      g(tfArtistSort),      before.artistSort);
         hl(tfAlbumSort,       g(tfAlbumSort),       before.albumSort);
@@ -1138,7 +1152,7 @@ public class DetailPanel extends JPanel {
             tfWork, tfWorkMbid, tfMovement, tfMovementNo, tfMovementTotal,
             tfPart, tfPeriod, tfOpus, tfClassicalCatalog, tfClassicalNickname,
             tfSection, tfOverallWork, tfGrouping,
-            tfLyricist, tfProducer, tfArranger, tfEngineer, tfMixer, tfDjMixer,
+            tfLyricist, tfProducer, tfArranger, tfEngineer, tfMixer, tfDjMixer, tfPerformers, tfRemixer,
             tfTitleSort, tfArtistSort, tfAlbumSort, tfAlbumArtistSort,
             tfConductorSort, tfOrchestraSort,
             tfBpm, tfKey, tfLanguage, tfRating, tfIsrc, tfAmazonId, tfTags,

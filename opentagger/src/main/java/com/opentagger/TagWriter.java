@@ -467,6 +467,8 @@ public class TagWriter {
         sf(tag, FieldKey.ENGINEER,           i.engineer);
         sf(tag, FieldKey.MIXER,              i.mixer);
         sf(tag, FieldKey.DJMIXER,            i.djMixer);
+        sf(tag, FieldKey.PERFORMER,          i.performers);
+        sf(tag, FieldKey.REMIXER,            i.remixer);
 
         // ── Classique ────────────────────────────────────────────────────────
         sf(tag, FieldKey.WORK,               i.work);
@@ -789,6 +791,8 @@ public class TagWriter {
         apFreeform(cmd, "ENGINEER",  i.engineer);
         apFreeform(cmd, "MIXER",     i.mixer);
         apFreeform(cmd, "DJMIXER",   i.djMixer);
+        apFreeform(cmd, "PERFORMER", i.performers);
+        apFreeform(cmd, "REMIXER",   i.remixer);
 
         apFreeform(cmd, "WORK",                i.work);
         apFreeform(cmd, "MusicBrainz Work Id",  i.workMbid);

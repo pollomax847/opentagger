@@ -1322,11 +1322,14 @@ public class MainFrame extends JFrame {
         // ne plus se lire à tort comme une 6e fenêtre de revue.
         JMenu rapports = new JMenu(I18n.t("Rapports"));
         rapports.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
+        rapports.add(mitem(I18n.t("Revue rapide (notation)…"), "ctrl R", e -> openQuickReview()));
         rapports.add(mitem(I18n.t("Revue des durées incohérentes…"), null,
             e -> new DurationMismatchReviewDialog(this, tableModel).setVisible(true)));
         rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         rapports.add(mitem(I18n.t("Rapport Non identifiés…"), null,
             e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
+        rapports.add(mitem(I18n.t("Rapport de complétude…"), null,
+            e -> new CompletenessReportDialog(this, tableModel).setVisible(true)));
         rapports.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
             e -> new CompilationRestoreReportDialog(this).setVisible(true)));
         rapports.addSeparator();
@@ -3369,6 +3372,44 @@ public class MainFrame extends JFrame {
         } finally {
             if (rows.length == 1) correctionsCache.close();
         }
+    }
+
+    /** Fenêtre de sélection courante (≥1 ligne), ou message de statut si vide — point d'entrée du
+     *  menu "Revue rapide (notation)…". Même garde que applyDetail() (rows.length==0 → rien à
+     *  faire) : la revue rapide agit sur la sélection, pas sur toute la bibliothèque, pour laisser
+     *  l'utilisateur cibler (ex. "Sélectionner les tagués" avant de lancer la revue). */
+    private void openQuickReview() {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) {
+            setStatus(I18n.t("Sélectionne d'abord les fichiers à noter (aucune sélection)."));
+            return;
+        }
+        List<FileEntry> selected = new ArrayList<>();
+        for (int row : rows) {
+            FileEntry e = entryAtViewRow(row);
+            if (e != null) selected.add(e); // null = ligne d'en-tête de groupe, ignorée
+        }
+        if (selected.isEmpty()) return;
+        new QuickReviewDialog(this, selected).setVisible(true);
+    }
+
+    /** Appelé par {@link QuickReviewDialog} à chaque note posée — même séquence que la branche
+     *  fichier unique de {@link #applyDetail()} (snapshot undo, écriture immédiate, suivi iTunes,
+     *  traçabilité des corrections), juste sans passer par DetailPanel puisque la revue rapide ne
+     *  touche que le champ note. {@code cache} reste ouvert par l'appelant pour toute la durée de
+     *  la session de revue (potentiellement des dizaines de notes en rafale) plutôt que rouvert à
+     *  chaque frappe. */
+    void quickReviewSave(MetadataCache cache, FileEntry e, String newRating) {
+        int mr = tableModel.indexOf(e);
+        if (mr < 0) return;
+        TagInfo snap = com.opentagger.UndoManager.snapshot(e.activeTags());
+        TagInfo ti   = e.activeTags();
+        ti.rating = newRating;
+        refreshTableRow(mr, ti);
+        undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Note rapide %s", e.filename()));
+        recordFieldCorrections(cache, e, snap, ti);
+        if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
+        if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
     }
 
     /**
@@ -6734,6 +6775,8 @@ public class MainFrame extends JFrame {
             ti.engineer       = g(tag, FieldKey.ENGINEER);
             ti.mixer          = g(tag, FieldKey.MIXER);
             ti.djMixer        = g(tag, FieldKey.DJMIXER);
+            ti.performers     = g(tag, FieldKey.PERFORMER);
+            ti.remixer        = g(tag, FieldKey.REMIXER);
 
             // ── Classique ─────────────────────────────────────────────────
             ti.work           = g(tag, FieldKey.WORK);
@@ -7808,6 +7851,10 @@ public class MainFrame extends JFrame {
              *  l'audio ailleurs, ou jusqu'à la racine du scan si aucun n'en a. */
             boolean scanDir(File dir) {
                 if (isCancelled()) return true; // ne rien signaler en cas d'annulation
+                // Config.excludedFolders() (2026-09-18) : jamais parcouru ni signalé, comme le
+                // scan de démarrage (AudioScanner.isExcluded()) — traité comme "a de l'audio" pour
+                // ne jamais remonter comme candidat orphelin, sans même lister son contenu.
+                if (isExcludedPath(dir)) return true;
                 File[] children = dir.listFiles();
                 if (children == null) return true; // inaccessible : ne jamais y toucher
                 scanned++;
@@ -7920,13 +7967,22 @@ public class MainFrame extends JFrame {
                         // moveToTrash() n'est PAS supporté sur cette machine, l'ancien code ici
                         // tombait donc dans deleteRecursively() — suppression DÉFINITIVE d'un
                         // dossier entier, en silence, malgré le message affiché à l'utilisateur.
-                        int deleted = 0, failDel = 0;
+                        // RE-vérification juste avant le déplacement (2026-09-18) : depuis que ce
+                        // scan peut tourner PENDANT un lot de taguage (voir WorkerHub.conflictsWith,
+                        // exception TAGGING/ORPHAN_CLEANUP), un dossier vu "sans audio" au moment du
+                        // scan a pu légitimement en recevoir un entre-temps — surtout ici, où
+                        // l'utilisateur a pu laisser la boîte de confirmation ouverte un moment.
+                        int deleted = 0, failDel = 0, skippedNowNotEmpty = 0;
                         for (OrphanDir od : trashCandidates) {
+                            if (hasAnyAudioNow(od.dir())) { skippedNowNotEmpty++; continue; }
                             boolean moved = com.opentagger.TrashHelper.moveDirToTrash(od.dir());
                             if (moved) deleted++; else failDel++;
                         }
-                        String msg = I18n.t("%d dossier(s) orphelin(s) déplacé(s) dans la corbeille%s", deleted,
-                                failDel > 0 ? I18n.t(", %d échec(s)", failDel) : "");
+                        String msg = I18n.t("%d dossier(s) orphelin(s) déplacé(s) dans la corbeille%s%s", deleted,
+                                failDel > 0 ? I18n.t(", %d échec(s)", failDel) : "",
+                                skippedNowNotEmpty > 0
+                                    ? I18n.t(", %d ignoré(s) (a reçu de l'audio entre-temps)", skippedNowNotEmpty)
+                                    : "");
                         setStatus(msg);
                         // Pop-up de résultat manquante jusqu'à ce correctif (2026-09-06) — seul le
                         // texte de la barre de statut changeait, facilement manqué (retour direct de
@@ -7940,6 +7996,32 @@ public class MainFrame extends JFrame {
                             + "audio mais avec du contenu non reconnu (jamais touchés automatiquement).",
                             scanned, unknownFolders));
                 }
+            }
+
+            boolean isExcludedPath(File dir) {
+                String[] excluded = com.opentagger.Config.get().excludedFolders();
+                if (excluded.length == 0) return false;
+                String path = dir.getAbsolutePath();
+                for (String prefix : excluded) {
+                    if (!prefix.isBlank() && (path.equals(prefix) || path.startsWith(prefix + File.separator))) return true;
+                }
+                return false;
+            }
+
+            /** Re-scan minimal (juste KNOWN_AUDIO, aucune sonde ffprobe) juste avant de déplacer un
+             *  dossier candidat vers la corbeille — voir le commentaire d'appel. Volontairement plus
+             *  strict/simple que scanDir() (pas de repli AudioFormatCheck sur extension inconnue) :
+             *  ici on cherche juste "un fichier audio a-t-il été déposé depuis le scan", pas à
+             *  reclasser finement un résidu ambigu. */
+            boolean hasAnyAudioNow(File dir) {
+                File[] children = dir.listFiles();
+                if (children == null) return false;
+                for (File f : children) {
+                    if (f.isDirectory()) { if (hasAnyAudioNow(f)) return true; continue; }
+                    String lower = f.getName().toLowerCase();
+                    if (KNOWN_AUDIO.stream().anyMatch(lower::endsWith)) return true;
+                }
+                return false;
             }
 
             boolean deleteRecursively(File dir) {

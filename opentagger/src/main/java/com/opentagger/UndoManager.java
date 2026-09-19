@@ -28,7 +28,11 @@ import java.util.function.Function;
  */
 public class UndoManager {
 
-    public static final int MAX_HISTORY = 100;
+    // 100 → 1000 (2026-09-18) : la persistance (voir Javadoc de classe) existe déjà depuis le
+    // 2026-08-16, mais un plafond aussi bas limitait la fenêtre "restaurable des semaines après"
+    // à quelques dizaines de minutes de travail actif sur une bibliothèque de cette taille — 1000
+    // TagInfo (avant+après, JSON compact) restent négligeables en SQLite comme en mémoire.
+    public static final int MAX_HISTORY = 1000;
 
     /** Une commande = snapshot avant + snapshot après + référence à l'entrée. */
     public record Command(FileEntry entry, TagInfo before, TagInfo after, String description) {}

@@ -67,6 +67,15 @@ public class TagInfo {
     public String engineer            = "";
     public String mixer               = "";
     public String mixerSort           = "";
+    // "Instrument: Nom" par soliste, joints par "; " — relations MB "performer"/"instrument"/
+    // "vocal" (2026-09-18, écart trouvé vs SongKong : ces relations existaient déjà dans les
+    // réponses MB mais n'étaient jamais lues, contrairement à composer/conductor/orchestra...).
+    public String performers          = "";
+    // Écart trouvé vs OneTagger (2026-09-18, analyse du code source cloné + binaire local) : champ
+    // dédié absent d'OpenTagger, alors que la bibliothèque contient de vrais remixes crédités MB
+    // (ex. "Ride It (Lenjix remix)", vérifié en direct sur MusicBrainz — relation "remixer" réelle).
+    public String remixer             = "";
+    public String remixerSort         = "";
     public String djMixer             = "";
 
     // ── Classique — hiérarchie Work ──────────────────────────────────────────

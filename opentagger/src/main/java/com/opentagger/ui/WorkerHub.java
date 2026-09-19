@@ -212,6 +212,16 @@ public final class WorkerHub {
         // pas juste résoudre la famine.
         if ((a == TaskKind.TAGGING && b == TaskKind.INFO_COMPLETER)
                 || (a == TaskKind.INFO_COMPLETER && b == TaskKind.TAGGING)) return false;
+        // ORPHAN_CLEANUP (cleanOrphanFolders()) : la passe de scan elle-même ne fait QUE lire
+        // (File.listFiles()) et ne touche le disque qu'après confirmation explicite de
+        // l'utilisateur (JOptionPane, voir MainFrame.cleanOrphanFolders()) — demandé le 2026-09-18
+        // pour pouvoir lancer la recherche pendant qu'un lot de taguage tourne, plutôt que
+        // d'attendre des jours qu'il se termine. Risque résiduel accepté : un dossier vu "sans
+        // audio" au moment du scan pourrait légitimement en recevoir un pendant que l'utilisateur
+        // regarde encore la boîte de confirmation — couvert par une RE-vérification juste avant le
+        // déplacement effectif en corbeille (voir cleanOrphanFolders(), pas ici).
+        if ((a == TaskKind.TAGGING && b == TaskKind.ORPHAN_CLEANUP)
+                || (a == TaskKind.ORPHAN_CLEANUP && b == TaskKind.TAGGING)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction

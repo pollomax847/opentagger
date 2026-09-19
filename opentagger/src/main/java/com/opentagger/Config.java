@@ -287,6 +287,32 @@ public class Config {
         return v.isBlank() ? new String[0] : v.split("\\|");
     }
 
+    /** Dossiers (préfixes de chemin absolu) jamais parcourus, ni au scan de démarrage ni par
+     *  "Nettoyer les dossiers orphelins" — écart trouvé vs SongKong ({@code excluded_folder.txt},
+     *  2026-09-18) : utile sur cette machine où le pool mergerfs partage ses disques physiques avec
+     *  Plex/Headphones/PhotoPrism/Docker (dossiers de travail d'autres apps qu'on ne veut jamais
+     *  voir remonter comme "orphelins"). Même format pipe-séparé que startupFolders(). */
+    public String[] excludedFolders() {
+        String v = str("scan.excluded_folders");
+        return v.isBlank() ? new String[0] : v.split("\\|");
+    }
+
+    /** Ordre de priorité des critères anti-doublons (Format/Débit/Durée/Nom/Date), en noms bruts —
+     *  écart trouvé vs SongKong (2026-09-18), voir DuplicateDetector.Criterion (paquet ui, pas
+     *  référencé ici pour ne pas faire dépendre Config d'une classe UI) pour le détail de chaque
+     *  critère et le parsing réel. Défaut = FORMAT,BITRATE, identique au comportement câblé en dur
+     *  avant ce correctif — un utilisateur qui n'a jamais ouvert ce réglage ne voit aucun changement. */
+    public java.util.List<String> duplicateCriteriaOrder() {
+        String v = str("duplicates.criteria_order", "FORMAT,BITRATE");
+        java.util.List<String> order = new java.util.ArrayList<>();
+        for (String s : v.split(",")) if (!s.isBlank()) order.add(s.trim());
+        if (order.isEmpty()) order.add("FORMAT");
+        return order;
+    }
+    public void setDuplicateCriteriaOrder(java.util.List<String> order) {
+        set("duplicates.criteria_order", String.join(",", order));
+    }
+
     public String userAgent() {
         return "OpenTagger/" + appVersion() + " (" + contact() + ")";
     }
