@@ -1119,9 +1119,12 @@ public class SettingsDialog extends JDialog {
             "Pour un dossier avec assez de pistes numérotées 1..N sans trou : calcule un TOC "
             + "(comme un CD) depuis les durées de fichier et interroge MusicBrainz — un seul appel "
             + "réseau pour tout l'album, avant AcoustID/SongRec."));
-        chkBandcampGuess = new JCheckBox(I18n.t("Deviner et vérifier une page Bandcamp en dernier recours"));
+        chkBandcampGuess = new JCheckBox(I18n.t("Deviner et vérifier une page Bandcamp automatiquement (dernier recours)"));
         chkBandcampGuess.setToolTipText(I18n.t(
-            "Uniquement si RIEN d'autre n'a identifié le fichier : devine une URL "
+            "Désactivé par défaut (rendement mesuré en prod : ~0,4%%, 4 succès / 919 essais) — "
+            + "inclut cette étape dans le taguage normal, pour CHAQUE fichier non identifié par "
+            + "ailleurs. Sans cette case, la même devinette Bandcamp reste disponible à la demande "
+            + "via le menu Retraitement, sur une sélection précise. Si activée : devine une URL "
             + "artiste.bandcamp.com/track/titre depuis les tags, et n'applique que si le contenu "
             + "récupéré correspond vraiment (jamais de fausse donnée sur un essai raté)."));
         chkSyncPlaylists = new JCheckBox(I18n.t("Corriger les playlists (.m3u/.pls) lors d'un renommage"));

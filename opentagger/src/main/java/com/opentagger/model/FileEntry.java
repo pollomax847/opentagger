@@ -40,6 +40,14 @@ public class FileEntry {
     /** Forcer la ré-identification même si le cache ou les tags MB existants sont valides. */
     public boolean forceReidentify = false;
 
+    /** Ignorer toute la cascade d'identification normale et n'essayer QUE la devinette Bandcamp
+     *  (voir TaggingWorker.tryBandcampGuess()) — déclenchement manuel dédié (menu "Retraitement"),
+     *  demande utilisateur 2026-09-19 après avoir constaté que l'étape automatique (6a, tout en bas
+     *  de la cascade) est en pratique un pari à faible rendement (4 succès / 919 essais mesurés en
+     *  prod) : plutôt que de la retirer, elle devient une action à la demande façon MetaGrater de
+     *  SongKong, au lieu de tourner sur tout le lot à chaque taguage. */
+    public boolean bandcampOnly = false;
+
     /** SKIPPED spécifiquement parce que la durée du fichier ne correspond pas à celle déclarée par
      *  MusicBrainz pour l'enregistrement identifié (voir {@link #isDurationMismatch}) — pas
      *  une simple non-identification. Distingue ce cas pour le déplacement optionnel dédié (voir

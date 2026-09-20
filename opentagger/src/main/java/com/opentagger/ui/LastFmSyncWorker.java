@@ -45,8 +45,10 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
             return null;
         }
 
+        log(I18n.t("Récupération des statistiques Last.fm pour \"%s\"…", username));
         onProgress.accept(I18n.t("Récupération des statistiques Last.fm pour \"%s\"…", username));
         Map<String, Integer> counts = client.fetchTopTrackCounts(username, Config.get().lastfmMaxTracks());
+        log(I18n.t("%d piste(s) dans le classement Last.fm récupéré.", counts.size()));
         onProgress.accept(I18n.t("%d piste(s) dans le classement Last.fm récupéré.", counts.size()));
 
         int total = entries.size();
@@ -77,13 +79,17 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
                     ef.message = I18n.t("Last.fm : %d écoute(s)", countFinal);
                     onUpdate.accept(ef);
                 });
+                log("  " + entry.filename() + " → Last.fm " + countFinal + " écoute(s)");
                 updated++;
             } catch (Exception ex) {
+                log("  ✗ " + entry.filename() + " : " + ex.getMessage());
                 onProgress.accept("  ✗ " + entry.filename() + " : " + ex.getMessage());
                 errors++;
             }
         }
 
+        log(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
+                updated, skipped, errors));
         onProgress.accept(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
                 updated, skipped, errors));
         return null;
@@ -92,6 +98,13 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
     @Override
     protected void process(List<FileEntry> chunks) {
         // rien : les mises à jour sont déjà publiées via onUpdate/invokeLater dans doInBackground()
+    }
+
+    /** Voir ListenBrainzSyncWorker.log() pour le pourquoi complet — même trou de journalisation,
+     *  même correctif, même format que le reste du pipeline. */
+    private static void log(String msg) {
+        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg);
+        System.out.flush();
     }
 
     public int getUpdated() { return updated; }

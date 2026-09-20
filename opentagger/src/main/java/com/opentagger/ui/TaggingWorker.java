@@ -501,8 +501,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             log(I18n.t("  findTags..."));
-            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, mb, acoustId, lastFm, cache, groupKey);
+            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, entry.bandcampOnly, mb, acoustId, lastFm, cache, groupKey);
             entry.forceReidentify = false;
+            entry.bandcampOnly    = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
             log(I18n.t("  findTags → %s résultat(s)%s", results.size(),
                 results.isEmpty() ? "" : " score=" + results.get(0).score));
@@ -568,6 +569,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // dès le premier tour, aboutissant à tort à "durée incohérente" pour un cas qui n'a
             // simplement pas de durée MB de référence.
             TagInfo durationOk = unverifiedFallback ? best : null;
+            // Candidat le plus proche en durée parmi ceux réellement testés ci-dessous — pour que le
+            // message affiché en cas de rejet total (voir plus bas) montre le candidat le plus
+            // pertinent, pas systématiquement le premier/mieux scoré (results.get(0) via `best`), qui
+            // peut être un écart énorme alors qu'un autre candidat, rejeté aussi mais bien plus
+            // proche, donnerait un message plus honnête sur ce qui a vraiment été essayé.
+            TagInfo closestMiss = null;
             if (!unverifiedFallback) {
                 for (TagInfo candidate : results) {
                     if (candidate.score < seuil) break; // triés par score décroissant : la suite ne fera que pire
@@ -595,19 +602,25 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         durationOk = candidate;
                         break;
                     }
+                    if (candidate.mbDurationSec > 0 && (closestMiss == null
+                            || Math.abs(candidate.mbDurationSec - entry.current.durationSec)
+                             < Math.abs(closestMiss.mbDurationSec - entry.current.durationSec))) {
+                        closestMiss = candidate;
+                    }
                 }
             }
             if (durationOk == null) {
+                TagInfo shown = closestMiss != null ? closestMiss : best;
                 entry.candidates = results;
                 entry.status = FileEntry.Status.SKIPPED;
                 entry.durationMismatch = true;
                 entry.skipReason = com.opentagger.model.SkipReason.DURATION_MISMATCH;
                 entry.message = I18n.t("Durée incohérente : fichier %s vs MusicBrainz %s (%s)",
                     FileTableModel.formatDuration(entry.current.durationSec),
-                    FileTableModel.formatDuration(best.mbDurationSec), best.title)
+                    FileTableModel.formatDuration(shown.mbDurationSec), shown.title)
                         + videoHintIfAny(fichier);
                 log(I18n.t("  SKIPPED durée incohérente (%ds vs %ds)",
-                    entry.current.durationSec, best.mbDurationSec));
+                    entry.current.durationSec, shown.mbDurationSec));
                 return;
             }
             best = durationOk;
@@ -1202,10 +1215,29 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // ── Résolution des tags — avec cache SQLite ───────────────────────────────
 
     private List<TagInfo> findTags(File fichier, TagInfo existingTags, boolean forceReidentify,
+                                    boolean bandcampOnly,
                                     MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm,
                                     MetadataCache cache, String groupKey) throws Exception {
         // 0-pre. Réparer les M4A avec structure mdat<moov non lisible par jaudiotagger
         if (TagWriter.repairM4aIfNeeded(fichier)) log(I18n.t("  M4A réparé OK"));
+
+        // Mode dédié (FileEntry.bandcampOnly, déclenché via le menu Retraitement) : court-circuite
+        // toute la cascade normale (historique, cache, MB, AcoustID/SongRec...) et n'essaie QUE la
+        // devinette Bandcamp, à partir des tags actuels du fichier — voir tryBandcampGuess() et son
+        // appel normal en 6a plus bas (même logique, factorisée). Contrairement à forceReidentify,
+        // ne touche ni le cache ni les MBID déjà présents sur le fichier : ce mode s'applique à des
+        // fichiers déjà SKIPPED, rien à préserver ni à effacer.
+        if (bandcampOnly) {
+            String bcArtist = cleanSearchTerm(readTag(fichier, FieldKey.ARTIST));
+            String bcTitle  = cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
+            bcArtist = collapseSelfConcatenatedTitle(bcArtist);
+            bcTitle  = collapseSelfConcatenatedTitle(bcTitle);
+            if (isGenericTag(bcArtist)) bcArtist = "";
+            if (isGenericTag(bcTitle))  bcTitle  = "";
+            boolean nonLatin = TagEnrichment.hasNonLatinChars(bcArtist) || TagEnrichment.hasNonLatinChars(bcTitle);
+            TagInfo bc = nonLatin ? null : tryBandcampGuess(fichier, bcArtist, bcTitle);
+            return bc != null ? List.of(bc) : List.of();
+        }
 
         // Indice d'album : tag existant > nom du dossier parent.
         // Permet à pickBestRelease() de favoriser la release MB qui correspond au dossier iTunes.
@@ -2028,42 +2060,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // volume de requêtes vers un site tiers scrapé sans API officielle à la seule fraction de
         // bibliothèque réellement bloquée ailleurs, pas toute la bibliothèque.
         if (results.isEmpty() && !nonLatinInput && Config.get().bandcampGuessEnabled()) {
-            String ytUrl = YouTubeOEmbedClient.extractUrl(readTag(fichier, FieldKey.COMMENT));
-            TagInfo ytInfo = ytUrl != null ? YouTubeOEmbedClient.fetch(ytUrl) : null;
-            String bcArtist = artist, bcTitle = title;
-            if (ytInfo != null && !ytInfo.title.isBlank()) {
-                if (!ytInfo.artist.isBlank()) bcArtist = ytInfo.artist;
-                bcTitle = ytInfo.title;
-            }
-            String guessUrl = BandcampClient.guessTrackUrl(bcArtist, bcTitle);
-            if (guessUrl != null) {
-                try {
-                    var bc = BandcampClient.fetchTrack(guessUrl);
-                    if (bc != null && !bc.title().isBlank() && !bc.artist().isBlank()
-                            && TrackMatcher.titleSimilarity(bc.title().toLowerCase(), bcTitle.toLowerCase())
-                                    >= Config.get().trackMatchingThreshold()
-                            && TrackMatcher.titleSimilarity(bc.artist().toLowerCase(), bcArtist.toLowerCase())
-                                    >= Config.get().trackMatchingThreshold()) {
-                        TagInfo bcInfo = new TagInfo();
-                        bcInfo.artist      = bc.artist();
-                        bcInfo.title       = bc.title();
-                        bcInfo.albumArtist = bc.artist();
-                        if (!bc.album().isBlank()) bcInfo.album = bc.album();
-                        java.util.regex.Matcher ym = java.util.regex.Pattern.compile("\\b(\\d{4})\\b")
-                                .matcher(bc.releaseDate());
-                        if (ym.find()) bcInfo.year = ym.group(1);
-                        // Score légèrement > le repli "tags existants" (50, voir 6b) : celui-ci est
-                        // confirmé par une source externe, pas une simple confiance dans le fichier.
-                        bcInfo.score = 55;
-                        log(I18n.t("  Bandcamp (URL devinée, vérifiée) → %s – %s [%s]",
-                                bc.artist(), bc.title(), guessUrl));
-                        lastFindTagsSource.set(MetadataCache.SOURCE_BANDCAMP);
-                        return List.of(bcInfo);
-                    }
-                } catch (Exception e) {
-                    log(I18n.t("  Bandcamp devinette échouée/non trouvée : %s", e.getMessage()));
-                }
-            }
+            TagInfo bc = tryBandcampGuess(fichier, artist, title);
+            if (bc != null) return List.of(bc);
         }
 
         // 6b. Dernier recours : rien n'a été confirmé, mais les tags déjà présents sur le fichier
@@ -2116,6 +2114,51 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
         return results;
+    }
+
+    /** Devine puis vérifie une page piste Bandcamp depuis artiste+titre (voir BandcampClient.
+     *  guessTrackUrl/fetchTrack) — extrait de l'étape 6a de findTags() (2026-09-19) pour être
+     *  réutilisable tel quel par le mode {@code bandcampOnly} (déclenchement manuel, menu
+     *  Retraitement), sans dupliquer la logique de vérification (TrackMatcher.titleSimilarity sur
+     *  artiste ET titre — un essai qui ne correspond pas échoue silencieusement, jamais de fausse
+     *  donnée écrite). Retourne {@code null} si rien de vérifié n'a été trouvé. */
+    private TagInfo tryBandcampGuess(File fichier, String artist, String title) {
+        String ytUrl = YouTubeOEmbedClient.extractUrl(readTag(fichier, FieldKey.COMMENT));
+        TagInfo ytInfo = ytUrl != null ? YouTubeOEmbedClient.fetch(ytUrl) : null;
+        String bcArtist = artist, bcTitle = title;
+        if (ytInfo != null && !ytInfo.title.isBlank()) {
+            if (!ytInfo.artist.isBlank()) bcArtist = ytInfo.artist;
+            bcTitle = ytInfo.title;
+        }
+        String guessUrl = BandcampClient.guessTrackUrl(bcArtist, bcTitle);
+        if (guessUrl == null) return null;
+        try {
+            var bc = BandcampClient.fetchTrack(guessUrl);
+            if (bc != null && !bc.title().isBlank() && !bc.artist().isBlank()
+                    && TrackMatcher.titleSimilarity(bc.title().toLowerCase(), bcTitle.toLowerCase())
+                            >= Config.get().trackMatchingThreshold()
+                    && TrackMatcher.titleSimilarity(bc.artist().toLowerCase(), bcArtist.toLowerCase())
+                            >= Config.get().trackMatchingThreshold()) {
+                TagInfo bcInfo = new TagInfo();
+                bcInfo.artist      = bc.artist();
+                bcInfo.title       = bc.title();
+                bcInfo.albumArtist = bc.artist();
+                if (!bc.album().isBlank()) bcInfo.album = bc.album();
+                java.util.regex.Matcher ym = java.util.regex.Pattern.compile("\\b(\\d{4})\\b")
+                        .matcher(bc.releaseDate());
+                if (ym.find()) bcInfo.year = ym.group(1);
+                // Score légèrement > le repli "tags existants" (50, voir 6b) : celui-ci est
+                // confirmé par une source externe, pas une simple confiance dans le fichier.
+                bcInfo.score = 55;
+                log(I18n.t("  Bandcamp (URL devinée, vérifiée) → %s – %s [%s]",
+                        bc.artist(), bc.title(), guessUrl));
+                lastFindTagsSource.set(MetadataCache.SOURCE_BANDCAMP);
+                return bcInfo;
+            }
+        } catch (Exception e) {
+            log(I18n.t("  Bandcamp devinette échouée/non trouvée : %s", e.getMessage()));
+        }
+        return null;
     }
 
     // clusterAlbums()/findBestTrack()/titleSimilarity() : extraits vers AlbumClusterWorker

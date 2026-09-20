@@ -34,6 +34,15 @@ public final class ITunesXmlSyncQueue {
         knownTrackIdByPath.put(path.toAbsolutePath().normalize(), trackId);
     }
 
+    /** Track ID iTunes connu pour ce chemin (import antérieur — voir registerKnownPath()), ou -1 si
+     *  inconnu — utilisé par ITunesLibraryExporter pour garder le même Track ID d'un export complet
+     *  à l'autre pour les pistes déjà connues du vrai iTunes, plutôt que d'en générer un nouveau à
+     *  chaque fois. */
+    public static int knownTrackId(Path path) {
+        Integer id = knownTrackIdByPath.get(path.toAbsolutePath().normalize());
+        return id != null ? id : -1;
+    }
+
     /** Appelé par FileRenamer.moveFile() pour CHAQUE déplacement — no-op silencieux si {@code src}
      *  ne correspond à aucun Track ID connu (immense majorité des fichiers, jamais importés depuis
      *  iTunes). Fait suivre l'association vers le nouveau chemin pour le prochain renommage. */

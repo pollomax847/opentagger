@@ -230,8 +230,23 @@ public class LocalCorrector {
             // cache.db. Écrit directement sur le disque (IS_CLASSICAL) sans aucun garde de score,
             // contrairement aux autres correctifs de faux positifs du jour.
             boolean found = classicalNames.stream().anyMatch(name -> {
-                String n = name.toLowerCase();
-                return !n.isBlank() && java.util.regex.Pattern
+                String n = name.toLowerCase().trim();
+                if (n.isBlank()) return false;
+                // Mononyme (aucun espace, ex. "Jesus", "Farinelli", "Gilles" — 159 entrées rien
+                // que dans classical_people.txt) : un \bmot\b classique matcherait n'importe quel
+                // artiste CONTENANT ce mot courant ailleurs dans son nom, même complet. Trouvé en
+                // direct (2026-09-19) sur "Jesus Loves You" (projet dance-pop de Boy George, album
+                // "The Martyr Mantras") marqué isClassical=1/genre=Classical à cause du mononyme MB
+                // "Jesus" (bde40933-e89b-4f10-8e52-faa040c4cae4, classical_people.txt) — même classe
+                // de bug que le correctif \b...\b du 2026-09-13 (Travis Scott / "ravi" dans
+                // "tRAVIs"), non couverte par lui : ici la limite de mot matche bel et bien, "Jesus"
+                // est un mot entier de l'artiste. Un mononyme classique est crédité SEUL, jamais noyé
+                // dans un nom de groupe/artiste plus long : exiger l'égalité exacte du champ artiste
+                // entier plutôt qu'un \bmot\b isolé. Les entrées à plusieurs mots (ex. "Jesús López
+                // Cobos") gardent le \b...\b existant, une collision complète étant bien moins
+                // probable.
+                if (!n.contains(" ")) return artist.equals(n);
+                return java.util.regex.Pattern
                         .compile("\\b" + java.util.regex.Pattern.quote(n) + "\\b")
                         .matcher(artist).find();
             });

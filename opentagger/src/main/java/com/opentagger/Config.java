@@ -241,7 +241,13 @@ public class Config {
     // BandcampClient) en tout dernier recours dans TaggingWorker.findTags(), uniquement si RIEN
     // d'autre n'a identifié le fichier, et seulement appliqué si le contenu récupéré correspond
     // vraiment (TrackMatcher.titleSimilarity) — jamais de fausse donnée écrite sur un essai raté.
-    public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", true); }
+    // Défaut passé de true à false le 2026-09-19 : cette étape (6a, dernier recours automatique
+    // de TaggingWorker.findTags()) mesurée en prod à 4 succès / 919 essais (~0,4%) — demande
+    // utilisateur de la sortir de la cascade automatique et d'en faire une action à la demande
+    // (voir MainFrame.bandcampOnlyOnSelection(), FileEntry.bandcampOnly, menu "Retraitement").
+    // Cette case à cocher reste utile pour qui veut quand même l'automatique malgré le faible
+    // rendement mesuré.
+    public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", false); }
     // Substitution de préfixe pour convertir un chemin "Location" de l'XML iTunes (souvent un
     // lecteur Windows, ex. "C:/Users/xxx/OneDrive/Musiques") vers le point de montage réel sur ce
     // système (ex. "/mnt/Music") — voir ITunesLibraryImporter.resolveLocalPath(). Vide par défaut
@@ -254,6 +260,11 @@ public class Config {
     // iTunes, et mis à jour automatiquement dès qu'un fichier est choisi dans ITunesImportDialog/
     // MainFrame.writeItunesXmlCorrections.
     public String  itunesXmlFilePath()             { return str("itunes.xml_file_path", ""); }
+    // Fichier de la RECONSTRUCTION COMPLÈTE (ITunesLibraryExporter) — volontairement distinct
+    // d'itunes.xml_file_path (le vrai fichier iTunes, régénéré par un vrai iTunes encore actif
+    // d'après l'utilisateur, jamais écrasé par cet export) — voir la Javadoc de classe pour le
+    // pourquoi complet.
+    public String  itunesExportXmlFilePath()       { return str("itunes.export_xml_file_path", ""); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source

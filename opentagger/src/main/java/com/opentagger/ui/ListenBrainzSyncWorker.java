@@ -49,8 +49,10 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
             return null;
         }
 
+        log(I18n.t("Récupération des statistiques ListenBrainz pour \"%s\"…", username));
         onProgress.accept(I18n.t("Récupération des statistiques ListenBrainz pour \"%s\"…", username));
         Map<String, Integer> counts = client.fetchTopRecordingCounts(username, Config.get().listenbrainzMaxTracks());
+        log(I18n.t("%d piste(s) dans le classement ListenBrainz récupéré.", counts.size()));
         onProgress.accept(I18n.t("%d piste(s) dans le classement ListenBrainz récupéré.", counts.size()));
 
         int total = entries.size();
@@ -81,13 +83,17 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
                     ef.message = I18n.t("ListenBrainz : %d écoute(s)", countFinal);
                     onUpdate.accept(ef);
                 });
+                log("  " + entry.filename() + " → ListenBrainz " + countFinal + " écoute(s)");
                 updated++;
             } catch (Exception ex) {
+                log("  ✗ " + entry.filename() + " : " + ex.getMessage());
                 onProgress.accept("  ✗ " + entry.filename() + " : " + ex.getMessage());
                 errors++;
             }
         }
 
+        log(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
+                updated, skipped, errors));
         onProgress.accept(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
                 updated, skipped, errors));
         return null;
@@ -96,6 +102,17 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
     @Override
     protected void process(List<FileEntry> chunks) {
         // rien : les mises à jour sont déjà publiées via onUpdate/invokeLater dans doInBackground()
+    }
+
+    /** Sans ceci, cette synchro ne laissait AUCUNE trace en dehors du statut UI éphémère
+     *  (onProgress→setStatus()) et du Journal en mémoire (appendLog(), jamais imprimé) — repéré en
+     *  direct (2026-09-19) : l'utilisateur avait lancé cette synchro 3 fois, mais journalctl ne
+     *  montrait absolument rien, contrairement à tout le reste du pipeline (TaggingWorker,
+     *  AlbumCompletionWorker...) qui logue déjà sur la console via ce même motif. Même format que
+     *  AlbumCompletionWorker.log()/InfoCompleterWorker.log(). */
+    private static void log(String msg) {
+        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg);
+        System.out.flush();
     }
 
     public int getUpdated() { return updated; }

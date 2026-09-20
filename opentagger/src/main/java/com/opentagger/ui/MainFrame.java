@@ -572,13 +572,6 @@ public class MainFrame extends JFrame {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { openFolder(); }
         });
 
-        // Ctrl+E = export CSV
-        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_E,
-                java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "exportCsv");
-        actionMap.put("exportCsv", new javax.swing.AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent e) { exportCsv(); }
-        });
-
         // Ctrl+R = renommer
         rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_R,
                 java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "rename");
@@ -633,10 +626,6 @@ public class MainFrame extends JFrame {
         // par le même mot et n'avaient rien pour les distinguer visuellement malgré des risques
         // opposés.
         m.add(mitem(I18n.t("Vider la corbeille de l'application…"), null, e -> emptyApplicationTrash()));
-        m.addSeparator();
-        m.add(mitem(I18n.t("Exporter CSV…"),            "Ctrl+E",  e -> exportCsv()));
-        m.add(mitem(I18n.t("Exporter playlist M3U…"),  null,      e -> exportPlaylist("m3u")));
-        m.add(mitem(I18n.t("Exporter playlist XSPF…"), null,      e -> exportPlaylist("xspf")));
         m.addSeparator();
         m.add(mitem(I18n.t("Quitter"),                 null,      e -> quitApp()));
         return m;
@@ -1275,6 +1264,7 @@ public class MainFrame extends JFrame {
         JMenu retraitement = new JMenu(I18n.t("Re-traitement"));
         retraitement.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
         retraitement.add(mitem(I18n.t("Ré-identifier par empreinte audio (Non identifiés)…"), null, e -> reidentifyUnmatched()));
+        retraitement.add(mitem(I18n.t("Essayer Bandcamp (Non identifiés)…"), null, e -> tryBandcampOnUnmatched()));
         retraitement.add(mitem(I18n.t("Corriger l'encodage des tags…"), null, e -> fixEncoding()));
         retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNames()));
         retraitement.add(mitem(I18n.t("Synchroniser les compteurs d'écoute (ListenBrainz + Last.fm)…"), null, e -> syncPlayCounts()));
@@ -1343,6 +1333,8 @@ public class MainFrame extends JFrame {
             e -> new ITunesImportDialog(this, tableModel).setVisible(true)));
         importExport.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
             e -> writeItunesXmlCorrections()));
+        importExport.add(mitem(I18n.t("Reconstruire un export XML iTunes complet…"), null,
+            e -> exportFullItunesXml()));
         importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
         // Même famille que "Importer un CD"/"Coller une URL Bandcamp" (2026-09-07 — vivait seul
         // directement sous Bibliothèque, hors de toute logique de regroupement) : "aller chercher du
@@ -3163,6 +3155,75 @@ public class MainFrame extends JFrame {
                     setStatus(I18n.t("XML iTunes mis à jour"));
                 } catch (Exception ex) {
                     showError(I18n.t("Échec de l'écriture du XML iTunes : %s", ex.getMessage()));
+                }
+            }
+        }.execute();
+    }
+
+    /**
+     * Reconstruction COMPLÈTE d'un export XML iTunes depuis l'état actuel d'OpenTagger — voir
+     * ITunesLibraryExporter pour le pourquoi complet (demande utilisateur 2026-09-19 : "comme si
+     * c'était iTunes qui écrivait dedans", ajouts/modifications/renommages/fichiers supprimés tous
+     * couverts naturellement par une régénération complète à chaque fois). Fichier DÉLIBÉRÉMENT
+     * séparé de celui utilisé par writeItunesXmlCorrections() — l'utilisateur a confirmé qu'un vrai
+     * iTunes régénère encore "iTunes Music Library.xml" lui-même, cet export-ci ne doit donc JAMAIS
+     * cibler ce même fichier.
+     */
+    private void exportFullItunesXml() {
+        if (tableModel.allEntries().isEmpty()) {
+            setStatus(I18n.t("Aucun fichier à exporter."));
+            return;
+        }
+        JFileChooser fc = new JFileChooser();
+        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("XML", "xml"));
+        fc.setDialogTitle(I18n.t("Fichier de destination de l'export XML iTunes complet"));
+        String remembered = Config.get().itunesExportXmlFilePath();
+        fc.setSelectedFile(new File(!remembered.isBlank() ? remembered : "OpenTagger Library.xml"));
+        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File out = fc.getSelectedFile();
+        if (!out.getName().toLowerCase().endsWith(".xml")) out = new File(out.getAbsolutePath() + ".xml");
+
+        // Garde-fou explicite : jamais le même fichier que celui géré par le vrai iTunes (voir la
+        // Javadoc de classe) — comparaison par chemin absolu normalisé, pas juste par égalité de
+        // File, pour couvrir un chemin relatif/différemment écrit pointant vers la même cible.
+        String realItunes = Config.get().itunesXmlFilePath();
+        if (!realItunes.isBlank() && out.toPath().toAbsolutePath().normalize()
+                .equals(new File(realItunes).toPath().toAbsolutePath().normalize())) {
+            JOptionPane.showMessageDialog(this, I18n.t(
+                "\"%s\" est le fichier du vrai iTunes (Préférences > iTunes) — cet export complet ne "
+              + "doit jamais l'écraser, un vrai iTunes actif le régénérerait de toute façon depuis sa "
+              + "propre base au prochain lancement. Choisis un autre nom de fichier.", out.getName()),
+                I18n.t("Destination refusée"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        int total = tableModel.allEntries().size();
+        int ok = JOptionPane.showConfirmDialog(this, I18n.t(
+                "Reconstruit entièrement :\n%s\ndepuis les %d fichier(s) actuellement chargés dans "
+              + "OpenTagger (fichiers manquants sur le disque exclus automatiquement).\n\n"
+              + "Le fichier existant (s'il y en a un) sera remplacé. Continuer ?", out.getAbsolutePath(), total),
+                I18n.t("Confirmer la reconstruction"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        Config.get().set("itunes.export_xml_file_path", out.getAbsolutePath());
+        List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
+        final File outFinal = out;
+        setStatus(I18n.t("Export XML iTunes complet en cours…"));
+        new SwingWorker<com.opentagger.ITunesLibraryExporter.Result, Integer>() {
+            @Override protected com.opentagger.ITunesLibraryExporter.Result doInBackground() throws Exception {
+                return com.opentagger.ITunesLibraryExporter.export(outFinal, snapshot, this::publish);
+            }
+            @Override protected void process(List<Integer> chunks) {
+                if (!chunks.isEmpty())
+                    setStatus(I18n.t("Export XML iTunes… %d / %d", chunks.get(chunks.size() - 1), total));
+            }
+            @Override protected void done() {
+                try {
+                    var r = get();
+                    setStatus(I18n.t("Export XML iTunes terminé — %d piste(s) écrite(s), %d ignorée(s) (fichier introuvable).",
+                            r.written(), r.skippedMissingFile()));
+                } catch (Exception ex) {
+                    showError(I18n.t("Échec de l'export XML iTunes complet : %s", ex.getMessage()));
                 }
             }
         }.execute();
@@ -5416,6 +5477,58 @@ public class MainFrame extends JFrame {
         resetForReidentification(targets, () -> launchForcedTagging(targets, true, true));
     }
 
+    /** Devinette Bandcamp à la demande (FileEntry.bandcampOnly, voir TaggingWorker.
+     *  tryBandcampGuess()) — sortie de la cascade automatique le 2026-09-19 (rendement mesuré en
+     *  prod : ~0,4%, 4 succès / 919 essais) pour devenir une action ciblée façon MetaGrater de
+     *  SongKong : appliquée seulement à la sélection (ou à tous les "Non identifiés" si rien n'est
+     *  sélectionné), pas à tout le lot à chaque taguage. Contrairement à reidentifyUnmatched(), pas
+     *  de resetForReidentification() : ce mode ne touche ni le cache ni les MBID du fichier (rien à
+     *  effacer sur un fichier déjà SKIPPED), juste ses champs en mémoire. */
+    private void tryBandcampOnUnmatched() {
+        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
+            return;
+        }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'essayer Bandcamp.",
+                    String.join(", ", blockers)));
+            return;
+        }
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        List<FileEntry> targets = new ArrayList<>();
+        if (sel.length > 0) {
+            java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
+            for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
+            for (FileEntry e : targetSet) {
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
+        } else {
+            for (FileEntry e : tableModel.allEntries()) {
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
+        }
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier \"Non identifié\" à essayer sur Bandcamp.")); return; }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            I18n.t("<html>Deviner une page Bandcamp pour %d fichier(s) \"Non identifié\" à partir de<br>"
+                 + "leurs tags artiste/titre actuels — rendement mesuré faible en pratique (~0,4%%).<br><br>"
+                 + "Une fenêtre de revue s'ouvrira ensuite pour confirmer les résultats trouvés,<br>"
+                 + "rien n'est appliqué automatiquement.</html>", targets.size()),
+            I18n.t("Essayer Bandcamp"), JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        for (FileEntry e : targets) {
+            e.status      = FileEntry.Status.PENDING;
+            e.message     = "";
+            e.result      = null;
+            e.candidates  = null;
+            e.bandcampOnly = true;
+            tableModel.update(e);
+        }
+        launchForcedTagging(targets, true, true);
+    }
+
     /**
      * Détecte et propose de corriger un encodage cassé (mojibake — voir {@link
      * com.opentagger.EncodingFixer}) sur titre/artiste/artiste album/album/commentaire — un texte
@@ -7158,96 +7271,6 @@ public class MainFrame extends JFrame {
             JOptionPane.showMessageDialog(this,
                 I18n.t("Erreur export : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
         }
-    }
-
-    private void exportCsv() {
-        // allEntries() : un export "CSV" incomplet si un filtre reste actif au moment du clic
-        // (sinon getRowCount()/get(i), qui portent sur la vue déjà filtrée) — le nom de l'action
-        // ne suggère aucune restriction à la vue courante.
-        if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Aucun fichier à exporter.")); return; }
-        JFileChooser fc = new JFileChooser();
-        fc.setSelectedFile(new File("opentagger_export.csv"));
-        fc.setDialogTitle(I18n.t("Exporter en CSV"));
-        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File out = fc.getSelectedFile();
-        setStatus(I18n.t("Export CSV en cours…"));
-        // Copie de la liste sur l'EDT AVANT de passer en arrière-plan : doInBackground() itérait
-        // avant un correctif précédent directement sur tableModel (getRowCount()/get(i)) depuis un
-        // thread de fond pendant que l'EDT peut concurremment ajouter/retirer des lignes (scan en
-        // cours, filtre) — allEntries() est elle-même une vue live (non copiée) sur la liste
-        // mutable sous-jacente, donc toujours recopiée ici dans un ArrayList frais pour figer la
-        // structure itérée.
-        List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
-        new SwingWorker<Void, Void>() {
-            @Override protected Void doInBackground() throws Exception {
-                try (PrintWriter pw = new PrintWriter(
-                        new OutputStreamWriter(new FileOutputStream(out), StandardCharsets.UTF_8))) {
-                    // En-tête BOM pour Excel
-                    pw.print('﻿');
-                    pw.println(I18n.t("Fichier,Artiste,Artiste Album,Titre,Album,Année,Genre,Piste,Disque,Compositeur,Chef,MBID,Statut"));
-                    for (FileEntry e : snapshot) {
-                        TagInfo  ti = e.activeTags();
-                        pw.println(csv(e.filename()) + "," + csv(ti.artist) + "," + csv(ti.albumArtist)
-                            + "," + csv(ti.title) + "," + csv(ti.album) + "," + csv(ti.year)
-                            + "," + csv(ti.genre) + "," + csv(ti.track) + "," + csv(ti.discNo)
-                            + "," + csv(ti.composer) + "," + csv(ti.conductor)
-                            + "," + csv(ti.recordingMbid) + "," + csv(e.status.name()));
-                    }
-                }
-                return null;
-            }
-            @Override protected void done() {
-                try { get(); setStatus(I18n.t("CSV exporté → %s", out.getName())); }
-                catch (Exception ex) { showError(I18n.t("Export CSV : %s", ex.getMessage())); }
-            }
-        }.execute();
-    }
-
-    private static String csv(String s) {
-        if (s == null) return "";
-        s = s.replace("\"", "\"\"");
-        return (s.contains(",") || s.contains("\"") || s.contains("\n")) ? "\"" + s + "\"" : s;
-    }
-
-    // ── Export playlist ───────────────────────────────────────────────────────
-
-    private void exportPlaylist(String format) {
-        // allEntries() (compte ET liste réelle juste en dessous) : sinon un fichier tagué masqué
-        // par un filtre actif est silencieusement absent de la playlist exportée.
-        long tagged = 0;
-        for (FileEntry e : tableModel.allEntries())
-            if (e.status == FileEntry.Status.TAGGED) tagged++;
-        if (tagged == 0) { setStatus(I18n.t("Aucun fichier tagué à exporter.")); return; }
-
-        JFileChooser fc = new JFileChooser();
-        String ext = format.equalsIgnoreCase("xspf") ? ".xspf" : ".m3u";
-        fc.setSelectedFile(new File("playlist" + ext));
-        fc.setDialogTitle(I18n.t("Exporter playlist %s", format.toUpperCase()));
-        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-
-        File out = fc.getSelectedFile();
-        if (!out.getName().toLowerCase().endsWith(ext))
-            out = new File(out.getAbsolutePath() + ext);
-
-        List<FileEntry> all = new ArrayList<>(tableModel.allEntries());
-
-        final File outFinal = out;
-        setStatus(I18n.t("Export %s en cours…", format.toUpperCase()));
-        new SwingWorker<Integer, Void>() {
-            @Override protected Integer doInBackground() throws Exception {
-                return format.equalsIgnoreCase("xspf")
-                    ? com.opentagger.PlaylistExporter.exportXspf(all, outFinal)
-                    : com.opentagger.PlaylistExporter.exportM3u(all, outFinal);
-            }
-            @Override protected void done() {
-                try {
-                    int n = get();
-                    setStatus(I18n.t("%s exporté — %d piste(s) → %s", format.toUpperCase(), n, outFinal.getName()));
-                } catch (Exception ex) {
-                    showError(I18n.t("Export %s : %s", format.toUpperCase(), ex.getMessage()));
-                }
-            }
-        }.execute();
     }
 
     // ── Podcast ───────────────────────────────────────────────────────────────
