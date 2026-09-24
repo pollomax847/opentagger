@@ -47,7 +47,12 @@ public class AcoustIdSubmitter {
     private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public record SubmissionResult(File file, boolean accepted, String message) {}
+    /** {@code skipped} : volontairement NON soumis (AcoustID connaît déjà cette empreinte pour cet
+     *  enregistrement) — compté à part, ce n'est ni un succès d'envoi ni une erreur. {@code acoustId} :
+     *  identifiant AcoustID renvoyé quand l'import a abouti immédiatement (statut "imported"), sinon "". */
+    public record SubmissionResult(File file, boolean accepted, String message, boolean skipped, String acoustId) {
+        public SubmissionResult(File file, boolean accepted, String message) { this(file, accepted, message, false, ""); }
+    }
 
     /** Une soumission déjà préparée (empreinte calculée) mais pas encore envoyée. */
     private record PreparedSubmission(File file, List<String[]> params, int estimatedSize) {}
@@ -80,6 +85,7 @@ public class AcoustIdSubmitter {
             "dans ~/.opentagger/settings.properties");
 
         List<SubmissionResult> results = new ArrayList<>();
+        AcoustIdClient lookupClient = new AcoustIdClient();
 
         // ── 1. Fingerprinting local (par fichier) — construit les paramètres de chaque
         // soumission SANS l'index (attribué plus tard, par requête HTTP, pas globalement,
@@ -96,17 +102,49 @@ public class AcoustIdSubmitter {
                 results.add(new SubmissionResult(file, false, ex.getMessage()));
                 continue;
             }
+            String rec = tags.recordingMbid == null ? "" : tags.recordingMbid.trim();
+
+            // Règle Picard n°1 (picard/acoustid/manager.py, Submission.is_submitted) : ne soumettre QUE si
+            // AcoustID ne relie pas déjà cette empreinte à cet enregistrement — sinon on n'apporte rien et on
+            // charge inutilement un service gratuit. Une panne réseau ici ne doit pas bloquer la soumission.
+            if (!rec.isBlank()) {
+                try {
+                    java.util.Set<String> known = lookupClient.knownRecordingIds(fp);
+                    if (known != null && known.contains(rec.toLowerCase(java.util.Locale.ROOT))) {
+                        results.add(new SubmissionResult(file, true,
+                                "Déjà connu d'AcoustID pour cet enregistrement — non soumis", true, ""));
+                        continue;
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            // Règle Picard n°2 (Submission.valid_duration/args) : le MBID n'est envoyé QUE si la durée du
+            // fichier colle à celle de l'enregistrement MusicBrainz (±30 s, FINGERPRINT_MAX_ALLOWED_
+            // LENGTH_DIFF_MS) — sinon (autre édition/mix) on envoie les métadonnées texte à la place, jamais
+            // les deux : Picard ne mélange pas mbid et texte, l'un OU l'autre.
+            boolean sendMbid = !rec.isBlank() && durationPlausible(fp, tags, rec);
             List<String[]> params = new ArrayList<>();
             params.add(new String[]{"duration",    fp.duration()});
             params.add(new String[]{"fingerprint", fp.fingerprint()});
-            if (!tags.recordingMbid.isBlank()) params.add(new String[]{"mbid",        tags.recordingMbid});
-            if (!tags.title.isBlank())         params.add(new String[]{"track",       tags.title});
-            if (!tags.artist.isBlank())        params.add(new String[]{"artist",      tags.artist});
-            if (!tags.album.isBlank())         params.add(new String[]{"album",       tags.album});
-            if (!tags.albumArtist.isBlank())   params.add(new String[]{"albumartist", tags.albumArtist});
-            if (!tags.year.isBlank())          params.add(new String[]{"year",        tags.year});
-            if (!tags.track.isBlank())         params.add(new String[]{"trackno",     tags.track});
-            if (!tags.discNo.isBlank())        params.add(new String[]{"discno",      tags.discNo});
+            if (sendMbid) {
+                params.add(new String[]{"mbid", rec});
+            } else {
+                if (!tags.title.isBlank())         params.add(new String[]{"track",       tags.title});
+                if (!tags.artist.isBlank())        params.add(new String[]{"artist",      tags.artist});
+                if (!tags.album.isBlank())         params.add(new String[]{"album",       tags.album});
+                if (!tags.albumArtist.isBlank())   params.add(new String[]{"albumartist", tags.albumArtist});
+                if (!tags.year.isBlank())          params.add(new String[]{"year",        tags.year});
+                if (!tags.track.isBlank())         params.add(new String[]{"trackno",     tags.track});
+                if (!tags.discNo.isBlank())        params.add(new String[]{"discno",      tags.discNo});
+            }
+            // Champs optionnels documentés (bitrate.#, fileformat.#) — aident AcoustID à départager des
+            // encodages différents d'un même enregistrement.
+            String fmt = fileFormatOf(file);
+            if (!fmt.isBlank()) params.add(new String[]{"fileformat", fmt});
+            try {
+                long kbps = org.jaudiotagger.audio.AudioFileIO.read(file).getAudioHeader().getBitRateAsNumber();
+                if (kbps > 0) params.add(new String[]{"bitrate", String.valueOf(kbps)});
+            } catch (Exception ignored) {}
 
             // Approximation de la taille du payload — même formule que Picard
             // (Submission.__len__) : somme(clé+valeur+2) puis marge de 3% pour l'urlencode.
@@ -138,7 +176,10 @@ public class AcoustIdSubmitter {
                 onProgress.accept("Envoi de " + chunk.size() + " empreinte(s) à AcoustID… ("
                         + (idx + chunk.size()) + "/" + prepared.size() + ")");
 
-            HttpResponse<String> resp = sendChunk(appKey, userToken, chunk);
+            HttpResponse<String> resp = sendChunk(appKey, userToken, chunk, true);
+            if (resp.body() != null && resp.statusCode() != 200 && resp.body().toLowerCase().contains("wait")) {
+                resp = sendChunk(appKey, userToken, chunk, false);   // l'API refuse "wait" : renvoi sans
+            }
 
             if (resp.statusCode() == 413 && chunk.size() > 1) {
                 // Payload trop gros : réduire la taille de lot et réessayer CE morceau (pas
@@ -154,9 +195,15 @@ public class AcoustIdSubmitter {
     }
 
     private HttpResponse<String> sendChunk(String appKey, String userToken,
-                                            List<PreparedSubmission> chunk) throws Exception {
+                                            List<PreparedSubmission> chunk, boolean wait) throws Exception {
         StringBuilder body = new StringBuilder();
         append(body, "client", appKey);
+        append(body, "clientversion", Config.get().appVersion());
+        // "wait" (secondes, non listé dans la page publique de doc mais utilisé par SongKong :
+        // AcoustidHelper/AcoustId.submitListOfFingerprints, AcoustIdSubmitParams.WAIT = "5") : AcoustID attend
+        // jusqu'à N s que l'import se fasse, et la réponse porte alors status="imported" + l'AcoustID résultant
+        // au lieu du seul "pending".
+        if (wait) append(body, "wait", "5");
         append(body, "user",   userToken);
         for (int i = 0; i < chunk.size(); i++) {
             for (String[] kv : chunk.get(i).params()) {
@@ -166,10 +213,12 @@ public class AcoustIdSubmitter {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(SUBMIT_URL))
                 .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Content-Encoding", "gzip")   // corps compressé, préféré par AcoustID (voir AcoustIdClient.gzip)
                 .header("User-Agent", Config.get().userAgent())
                 .timeout(HttpTimeouts.binaryDownload())
-                .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(AcoustIdClient.gzip(body.toString())))
                 .build();
+        AcoustIdClient.throttle();   // même plafond de 3 requêtes/s que les lookups (créneau partagé)
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -184,14 +233,10 @@ public class AcoustIdSubmitter {
             return;
         }
 
-        // DIAGNOSTIC TEMPORAIRE — à retirer une fois le format "submissions"/"pending" confirmé
-        // par un essai réel réussi (on n'a pour l'instant confirmé que le format des ERREURS).
-        String diag = " [brut: " + resp.body() + "]";
-
         String status = root.path("status").asText("");
         if (!"ok".equals(status)) {
             String msg = root.path("error").path("message").asText("Réponse inattendue (HTTP " + resp.statusCode() + ")");
-            for (PreparedSubmission ps : chunk) results.add(new SubmissionResult(ps.file(), false, msg + diag));
+            for (PreparedSubmission ps : chunk) results.add(new SubmissionResult(ps.file(), false, msg));
             return;
         }
 
@@ -201,18 +246,24 @@ public class AcoustIdSubmitter {
             File file = chunk.get(i).file();
             JsonNode entry = findByIndex(submissions, i);
             if (entry == null) {
-                results.add(new SubmissionResult(file, false, "Pas de résultat retourné pour cet élément" + diag));
+                results.add(new SubmissionResult(file, false, "Pas de résultat retourné pour cet élément"));
                 continue;
             }
             String subStatus = entry.path("status").asText("");
             String subId     = entry.path("id").asText("");
             if ("error".equals(subStatus)) {
                 String msg = entry.path("error").path("message").asText("Erreur inconnue");
-                results.add(new SubmissionResult(file, false, msg + diag));
-            } else {
-                // "pending" = accepté, traitement asynchrone côté AcoustID (pas de confirmation immédiate d'import)
+                results.add(new SubmissionResult(file, false, msg));
+            } else if ("imported".equals(subStatus)) {
+                // Import immédiat : l'AcoustID de cette empreinte est connu (SongKong l'écrit dans le tag
+                // "Acoustid Id" du fichier s'il était vide — ici l'appelant le range dans le TagInfo).
+                String acoustId = entry.path("result").path("id").asText("");
                 results.add(new SubmissionResult(file, true,
-                        "Accepté (id=" + subId + ", statut=" + subStatus + ")" + diag));
+                        "Importé" + (acoustId.isBlank() ? "" : " (AcoustID " + acoustId + ")"), false, acoustId));
+            } else {
+                // "pending" = accepté, traitement asynchrone côté AcoustID (import pas encore terminé)
+                results.add(new SubmissionResult(file, true,
+                        "En attente — AcoustID traite la soumission en arrière-plan (id=" + subId + ")"));
             }
         }
     }
@@ -222,6 +273,28 @@ public class AcoustIdSubmitter {
         for (JsonNode s : submissions) if (s.path("index").asInt(-1) == index) return s;
         // repli si "index" absent : suppose le même ordre que l'envoi
         return index < submissions.size() ? submissions.get(index) : null;
+    }
+
+    /** Durée du fichier ≈ durée MusicBrainz de l'enregistrement (±30 s) ? Durée MB inconnue → oui (Picard :
+     *  "metadata is None → valide"). Sinon lue depuis le TagInfo, à défaut via un lookup MusicBrainz. */
+    private static boolean durationPlausible(Fingerprinter.Result fp, TagInfo tags, String recordingMbid) {
+        int mbSec = tags.mbDurationSec;
+        if (mbSec <= 0) {
+            try {
+                TagInfo mb = new MusicBrainzClient().lookupRecording(recordingMbid);
+                if (mb != null) mbSec = mb.mbDurationSec;
+            } catch (Exception ignored) {}
+        }
+        if (mbSec <= 0) return true;
+        try { return Math.abs(Integer.parseInt(fp.duration()) - mbSec) <= 30; }
+        catch (NumberFormatException e) { return true; }
+    }
+
+    /** "MP3", "M4A", "FLAC"… d'après l'extension (champ fileformat.# de l'API). */
+    private static String fileFormatOf(File f) {
+        String n = f.getName();
+        int dot = n.lastIndexOf('.');
+        return dot < 0 ? "" : n.substring(dot + 1).toUpperCase(java.util.Locale.ROOT);
     }
 
     /** Vérifie que fpcalc est disponible. */

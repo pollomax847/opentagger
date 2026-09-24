@@ -1,15 +1,7 @@
 package com.opentagger;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opentagger.model.TagInfo;
 
-import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -19,23 +11,18 @@ import java.util.List;
 
 /**
  * Intégration avec une instance Headphones (music-download-manager) tierce, tournant sur la même
- * machine — deux usages indépendants, vérifiés en direct le 2026-08-29 :
+ * machine — LECTURE SEULE uniquement (l'envoi d'albums vers son API a été supprimé le 2026-09-24 : il
+ * faisait planter les conteneurs, voir TagEnrichment.saveEntry()) :
  *
- *  1. Lecture SEULE de sa base SQLite locale (headphones.db, table alltracks) — sert de source
+ *  Lecture SEULE de sa base SQLite locale (headphones.db, table alltracks) — sert de source
  *     d'identification supplémentaire GRATUITE (aucun appel réseau, juste un fichier local) pour
  *     les pistes que l'utilisateur a déjà téléchargées/organisées via Headphones : ce catalogue est
  *     pré-résolu avec un MBID d'enregistrement fiable, donc un cran de confiance au-dessus d'une
  *     recherche MusicBrainz texte à l'aveugle. Jamais d'écriture dans ce fichier — Headphones
  *     l'écrit lui-même en direct (mode WAL), une écriture externe risquerait sa cohérence interne.
  *
- *  2. Appels à son API HTTP (documentée, voir ~/headphones/API.md) pour lui signaler un album que
- *     l'utilisateur ne possède pas encore et le mettre en recherche/téléchargement — c'est LE
- *     chemin officiel pour "écrire" côté Headphones, jamais une écriture SQL directe.
  */
 public class HeadphonesClient {
-
-    private static final HttpClient http = HttpTimeouts.client();
-    private final ObjectMapper mapper = new ObjectMapper();
 
     // ── 1. Lecture directe de la base SQLite (identification) ──────────────────────────────────
 
@@ -92,26 +79,6 @@ public class HeadphonesClient {
         t.recordingMbid = best.trackId();
         t.score         = 88;
         return t;
-    }
-
-    /** Vrai si Headphones a déjà au moins une piste LOCALISÉE (Location non vide, voir loadRows())
-     *  pour cet artiste+album — sert de garde-fou avant d'envoyer automatiquement un album vers
-     *  Headphones (queueAlbum) : inutile (et bruyant côté Headphones) de proposer un album qu'il a
-     *  déjà téléchargé. Même seuil de similarité (0.85) que lookupTrack(). */
-    public boolean isAlbumKnown(String artist, String album) {
-        if (!Config.get().bool("headphones.db_enabled", false)) return false;
-        if (artist == null || artist.isBlank() || album == null || album.isBlank()) return false;
-        List<Row> rows = loadRows();
-        if (rows.isEmpty()) return false;
-
-        String qArtist = normalizePunctuation(artist);
-        String qAlbum  = normalizePunctuation(album);
-        for (Row r : rows) {
-            if (TrackMatcher.titleSimilarity(qArtist, normalizePunctuation(r.artist())) < 0.85) continue;
-            if (TrackMatcher.titleSimilarity(qAlbum, normalizePunctuation(r.album())) < 0.85) continue;
-            return true;
-        }
-        return false;
     }
 
     /** Réduit les variantes Unicode "typographiques" de tirets/apostrophes à leur équivalent ASCII
@@ -219,72 +186,4 @@ public class HeadphonesClient {
         }
         return result[0] != null ? result[0] : List.of();
     }
-
-    // ── 2. API HTTP (recherche + mise en file d'attente côté Headphones) ───────────────────────
-
-    private String apiUrl(String cmd, String extraParams) {
-        String base = Config.get().str("headphones.url", "").trim();
-        String key  = Config.get().str("headphones.api_key", "").trim();
-        if (base.isBlank() || key.isBlank()) return null;
-        if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
-        return base + "/api?apikey=" + key + "&cmd=" + cmd + (extraParams != null ? "&" + extraParams : "");
-    }
-
-    public boolean isConfigured() {
-        return !Config.get().str("headphones.url", "").isBlank()
-            && !Config.get().str("headphones.api_key", "").isBlank();
-    }
-
-    /** Résultat d'une recherche findAlbum — champs déjà normalisés depuis le JSON brut de l'API. */
-    public record AlbumCandidate(String artistId, String artistName, String albumTitle,
-                                  String releaseId, int score) {}
-
-    /** Cherche un album côté MusicBrainz via findAlbum (relayé par l'instance Headphones). */
-    public List<AlbumCandidate> findAlbum(String query) throws Exception {
-        String url = apiUrl("findAlbum", "name=" + enc(query) + "&limit=5");
-        if (url == null) return List.of();
-        JsonNode root = getJson(url);
-        List<AlbumCandidate> out = new ArrayList<>();
-        if (root != null && root.isArray()) {
-            for (JsonNode n : root) {
-                out.add(new AlbumCandidate(
-                    n.path("id").asText(""),
-                    n.path("uniquename").asText(n.path("title").asText("")),
-                    n.path("title").asText(""),
-                    n.path("albumid").asText(""),
-                    n.path("score").asInt(0)));
-            }
-        }
-        return out;
-    }
-
-    /** Ajoute l'artiste puis met l'album en recherche/téléchargement côté Headphones — même
-     *  séquence que l'UI web de Headphones (addArtist requis avant qu'un album lui appartenant
-     *  puisse être mis en file). {@code releaseId} = AlbumCandidate.releaseId() (id "albumid" de
-     *  findAlbum, une release MusicBrainz précise — voir API.md : addAlbum/queueAlbum prennent tous
-     *  deux ce même identifiant, pas le release-group). */
-    public boolean queueAlbum(String artistId, String releaseId) throws Exception {
-        if (releaseId == null || releaseId.isBlank()) return false;
-        if (artistId != null && !artistId.isBlank()) {
-            String addArtistUrl = apiUrl("addArtist", "id=" + enc(artistId));
-            if (addArtistUrl != null) getJson(addArtistUrl); // "OK" attendu, pas bloquant si échoue
-        }
-        String url = apiUrl("queueAlbum", "id=" + enc(releaseId));
-        if (url == null) return false;
-        JsonNode root = getJson(url);
-        return root != null;
-    }
-
-    private JsonNode getJson(String url) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", Config.get().userAgent())
-                .timeout(HttpTimeouts.apiCall())
-                .GET().build();
-        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() != 200) return null;
-        return mapper.readTree(resp.body());
-    }
-
-    private static String enc(String s) { return URLEncoder.encode(s, StandardCharsets.UTF_8); }
 }

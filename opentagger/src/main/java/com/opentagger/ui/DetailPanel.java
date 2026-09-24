@@ -155,6 +155,17 @@ public class DetailPanel extends JPanel {
     private final JTextField tfMedia               = tf(20);
     private final JTextField tfReleaseType         = tf(20);
     private final JTextField tfOriginalYear        = tf(10);
+    private final JTextField tfDate                = tf(12);
+    // Champs générés depuis com.opentagger.TagFieldRegistry (tags Picard / Discogs / Last.fm / Bandcamp,
+    // 2026-09-20) : un JTextField par entrée écrite par la table et dotée d'un libellé, clé = nom du
+    // champ TagInfo. Évite d'ajouter à la main 18 champs × 7 emplacements ; sans eux, un TagInfo
+    // reconstruit depuis le panneau (édition manuelle) perdrait ces valeurs à l'enregistrement.
+    private final java.util.Map<String, JTextField> extraTf = new java.util.LinkedHashMap<>();
+    {
+        for (com.opentagger.TagFieldRegistry.Entry e : com.opentagger.TagFieldRegistry.ALL)
+            if (e.writeHere() && e.label() != null) extraTf.put(e.prop(), tf(24));
+    }
+    private final JTextField tfOriginalDate        = tf(12);
     private final JTextField tfCountry             = tf(10);
     private final JTextField tfScript              = tf(10);
 
@@ -331,6 +342,9 @@ public class DetailPanel extends JPanel {
         set(tfMedia,               t.media);
         set(tfReleaseType,         t.releaseType);
         set(tfOriginalYear,        t.originalYear);
+        set(tfDate,                t.date);
+        for (var en : extraTf.entrySet()) set(en.getValue(), com.opentagger.TagFieldRegistry.get(t, en.getKey()));
+        set(tfOriginalDate,        t.originalDate);
         set(tfCountry,             t.country);
         set(tfScript,              t.script);
     }
@@ -418,6 +432,12 @@ public class DetailPanel extends JPanel {
         setM(tfMedia,         tags, t -> t.media);
         setM(tfReleaseType,   tags, t -> t.releaseType);
         setM(tfOriginalYear,  tags, t -> t.originalYear);
+        setM(tfDate,          tags, t -> t.date);
+        for (var en : extraTf.entrySet()) {
+            final String prop = en.getKey();
+            setM(en.getValue(), tags, t -> com.opentagger.TagFieldRegistry.get(t, prop));
+        }
+        setM(tfOriginalDate,  tags, t -> t.originalDate);
         setM(tfCountry,       tags, t -> t.country);
         setM(tfScript,        tags, t -> t.script);
         // Paroles, IDs — laisser vide en mode multi
@@ -490,6 +510,10 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfMedia)).isBlank())        t.media        = v;
             if (!(v = g(tfReleaseType)).isBlank())  t.releaseType  = v;
             if (!(v = g(tfOriginalYear)).isBlank()) t.originalYear = v;
+            if (!(v = g(tfDate)).isBlank())         t.date         = v;
+            for (var en : extraTf.entrySet())
+                if (!(v = g(en.getValue())).isBlank()) com.opentagger.TagFieldRegistry.put(t, en.getKey(), v);
+            if (!(v = g(tfOriginalDate)).isBlank()) t.originalDate = v;
             if (!(v = g(tfCountry)).isBlank())      t.country      = v;
             if (!(v = g(tfScript)).isBlank())       t.script       = v;
             if (!(v = g(tfComposer)).isBlank())     t.composer     = v;
@@ -594,6 +618,9 @@ public class DetailPanel extends JPanel {
         t.media          = g(tfMedia);
         t.releaseType    = g(tfReleaseType);
         t.originalYear   = g(tfOriginalYear);
+        t.date           = g(tfDate);
+        for (var en : extraTf.entrySet()) com.opentagger.TagFieldRegistry.put(t, en.getKey(), g(en.getValue()));
+        t.originalDate   = g(tfOriginalDate);
         t.country        = g(tfCountry);
         t.script         = g(tfScript);
 
@@ -866,6 +893,11 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Support :"),                 tfMedia);
         fields.put(I18n.t("Type de parution :"),        tfReleaseType);
         fields.put(I18n.t("Année d'origine :"),         tfOriginalYear);
+        fields.put(I18n.t("Date de parution :"),        tfDate);
+        for (com.opentagger.TagFieldRegistry.Entry e : com.opentagger.TagFieldRegistry.ALL)
+            if (extraTf.containsKey(e.prop()) && e.writeHere() && e.label() != null)
+                fields.put(I18n.t(e.label()), extraTf.get(e.prop()));
+        fields.put(I18n.t("Date d'origine :"),          tfOriginalDate);
         fields.put(I18n.t("Pays :"),                    tfCountry);
         fields.put(I18n.t("Script :"),                  tfScript);
         fields.put(I18n.t("─── URLs artiste ───"),    sep());
@@ -1023,6 +1055,9 @@ public class DetailPanel extends JPanel {
         hl(tfMedia,         g(tfMedia),         before.media);
         hl(tfReleaseType,   g(tfReleaseType),   before.releaseType);
         hl(tfOriginalYear,  g(tfOriginalYear),  before.originalYear);
+        hl(tfDate,          g(tfDate),          before.date);
+        for (var en : extraTf.entrySet()) hl(en.getValue(), g(en.getValue()), com.opentagger.TagFieldRegistry.get(before, en.getKey()));
+        hl(tfOriginalDate,  g(tfOriginalDate),  before.originalDate);
         hl(tfCountry,       g(tfCountry),       before.country);
         hl(tfScript,        g(tfScript),        before.script);
         // Classique
@@ -1145,6 +1180,12 @@ public class DetailPanel extends JPanel {
     }
 
     private JTextField[] allTextFields() {
+        java.util.List<JTextField> all = new java.util.ArrayList<>(java.util.Arrays.asList(allBaseTextFields()));
+        all.addAll(extraTf.values());
+        return all.toArray(new JTextField[0]);
+    }
+
+    private JTextField[] allBaseTextFields() {
         return new JTextField[]{
             tfTitle, tfArtist, tfAlbumArtist, tfAlbum, tfYear, tfGenre,
             tfTrack, tfTrackTotal, tfDiscNo, tfDiscTotal, tfComment,
@@ -1164,7 +1205,7 @@ public class DetailPanel extends JPanel {
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
             tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate,
             tfLabel, tfCatalogNo, tfBarcode, tfReleaseStatus, tfMedia,
-            tfReleaseType, tfOriginalYear, tfCountry, tfScript
+            tfReleaseType, tfOriginalYear, tfDate, tfOriginalDate, tfCountry, tfScript
         };
     }
 }

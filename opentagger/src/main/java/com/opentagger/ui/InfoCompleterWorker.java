@@ -264,6 +264,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 if (fillBlank(ti, "country",           mbr.country))          filled.add("country");
                 if (fillBlank(ti, "releaseType",       mbr.releaseType))      filled.add("releaseType");
                 if (fillBlank(ti, "originalYear",      mbr.originalYear))     filled.add("originalYear");
+                if (fillBlank(ti, "date",              mbr.date))             filled.add("date");
+                if (fillBlank(ti, "originalDate",      mbr.originalDate))     filled.add("originalDate");
                 if (fillBlank(ti, "artists",           mbr.artists))          filled.add("artists");
                 if (fillBlank(ti, "artistsSort",       mbr.artistsSort))      filled.add("artistsSort");
                 if (fillFlag(ti, "isSoundtrack",       mbr.isSoundtrack))     filled.add("isSoundtrack");
@@ -479,7 +481,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             ti.title           = TagInfo.isGenericIdentityValue(rawTitle)       ? "" : rawTitle;
             ti.album           = TagInfo.isGenericIdentityValue(rawAlbum)       ? "" : rawAlbum;
             ti.albumArtist     = TagInfo.isGenericIdentityValue(rawAlbumArtist) ? "" : rawAlbumArtist;
-            ti.year            = tag.getFirst(FieldKey.YEAR);
+            ti.setYearFromRaw(tag.getFirst(FieldKey.YEAR));
             ti.track           = tag.getFirst(FieldKey.TRACK);
             ti.genre           = tag.getFirst(FieldKey.GENRE);
             ti.bpm             = tag.getFirst(FieldKey.BPM);

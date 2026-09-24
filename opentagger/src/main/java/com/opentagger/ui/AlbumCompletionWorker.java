@@ -300,8 +300,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             ti.releaseMbid     = tl.releaseMbid();
             ti.releaseGroupMbid= tl.releaseGroupMbid();
             ti.recordingMbid   = track.recordingMbid();
+            ti.releaseTrackMbid= track.trackMbid();
+            ti.discSubtitle    = track.discTitle();
             ti.artistMbid      = track.artistMbid();
             ti.isCompilation   = tl.isCompilation() ? "1" : "";
+            // Champs de PARUTION (pays, label, code-barres, statut, date complète, type de parution,
+            // langue...) : ce chemin n'en recopiait aucun — voir TagInfo.applyReleaseLevelFrom().
+            ti.applyReleaseLevelFrom(tl.releaseMeta());
             ti.score           = 100;
 
             // Translittération artiste (si nom non-Latin et option activée) — même logique

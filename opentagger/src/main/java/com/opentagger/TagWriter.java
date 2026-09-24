@@ -18,7 +18,6 @@ import org.jaudiotagger.tag.id3.framebody.FrameBodyTXXX;
 import org.jaudiotagger.tag.images.Artwork;
 import org.jaudiotagger.tag.images.ArtworkFactory;
 import org.jaudiotagger.tag.mp4.Mp4Tag;
-import org.jaudiotagger.tag.mp4.field.Mp4TagTextField;
 import org.jaudiotagger.tag.vorbiscomment.VorbisCommentTagField;
 
 import java.io.File;
@@ -413,7 +412,10 @@ public class TagWriter {
         sf(tag, FieldKey.ARTIST,             i.artist);
         sf(tag, FieldKey.ALBUM_ARTIST,       i.albumArtist);
         sf(tag, FieldKey.ALBUM,              i.album);
-        sf(tag, FieldKey.YEAR,               i.year);
+        // Date COMPLÈTE quand MusicBrainz la fournit ("2014-05-15") au lieu de l'année seule —
+        // voir TagInfo.dateForWrite() ; jaudiotagger route FieldKey.YEAR vers TDRC (ID3v2.4),
+        // TYER+TDAT (ID3v2.3), DATE (Vorbis), ©day (MP4) selon le format.
+        sf(tag, FieldKey.YEAR,               i.dateForWrite());
         sf(tag, FieldKey.GENRE,              i.genre);
         sf(tag, FieldKey.TRACK,              i.track);
         sf(tag, FieldKey.TRACK_TOTAL,        i.trackTotal);
@@ -534,7 +536,18 @@ public class TagWriter {
         sf(tag, FieldKey.BARCODE,            i.barcode);
         sf(tag, FieldKey.CATALOG_NO,         i.catalogNo);
         sf(tag, FieldKey.MUSICBRAINZ_RELEASE_TYPE, i.releaseType);
-        sf(tag, FieldKey.ORIGINAL_YEAR,      i.originalYear);
+        // Date d'origine COMPLÈTE : ID3v2.4 la range dans TDOR (via ORIGINAL_YEAR, qui accepte un
+        // horodatage complet — comme Picard) ; ID3v2.3 (TORY = année seule), Vorbis et MP4 gardent
+        // l'année dans ORIGINAL_YEAR et la date complète dans un champ ORIGINALDATE (nom Picard).
+        // Ignorée si elle contredit originalYear (corrigée à la main) — même règle que dateForWrite().
+        String origDate = i.originalDate == null ? "" : i.originalDate.trim();
+        if (!origDate.isEmpty() && !i.originalYear.isBlank() && !origDate.startsWith(i.originalYear.trim())) origDate = "";
+        if (tag instanceof ID3v24Tag && !origDate.isEmpty()) {
+            sf(tag, FieldKey.ORIGINAL_YEAR,  origDate);
+        } else {
+            sf(tag, FieldKey.ORIGINAL_YEAR,  i.originalYear);
+            setCustomField(tag, "ORIGINALDATE", origDate);
+        }
         // label/releaseStatus/media : champs MusicBrainz systématiquement extraits mais jamais
         // écrits avant ce correctif (comparaison directe avec Picard sur un même fichier).
         sf(tag, FieldKey.RECORD_LABEL,             i.label);
@@ -558,6 +571,13 @@ public class TagWriter {
         // ── Statistiques d'écoute ───────────────────────────────────────────────
         setCustomField(tag, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
         setCustomField(tag, "LASTFM_PLAYCOUNT",       i.lastfmPlayCount);
+
+        // ── Tags Picard / Discogs / Last.fm / Bandcamp (TagFieldRegistry, 2026-09-20) ─────────────
+        for (TagFieldRegistry.Entry e : TagFieldRegistry.ALL) {
+            if (!e.writeHere()) continue;
+            String v = TagFieldRegistry.get(i, e.prop());
+            if (e.key() != null) sf(tag, e.key(), v); else setCustomField(tag, e.custom(), v);
+        }
 
         // ── Marqueur de taguage (portable, indépendant du cache SQLite) ─────────
         setCustomField(tag, "OT_TAGGEDDATE", i.taggedDate);
@@ -633,7 +653,7 @@ public class TagWriter {
         apField(cmd, "--artist",      i.artist);
         apField(cmd, "--albumArtist", i.albumArtist);
         apField(cmd, "--album",       i.album);
-        apField(cmd, "--year",        i.year);
+        apField(cmd, "--year",        i.dateForWrite());
         apField(cmd, "--genre",       i.genre);
         apField(cmd, "--composer",    i.composer);
         apField(cmd, "--comment",     comment);
@@ -811,6 +831,14 @@ public class TagWriter {
 
         apFreeform(cmd, "CATALOG_NO",    i.catalogNo);
         apFreeform(cmd, "ORIGINAL_YEAR", i.originalYear);
+        apFreeform(cmd, "ORIGINALDATE",  i.originalDate);
+        // Nouveaux tags du registre : seulement ceux dont le nom de champ personnalisé n'a AUCUN espace
+        // (contrainte d'AtomicParsley, voir apFreeform) — les FieldKey à nom "MusicBrainz ..." restent
+        // hors de ce repli, comme les 4 autres champs MusicBrainz déjà documentés plus haut.
+        for (TagFieldRegistry.Entry e : TagFieldRegistry.ALL) {
+            if (e.writeHere() && e.custom() != null && !e.custom().contains(" "))
+                apFreeform(cmd, e.custom(), TagFieldRegistry.get(i, e.prop()));
+        }
 
         cmd.add("--overWrite");
 
@@ -905,7 +933,7 @@ public class TagWriter {
         ffMeta(cmd, "artist",       i.artist);
         ffMeta(cmd, "album_artist", i.albumArtist);
         ffMeta(cmd, "album",        i.album);
-        ffMeta(cmd, "date",         i.year);
+        ffMeta(cmd, "date",         i.dateForWrite());
         ffMeta(cmd, "genre",        i.genre);
         ffMeta(cmd, "composer",     i.composer);
         ffMeta(cmd, "comment",      comment);
@@ -1061,11 +1089,24 @@ public class TagWriter {
     }
 
     /** Ajoute un atome freeform ----:com.apple.iTunes:NOM dans un tag M4A. */
+    /**
+     * Atome freeform "----:com.apple.iTunes:NOM". CORRECTIF 2026-09-20 : ce code construisait un
+     * {@code Mp4TagTextField} portant un identifiant "----:..." — une classe pour les atomes TEXTE
+     * simples (©nam, ©alb...), que jaudiotagger ne sait pas sérialiser en atome reverse-DNS : le commit
+     * échouait ("Unable to determine start of audio in file" à sa vérification post-écriture, ou
+     * CannotWriteException). Comme OT_TAGGEDDATE est TOUJOURS écrit (donc au moins un champ custom par
+     * écriture), TOUTE écriture native M4A échouait, et chaque .m4a partait dans la chaîne de repli
+     * (réparation ffmpeg → AtomicParsley, sans nom à espaces → ffmpeg, tags standards seulement) :
+     * aucun "MusicBrainz Album Type/Status/Release Track Id", ReplayGain, ids, pays… sur un M4A, jamais.
+     * Reproduit sur un vrai .m4a de la bibliothèque (copie) ET un synthétique ; la classe correcte,
+     * {@code Mp4TagReverseDnsField}, écrit et relit ces atomes sans erreur (vérifié).
+     */
     private static void writeMp4Freeform(Mp4Tag mp4, String name, String value) {
         try {
             String atomId = "----:com.apple.iTunes:" + name;
-            Mp4TagTextField field = new Mp4TagTextField(atomId, value);
-            mp4.addField(field);
+            try { mp4.deleteField(atomId); } catch (Exception ignored) {} // remplacer, pas dupliquer (mode fusion)
+            mp4.addField(new org.jaudiotagger.tag.mp4.field.Mp4TagReverseDnsField(
+                    atomId, "com.apple.iTunes", name, value));
         } catch (Exception ignored) {}
     }
 
@@ -1208,6 +1249,9 @@ public class TagWriter {
                 }
             } catch (Exception ignored) {}
         }
+        // Champs de la table TagFieldRegistry (pays, label, ReplayGain, tags Picard/Discogs/Last.fm…) :
+        // même sémantique "existant seulement si le calculé est vide" que la boucle ci-dessus.
+        TagFieldRegistry.readInto(tag, m);
         return m;
     }
 

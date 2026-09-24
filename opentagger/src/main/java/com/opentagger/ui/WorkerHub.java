@@ -38,7 +38,11 @@ public final class WorkerHub {
     public enum TaskKind {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
         COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, PODCAST_TAG,
-        DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP
+        DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP,
+        /** Audit audio ↔ tags (AudioTagAuditWorker) : LECTURE SEULE — n'écrit ni fichier ni tag, donc
+         *  volontairement absent de LIBRARY_WRITE (il peut tourner pendant un taguage/enregistrement ;
+         *  seul un second audit est refusé, via a == b dans conflictsWith()). */
+        AUDIO_AUDIT
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,

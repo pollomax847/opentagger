@@ -88,10 +88,6 @@ public class SettingsDialog extends JDialog {
     // ── Onglet APIs (Headphones — intégration tierce, voir HeadphonesClient) ───────────────────
     private JCheckBox  chkHeadphonesDbEnabled;
     private JTextField tfHeadphonesDbPath;
-    private JTextField tfHeadphonesUrl;
-    private JTextField tfHeadphonesApiKey;
-    private JCheckBox  chkHeadphonesAutoQueue;
-    private JSpinner   spHeadphonesAutoQueueMinScore;
     // ── Onglet APIs (beets — intégration tierce, voir BeetsClient) ─────────────────────────────
     private JCheckBox  chkBeetsDbEnabled;
     private JTextField tfBeetsDbPath;
@@ -108,7 +104,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkCorrectPunctuation;
     private JCheckBox  chkRemoveId3v1;
     private JCheckBox  chkSaveAcoustidFingerprints;
-    private JCheckBox  chkIgnoreExistingFingerprints;
+    private JCheckBox  chkIgnoreExistingFingerprints, chkAcoustidLookupByTrackId;
     private JSpinner   spFpcalcThreads;
     private JSpinner   spBatchThreads;
     private JTextField tfPreservedTags;
@@ -556,15 +552,6 @@ public class SettingsDialog extends JDialog {
         chkHeadphonesDbEnabled.setToolTipText(I18n.t("Cherche une correspondance dans la base SQLite d'une "
                 + "instance Headphones tierce avant tout appel réseau — lecture seule, jamais d'écriture."));
         tfHeadphonesDbPath = tf();
-        tfHeadphonesUrl    = tf();
-        tfHeadphonesApiKey = tf();
-        chkHeadphonesAutoQueue = new JCheckBox(I18n.t("Envoyer automatiquement vers Headphones après chaque enregistrement"));
-        chkHeadphonesAutoQueue.setToolTipText(I18n.t("Si l'album identifié n'est pas déjà connu de Headphones "
-                + "(voir sa base), le met automatiquement en recherche/téléchargement de son côté — au-delà du "
-                + "seuil de confiance ci-dessous."));
-        spHeadphonesAutoQueueMinScore = new JSpinner(new SpinnerNumberModel(90, 0, 100, 1));
-        spHeadphonesAutoQueueMinScore.setToolTipText(I18n.t("Score minimum de CETTE identification (pas celui "
-                + "de la recherche côté Headphones) pour déclencher l'envoi automatique."));
         chkBeetsDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base beets (identification locale)"));
         chkBeetsDbEnabled.setToolTipText(I18n.t("Cherche une correspondance (chemin exact, puis similarité) dans "
                 + "la base SQLite d'une instance beets tierce avant tout appel réseau — lecture seule."));
@@ -608,11 +595,6 @@ public class SettingsDialog extends JDialog {
             { "Pistes max à synchroniser (Last.fm) :", spLastfmMaxTracks, null, null },
             { "", chkHeadphonesDbEnabled, null, null },
             { "Chemin headphones.db :",     tfHeadphonesDbPath,   null, null },
-            { "URL Headphones (API) :",     tfHeadphonesUrl,      null, null },
-            { "Clé API Headphones :",       tfHeadphonesApiKey,   "http://127.0.0.1:8181/home/api_builder",
-                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testHeadphones(tfHeadphonesUrl.getText().trim(), tfHeadphonesApiKey.getText().trim()) },
-            { "", chkHeadphonesAutoQueue, null, null },
-            { "Score minimum (envoi auto) :", spHeadphonesAutoQueueMinScore, null, null },
             { "", chkBeetsDbEnabled, null, null },
             { "Chemin library.db (beets) :", tfBeetsDbPath, null, null },
             { "Dossier racine beets :",       tfBeetsMusicDir, null, null },
@@ -1260,6 +1242,12 @@ public class SettingsDialog extends JDialog {
             "Une empreinte déjà présente peut avoir été écrite par un autre outil et être fausse ou "
             + "obsolète (ex: fichier ré-encodé depuis). Cocher ceci ignore l'ancienne et repart d'un "
             + "calcul frais à chaque fois — plus lent, mais plus fiable en cas de doute."));
+        chkAcoustidLookupByTrackId = new JCheckBox(I18n.t("Identifier par l'AcoustID déjà présent dans les tags (sans recalculer l'empreinte)"));
+        chkAcoustidLookupByTrackId.setToolTipText(I18n.t(
+            "Pour un fichier qui porte déjà un \"Acoustid Id\" : interroge AcoustID par cet identifiant "
+            + "(lookup par track ID, comme SongKong) au lieu de renoncer — rapide, sans fpcalc. Ne re-vérifie "
+            + "PAS l'audio : l'identifiant du tag est cru sur parole. Sans effet si la case ci-dessus "
+            + "(toujours recalculer l'empreinte) est cochée."));
         spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
         spBatchThreads             = new JSpinner(new SpinnerNumberModel(6, 1, 16, 1));
         spBatchThreads.setToolTipText(I18n.t("Fichiers traités en parallèle pendant le taguage (GUI et CLI/--dossier). "
@@ -1316,6 +1304,7 @@ public class SettingsDialog extends JDialog {
         JComponent[][] fpRows = {
             { new JLabel(""), chkSaveAcoustidFingerprints },
             { new JLabel(""), chkIgnoreExistingFingerprints },
+            { new JLabel(""), chkAcoustidLookupByTrackId },
             { new JLabel(I18n.t("Threads fpcalc :")), spFpcalcThreads },
             { new JLabel(I18n.t("Threads de taguage :")), spBatchThreads },
             { new JLabel(""), batchThreadsHint },
@@ -2183,9 +2172,7 @@ public class SettingsDialog extends JDialog {
         // qui a motivé cet onglet séparé : rafraîchir la bibliothèque d'un serveur de streaming
         // (Navidrome/Plex) juste après un taguage, sans avoir à connaître curl/les API par cœur.
         JTextArea taExamples = new JTextArea(
-            "# Navidrome — relance un scan de bibliothèque (API Subsonic) :\n"
-          + "curl \"http://127.0.0.1:4533/rest/startScan?u=USER&p=MDP&v=1.16.1&c=opentagger&f=json\"\n\n"
-          + "# Plex — rafraîchit une section de bibliothèque (token + ID de section requis) :\n"
+            "# Plex — rafraîchit une section de bibliothèque (token + ID de section requis) :\n"
           + "curl \"http://127.0.0.1:32400/library/sections/ID/refresh?X-Plex-Token=TOKEN\"");
         taExamples.setEditable(false);
         taExamples.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
@@ -2193,7 +2180,7 @@ public class SettingsDialog extends JDialog {
         taExamples.setBorder(new EmptyBorder(4, 4, 4, 4));
         JPanel exBox = new JPanel(new BorderLayout());
         exBox.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(),
-                I18n.t("Exemples — Navidrome / Plex (copier une ligne, ajuster USER/MDP/TOKEN/ID)")));
+                I18n.t("Exemple — Plex (copier la ligne, ajuster TOKEN/ID)")));
         exBox.add(taExamples, BorderLayout.CENTER);
 
         JPanel outer = new JPanel(new BorderLayout(0, 10));
@@ -2625,10 +2612,6 @@ public class SettingsDialog extends JDialog {
         spLastfmMaxTracks.setValue(cfg.lastfmMaxTracks());
         chkHeadphonesDbEnabled.setSelected(cfg.headphonesDbEnabled());
         tfHeadphonesDbPath.setText(cfg.headphonesDbPath());
-        tfHeadphonesUrl.setText(cfg.headphonesUrl());
-        tfHeadphonesApiKey.setText(cfg.headphonesApiKey());
-        chkHeadphonesAutoQueue.setSelected(cfg.headphonesAutoQueueEnabled());
-        spHeadphonesAutoQueueMinScore.setValue(cfg.headphonesAutoQueueMinScore());
         chkBeetsDbEnabled.setSelected(cfg.beetsDbEnabled());
         tfBeetsDbPath.setText(cfg.beetsDbPath());
         tfBeetsMusicDir.setText(cfg.beetsMusicDir());
@@ -2735,6 +2718,7 @@ public class SettingsDialog extends JDialog {
         chkPreserveCompilation    .setSelected(cfg.preserveCompilationAlbum());
         chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
         chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
+        chkAcoustidLookupByTrackId.setSelected(cfg.acoustidLookupByTrackId());
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
         spBatchThreads            .setValue(cfg.num("batch.threads", 6));
 
@@ -2781,7 +2765,7 @@ public class SettingsDialog extends JDialog {
         return new JSpinner[]{
             spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays,
             spnSkipSongRecMinScore, spListenBrainzMaxTracks, spLastfmMaxTracks,
-            spHeadphonesAutoQueueMinScore, spFpcalcThreads,
+            spFpcalcThreads,
             spBatchThreads, spMbMinGenreUsage, spMbMaxGenres, spTranscodeBitrate, spMbRateLimitMs
         };
     }
@@ -2885,10 +2869,6 @@ public class SettingsDialog extends JDialog {
         p.setProperty("lastfm.max_tracks", String.valueOf(spLastfmMaxTracks.getValue()));
         p.setProperty("headphones.db_enabled", String.valueOf(chkHeadphonesDbEnabled.isSelected()));
         p.setProperty("headphones.db_path",    tfHeadphonesDbPath.getText().trim());
-        p.setProperty("headphones.url",        tfHeadphonesUrl.getText().trim());
-        p.setProperty("headphones.api_key",    tfHeadphonesApiKey.getText().trim());
-        p.setProperty("headphones.auto_queue_enabled",  String.valueOf(chkHeadphonesAutoQueue.isSelected()));
-        p.setProperty("headphones.auto_queue_min_score", String.valueOf(spHeadphonesAutoQueueMinScore.getValue()));
         p.setProperty("beets.db_enabled", String.valueOf(chkBeetsDbEnabled.isSelected()));
         p.setProperty("beets.db_path",    tfBeetsDbPath.getText().trim());
         p.setProperty("beets.music_dir",  tfBeetsMusicDir.getText().trim());
@@ -2988,6 +2968,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("tags.preserve_compilation",     String.valueOf(chkPreserveCompilation.isSelected()));
         p.setProperty("acoustid.save_fingerprints",    String.valueOf(chkSaveAcoustidFingerprints.isSelected()));
         p.setProperty("acoustid.ignore_existing",      String.valueOf(chkIgnoreExistingFingerprints.isSelected()));
+        p.setProperty("acoustid.lookup_by_track_id",   String.valueOf(chkAcoustidLookupByTrackId.isSelected()));
         p.setProperty("acoustid.fpcalc_threads",       String.valueOf(spFpcalcThreads.getValue()));
         p.setProperty("batch.threads",                 String.valueOf(spBatchThreads.getValue()));
 
@@ -3081,7 +3062,7 @@ public class SettingsDialog extends JDialog {
         "discogs.consumer_key", "discogs.consumer_secret",
         "lastfm.api_key", "fanart.api_key", "audd.api_token",
         "listenbrainz.username", "lastfm.username",
-        "headphones.db_path", "headphones.url", "headphones.api_key",
+        "headphones.db_path",
         "beets.db_path", "beets.music_dir",
         "mb.oauth.client_id", "mb.oauth.client_secret", "mb.oauth.token",
         "mb.oauth.refresh_token", "mb.oauth.username", "mb.oauth.collection_id",

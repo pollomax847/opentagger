@@ -141,7 +141,7 @@ public class NonIdentifiedReportDialog extends JDialog {
         btnExport .addActionListener(e -> exportJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder ce rapport dans un fichier JSON"));
 
-        // Empilé, pas côte à côte — même correctif que DurationMismatchReviewDialog (voir son
+        // Empilé, pas côte à côte — même correctif que DurationMismatchReviewPanel (voir son
         // commentaire) : un texte WEST trop long pouvait pousser les boutons EAST hors des limites
         // visibles de la fenêtre (setSize() fixe, jamais de pack()), sans le moindre signalement.
         JPanel p = new JPanel(new BorderLayout(0, 6));

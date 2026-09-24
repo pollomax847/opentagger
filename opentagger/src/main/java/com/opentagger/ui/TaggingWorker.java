@@ -1417,6 +1417,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         t.releaseMbid      = tl.releaseMbid();
                         t.releaseGroupMbid = tl.releaseGroupMbid();
                         t.recordingMbid    = myTrack.recordingMbid();
+                        t.releaseTrackMbid = myTrack.trackMbid();
+                        t.discSubtitle     = myTrack.discTitle();
                         t.track            = String.valueOf(myTrack.trackNo());
                         t.trackTotal       = String.valueOf(myTrack.trackTotal());
                         if (myTrack.disc() > 0) t.discNo = String.valueOf(myTrack.disc());
@@ -1426,6 +1428,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         t.label            = tl.label();
                         t.catalogNo        = tl.catalogNo();
                         t.script           = tl.script();
+                        // Tout le reste des champs de PARUTION (date complète, type "album;live",
+                        // langue, ASIN, URLs, drapeaux live/soundtrack...) — voir
+                        // TagInfo.applyReleaseLevelFrom() : ce chemin n'en recopiait qu'une partie.
+                        t.applyReleaseLevelFrom(tl.releaseMeta());
                         if (tl.isCompilation()) t.isCompilation = "1";
                         // Score élevé mais volontairement < 100 (réservé aux identifications vérifiées
                         // par empreinte audio/MBID direct) : le checksum porte sur TOUT l'album, une
@@ -1545,6 +1551,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         t.releaseMbid      = tl.releaseMbid();
                         t.releaseGroupMbid = tl.releaseGroupMbid();
                         t.recordingMbid    = myTrack.recordingMbid();
+                        t.releaseTrackMbid = myTrack.trackMbid();
+                        t.discSubtitle     = myTrack.discTitle();
                         t.track            = String.valueOf(myTrack.trackNo());
                         t.trackTotal       = String.valueOf(myTrack.trackTotal());
                         if (myTrack.disc() > 0) t.discNo = String.valueOf(myTrack.disc());
@@ -1554,6 +1562,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         t.label            = tl.label();
                         t.catalogNo        = tl.catalogNo();
                         t.script           = tl.script();
+                        // Tout le reste des champs de PARUTION (date complète, type "album;live",
+                        // langue, ASIN, URLs, drapeaux live/soundtrack...) — voir
+                        // TagInfo.applyReleaseLevelFrom() : ce chemin n'en recopiait qu'une partie.
+                        t.applyReleaseLevelFrom(tl.releaseMeta());
                         if (tl.isCompilation()) t.isCompilation = "1";
                         if (myTrack.lengthMs() > 0) t.mbDurationSec = myTrack.lengthMs() / 1000;
                         // Score < TOC (95) : matching titre/numéro contre une release VÉRIFIÉE par une
@@ -2150,6 +2162,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 // Score légèrement > le repli "tags existants" (50, voir 6b) : celui-ci est
                 // confirmé par une source externe, pas une simple confiance dans le fichier.
                 bcInfo.score = 55;
+                // Tout ce que la page fournit en plus (2026-09-20) : URL, label, tags, copyright, licence, ISRC.
+                bcInfo.bandcampUrl = guessUrl;
+                if (bc.extra() != null) {
+                    bcInfo.label     = bc.extra().label();
+                    bcInfo.tags      = bc.extra().keywords();
+                    bcInfo.copyright = bc.extra().copyright();
+                    bcInfo.license   = bc.extra().license();
+                    bcInfo.isrc      = bc.extra().isrc();
+                }
                 log(I18n.t("  Bandcamp (URL devinée, vérifiée) → %s – %s [%s]",
                         bc.artist(), bc.title(), guessUrl));
                 lastFindTagsSource.set(MetadataCache.SOURCE_BANDCAMP);
@@ -2181,9 +2202,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                                        boolean forceReidentify) throws Exception {
         if (!useAcoustId) return null;
         // ignore_existing : si un AcoustID est déjà dans les tags et qu'on ne force pas, on skip
-        boolean hasExistingId = !readTag(fichier, FieldKey.ACOUSTID_ID).isBlank();
-        if (hasExistingId && !Config.get().ignoreExistingFingerprints()) return null;
-        List<TagInfo> r = acoustId.identify(fichier);
+        String storedAcoustId = readTag(fichier, FieldKey.ACOUSTID_ID);
+        boolean hasExistingId = !storedAcoustId.isBlank();
+        List<TagInfo> r;
+        if (hasExistingId && !Config.get().ignoreExistingFingerprints()) {
+            // Option "lookup par identifiant" (SongKong) : interroger AcoustID par l'ID déjà présent plutôt que
+            // de renoncer — voir Config.acoustidLookupByTrackId() pour le compromis (pas de re-vérification audio).
+            if (!Config.get().acoustidLookupByTrackId()) return null;
+            r = acoustId.identifyByTrackId(storedAcoustId);
+        } else {
+            r = acoustId.identify(fichier);
+        }
         if (r.isEmpty() || !acoustIdResultPlausible(fichier, r.get(0), forceReidentify)) return null;
         if (existingTags.durationSec > 0
                 && FileEntry.isDurationMismatch(existingTags.durationSec, r.get(0).mbDurationSec)) {

@@ -102,8 +102,8 @@ public final class FfmpegTagIO {
             ti.artist      = tag(tags, "artist");
             ti.albumArtist = tag(tags, "album_artist");
             ti.album       = tag(tags, "album");
-            String date    = tag(tags, "date");
-            ti.year        = date.length() >= 4 ? date.substring(0, 4) : date;
+            ti.setYearFromRaw(tag(tags, "date"));
+            ti.originalDate = tag(tags, "ORIGINALDATE");
             ti.genre       = tag(tags, "genre");
             ti.comment     = tag(tags, "comment");
             ti.composer    = tag(tags, "composer");
@@ -123,6 +123,11 @@ public final class FfmpegTagIO {
             ti.recordingMbid    = tag(tags, "MUSICBRAINZ_TRACKID");
             ti.releaseGroupMbid = tag(tags, "MUSICBRAINZ_RELEASEGROUPID");
             ti.taggedDate       = tag(tags, "OT_TAGGEDDATE");
+
+            // Tout le reste de ce que write() écrit (tri, contributeurs, classique, mood, URLs, pays,
+            // label, ReplayGain…) — voir TagFieldRegistry : sans ça, réécrire un .opus/.aac/.wv/.wav
+            // depuis ce TagInfo partiel effaçait tout ce qui n'était pas relu.
+            TagFieldRegistry.readInto(tags, ti);
         } catch (Exception ignored) {}
         return ti;
     }
@@ -210,7 +215,7 @@ public final class FfmpegTagIO {
         meta(cmd, "artist",       i.artist);
         meta(cmd, "album_artist", i.albumArtist);
         meta(cmd, "album",        i.album);
-        meta(cmd, "date",         i.year);
+        meta(cmd, "date",         i.dateForWrite());
         meta(cmd, "genre",        i.genre);
         meta(cmd, "composer",     i.composer);
         meta(cmd, "comment",      i.comment);
@@ -252,6 +257,8 @@ public final class FfmpegTagIO {
         meta(cmd, "ENGINEER",  i.engineer);
         meta(cmd, "MIXER",     i.mixer);
         meta(cmd, "DJMIXER",   i.djMixer);
+        meta(cmd, "PERFORMER", i.performers);   // manquaient ici alors que TagWriter les écrit
+        meta(cmd, "REMIXER",   i.remixer);
 
         // ── Classique ────────────────────────────────────────────────────────
         meta(cmd, "WORK",               i.work);
@@ -328,6 +335,7 @@ public final class FfmpegTagIO {
         meta(cmd, "CATALOGNUMBER",          i.catalogNo);
         meta(cmd, "MUSICBRAINZ_ALBUMTYPE",  i.releaseType);
         meta(cmd, "ORIGINAL YEAR",          i.originalYear);
+        meta(cmd, "ORIGINALDATE",           i.originalDate);
         meta(cmd, "LABEL",                  i.label);
         meta(cmd, "MUSICBRAINZ_ALBUMSTATUS", i.releaseStatus);
         meta(cmd, "MEDIA",                  i.media);
@@ -341,6 +349,12 @@ public final class FfmpegTagIO {
 
         // ── Statistiques d'écoute ────────────────────────────────────────────
         meta(cmd, "LISTENBRAINZ_PLAYCOUNT", i.listenbrainzPlayCount);
+        meta(cmd, "LASTFM_PLAYCOUNT",       i.lastfmPlayCount);   // manquait ici alors que TagWriter l'écrit
+
+        // ── Tags Picard / Discogs / Last.fm / Bandcamp (TagFieldRegistry, 2026-09-20) ──────────
+        for (TagFieldRegistry.Entry e : TagFieldRegistry.ALL) {
+            if (e.writeHere() && e.vorbis() != null) meta(cmd, e.vorbis(), TagFieldRegistry.get(i, e.prop()));
+        }
 
         // ── URLs ─────────────────────────────────────────────────────────────
         meta(cmd, "URL_OFFICIAL_ARTIST_SITE",   i.artistOfficialUrl);

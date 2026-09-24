@@ -166,7 +166,7 @@ public class DuplicateDetector {
             case FORMAT   -> formatRank(f);
             case BITRATE  -> bitrateScore(e, f);
             // Plus long = plus probablement complet (un doublon tronqué/coupé a une durée plus
-            // courte que l'original) — même logique de "complétude" que DurationMismatchReviewDialog.
+            // courte que l'original) — même logique de "complétude" que DurationMismatchReviewPanel.
             case DURATION -> e.activeTags().durationSec;
             // Plus court = probablement l'original plutôt qu'une copie suffixée "(2)"/"(3)" issue
             // d'une fusion de dossiers (motif réel rencontré cette même nuit sur "Ride It (remixes)").

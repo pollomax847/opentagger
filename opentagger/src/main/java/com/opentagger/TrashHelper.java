@@ -39,6 +39,7 @@ public final class TrashHelper {
     /** @return true si le fichier a bien été retiré de son emplacement d'origine (corbeille
      *  système OU repli local) — jamais de suppression définitive, jamais silencieux. */
     public static boolean moveToTrash(File f) {
+        if (refuseIfHoldsAudio(f)) return false;
         if (systemTrash(f)) return true;
         return fallbackMove(f);
     }
@@ -47,8 +48,49 @@ public final class TrashHelper {
      *  la corbeille système gère nativement les dossiers ; le repli déplace le dossier tel quel
      *  (avec son contenu) dans la corbeille applicative. */
     public static boolean moveDirToTrash(File dir) {
+        if (refuseIfHoldsAudio(dir)) return false;
         if (systemTrash(dir)) return true;
         return fallbackMove(dir);
+    }
+
+    // ── Garde-fou « jamais un dossier qui contient de l'audio » (2026-09-24) ─────────────────────
+    // Incident réel : ~8 000 pistes audio VALIDES (76,8 Go, ~5 000 dossiers artiste/album/disque) ont quitté
+    // la bibliothèque (MyBook) pour cette corbeille le 24/09 entre 06:27 et 18:33, sans aucune trace dans le
+    // journal ni confirmation retrouvée (l'utilisateur affirme n'avoir rien supprimé de tel). La cause exacte
+    // n'a pas pu être identifiée — mais le seul usage légitime de la corbeille au niveau DOSSIER est le
+    // nettoyage d'orphelins, par définition SANS audio. Refuser ici tout dossier contenant de l'audio (ou dont
+    // le contenu ne peut pas être listé : dans le doute, on ne touche pas) rend cette classe d'incident
+    // impossible via ce point de passage, quel que soit l'appelant.
+    private static final java.util.Set<String> AUDIO_EXT = java.util.Set.of(
+        ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".opus", ".wma", ".ape", ".wv",
+        ".aiff", ".aif", ".mpc", ".mp4", ".dsf", ".dff", ".mka");
+
+    private static boolean refuseIfHoldsAudio(File f) {
+        if (f == null || !f.isDirectory()) return false;
+        boolean holdsAudio;
+        try (java.util.stream.Stream<Path> walk = Files.walk(f.toPath())) {
+            holdsAudio = walk.anyMatch(p -> {
+                String n = p.getFileName() == null ? "" : p.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                return !n.startsWith(".") && Files.isRegularFile(p) && AUDIO_EXT.stream().anyMatch(n::endsWith);
+            });
+        } catch (Exception e) {
+            holdsAudio = true;   // contenu illisible : dans le doute, on ne déplace rien
+        }
+        if (holdsAudio) {
+            System.out.println("[OT] ⛔ Corbeille REFUSÉE : le dossier contient de l'audio (ou n'a pas pu être listé) — "
+                    + f.getAbsolutePath() + " ← " + callerOf());
+        }
+        return holdsAudio;
+    }
+
+    /** Premier appelant hors TrashHelper, « Classe.méthode:ligne » — pour que la prochaine mise à la corbeille
+     *  inattendue soit traçable dans le journal (jusqu'ici ces déplacements étaient totalement silencieux). */
+    private static String callerOf() {
+        for (StackTraceElement el : new Throwable().getStackTrace()) {
+            if (!el.getClassName().equals(TrashHelper.class.getName()))
+                return el.getClassName().replaceAll(".*\\.", "") + "." + el.getMethodName() + ":" + el.getLineNumber();
+        }
+        return "?";
     }
 
     /** Pour les textes affichés à l'utilisateur (confirmations/infobulles) — beaucoup annonçaient
@@ -92,6 +134,8 @@ public final class TrashHelper {
     }
 
     private static boolean fallbackMove(File f) {
+        System.out.println("[OT] 🗑 Corbeille : " + f.getAbsolutePath() + (f.isDirectory() ? " [dossier]" : "")
+                + " ← " + callerOf());
         try {
             Files.createDirectories(FALLBACK_DIR);
             String name = f.getName();

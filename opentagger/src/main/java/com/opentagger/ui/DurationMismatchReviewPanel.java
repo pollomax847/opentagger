@@ -40,7 +40,7 @@ import java.util.List;
  * scan de bibliothèque n'a pas encore atteint ce dossier cette session — pas une erreur, juste un
  * "revenir plus tard".
  */
-public class DurationMismatchReviewDialog extends JDialog {
+public class DurationMismatchReviewPanel extends JPanel {
 
     // En dessous de ce seuil, un fichier plus court que prévu est un extrait/téléchargement cassé
     // avec une confiance suffisante pour proposer une suppression groupée — voir le commentaire de
@@ -57,14 +57,15 @@ public class DurationMismatchReviewDialog extends JDialog {
     private final DefaultTableModel model;
     private final JLabel           lblCount = new JLabel();
     private final List<FileEntry>  rowEntries = new ArrayList<>();
+    private final Runnable         onClose;
 
-    public DurationMismatchReviewDialog(MainFrame owner, FileTableModel tableModel) {
-        super(owner, I18n.t("Durées incohérentes — revue"), false);
+    /** @param onClose ferme la FENÊTRE qui héberge ce panneau (voir SuspectFilesReviewDialog) — ce panneau était
+     *  une fenêtre à part entière jusqu'au 2026-09-20 et fermait la sienne (« Fermer », après un re-taguage forcé). */
+    public DurationMismatchReviewPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose) {
+        super(new BorderLayout(0, 0));
         this.owner      = owner;
         this.tableModel = tableModel;
-        setSize(900, 480);
-        setMinimumSize(new Dimension(640, 320));
-        setLocationRelativeTo(owner);
+        this.onClose    = onClose;
 
         model = new DefaultTableModel(COLS, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
@@ -90,19 +91,15 @@ public class DurationMismatchReviewDialog extends JDialog {
             }
         });
 
-        getContentPane().setLayout(new BorderLayout(0, 0));
-        getContentPane().add(new JScrollPane(table), BorderLayout.CENTER);
-        getContentPane().add(buildFooter(), BorderLayout.SOUTH);
+        add(new JScrollPane(table), BorderLayout.CENTER);
+        add(buildFooter(), BorderLayout.SOUTH);
 
         load();
-
-        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
-        getRootPane().getActionMap().put("close",
-                new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
     }
 
-    private void load() {
+    /** Relit le lot depuis le tableau principal (mémoire seulement) — appelé aussi par la fenêtre hôte à chaque
+     *  ré-ouverture / changement d'onglet. */
+    void load() {
         String folder = Config.get().durationMismatchMoveFolder();
         Path root = folder == null || folder.isBlank() ? null : Paths.get(folder).toAbsolutePath();
 
@@ -169,7 +166,7 @@ public class DurationMismatchReviewDialog extends JDialog {
         btnForce.addActionListener(e -> forceRetagSelection());
         btnTrash.addActionListener(e -> trashSelected());
         btnRefresh.addActionListener(e -> load());
-        btnClose.addActionListener(e -> dispose());
+        btnClose.addActionListener(e -> onClose.run());
 
         // Empilé (texte au-dessus, boutons dans leur propre rangée en dessous) plutôt que côte à
         // côte (WEST=texte / EAST=boutons) — trouvé en direct 2026-09-01 (capture d'écran
@@ -222,7 +219,7 @@ public class DurationMismatchReviewDialog extends JDialog {
             return;
         }
         owner.forceRetagOn(targets);
-        dispose();
+        onClose.run();
     }
 
     private void trashSelected() {

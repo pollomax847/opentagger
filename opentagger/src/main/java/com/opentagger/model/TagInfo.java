@@ -211,8 +211,43 @@ public class TagInfo {
     public String country             = "";    // code ISO-3166 : US, FR, GB…
     public String barcode             = "";
     public String catalogNo           = "";
-    public String releaseType         = "";    // Album, Single, EP, Broadcast…
+    // Types de parution MusicBrainz — primaire PUIS secondaires, minuscules, séparés par ";" (ex.
+    // "album;live", "album;compilation;dj-mix"), comme le fait Picard (releasetype multi-valeur) ;
+    // avant le 2026-09-20 seul le type primaire ("Album") était retenu, jamais "live"/"compilation"...
+    public String releaseType         = "";
     public String originalYear        = "";    // Première année de parution
+    // Dates COMPLÈTES telles que MusicBrainz les donne ("2014-05-15", "2014-05" ou "2014") — year/
+    // originalYear restent toujours 4 chiffres (utilisés par le scoring, les masques de renommage...) ;
+    // date/originalDate ne servent qu'à ce que le fichier reçoive la même précision que Picard.
+    public String date                = "";
+    public String originalDate        = "";
+
+    // ── Tags que Picard écrit et qu'OpenTagger n'écrivait pas (2026-09-20) — voir TagFieldRegistry ──
+    public String releaseTrackMbid    = "";    // "MusicBrainz Release Track Id" : la piste DANS cette parution
+                                                // (≠ recordingMbid, l'enregistrement, partagé entre parutions)
+    public String discSubtitle        = "";    // titre du disque (media[].title), ex. "Live at Wembley"
+    public String discId              = "";    // "MusicBrainz Disc Id" (TOC du CD) — seulement si identifié par TOC
+    public String originalReleaseMbid = "";    // "MusicBrainz Original Album Id"
+    public String license             = "";    // URL de licence (relation MB "license", Bandcamp…)
+    public String writer              = "";    // relation MB "writer"
+    public String director            = "";    // relations MB "audio director"/"video director"
+    public String copyright           = "";    // TCOP / cprt / COPYRIGHT
+    public String subtitle            = "";    // TIT3 / SUBTITLE
+
+    // ── Discogs (voir DiscogsClient) ─────────────────────────────────────────────────────────
+    public String discogsMasterId     = "";    // id du "master release" Discogs (toutes éditions confondues)
+    public String discogsArtistId     = "";
+    public String discogsStyles       = "";    // styles Discogs bruts, ex. "Deep House, Tech House"
+    public String discogsFormat       = "";    // ex. "Vinyl, 12\", 33 ⅓ RPM, EP"
+
+    // ── Last.fm (voir LastFmClient) — hors playcount PERSONNEL (lastfmPlayCount, ci-dessus) ─────
+    public String lastfmUrl           = "";    // page Last.fm de la piste
+    public String lastfmListeners     = "";    // nombre d'auditeurs distincts (global)
+    public String lastfmGlobalPlaycount = "";  // nombre d'écoutes total (global, tous utilisateurs)
+    public String lastfmSimilarArtists = "";   // artistes similaires, séparés par "; "
+
+    // ── Bandcamp (voir BandcampClient) ────────────────────────────────────────────────────────
+    public String bandcampUrl         = "";
     // Label discographique + statut de parution + support physique/numérique — présents dans la
     // réponse MB (label-info[].label.name, status, media[].format) mais jamais extraits ni écrits
     // avant ce correctif : comparé côté à côté avec Picard sur un même fichier, ces 3 champs (plus
@@ -262,6 +297,94 @@ public class TagInfo {
         return low.matches("unknown artist|unknown|artist|artiste|various|various artists|"
                           + "no artist|inconnu|track \\d+|piste \\d+|untitled|titre|title");
     }
+
+    private static final java.util.regex.Pattern ISO_DATE_PREFIX =
+            java.util.regex.Pattern.compile("^(\\d{4}(?:-\\d{2}(?:-\\d{2})?)?)");
+
+    /** "2014", "2014-05" ou "2014-05-15" (exactement, rien après) — le format que renvoie MusicBrainz. */
+    public static boolean isIsoDate(String s) {
+        return s != null && s.matches("\\d{4}(-\\d{2}(-\\d{2})?)?");
+    }
+
+    /** Valeur à écrire dans le champ "date" du fichier : la date complète si elle est connue ET
+     *  cohérente avec {@link #year} (même année — sinon l'utilisateur a corrigé l'année à la main et
+     *  une date MB périmée ne doit pas la contredire), sinon l'année seule comme avant. */
+    public String dateForWrite() {
+        String y = year == null ? "" : year.trim();
+        String d = date == null ? "" : date.trim();
+        if (isIsoDate(d) && (y.isBlank() || d.startsWith(y.length() >= 4 ? y.substring(0, 4) : y))) return d;
+        return y;
+    }
+
+    /** Renseigne {@link #year} (4 chiffres) et {@link #date} (complète) depuis la valeur BRUTE d'un tag
+     *  de fichier — un fichier déjà tagué par Picard peut contenir "2014-05-15" (voire avec heure,
+     *  "2014-05-15T00:00"), qu'on ne veut plus perdre en ne gardant que l'année à la relecture. Valeur
+     *  non reconnue comme une date → conservée telle quelle dans year, comme avant. */
+    public void setYearFromRaw(String raw) {
+        String r = raw == null ? "" : raw.trim();
+        java.util.regex.Matcher m = ISO_DATE_PREFIX.matcher(r);
+        if (m.find() && m.group(1).length() > 4) {
+            year = m.group(1).substring(0, 4);
+            date = m.group(1);
+        } else {
+            year = r;
+        }
+    }
+
+    /** Comme {@link #setYearFromRaw} pour l'année/date d'ORIGINE : ID3v2.4 range la date d'origine
+     *  complète dans TDOR ("1994-10-31"), qu'on ne veut pas laisser dans originalYear (4 chiffres). */
+    public void setOriginalFromRaw(String raw) {
+        String r = raw == null ? "" : raw.trim();
+        java.util.regex.Matcher m = ISO_DATE_PREFIX.matcher(r);
+        if (m.find() && m.group(1).length() > 4) {
+            originalYear = m.group(1).substring(0, 4);
+            if (originalDate == null || originalDate.isBlank()) originalDate = m.group(1);
+        } else {
+            originalYear = r;
+        }
+    }
+
+    /**
+     * Copie, dans les champs encore VIDES de cette instance, tout ce qui est propre à la PARUTION
+     * (pas à la piste) depuis {@code r} — un TagInfo jetable issu de MusicBrainzClient
+     * (parseReleaseTracklist → ReleaseTracklist.releaseMeta). Point de passage UNIQUE pour tous les
+     * chemins qui identifient une piste depuis une tracklist déjà connue (TOC, cohérence de groupe,
+     * complétion d'album, regroupement) : avant, chacun recopiait à la main SA propre sous-liste de
+     * champs (TaggingWorker en oubliait plusieurs, AlbumCompletionWorker presque tous), d'où des
+     * fichiers dont les tags de parution différaient selon LE CHEMIN qui les avait identifiés
+     * (date complète, type de parution, label, pays... présents ou non au hasard).
+     *
+     * @return vrai si au moins un champ a réellement été rempli
+     */
+    public boolean applyReleaseLevelFrom(TagInfo r) {
+        if (r == null) return false;
+        boolean changed = false;
+        String y4 = year != null && year.length() >= 4 ? year.substring(0, 4) : "";
+        if (isBlank(date) && !isBlank(r.date) && (y4.isBlank() || r.date.startsWith(y4))) { date = r.date; changed = true; }
+        if (isBlank(originalDate)     && !isBlank(r.originalDate))     { originalDate     = r.originalDate;     changed = true; }
+        if (isBlank(originalYear)     && !isBlank(r.originalYear))     { originalYear     = r.originalYear;     changed = true; }
+        if (isBlank(releaseType)      && !isBlank(r.releaseType))      { releaseType      = r.releaseType;      changed = true; }
+        if (isBlank(country)          && !isBlank(r.country))          { country          = r.country;          changed = true; }
+        if (isBlank(barcode)          && !isBlank(r.barcode))          { barcode          = r.barcode;          changed = true; }
+        if (isBlank(releaseStatus)    && !isBlank(r.releaseStatus))    { releaseStatus    = r.releaseStatus;    changed = true; }
+        if (isBlank(label)            && !isBlank(r.label))            { label            = r.label;            changed = true; }
+        if (isBlank(catalogNo)        && !isBlank(r.catalogNo))        { catalogNo        = r.catalogNo;        changed = true; }
+        if (isBlank(script)           && !isBlank(r.script))           { script           = r.script;           changed = true; }
+        if (isBlank(language)         && !isBlank(r.language))         { language         = r.language;         changed = true; }
+        if (isBlank(amazonId)         && !isBlank(r.amazonId))         { amazonId         = r.amazonId;         changed = true; }
+        if (isBlank(albumArtistMbid)  && !isBlank(r.albumArtistMbid))  { albumArtistMbid  = r.albumArtistMbid;  changed = true; }
+        if (isBlank(license)          && !isBlank(r.license))          { license          = r.license;          changed = true; }
+        if (isBlank(originalReleaseMbid) && !isBlank(r.originalReleaseMbid)) { originalReleaseMbid = r.originalReleaseMbid; changed = true; }
+        if (isBlank(releaseOfficialUrl)  && !isBlank(r.releaseOfficialUrl))  { releaseOfficialUrl  = r.releaseOfficialUrl;  changed = true; }
+        if (isBlank(releaseWikipediaUrl) && !isBlank(r.releaseWikipediaUrl)) { releaseWikipediaUrl = r.releaseWikipediaUrl; changed = true; }
+        if ("1".equals(r.isLive)         && !"1".equals(isLive))         { isLive         = "1"; changed = true; }
+        if ("1".equals(r.isSoundtrack)   && !"1".equals(isSoundtrack))   { isSoundtrack   = "1"; changed = true; }
+        if ("1".equals(r.isGreatestHits) && !"1".equals(isGreatestHits)) { isGreatestHits = "1"; changed = true; }
+        if ("1".equals(r.isCompilation)  && !"1".equals(isCompilation))  { isCompilation  = "1"; changed = true; }
+        return changed;
+    }
+
+    private static boolean isBlank(String s) { return s == null || s.isBlank(); }
 
     /** Copie superficielle — tous les champs String sont indépendants (immutables). */
     public TagInfo copy() {

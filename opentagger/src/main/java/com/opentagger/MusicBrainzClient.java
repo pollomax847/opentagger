@@ -114,6 +114,7 @@ public class MusicBrainzClient {
                 info.releaseGroupMbid = chosen.path("release-group").path("id").asText("").trim();
                 String date = chosen.path("date").asText("");
                 info.year = date.length() >= 4 ? date.substring(0, 4) : date;
+                info.date = fullDate(date);
                 JsonNode rc = chosen.path("artist-credit");
                 if (rc.isArray() && !rc.isEmpty()) {
                     info.albumArtist     = rc.get(0).path("name").asText("").trim();
@@ -291,6 +292,7 @@ public class MusicBrainzClient {
                 // Année (MB peut renvoyer "2003-05-01" → on tronque à 4)
                 String date = chosen.path("date").asText("");
                 info.year = date.length() >= 4 ? date.substring(0, 4) : date;
+                info.date = fullDate(date);
 
                 // AlbumArtist — présent dans la release si inc=artist-credits
                 JsonNode releaseCredits = chosen.path("artist-credit");
@@ -314,6 +316,7 @@ public class MusicBrainzClient {
             String frd = rec.path("first-release-date").asText("").trim();
             if (frd.length() >= 4 && info.originalYear.isBlank())
                 info.originalYear = frd.substring(0, 4);
+            if (info.originalDate.isBlank()) info.originalDate = fullDate(frd);
 
             // Relations (compositeur, producteur, parolier…) si inclus dans la réponse
             extractRelations(rec.path("relations"), info);
@@ -325,6 +328,14 @@ public class MusicBrainzClient {
 
     private void extractSecondaryTypes(JsonNode release, TagInfo info) {
         JsonNode secTypes = release.path("release-group").path("secondary-types");
+        // Type de parution COMPLET façon Picard (releasetype multi-valeur) : primaire d'abord, puis
+        // chaque type secondaire, en minuscules (convention des tags MusicBrainz : "album", "live",
+        // "compilation", "dj-mix"...), séparés par ";" — ex. "album;live". Avant le 2026-09-20 seul le
+        // type primaire ("Album") était écrit, les secondaires n'alimentaient que les drapeaux
+        // isLive/isCompilation... sans jamais apparaître dans le tag "MusicBrainz Album Type".
+        java.util.List<String> types = new java.util.ArrayList<>();
+        String ptype = release.path("release-group").path("primary-type").asText("").trim();
+        if (!ptype.isBlank()) types.add(ptype.toLowerCase(java.util.Locale.ROOT));
         if (secTypes.isArray()) {
             for (JsonNode t : secTypes) {
                 String type = t.asText();
@@ -332,13 +343,20 @@ public class MusicBrainzClient {
                 if ("Live".equalsIgnoreCase(type))            info.isLive         = "1";
                 if ("Soundtrack".equalsIgnoreCase(type))      info.isSoundtrack   = "1";
                 if ("Greatest Hits".equalsIgnoreCase(type))   info.isGreatestHits = "1";
+                String low = type.trim().toLowerCase(java.util.Locale.ROOT);
+                if (!low.isBlank() && !types.contains(low)) types.add(low);
             }
         }
         if (Config.get().vaName().equalsIgnoreCase(info.albumArtist) || "Various Artists".equalsIgnoreCase(info.albumArtist)) info.isCompilation = "1";
 
-        // Primary type (Album, Single, EP, Broadcast, Other)
-        String ptype = release.path("release-group").path("primary-type").asText("").trim();
-        if (!ptype.isBlank()) info.releaseType = ptype;
+        if (!types.isEmpty()) info.releaseType = String.join(";", types);
+    }
+
+    /** Date MusicBrainz telle quelle si c'est bien "AAAA", "AAAA-MM" ou "AAAA-MM-JJ", sinon "" —
+     *  garde year/originalYear (4 chiffres) inchangés, ne sert qu'aux champs date/originalDate. */
+    private static String fullDate(String raw) {
+        String s = raw == null ? "" : raw.trim();
+        return TagInfo.isIsoDate(s) ? s : "";
     }
 
     /**
@@ -385,6 +403,11 @@ public class MusicBrainzClient {
         String sc = release.path("text-representation").path("script").asText("").trim();
         if (!sc.isBlank() && info.script.isBlank()) info.script = sc;
 
+        // Langue de la parution — jusqu'ici lue UNIQUEMENT dans le chemin lookupRecording ; le chemin
+        // recherche texte et les tracklists (TOC/groupe/complétion d'album) la laissaient vide.
+        String lang = release.path("text-representation").path("language").asText("").trim();
+        if (!lang.isBlank() && info.language.isBlank()) info.language = lang;
+
         String co = release.path("country").asText("").trim();
         if (!co.isBlank() && info.country.isBlank()) info.country = co;
 
@@ -414,7 +437,9 @@ public class MusicBrainzClient {
                 String type = r.path("type").asText("");
                 String url  = r.path("url").path("resource").asText("").trim();
                 if (url.isBlank()) continue;
-                if ("official homepage".equals(type) && info.releaseOfficialUrl.isBlank())
+                if ("license".equals(type) && info.license.isBlank())
+                    info.license = url;
+                else if ("official homepage".equals(type) && info.releaseOfficialUrl.isBlank())
                     info.releaseOfficialUrl = url;
                 else if ("wikidata".equals(type) && info.releaseWikipediaUrl.isBlank())
                     info.releaseWikipediaUrl = url;
@@ -592,6 +617,12 @@ public class MusicBrainzClient {
                 // Numéro de piste
                 JsonNode t = tracks.get(0);
                 info.track = t.path("number").asText("").trim();
+                // "MusicBrainz Release Track Id" (id de la piste dans CETTE parution) et titre du disque —
+                // deux tags que Picard écrit et qu'OpenTagger n'écrivait jamais (2026-09-20).
+                String rtid = t.path("id").asText("").trim();
+                if (!rtid.isBlank() && info.releaseTrackMbid.isBlank()) info.releaseTrackMbid = rtid;
+                String dtitle = medium.path("title").asText("").trim();
+                if (!dtitle.isBlank() && info.discSubtitle.isBlank()) info.discSubtitle = dtitle;
 
                 // Numéro de disc (position du medium)
                 int pos = medium.path("position").asInt(0);
@@ -615,6 +646,8 @@ public class MusicBrainzClient {
                 if (recordingMbid.equals(t.recordingMbid())) {
                     info.track      = String.valueOf(t.trackNo());
                     info.trackTotal = String.valueOf(t.trackTotal());
+                    if (info.releaseTrackMbid.isBlank() && !t.trackMbid().isBlank()) info.releaseTrackMbid = t.trackMbid();
+                    if (info.discSubtitle.isBlank() && !t.discTitle().isBlank())     info.discSubtitle     = t.discTitle();
                     if (t.disc() > 0) {
                         info.discNo    = String.valueOf(t.disc());
                         info.discTotal = String.valueOf(discCount);
@@ -724,15 +757,19 @@ public class MusicBrainzClient {
 
     // ── Lookup d'une release complète (tracklist) ─────────────────────────────
 
+    /** trackMbid = "MusicBrainz Release Track Id" (la piste DANS cette parution, distinct de
+     *  recordingMbid) ; discTitle = titre du disque (media[].title), souvent vide. */
     public record ReleaseTrack(int disc, int trackNo, int trackTotal, String title,
-                               String artist, String recordingMbid, int lengthMs, String artistMbid) {}
+                               String artist, String recordingMbid, int lengthMs, String artistMbid,
+                               String trackMbid, String discTitle) {}
 
     public record ReleaseTracklist(String releaseMbid, String album, String albumArtist,
                                    String albumArtistSort, String year, String releaseGroupMbid,
                                    boolean isCompilation, List<ReleaseTrack> tracks,
                                    String country, String barcode, String releaseStatus,
                                    String label, String catalogNo, String script,
-                                   String albumArtistMbid, String releaseType, String originalYear) {}
+                                   String albumArtistMbid, String releaseType, String originalYear,
+                                   TagInfo releaseMeta) {}
 
     public ReleaseTracklist lookupRelease(String releaseMbid) throws Exception {
         // +labels : sinon label/catalogNo restent structurellement vides pour tout fichier
@@ -774,13 +811,19 @@ public class MusicBrainzClient {
         extractReleaseDetails(root, tmp); // script/country/barcode/status/label/catalogNo/albumArtistMbid
         String frd = root.path("release-group").path("first-release-date").asText("").trim();
         if (frd.length() >= 4) tmp.originalYear = frd.substring(0, 4);
+        tmp.originalDate = fullDate(frd);
+        tmp.year = year;
+        tmp.date = fullDate(date);
 
         List<ReleaseTrack> tracks = parseTracks(root.path("media"), albumArtist);
+        // tmp (releaseMeta) porte TOUS les champs de parution extraits ci-dessus — les appelants le
+        // fusionnent via TagInfo.applyReleaseLevelFrom() au lieu de recopier chacun leur propre
+        // sous-liste de champs (voir sa Javadoc).
         return new ReleaseTracklist(releaseMbid, album, albumArtist, albumArtistSort,
                                     year, rgMbid, "1".equals(tmp.isCompilation), tracks,
                                     tmp.country, tmp.barcode, tmp.releaseStatus,
                                     tmp.label, tmp.catalogNo, tmp.script,
-                                    tmp.albumArtistMbid, tmp.releaseType, tmp.originalYear);
+                                    tmp.albumArtistMbid, tmp.releaseType, tmp.originalYear, tmp);
     }
 
     /** Parse le tableau "media" (disques + pistes) d'une réponse MB release, avec durée (lengthMs). */
@@ -791,6 +834,7 @@ public class MusicBrainzClient {
             for (JsonNode medium : media) {
                 int disc       = medium.path("position").asInt(1);
                 int trackTotal = medium.path("track-count").asInt(0);
+                String discTitle = medium.path("title").asText("").trim();
                 for (JsonNode t : medium.path("tracks")) {
                     int    pos      = t.path("position").asInt(0);
                     String tTitle   = t.path("title").asText("").trim();
@@ -805,7 +849,7 @@ public class MusicBrainzClient {
                     }
                     tracks.add(new ReleaseTrack(discCount > 1 ? disc : 0, pos, trackTotal,
                                                tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid, lengthMs,
-                                               tArtistMbid));
+                                               tArtistMbid, t.path("id").asText("").trim(), discTitle));
                 }
             }
         }
@@ -870,6 +914,7 @@ public class MusicBrainzClient {
             info.releaseGroupMbid = chosen.path("release-group").path("id").asText("").trim();
             String date = chosen.path("date").asText("");
             info.year = date.length() >= 4 ? date.substring(0, 4) : date;
+                info.date = fullDate(date);
 
             JsonNode releaseCredits = chosen.path("artist-credit");
             if (releaseCredits.isArray() && !releaseCredits.isEmpty()) {
@@ -917,6 +962,7 @@ public class MusicBrainzClient {
         // originalYear : date de première sortie du recording
         String frd = rec.path("first-release-date").asText("").trim();
         if (frd.length() >= 4 && info.originalYear.isBlank()) info.originalYear = frd.substring(0, 4);
+        if (info.originalDate.isBlank()) info.originalDate = fullDate(frd);
 
         // Genres MB (folksonomy) — uniquement si mb.use_genres=true
         if (Config.get().bool("mb.use_genres", false)) {
@@ -1039,6 +1085,13 @@ public class MusicBrainzClient {
             String type = rel.path("type").asText("").toLowerCase().trim();
             if (type.isBlank()) continue;
 
+            // Relation URL de licence (Picard : `license`) — nœud "url", pas "artist".
+            if ("license".equals(type)) {
+                String lic = rel.path("url").path("resource").asText("").trim();
+                if (!lic.isBlank() && info.license.isBlank()) info.license = lic;
+                continue;
+            }
+
             // "performance" a un nœud "work", pas "artist" — traité à part avant le switch
             // ci-dessous (qui suppose toujours un nœud "artist" et sinon ignore la relation).
             if ("performance".equals(type)) {
@@ -1066,11 +1119,17 @@ public class MusicBrainzClient {
                 case "conductor"                   -> { if (info.conductor.isBlank())  { info.conductor   = name; info.conductorSort   = sortName; } }
                 case "producer"                    -> { if (info.producer.isBlank())   { info.producer    = name; info.producerSort    = sortName; } }
                 case "mix"                         -> { if (info.mixer.isBlank())      { info.mixer       = name; info.mixerSort       = sortName; } }
-                case "dj-mix"                      -> { if (info.djMixer.isBlank())    info.djMixer       = name; }
+                case "dj-mix", "mix-dj"            -> { if (info.djMixer.isBlank())    info.djMixer       = name; }
+                // Types de relation Picard (picard/mbjson.py: _ARTIST_REL_TYPES) absents jusqu'ici :
+                case "writer"                      -> { if (info.writer.isBlank())     info.writer        = name; }
+                case "audio director", "video director" -> { if (info.director.isBlank()) info.director   = name; }
+                case "instrument arranger", "orchestrator", "vocal arranger"
+                                                   -> { if (info.arranger.isBlank())   { info.arranger    = name; info.arrangerSort    = sortName; } }
+                case "librettist"                  -> { if (info.lyricist.isBlank())   { info.lyricist    = name; info.lyricistSort    = sortName; } }
                 case "performing orchestra"        -> { if (info.orchestra.isBlank())  { info.orchestra   = name; info.orchestraSort   = sortName; } }
                 case "ensemble"                    -> { if (info.ensemble.isBlank())   { info.ensemble    = name; info.ensembleSort    = sortName; } }
                 case "choir", "chorus master"      -> { if (info.choir.isBlank())      { info.choir       = name; info.choirSort       = sortName; } }
-                case "engineer", "recording", "mastering", "balance"
+                case "engineer", "recording", "mastering", "balance", "audio", "live sound", "sound"
                                                    -> { if (info.engineer.isBlank())   info.engineer      = name; }
                 case "remixer"                     -> { if (info.remixer.isBlank())   { info.remixer     = name; info.remixerSort     = sortName; } }
                 case "performer", "instrument", "vocal" -> {

@@ -101,6 +101,30 @@ public class DiscogsClient {
             if (yr.matches("\\d{4}")) info.year = yr;
         }
 
+        // Données déjà présentes dans ce même résultat de recherche (aucun appel réseau de plus) que
+        // Picard/Jaikoz-style "tout ce que la source sait" — jamais lues jusqu'ici (2026-09-20) :
+        // master release, styles bruts (le genre ci-dessus est filtré/limité), format physique, label.
+        if (info.discogsMasterId.isBlank()) {
+            long master = hit.path("master_id").asLong(0);
+            if (master > 0) info.discogsMasterId = String.valueOf(master);
+        }
+        if (info.discogsStyles.isBlank()) {
+            List<String> st = extraireTableau(hit.path("style"));
+            if (!st.isEmpty()) info.discogsStyles = String.join(", ", st);
+        }
+        if (info.discogsFormat.isBlank()) {
+            List<String> fm = extraireTableau(hit.path("format"));
+            if (!fm.isEmpty()) info.discogsFormat = String.join(", ", fm);
+        }
+        if (info.label.isBlank()) {
+            JsonNode labels = hit.path("label");
+            if (labels.isArray() && !labels.isEmpty()) {
+                String lb = labels.get(0).asText("").trim();
+                if (!lb.isBlank() && !"not on label".equalsIgnoreCase(lb) && !lb.toLowerCase().startsWith("not on label"))
+                    info.label = lb;
+            }
+        }
+
         // Identifiant et URL Discogs
         if (info.discogsId.isBlank()) {
             long id = hit.path("id").asLong(0);
@@ -133,6 +157,7 @@ public class DiscogsClient {
         JsonNode detail = fetchArtistDetail(id, cache);
         if (detail == null) return;
 
+        if (info.discogsArtistId.isBlank()) info.discogsArtistId = String.valueOf(id);
         if (info.artistDiscogsUrl.isBlank()) {
             String uri = detail.path("uri").asText("").trim();
             if (!uri.isBlank()) info.artistDiscogsUrl = uri;

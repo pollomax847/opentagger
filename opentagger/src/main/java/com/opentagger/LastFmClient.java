@@ -52,7 +52,8 @@ public class LastFmClient {
         if (!Config.get().lastfmEnabled()) return;
         if (!Config.get().lastfmArtistUrlsEnabled()) return;
         if (Config.get().lastfmKey().isBlank()) return;
-        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank() && !info.artistBio.isBlank()) return;
+        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank() && !info.artistBio.isBlank()
+                && !info.lastfmSimilarArtists.isBlank()) return;
         if (info.artist.isBlank()) return;
 
         // Clé de cache SANS l'api_key (contrairement à l'URL réellement appelée) — un secret n'a
@@ -88,6 +89,59 @@ public class LastFmClient {
             String summary = artist.path("bio").path("summary").asText("").trim();
             if (!summary.isBlank()) info.artistBio = cleanBio(summary);
         }
+        // Artistes similaires — présents dans cette même réponse artist.getInfo (aucun appel de plus).
+        if (info.lastfmSimilarArtists.isBlank()) {
+            JsonNode sim = artist.path("similar").path("artist");
+            if (sim.isArray()) {
+                List<String> names = new ArrayList<>();
+                for (JsonNode a : sim) {
+                    String n = a.path("name").asText("").trim();
+                    if (!n.isBlank() && names.size() < 5) names.add(n);
+                }
+                if (!names.isEmpty()) info.lastfmSimilarArtists = String.join("; ", names);
+            }
+        }
+    }
+
+    /**
+     * URL de la page Last.fm de la piste (construite, sans appel réseau — motif public stable
+     * {@code /music/ARTISTE/_/TITRE}, "+" pour les espaces) puis, si {@code lastfm.fetch_track_stats},
+     * auditeurs distincts et écoutes globales via {@code track.getInfo} (mis en cache comme les autres
+     * appels Last.fm). Ces trois champs sont GLOBAUX — distincts de lastfmPlayCount, l'écoute PERSONNELLE
+     * de l'utilisateur (voir LastFmSyncWorker).
+     */
+    public void enrichTrackStats(TagInfo info, MetadataCache cache) throws Exception {
+        if (!Config.get().lastfmEnabled()) return;
+        if (Config.get().lastfmKey().isBlank()) return;
+        if (info.artist.isBlank() || info.title.isBlank()) return;
+
+        if (info.lastfmUrl.isBlank()) {
+            info.lastfmUrl = "https://www.last.fm/music/" + encode(info.artist) + "/_/" + encode(info.title);
+        }
+        if (!Config.get().lastfmTrackStatsEnabled()) return;
+        if (!info.lastfmListeners.isBlank() && !info.lastfmGlobalPlaycount.isBlank()) return;
+
+        String cacheKey = "lastfm:trackinfo:" + MetadataCache.queryHash(info.artist, info.title);
+        JsonNode root = fetch(BASE_URL
+            + "?method=track.getInfo"
+            + "&artist=" + encode(info.artist)
+            + "&track="  + encode(info.title)
+            + "&autocorrect=1"
+            + "&api_key=" + Config.get().lastfmKey()
+            + "&format=json", cacheKey, cache);
+        if (root == null) return;
+        JsonNode track = root.path("track");
+        if (info.lastfmListeners.isBlank()) {
+            String v = track.path("listeners").asText("").trim();
+            if (v.matches("\\d+")) info.lastfmListeners = v;
+        }
+        if (info.lastfmGlobalPlaycount.isBlank()) {
+            String v = track.path("playcount").asText("").trim();
+            if (v.matches("\\d+")) info.lastfmGlobalPlaycount = v;
+        }
+        // L'URL renvoyée par Last.fm (après autocorrection d'orthographe) prime sur celle construite.
+        String url = track.path("url").asText("").trim();
+        if (url.startsWith("http")) info.lastfmUrl = url;
     }
 
     /** Last.fm ajoute systématiquement un lien de renvoi HTML en fin de résumé

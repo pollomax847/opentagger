@@ -172,6 +172,15 @@ public class Config {
     // désactiver JUSTE ça (et garder genre/mood Last.fm) économise un appel réseau par fichier
     // sans rien perdre d'autre. Défaut true = comportement inchangé pour qui ne touche pas ce réglage.
     public boolean lastfmArtistUrlsEnabled() { return bool("lastfm.fetch_artist_urls", true); }
+    // Statistiques PAR PISTE de Last.fm (auditeurs, écoutes globales, URL — track.getInfo, un appel de plus
+    // par piste, mis en cache) — demande utilisateur 2026-09-20 ("tous les tags Last.fm"). Désactivable si
+    // le débit du pipeline en souffre.
+    public boolean lastfmTrackStatsEnabled() { return bool("lastfm.fetch_track_stats", true); }
+    // Discogs : interroger la release même quand le genre est DÉJÀ connu (MusicBrainz d'abord) pour en tirer
+    // l'id, le master, les styles, le format, le label/catalogue/code-barres manquants — avant, Discogs
+    // n'était appelé que pour un genre vide, donc presque jamais avec mb.use_genres=true. Un appel de
+    // recherche par album (mis en cache), à couper si le débit Discogs (60/min) ralentit trop le pipeline.
+    public boolean discogsAlwaysEnrich() { return bool("discogs.always_enrich", true); }
     public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
@@ -352,6 +361,11 @@ public class Config {
     // --- AcoustID fingerprint ---
     public boolean saveAcoustidFingerprints()     { return bool("acoustid.save_fingerprints", true); }
     public boolean ignoreExistingFingerprints()   { return bool("acoustid.ignore_existing",   false); }
+    // "Lookup by track ID" de la doc AcoustID : un fichier qui porte déjà un "Acoustid Id" est identifié en
+    // interrogeant AcoustID par cet identifiant (aucun fpcalc, aucune empreinte envoyée), comme SongKong —
+    // uniquement quand acoustid.ignore_existing est FAUX (sinon l'empreinte est de toute façon recalculée).
+    // Rapide, mais l'audio réel n'est plus re-vérifié : l'identifiant du tag est cru sur parole. Désactivé.
+    public boolean acoustidLookupByTrackId()      { return bool("acoustid.lookup_by_track_id", false); }
     public int     fpcalcThreads()                { return num ("acoustid.fpcalc_threads",    2); }
 
     // --- Métadonnées ---
@@ -630,18 +644,10 @@ public class Config {
 
     public boolean headphonesDbEnabled() { return bool("headphones.db_enabled", false); }
     public String  headphonesDbPath()    { return str("headphones.db_path", System.getProperty("user.home") + "/headphones/headphones.db"); }
-    public String  headphonesUrl()       { return str("headphones.url", "http://127.0.0.1:8181"); }
-    public String  headphonesApiKey()    { return str("headphones.api_key", ""); }
 
     public boolean beetsDbEnabled() { return bool("beets.db_enabled", false); }
     public String  beetsDbPath()    { return str("beets.db_path", System.getProperty("user.home") + "/.config/beets/library.db"); }
     public String  beetsMusicDir()  { return str("beets.music_dir", ""); }
-
-    /** Envoi automatique vers Headphones (queueAlbum) après chaque enregistrement réussi, si
-     *  l'album n'y est pas déjà connu — voir TagEnrichment.saveEntry() et HeadphonesClient. Demande
-     *  utilisateur explicite (2026-08-29), après avoir d'abord construit une version manuelle. */
-    public boolean headphonesAutoQueueEnabled()  { return bool("headphones.auto_queue_enabled", false); }
-    public int     headphonesAutoQueueMinScore() { return num("headphones.auto_queue_min_score", 90); }
 
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {

@@ -51,11 +51,51 @@ public final class BandcampClient {
     }
 
     public record BandcampTrack(int position, String title, int durationSec) {}
+    /** Champs "en plus" du JSON-LD Bandcamp (label = publisher, tags = keywords, copyright, licence, ISRC) —
+     *  tous optionnels, vides si la page ne les fournit pas. */
+    public record Extra(String label, String keywords, String copyright, String license, String isrc) {}
+
     public record BandcampAlbum(String title, String artist, String artistUrl, String albumUrl,
                                  String imageUrl, String releaseDate, List<BandcampTrack> tracks,
-                                 String credits) {}
+                                 String credits, Extra extra) {}
     public record BandcampTrackPage(String title, String artist, String artistUrl, String trackUrl,
-                                     int durationSec, String album, String imageUrl, String releaseDate) {}
+                                     int durationSec, String album, String imageUrl, String releaseDate,
+                                     Extra extra) {}
+
+    /** Lecture défensive : le JSON-LD Bandcamp varie (chaîne OU objet, tableau OU texte) selon la page. */
+    static Extra parseExtra(JsonNode root) {
+        return new Extra(
+                nameOf(root.path("publisher")),
+                keywordsOf(root.path("keywords")),
+                firstNonBlank(root.path("copyrightNotice").asText(""), nameOf(root.path("copyrightHolder"))),
+                urlOf(root.path("license")),
+                root.path("isrcCode").asText("").trim());
+    }
+
+    private static String nameOf(JsonNode n) {
+        if (n == null || n.isMissingNode() || n.isNull()) return "";
+        return (n.isObject() ? n.path("name").asText("") : n.asText("")).trim();
+    }
+
+    private static String urlOf(JsonNode n) {
+        if (n == null || n.isMissingNode() || n.isNull()) return "";
+        if (n.isObject()) return firstNonBlank(n.path("@id").asText(""), n.path("url").asText(""));
+        return n.asText("").trim();
+    }
+
+    private static String keywordsOf(JsonNode n) {
+        if (n == null || n.isMissingNode() || n.isNull()) return "";
+        if (n.isArray()) {
+            List<String> out = new ArrayList<>();
+            for (JsonNode k : n) { String v = k.asText("").trim(); if (!v.isBlank()) out.add(v); }
+            return String.join(", ", out);
+        }
+        return n.asText("").trim();
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        return a != null && !a.isBlank() ? a.trim() : (b == null ? "" : b.trim());
+    }
 
     /**
      * Devine l'URL d'une page piste Bandcamp depuis artiste+titre déjà connus — AUCUNE recherche
@@ -120,7 +160,8 @@ public final class BandcampClient {
                         parseIso8601Duration(root.path("duration").asText("")),
                         inAlbum.path("name").asText(""),
                         root.path("image").asText(""),
-                        root.path("datePublished").asText(""));
+                        root.path("datePublished").asText(""),
+                        parseExtra(root));
             }
         }
         return null;
@@ -171,7 +212,8 @@ public final class BandcampClient {
                 root.path("image").asText(""),
                 root.path("datePublished").asText(""),
                 tracks,
-                root.path("creditText").asText(""));
+                root.path("creditText").asText(""),
+                parseExtra(root));
     }
 
     // Format RÉEL constaté sur une vraie page Bandcamp le 2026-08-16 ("P00H00M38S",

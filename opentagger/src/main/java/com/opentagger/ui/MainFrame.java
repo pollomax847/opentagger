@@ -4,7 +4,6 @@ import com.opentagger.AlbumGrouping;
 import com.opentagger.AudioScanner;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
-import com.opentagger.HeadphonesClient;
 import com.opentagger.I18n;
 import com.opentagger.MetadataCache;
 import com.opentagger.TagWriter;
@@ -1311,8 +1310,10 @@ public class MainFrame extends JFrame {
         JMenu rapports = new JMenu(I18n.t("Rapports"));
         rapports.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
         rapports.add(mitem(I18n.t("Revue rapide (notation)…"), "ctrl R", e -> openQuickReview()));
-        rapports.add(mitem(I18n.t("Revue des durées incohérentes…"), null,
-            e -> new DurationMismatchReviewDialog(this, tableModel).setVisible(true)));
+        // Une seule entrée, deux onglets (durées incohérentes + audio ↔ tags) : « trop d'outils dans l'appli »
+        // (retour utilisateur, 2026-09-20) — voir SuspectFilesReviewDialog.
+        rapports.add(mitem(I18n.t("Revue des fichiers suspects…"), null,
+            e -> SuspectFilesReviewDialog.show(this, tableModel)));
         rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         rapports.add(mitem(I18n.t("Rapport Non identifiés…"), null,
             e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
@@ -1336,10 +1337,6 @@ public class MainFrame extends JFrame {
         importExport.add(mitem(I18n.t("Reconstruire un export XML iTunes complet…"), null,
             e -> exportFullItunesXml()));
         importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
-        // Même famille que "Importer un CD"/"Coller une URL Bandcamp" (2026-09-07 — vivait seul
-        // directement sous Bibliothèque, hors de toute logique de regroupement) : "aller chercher du
-        // contenu qu'on n'a pas encore".
-        importExport.add(mitem(I18n.t("Envoyer vers Headphones (album manquant)…"), null, e -> sendToHeadphones()));
         bibliotheque.add(importExport);
 
         return bibliotheque;
@@ -2568,7 +2565,18 @@ public class MainFrame extends JFrame {
                 else                           pb = new ProcessBuilder("xdg-open", dir.getAbsolutePath());
                 pb.start();
             } catch (Exception ex) {
-                showError(I18n.t("Impossible d'ouvrir le dossier : %s", ex.getMessage()));
+                // showError() (JOptionPane modal) remplacé ici après un vrai blocage en direct
+                // (2026-09-22) : le dialogue s'est ouvert avec une géométrie dégénérée (1x1 px,
+                // invisible — xwininfo l'a confirmé), tout en restant modal, gelant l'EDT (donc toute
+                // l'appli) sans qu'aucun bouton visible ne permette de le fermer ; même une fois sa
+                // fenêtre X11 détruite depuis l'extérieur, le thread EDT est resté bloqué dans
+                // Dialog.show() — seul un redémarrage a débloqué l'appli. Cause X11/Swing exacte non
+                // confirmée (peut-être liée au multi-écran de cette machine), mais l'échec réel ici
+                // ("xdg-open" indisponible/erreur) est mineur — jamais la peine de risquer de geler
+                // toute l'appli pour ça. setStatus() (nombreux précédents dans ce fichier) ne peut
+                // pas produire ce blocage : pas de fenêtre modale, juste une ligne dans la barre d'état.
+                System.out.println("[OT] Révéler dans le gestionnaire de fichiers : échec — " + ex.getMessage());
+                setStatus(I18n.t("Impossible d'ouvrir le dossier : %s", ex.getMessage()));
             }
         });
         miRemove.addActionListener(e -> {
@@ -3038,6 +3046,14 @@ public class MainFrame extends JFrame {
                 java.util.regex.Matcher ym = java.util.regex.Pattern.compile("\\b(\\d{4})\\b")
                         .matcher(album.releaseDate());
                 if (ym.find()) ti.year = ym.group(1);
+                // Autres champs de la page Bandcamp (2026-09-20) — sans écraser une valeur déjà présente.
+                ti.bandcampUrl = album.albumUrl();
+                if (album.extra() != null) {
+                    if (ti.label.isBlank())     ti.label     = album.extra().label();
+                    if (ti.tags.isBlank())      ti.tags      = album.extra().keywords();
+                    if (ti.copyright.isBlank()) ti.copyright = album.extra().copyright();
+                    if (ti.license.isBlank())   ti.license   = album.extra().license();
+                }
                 int mr = tableModel.indexOf(e);
                 if (mr >= 0) refreshTableRow(mr, ti);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
@@ -3231,87 +3247,6 @@ public class MainFrame extends JFrame {
 
     /** Sélection actuelle, DANS L'ORDRE du tableau (pas l'ordre de clic) — voir BandcampMatchDialog,
      *  qui applique la piste N de Bandcamp au N-ième élément de cette liste. */
-    /**
-     * Signale à une instance Headphones tierce (API HTTP, voir HeadphonesClient) qu'un album trouvé
-     * ici mérite d'être mis en recherche/téléchargement de son côté — pour le fichier actuellement
-     * sélectionné. Toujours une confirmation explicite (JOptionPane) avant queueAlbum() : findAlbum()
-     * est une recherche texte MusicBrainz, jamais assez fiable pour agir silencieusement sur un
-     * service externe. Demande utilisateur (2026-08-29), API vérifiée en direct avant implémentation.
-     */
-    private void sendToHeadphones() {
-        FileEntry entry = entryAtViewRow(table.getSelectedRow());
-        if (entry == null) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Sélectionne d'abord un fichier (pas un en-tête de groupe)."),
-                "Headphones", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        TagInfo ti = entry.activeTags();
-        String artist = ti != null ? ti.artist : "";
-        String album  = ti != null ? ti.album  : "";
-        if (artist.isBlank() || album.isBlank()) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Ce fichier n'a pas encore d'artiste/album identifié."),
-                "Headphones", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        HeadphonesClient client = new HeadphonesClient();
-        if (!client.isConfigured()) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Configure d'abord l'URL et la clé API Headphones dans Préférences → APIs."),
-                "Headphones", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-
-        setStatus(I18n.t("Recherche \"%s – %s\" sur Headphones…", artist, album));
-        final String query = artist + " " + album;
-        new SwingWorker<List<HeadphonesClient.AlbumCandidate>, Void>() {
-            @Override protected List<HeadphonesClient.AlbumCandidate> doInBackground() throws Exception {
-                return client.findAlbum(query);
-            }
-            @Override protected void done() {
-                List<HeadphonesClient.AlbumCandidate> candidates;
-                try { candidates = get(); }
-                catch (Exception ex) {
-                    setStatus(I18n.t("Erreur Headphones : %s", ex.getMessage()));
-                    return;
-                }
-                if (candidates.isEmpty()) {
-                    setStatus(I18n.t("Aucun résultat Headphones pour \"%s\".", query));
-                    return;
-                }
-                String[] options = new String[candidates.size()];
-                for (int i = 0; i < candidates.size(); i++) {
-                    HeadphonesClient.AlbumCandidate c = candidates.get(i);
-                    options[i] = c.artistName() + " — " + c.albumTitle() + I18n.t(" (score %d)", c.score());
-                }
-                String chosen = (String) JOptionPane.showInputDialog(MainFrame.this,
-                        I18n.t("Quel album mettre en recherche sur Headphones ?"), "Headphones",
-                        JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
-                if (chosen == null) { setStatus(I18n.t("Envoi vers Headphones annulé.")); return; }
-                int idx = java.util.Arrays.asList(options).indexOf(chosen);
-                HeadphonesClient.AlbumCandidate pick = candidates.get(idx);
-
-                setStatus(I18n.t("Envoi vers Headphones : %s – %s…", pick.artistName(), pick.albumTitle()));
-                new SwingWorker<Boolean, Void>() {
-                    @Override protected Boolean doInBackground() throws Exception {
-                        return client.queueAlbum(pick.artistId(), pick.releaseId());
-                    }
-                    @Override protected void done() {
-                        try {
-                            boolean ok = get();
-                            setStatus(ok
-                                ? I18n.t("Envoyé à Headphones : %s – %s.", pick.artistName(), pick.albumTitle())
-                                : I18n.t("Échec de l'envoi à Headphones."));
-                        } catch (Exception ex) {
-                            setStatus(I18n.t("Erreur Headphones : %s", ex.getMessage()));
-                        }
-                    }
-                }.execute();
-            }
-        }.execute();
-    }
-
     private void openBandcampDialog() {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) {
@@ -5372,10 +5307,19 @@ public class MainFrame extends JFrame {
         forceRetagOn(targets);
     }
 
+    /** Entrées sélectionnées dans le tableau, vue liste OU arborescente (même résolution que forceRetag()).
+     *  Package-privé : AudioTagAuditPanel, qui audite "la sélection" sans dépendre de la JTable. */
+    List<FileEntry> selectedEntries() {
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        java.util.Set<FileEntry> set = new java.util.LinkedHashSet<>();
+        for (int r : sel) set.addAll(entriesAtViewRow(r));
+        return new ArrayList<>(set);
+    }
+
     /**
      * Confirme puis lance "Forcer le re-taguage" sur une liste explicite de fichiers — factorisé
      * hors de forceRetag() (2026-09-02) pour que d'autres fenêtres de revue (ex.
-     * DurationMismatchReviewDialog, dont le lot "à revérifier"/"probablement cassé" ne proposait
+     * DurationMismatchReviewPanel, dont le lot "à revérifier"/"probablement cassé" ne proposait
      * jusqu'ici qu'une correspondance manuelle fichier par fichier — impraticable sur plusieurs
      * centaines d'entrées) puissent déclencher le même re-taguage ciblé sans dépendre de la
      * sélection de la fenêtre principale. Package-privé : appelé depuis ui/*.
@@ -6837,174 +6781,9 @@ public class MainFrame extends JFrame {
     // Utilitaires
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /** Lit les 90+ champs d'un fichier audio — même couverture que TagWriter. */
+    /** Lit les champs d'un fichier audio — voir {@link com.opentagger.TagReader} (extrait le 2026-09-20). */
     TagInfo readTags(File f) {
-        // Opus/AAC/WV/APE : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO) — inutile
-        // de tenter AudioFileIO.read() en sachant qu'il va échouer.
-        if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
-        TagInfo ti = new TagInfo();
-        AudioFile af = null;
-        try {
-            af = AudioFileIO.read(f);
-        } catch (Exception ignored) {}
-        // En-tête audio (durée, débit...) indépendant du tag lui-même, un fichier sans AUCUN tag a
-        // quand même une durée — et un fichier dont AudioFileIO.read() plante entièrement (en-tête
-        // ID3/atom abîmé mais fichier par ailleurs parfaitement lisible/jouable) mérite quand même
-        // qu'on essaie de lui trouver une durée : avant ce correctif, un AudioFileIO.read() en échec
-        // sautait purement et simplement la sonde ffprobe ci-dessous, laissant durationSec à 0.
-        if (af != null) {
-            try {
-                if (af.getAudioHeader() != null) ti.durationSec = af.getAudioHeader().getTrackLength();
-            } catch (Exception ignored) {}
-        }
-        // jaudiotagger renvoie parfois 0 pour un .m4a/AAC structurellement valide (constaté en
-        // direct : un fichier de 7,8 Mo, flux AAC de 3:56 confirmé par ffprobe, mais
-        // getTrackLength()==0 — probablement un souci de parsing des atomes mvhd/mdhd/stts pour
-        // certains encodeurs). Grave : durationSec==0 est LE signal utilisé ailleurs pour repérer
-        // les fichiers vides/corrompus (voir le commentaire sur ce champ dans TagInfo.java) — un
-        // faux 0 fait donc passer un fichier parfaitement bon pour cassé. Contre-vérification via
-        // ffprobe (lecture des métadonnées du conteneur seulement, pas un décodage complet — coût
-        // négligeable), déclenchée dès que durationSec est encore à 0 à ce stade — que ce soit parce
-        // que getTrackLength() a renvoyé 0, ou parce qu'AudioFileIO.read() a échoué plus haut.
-        if (ti.durationSec <= 0) {
-            int probed = com.opentagger.AudioDuration.probeSeconds(f.getAbsolutePath());
-            if (probed > 0) ti.durationSec = probed;
-        }
-        if (af == null) return ti;
-        try {
-            Tag tag = af.getTag();
-            if (tag == null) return ti;
-
-            // ── Standard ──────────────────────────────────────────────────
-            ti.title          = g(tag, FieldKey.TITLE);
-            ti.artist         = g(tag, FieldKey.ARTIST);
-            ti.albumArtist    = g(tag, FieldKey.ALBUM_ARTIST);
-            ti.album          = g(tag, FieldKey.ALBUM);
-            ti.year           = g(tag, FieldKey.YEAR);
-            ti.track          = g(tag, FieldKey.TRACK);
-            ti.trackTotal     = g(tag, FieldKey.TRACK_TOTAL);
-            ti.genre          = g(tag, FieldKey.GENRE);
-            ti.discNo         = g(tag, FieldKey.DISC_NO);
-            ti.discTotal      = g(tag, FieldKey.DISC_TOTAL);
-            ti.comment        = g(tag, FieldKey.COMMENT);
-
-            // ── Tri ───────────────────────────────────────────────────────
-            ti.titleSort      = g(tag, FieldKey.TITLE_SORT);
-            ti.artistSort     = g(tag, FieldKey.ARTIST_SORT);
-            ti.albumSort      = g(tag, FieldKey.ALBUM_SORT);
-            ti.albumArtistSort= g(tag, FieldKey.ALBUM_ARTIST_SORT);
-            ti.composerSort   = g(tag, FieldKey.COMPOSER_SORT);
-            ti.conductorSort  = g(tag, FieldKey.CONDUCTOR_SORT);
-            ti.orchestraSort  = g(tag, FieldKey.ORCHESTRA_SORT);
-            ti.ensembleSort   = g(tag, FieldKey.ENSEMBLE_SORT);
-            ti.choirSort      = g(tag, FieldKey.CHOIR_SORT);
-            ti.lyricistSort   = g(tag, FieldKey.LYRICIST_SORT);
-            ti.producerSort   = g(tag, FieldKey.PRODUCER_SORT);
-            ti.arrangerSort   = g(tag, FieldKey.ARRANGER_SORT);
-
-            // ── Contributeurs ─────────────────────────────────────────────
-            ti.composer       = g(tag, FieldKey.COMPOSER);
-            ti.conductor      = g(tag, FieldKey.CONDUCTOR);
-            ti.orchestra      = g(tag, FieldKey.ORCHESTRA);
-            ti.ensemble       = g(tag, FieldKey.ENSEMBLE);
-            ti.choir          = g(tag, FieldKey.CHOIR);
-            ti.lyricist       = g(tag, FieldKey.LYRICIST);
-            ti.producer       = g(tag, FieldKey.PRODUCER);
-            ti.arranger       = g(tag, FieldKey.ARRANGER);
-            ti.engineer       = g(tag, FieldKey.ENGINEER);
-            ti.mixer          = g(tag, FieldKey.MIXER);
-            ti.djMixer        = g(tag, FieldKey.DJMIXER);
-            ti.performers     = g(tag, FieldKey.PERFORMER);
-            ti.remixer        = g(tag, FieldKey.REMIXER);
-
-            // ── Classique ─────────────────────────────────────────────────
-            ti.work           = g(tag, FieldKey.WORK);
-            ti.workMbid       = g(tag, FieldKey.MUSICBRAINZ_WORK_ID);
-            ti.movement       = g(tag, FieldKey.MOVEMENT);
-            ti.movementNo     = g(tag, FieldKey.MOVEMENT_NO);
-            ti.movementTotal  = g(tag, FieldKey.MOVEMENT_TOTAL);
-            ti.titleMovement  = g(tag, FieldKey.TITLE_MOVEMENT);
-            ti.part           = g(tag, FieldKey.PART);
-            ti.partType       = g(tag, FieldKey.PART_TYPE);
-            ti.partNo         = g(tag, FieldKey.PART_NUMBER);
-            ti.period         = g(tag, FieldKey.PERIOD);
-            ti.opus           = g(tag, FieldKey.OPUS);
-            ti.classicalCatalog   = g(tag, FieldKey.CLASSICAL_CATALOG);
-            ti.classicalNickname  = g(tag, FieldKey.CLASSICAL_NICKNAME);
-            ti.section        = g(tag, FieldKey.SECTION);
-            ti.overallWork    = g(tag, FieldKey.OVERALL_WORK);
-            ti.grouping       = g(tag, FieldKey.GROUPING);
-
-            // ── Flags ─────────────────────────────────────────────────────
-            String isCl = g(tag, FieldKey.IS_CLASSICAL);
-            if ("1".equals(isCl) || "true".equalsIgnoreCase(isCl)) ti.isClassical = "1";
-            String isCo = g(tag, FieldKey.IS_COMPILATION);
-            if ("1".equals(isCo) || "true".equalsIgnoreCase(isCo)) ti.isCompilation = "1";
-
-            // ── Audio ─────────────────────────────────────────────────────
-            ti.bpm            = g(tag, FieldKey.BPM);
-            ti.initialKey     = g(tag, FieldKey.KEY);
-            ti.language       = g(tag, FieldKey.LANGUAGE);
-
-            // ── Paroles ───────────────────────────────────────────────────
-            ti.lyrics         = g(tag, FieldKey.LYRICS);
-            ti.lyricsUrl      = g(tag, FieldKey.URL_LYRICS_SITE);
-
-            // ── Rating / Tags ─────────────────────────────────────────────
-            ti.rating         = g(tag, FieldKey.RATING);
-            ti.tags           = g(tag, FieldKey.TAGS);
-
-            // ── Mood ──────────────────────────────────────────────────────
-            ti.mood               = g(tag, FieldKey.MOOD);
-            ti.moodAggressive     = g(tag, FieldKey.MOOD_AGGRESSIVE);
-            ti.moodAcoustic       = g(tag, FieldKey.MOOD_ACOUSTIC);
-            ti.moodElectronic     = g(tag, FieldKey.MOOD_ELECTRONIC);
-            ti.moodHappy          = g(tag, FieldKey.MOOD_HAPPY);
-            ti.moodParty          = g(tag, FieldKey.MOOD_PARTY);
-            ti.moodRelaxed        = g(tag, FieldKey.MOOD_RELAXED);
-            ti.moodSad            = g(tag, FieldKey.MOOD_SAD);
-            ti.moodValence        = g(tag, FieldKey.MOOD_VALENCE);
-            ti.moodArousal        = g(tag, FieldKey.MOOD_AROUSAL);
-            ti.moodDanceability   = g(tag, FieldKey.MOOD_DANCEABILITY);
-            ti.moodInstrumental   = g(tag, FieldKey.MOOD_INSTRUMENTAL);
-
-            // ── URLs ──────────────────────────────────────────────────────
-            ti.artistOfficialUrl  = g(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE);
-            ti.artistWikipediaUrl = g(tag, FieldKey.URL_WIKIPEDIA_ARTIST_SITE);
-            ti.artistDiscogsUrl   = g(tag, FieldKey.URL_DISCOGS_ARTIST_SITE);
-            ti.releaseOfficialUrl = g(tag, FieldKey.URL_OFFICIAL_RELEASE_SITE);
-            ti.releaseWikipediaUrl= g(tag, FieldKey.URL_WIKIPEDIA_RELEASE_SITE);
-            ti.releaseDiscogsUrl  = g(tag, FieldKey.URL_DISCOGS_RELEASE_SITE);
-
-            // ── IDs ───────────────────────────────────────────────────────
-            ti.isrc               = g(tag, FieldKey.ISRC);
-            ti.amazonId           = g(tag, FieldKey.AMAZON_ID);
-            ti.roonAlbumTag       = g(tag, FieldKey.ROONALBUMTAG);
-            ti.roonTrackTag       = g(tag, FieldKey.ROONTRACKTAG);
-            ti.acoustidId         = g(tag, FieldKey.ACOUSTID_ID);
-            ti.acoustidFingerprint= g(tag, FieldKey.ACOUSTID_FINGERPRINT);
-
-            // ── IDs MusicBrainz ───────────────────────────────────────────
-            ti.artistMbid         = g(tag, FieldKey.MUSICBRAINZ_ARTISTID);
-            ti.releaseMbid        = g(tag, FieldKey.MUSICBRAINZ_RELEASEID);
-            ti.recordingMbid      = g(tag, FieldKey.MUSICBRAINZ_TRACK_ID);
-            ti.releaseGroupMbid   = g(tag, FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
-
-            // ── Marqueur de taguage (portable, indépendant du cache SQLite) ──
-            ti.taggedDate         = TagWriter.getCustomField(tag, "OT_TAGGEDDATE");
-
-            // ── Informations artiste (Discogs/Last.fm) ───────────────────────
-            ti.artistBio          = TagWriter.getCustomField(tag, "ARTIST_BIO");
-            ti.artistRealName     = TagWriter.getCustomField(tag, "ARTIST_REALNAME");
-
-        } catch (Exception ignored) {}
-        return ti;
-    }
-
-    /** getFirst avec protection NPE et chaîne vide par défaut. */
-    private String g(Tag tag, FieldKey key) {
-        try { String v = tag.getFirst(key); return v != null ? v : ""; }
-        catch (Exception e) { return ""; }
+        return com.opentagger.TagReader.read(f);
     }
 
     // ── Filtrage rapide (recherche + chips de statut cliquables dans buildStatsStrip()) ──────
@@ -7197,7 +6976,7 @@ public class MainFrame extends JFrame {
                 .forEach(en -> skipReasons.put(en.getKey().name(), en.getValue()));
             if (reasonUnknown > 0) skipReasons.put("UNKNOWN_LEGACY_SESSION", reasonUnknown);
 
-            // ── Durée incohérente : même seuil que DurationMismatchReviewDialog (90s), mais un
+            // ── Durée incohérente : même seuil que DurationMismatchReviewPanel (90s), mais un
             // ÉCHANTILLON des plus gros écarts relatifs plutôt que la liste complète (potentiellement
             // des milliers d'entrées — voir la même discussion sur le coût de relecture). ──────────
             record MismatchRow(String file, int fileSec, int mbSec, double ratio, String title) {}
@@ -8227,9 +8006,11 @@ public class MainFrame extends JFrame {
                 // Une seule requête HTTP pour tout le lot (format batch AcoustID), au lieu
                 // d'une requête par fichier — voir AcoustIdSubmitter.submitBatch.
                 results = sub.submitBatch(files, tagsList, this::publish);
-                long ok = results.stream().filter(com.opentagger.AcoustIdSubmitter.SubmissionResult::accepted).count();
-                long ko = results.size() - ok;
-                return I18n.t("Soumission AcoustID — ✔ %d accepté(s)", ok) +
+                long skipped = results.stream().filter(com.opentagger.AcoustIdSubmitter.SubmissionResult::skipped).count();
+                long ok = results.stream().filter(r -> r.accepted() && !r.skipped()).count();
+                long ko = results.size() - ok - skipped;
+                return I18n.t("Soumission AcoustID — ✔ %d soumis", ok) +
+                       (skipped > 0 ? I18n.t("  ⏭ %d déjà connu(s) d'AcoustID (non soumis)", skipped) : "") +
                        (ko > 0 ? I18n.t("  ✗ %d erreur(s)", ko) : "");
             }
             @Override protected void process(List<String> chunks) {
@@ -8240,8 +8021,22 @@ public class MainFrame extends JFrame {
                     setStatus(get());
                     List<String> errors = new ArrayList<>();
                     if (results != null) {
-                        for (var r : results)
+                        // AcoustID renvoie l'identifiant quand l'import est immédiat (statut "imported") :
+                        // le ranger dans le TagInfo si le fichier n'en avait pas (SongKong le range dans le tag
+                        // "Acoustid Id") — écrit sur disque au prochain enregistrement du fichier.
+                        java.util.Map<String, FileEntry> byPath = new java.util.HashMap<>();
+                        for (FileEntry e : toSubmit)
+                            byPath.put((e.currentPath != null ? e.currentPath.toFile() : e.file).getAbsolutePath(), e);
+                        for (var r : results) {
                             if (!r.accepted()) errors.add(r.file().getName() + " : " + r.message());
+                            if (!r.acoustId().isBlank()) {
+                                FileEntry e = byPath.get(r.file().getAbsolutePath());
+                                if (e != null && e.activeTags() != null && e.activeTags().acoustidId.isBlank()) {
+                                    e.activeTags().acoustidId = r.acoustId();
+                                    tableModel.update(e);
+                                }
+                            }
+                        }
                     }
                     if (!errors.isEmpty()) {
                         // Largeur fixée — même correctif que deleteErrorFiles() (voir son
@@ -8373,7 +8168,13 @@ public class MainFrame extends JFrame {
      *  dans cette classe (voir startTagging()/completeAlbums()/transcodeFiles()) — les mêmes
      *  champs, donc aucun risque de diverger de ce que ces gardes considèrent déjà "en cours". */
     private java.util.List<String> activeOperations() {
-        java.util.List<String> ops = new java.util.ArrayList<>(WorkerHub.get().activeLabels());
+        java.util.List<String> ops = new java.util.ArrayList<>();
+        for (WorkerHub.TaskHandle h : WorkerHub.get().active()) {
+            // L'audit audio ↔ tags (AudioTagAuditWorker) est en LECTURE SEULE, ne tient que sa propre liste de
+            // chemins et reprend là où il s'est arrêté : il ne doit ni bloquer "Vider la liste"/"Organiser"/
+            // "Grouper" pendant des heures, ni faire demander une confirmation à la fermeture.
+            if (h.kind() != WorkerHub.TaskKind.AUDIO_AUDIT) ops.add(h.label());
+        }
         if (!activeScanWorkers.isEmpty()) ops.add(I18n.t("Scan de dossier"));
         return ops;
     }

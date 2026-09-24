@@ -152,6 +152,14 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                     updated.discTotal = String.valueOf(maxDisc);
                     changed = true;
                 }
+                // Id de la piste dans la parution + titre du disque (tags Picard, 2026-09-20) — comblés
+                // seulement s'ils sont vides, comme applyReleaseLevelFrom() plus bas.
+                if (updated.releaseTrackMbid.isBlank() && !matched.trackMbid().isBlank()) {
+                    updated.releaseTrackMbid = matched.trackMbid(); changed = true;
+                }
+                if (updated.discSubtitle.isBlank() && !matched.discTitle().isBlank()) {
+                    updated.discSubtitle = matched.discTitle(); changed = true;
+                }
                 if (!tracklist.albumArtist().isBlank())     updated.albumArtist     = tracklist.albumArtist();
                 if (!tracklist.albumArtistSort().isBlank()) updated.albumArtistSort = tracklist.albumArtistSort();
                 if (tracklist.isCompilation())              updated.isCompilation   = "1";
@@ -160,8 +168,12 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                 // piste dont l'année divergerait du reste de l'album (import en plusieurs fois,
                 // source différente par piste...).
                 if (!tracklist.year().isBlank() && !tracklist.year().equals(updated.year)) {
-                    updated.year = tracklist.year(); changed = true;
+                    updated.year = tracklist.year(); updated.date = ""; changed = true;
                 }
+                // Champs de PARUTION encore vides (date complète, type "album;live", label, pays,
+                // langue...) — voir TagInfo.applyReleaseLevelFrom() : même source de vérité (la
+                // release MB) que l'année ci-dessus, jamais écrasés s'ils sont déjà renseignés.
+                if (updated.applyReleaseLevelFrom(tracklist.releaseMeta())) changed = true;
                 // Genre : voir le commentaire sur majorityGenre() plus haut — jamais pour combler
                 // un vide, seulement pour aligner une piste minoritaire sur le reste du groupe.
                 if (!majorityGenre.isEmpty() && !updated.genre.isBlank()
