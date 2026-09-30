@@ -332,6 +332,8 @@ public class MainFrame extends JFrame {
             SplashScreen.show(() -> SwingUtilities.invokeLater(() -> {
                 MainFrame frame = new MainFrame();
                 frame.setVisible(true);
+                // Premier démarrage : propose de saisir les clés API (modale, une seule fois).
+                FirstRunApiKeysDialog.showIfFirstRun(frame);
                 if (initialDirs != null && initialDirs.length > 0)
                     frame.loadFiles(initialDirs);
                 frame.checkForUpdates(false);

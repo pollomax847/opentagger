@@ -1,4 +1,11 @@
 {
+  "Bienvenue dans OpenTagger": "Welcome to OpenTagger",
+  "Pour identifier vos fichiers, OpenTagger utilise des services en ligne gratuits qui demandent chacun une clé personnelle. Renseignez celles que vous avez (toutes sont facultatives) — vous pourrez les modifier plus tard dans Préférences → APIs.": "To identify your files, OpenTagger uses free online services that each require a personal key. Fill in the ones you have (all are optional) — you can change them later in Preferences → APIs.",
+  "Plus tard": "Later",
+  "Enregistrer": "Save",
+  "Tester": "Test",
+  "Test en cours…": "Testing…",
+  "Échec": "Failed",
   "%d dossiers en cours de scan…": "%d folders scanning…",
   "Cover Art Archive (MB)": "Cover Art Archive (MB)",
   "Double-clic : localiser dans le tableau — Ctrl+C : copier": "Double-click: locate in the table — Ctrl+C: copy",
