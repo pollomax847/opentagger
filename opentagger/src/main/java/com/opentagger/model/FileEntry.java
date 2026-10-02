@@ -90,6 +90,18 @@ public class FileEntry {
      *  (voir ITunesXmlSyncQueue/ITunesXmlWriter) sans avoir à re-résoudre le chemin à chaque fois. */
     public Integer itunesTrackId = null;
 
+    /** Version STRICTE et symétrique de {@link #isDurationMismatch} (écart de plus de 20 s ET de
+     *  20 % de la durée MB, dans les DEUX sens), pour les identifications qui ne reposent pas sur
+     *  l'audio (cohérence de groupe : numéro de piste + titre) — là, un fichier nettement plus long
+     *  n'est pas un bootleg/live plausible mais bien probablement un autre morceau. Cas réel
+     *  (2026-10-02) : "Piggy Bank" (50 Cent, ~4:06 sur MB) épinglé sur un fichier de 5:51 qui
+     *  n'était pas ce morceau — +43 % passait sous le seuil de 50 % ci-dessus. */
+    public static boolean isStrictDurationMismatch(int fileSec, int mbSec) {
+        if (fileSec <= 0 || mbSec <= 0) return false;
+        int diff = Math.abs(fileSec - mbSec);
+        return diff > 20 && diff > mbSec * 0.20;
+    }
+
     public static boolean isDurationMismatch(int fileSec, int mbSec) {
         if (fileSec <= 0 || mbSec <= 0) return false;
         int diff = fileSec - mbSec;

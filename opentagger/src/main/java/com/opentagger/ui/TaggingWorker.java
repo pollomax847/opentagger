@@ -1373,7 +1373,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // ni doublon, durées connues pour toutes) — tout dossier qui ne remplit pas ces conditions
         // (compilation en vrac, singles, dossier incomplet) tombe silencieusement dans la suite
         // normale de la cascade, aucune régression pour les cas déjà bien couverts par ailleurs.
-        if (Config.get().discIdMatchingEnabled() && fichier.getParentFile() != null) {
+        // Jamais en re-taguage forcé (2026-10-02) : ces étapes 0.6/0.61/0.65 n'écoutent pas l'audio
+        // (durées de pistes du dossier, base beets, release épinglée par une autre piste + numéro de
+        // piste). "Forcer le re-taguage" promet une ré-identification par l'audio (SongRec/AcoustID
+        // d'abord) — avant ce correctif, la cohérence de groupe répondait avant SongRec et validait
+        // un fichier au bon nom mais à l'audio différent (score=92 sans jamais l'écouter).
+        if (!forceReidentify && Config.get().discIdMatchingEnabled() && fichier.getParentFile() != null) {
             Path folder = fichier.getParentFile().toPath();
             if (!discIdFailedFolders.contains(folder)) {
                 MusicBrainzClient.ReleaseTracklist tl =
@@ -1452,7 +1457,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Placée juste après le TOC : quasi certaine quand elle matche (beets.music_dir + chemin
         // relatif stocké = chemin absolu réel du fichier), donc un cran de confiance au-dessus même
         // du repli texte Headphones/beets juste en dessous. Désactivée par défaut (beets.db_enabled).
-        if (Config.get().beetsDbEnabled()) {
+        if (!forceReidentify && Config.get().beetsDbEnabled()) {
             TagInfo bx = new BeetsClient().lookupByPath(fichier.getAbsolutePath());
             if (bx != null) {
                 log(I18n.t("  beets (chemin exact) → %s – %s [%s]", bx.artist, bx.title, bx.album));
@@ -1499,7 +1504,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // contre une release trouvée par une autre piste. Contrairement au TOC, s'applique aussi aux
         // groupes éparpillés sur plusieurs dossiers physiques (regroupement par tag album, pas par
         // dossier).
-        if (Config.get().discIdMatchingEnabled() && groupKey != null) {
+        if (!forceReidentify && Config.get().discIdMatchingEnabled() && groupKey != null) {
             String pinnedMbid = groupPinnedRelease.get(groupKey);
             if (pinnedMbid != null && !pinnedTracklistFailed.contains(pinnedMbid)) {
                 MusicBrainzClient.ReleaseTracklist tl = pinnedTracklistCache.computeIfAbsent(pinnedMbid, mbid -> {
@@ -1539,6 +1544,18 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         }
                     }
                     if (myTrack == null) myTrack = findTrackInReleaseByTitle(tl, fichier);
+                    // Garde-fou durée STRICT (voir FileEntry.isStrictDurationMismatch) : ce chemin
+                    // n'écoute jamais l'audio — il se fie au numéro de piste et au tag titre DÉJÀ
+                    // présent dans le fichier (même après un re-taguage forcé), donc un fichier qui
+                    // porte le bon nom mais dont l'audio est un autre morceau passait ici avec
+                    // score=92. Si la durée ne colle pas, on laisse la cascade audio (AcoustID,
+                    // SongRec...) trancher plutôt que d'épingler la piste sur la foi du seul nom.
+                    if (myTrack != null && existingTags != null && myTrack.lengthMs() > 0
+                            && FileEntry.isStrictDurationMismatch(existingTags.durationSec, myTrack.lengthMs() / 1000)) {
+                        log(I18n.t("  Cohérence de groupe ⚠ durée du fichier (%ds) incompatible avec '%s' (%ds) → identification par l'audio",
+                                existingTags.durationSec, myTrack.title(), myTrack.lengthMs() / 1000));
+                        myTrack = null;
+                    }
                     if (myTrack != null) {
                         TagInfo t = new TagInfo();
                         t.artist           = myTrack.artist();
