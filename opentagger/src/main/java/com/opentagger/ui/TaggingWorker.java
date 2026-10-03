@@ -1800,6 +1800,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     artist = fn[0]; title = fn[1];
                     // Appliquer isGenericTag sur l'artiste du nom de fichier aussi ("0", "01", etc.)
                     if (isGenericTag(artist)) artist = "";
+                    // Le titre issu du nom de fichier doit lui aussi pouvoir être générique
+                    // ("download", "Track 01"…) — sinon il part en recherche texte seule.
+                    if (isGenericTag(title)) title = "";
                     filenameSplitAmbiguous = !artist.isBlank() && !title.isBlank();
                     log(I18n.t("  → infos du nom de fichier: artiste='%s' titre='%s'", artist, title));
                 }
@@ -2553,6 +2556,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // cohérence de l'artiste via SongRec, jamais sur le titre — ce titre absurde passait donc
         // sans être détecté ni corrigé.
         if (low.matches("(cover|folder|front|back|album|art|artwork)\\.(jpe?g|png|gif|bmp|webp)")) return true;
+        // Noms par défaut des outils de téléchargement/enregistrement ("download.m4a", "download (3)",
+        // "Nouvel enregistrement 2"…) — aucune information sur le morceau. Avant ce correctif
+        // (2026-10-03, journal réel d'un re-taguage forcé de 177 fichiers) "download" partait tel quel
+        // en recherche MusicBrainz et chaque fichier était "identifié" comme le premier morceau
+        // portant ce titre ("Mr. D – Download", "K2 – Download", score=100 trompeur), puis enregistré.
+        if (low.matches("(download(ed)?|nouvel enregistrement|new recording|sans titre)([\\s_\\-]*\\(?\\d+\\)?)?")) return true;
         // Aucun caractère alphanumérique exploitable (ex. tag corrompu "_ _ _ _ _ _ _ _ _ _ _ _ _ _") —
         // repéré en direct 2026-09-01 : cleanSearchTerm() convertit les "_" en espaces, donc ce genre
         // de titre part en recherche MB avec un terme quasi vide ; l'artiste seul suffit alors à MB
