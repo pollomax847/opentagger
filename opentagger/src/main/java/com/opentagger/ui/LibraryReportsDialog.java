@@ -7,7 +7,7 @@ import java.awt.*;
 
 /**
  * « Rapports de la bibliothèque » : UNE fenêtre, trois onglets — Non identifiés (par cause), Complétude des
- * tags et Compilations restaurées. (L'analyse iTunes vit dans l'outil {@link ITunesToolDialog}.)
+ * tags et Compilations restaurées.
  *
  * <p>Fusion du 2026-10-03 (retour utilisateur : « trop d'options gâchent l'application », le sous-menu
  * Rapports en comptait 10) : ces rapports avaient la même forme (un tableau, un pied de page

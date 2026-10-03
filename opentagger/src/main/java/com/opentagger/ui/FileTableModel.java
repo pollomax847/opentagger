@@ -49,6 +49,12 @@ public class FileTableModel extends AbstractTableModel {
     // tri par colonne, toujours protégé séparément par MainFrame.beginBulkTableUpdate()).
     private final List<FileEntry> entries = new ArrayList<>();
     private final List<FileEntry> visible = new ArrayList<>();
+    // Appartenance (par identité) à `entries` en O(1) : update() s'en sert pour ignorer une entrée déjà
+    // RETIRÉE (scan annulé, « Retirer la sélection », « Vider la liste ») que des tâches d'arrière-plan
+    // mettent encore à jour — sans cela elle réapparaissait dans `visible` seulement, créant des
+    // « lignes fantômes » (chip Total 187 340 contre 130 333 fichiers réels, constaté le 2026-10-03).
+    private final java.util.Set<FileEntry> members =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     // FileEntry → index dans `visible` (pas dans `entries`) — FileEntry n'override pas
     // equals/hashCode, IdentityHashMap correspond au comportement historique de indexOf().
     private final java.util.Map<FileEntry, Integer> indexMap = new java.util.IdentityHashMap<>();
@@ -66,6 +72,7 @@ public class FileTableModel extends AbstractTableModel {
 
     public void add(FileEntry e) {
         entries.add(e);
+        members.add(e);
         if (matches(e)) {
             visible.add(e);
             indexMap.put(e, visible.size() - 1);
@@ -74,6 +81,8 @@ public class FileTableModel extends AbstractTableModel {
     }
 
     public void update(FileEntry e) {
+        // Entrée retirée entre-temps : surtout ne pas la remettre dans la vue (voir `members`).
+        if (!members.contains(e)) return;
         Integer viewRow = indexMap.get(e);
         boolean wasVisible = viewRow != null;
         boolean nowMatches = matches(e);
@@ -95,6 +104,7 @@ public class FileTableModel extends AbstractTableModel {
     public void remove(int row) {
         FileEntry removed = visible.remove(row);
         entries.remove(removed);
+        members.remove(removed);
         indexMap.remove(removed);
         reindexVisibleFrom(row);
         fireTableRowsDeleted(row, row);
@@ -102,6 +112,7 @@ public class FileTableModel extends AbstractTableModel {
 
     public void clear() {
         entries.clear();
+        members.clear();
         visible.clear();
         indexMap.clear();
         dirty = false;
@@ -122,13 +133,16 @@ public class FileTableModel extends AbstractTableModel {
 
     public void replaceAll(List<FileEntry> list) {
         entries.clear();
+        members.clear();
         entries.addAll(list);
+        members.addAll(list);
         rebuildVisible();
     }
 
     public void addAll(List<FileEntry> list) {
         if (list.isEmpty()) return;
         entries.addAll(list);
+        members.addAll(list);
         int from = visible.size();
         for (FileEntry e : list) {
             if (matches(e)) {
@@ -143,6 +157,7 @@ public class FileTableModel extends AbstractTableModel {
     public void removeEntries(java.util.Set<FileEntry> toRemove) {
         if (toRemove.isEmpty()) return;
         entries.removeIf(toRemove::contains);
+        for (FileEntry e : toRemove) members.remove(e);
         rebuildVisible();
     }
 

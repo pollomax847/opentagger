@@ -683,7 +683,6 @@ public class FileRenamer {
             }
         }
         PlaylistSync.onFileMoved(src, dst);
-        ITunesXmlSyncQueue.onFileMoved(src, dst);
     }
 
     // ── Nettoyage des dossiers vides ──────────────────────────────────────────

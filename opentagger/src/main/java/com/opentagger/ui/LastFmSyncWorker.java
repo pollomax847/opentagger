@@ -47,7 +47,7 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
 
         log(I18n.t("Récupération des statistiques Last.fm pour \"%s\"…", username));
         onProgress.accept(I18n.t("Récupération des statistiques Last.fm pour \"%s\"…", username));
-        Map<String, Integer> counts = client.fetchTopTrackCounts(username, Config.get().lastfmMaxTracks());
+        Map<String, Integer> counts = client.fetchTopTrackCounts(username);
         log(I18n.t("%d piste(s) dans le classement Last.fm récupéré.", counts.size()));
         onProgress.accept(I18n.t("%d piste(s) dans le classement Last.fm récupéré.", counts.size()));
 
@@ -64,6 +64,8 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
 
             Integer count = counts.get(mbid);
             if (count == null) { skipped++; continue; }
+            // Déjà à jour (ou compteur en ligne plus petit) : ne PAS réécrire le fichier — voir PlayCounts.
+            if (!com.opentagger.PlayCounts.needsUpdate(ti.lastfmPlayCount, count)) { skipped++; continue; }
 
             try {
                 File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;

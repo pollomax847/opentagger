@@ -299,7 +299,7 @@ public class MainFrame extends JFrame {
     private java.util.Map<String, MetadataCache.ScanCacheEntry> sharedScanCacheMap;
     private int scanCacheMapRefCount = 0;
 
-    /** Public (2026-08-17) pour qu'ITunesImportDialog réutilise ce cache partagé au lieu de
+    /** Public (2026-08-17) pour que les dialogues réutilisent ce cache partagé au lieu de
      *  recharger tout scan_cache (des centaines de milliers de lignes) à chaque tentative d'import
      *  — exactement le motif qui avait déjà causé un OutOfMemoryError par le passé (voir commentaire
      *  ci-dessus) et qui provoquait à nouveau une fuite mémoire native constatée en direct ce
@@ -1134,6 +1134,15 @@ public class MainFrame extends JFrame {
         });
         options.add(chkAutoSaveEnabled);
 
+        // Automatisation de « Outils → Re-traitement → Synchroniser les compteurs d'écoute » (qui reste
+        // disponible à la main) : à la fin d'un scan, au plus une fois par 24 h — voir scheduleAutoPlayCountSync().
+        StayOpenCheckBoxMenuItem chkAutoPlayCounts = new StayOpenCheckBoxMenuItem(
+                I18n.t("Synchroniser les compteurs d'écoute automatiquement après un scan (1 fois par jour)"));
+        chkAutoPlayCounts.setSelected(Config.get().autoSyncPlayCounts());
+        chkAutoPlayCounts.addActionListener(e ->
+                Config.get().set("playcounts.auto_sync", String.valueOf(chkAutoPlayCounts.isSelected())));
+        options.add(chkAutoPlayCounts);
+
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
         // le dossier cible lui-même (chemin texte) reste configuré dans Préférences, un menu
@@ -1325,7 +1334,7 @@ public class MainFrame extends JFrame {
             e -> SuspectFilesReviewDialog.show(this, tableModel)));
         rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
         // Une seule entrée pour tous les rapports chiffrés (Non identifiés, Complétude, Compilations
-        // restaurées, iTunes sous Windows) — voir LibraryReportsDialog (2026-10-03, « trop d'options »).
+        // restaurées) — voir LibraryReportsDialog (2026-10-03, « trop d'options »).
         rapports.add(mitem(I18n.t("Rapports de la bibliothèque…"), null,
             e -> LibraryReportsDialog.open(this, tableModel)));
         rapports.addSeparator();
@@ -1337,9 +1346,6 @@ public class MainFrame extends JFrame {
         importExport.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
         importExport.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
         importExport.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
-        // Une seule entrée pour tout iTunes (import/écriture/export XML + analyse de la vraie
-        // bibliothèque sous Windows) — voir ITunesToolDialog (2026-10-03, « tout regroupé »).
-        importExport.add(mitem(I18n.t("iTunes…"), null, e -> ITunesToolDialog.open(this, tableModel)));
         importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
         bibliotheque.add(importExport);
 
@@ -3010,34 +3016,6 @@ public class MainFrame extends JFrame {
     }
 
     /**
-     * Applique une note importée (voir ITunesImportDialog) à chaque entrée du tableau
-     * actuellement chargée — même chemin que applyDetail() (snapshot avant/après, undo persistant,
-     * écriture sécurisée) pour qu'une note importée par erreur reste annulable exactement comme
-     * une édition manuelle, y compris après redémarrage (voir UndoManager). Ne touche jamais un
-     * fichier qui n'est pas actuellement dans ce tableau — voir ITunesImportDialog pour le
-     * pourquoi (ne jamais écrire sur un fichier que l'utilisateur n'a pas chargé/vu cette
-     * session).
-     */
-    /** Répercute une note éditée manuellement vers la file XML iTunes (voir ITunesXmlSyncQueue) —
-     *  UNIQUEMENT si ce fichier a déjà un Track ID connu (établi par un import XML antérieur, voir
-     *  ITunesImportDialog) ; no-op silencieux sinon (immense majorité des fichiers). Ne pousse
-     *  jamais rien depuis applyRatingImport() elle-même : la note vient déjà de ce même Track ID,
-     *  la repousser serait un aller-retour sans effet. */
-    private void queueRatingBackToItunes(FileEntry e, String newRating) {
-        if (e.itunesTrackId == null || newRating == null || newRating.isBlank()) return;
-        try {
-            int stars = Integer.parseInt(newRating.trim());
-            if (stars >= 1 && stars <= 5) {
-                com.opentagger.ITunesXmlSyncQueue.queueRatingChange(e.itunesTrackId, stars);
-            }
-        } catch (NumberFormatException ignored) {
-            // Valeur brute ID3 (0-255) plutôt que 1-5 étoiles — voir TagEnrichment.parseStars()
-            // pour la même ambiguïté ; pas assez fiable pour repousser vers iTunes sans risquer un
-            // mauvais nombre d'étoiles, on préfère s'abstenir.
-        }
-    }
-
-    /**
      * Applique un album Bandcamp (voir BandcampMatchDialog) — position N de l'album → N-ième
      * fichier de {@code selection} (ordre déjà fixé par le tableau au moment de l'appel). Même
      * circuit que les autres écritures manuelles (snapshot/undo persistant/écriture sécurisée).
@@ -3083,184 +3061,6 @@ public class MainFrame extends JFrame {
         } finally {
             correctionsCache.close();
         }
-    }
-
-    /** @return succès d'écriture RÉEL par fichier (pas juste "traité") — retour utilisateur
-     *  (2026-08-24) : ITunesImportDialog n'avait aucun moyen de savoir si l'écriture sur disque
-     *  avait vraiment réussi pour chaque fichier, seulement un compte global optimiste. */
-    public java.util.Map<FileEntry, Boolean> applyRatingImport(java.util.Map<FileEntry, String> newRatings) {
-        java.util.Map<FileEntry, Boolean> results = new java.util.LinkedHashMap<>();
-        if (newRatings.isEmpty()) return results;
-        MetadataCache correctionsCache = new MetadataCache();
-        try {
-            for (var entry : newRatings.entrySet()) {
-                FileEntry e    = entry.getKey();
-                TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
-                TagInfo   ti   = e.activeTags();
-                ti.rating = entry.getValue();
-                int mr = tableModel.indexOf(e);
-                if (mr >= 0) refreshTableRow(mr, ti);
-                undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
-                        I18n.t("Import note iTunes %s", e.filename()));
-                recordFieldCorrections(correctionsCache, e, snap, ti);
-                boolean written = writeTagsSafe(e, ti);
-                if (written) markManuallyTagged(e, ti, mr);
-                results.put(e, written);
-            }
-            long okCount = results.values().stream().filter(Boolean::booleanValue).count();
-            setStatus(I18n.t("Notes iTunes appliquées — %d/%d fichier(s) écrit(s)", okCount, newRatings.size()));
-        } finally {
-            correctionsCache.close();
-        }
-        return results;
-    }
-
-    /**
-     * Applique la file d'attente (voir ITunesXmlSyncQueue) au VRAI fichier XML iTunes — action
-     * manuelle explicite uniquement, jamais déclenchée automatiquement (voir ITunesXmlWriter pour
-     * les garanties : sauvegarde horodatée systématique, réécriture chirurgicale ligne par ligne,
-     * jamais un DOM complet). Demande utilisateur (2026-08-16) après mise en garde sur le risque
-     * réel de désynchronisation avec la vraie base iTunes (.itl).
-     */
-    void writeItunesXmlCorrections() {
-        int pending = com.opentagger.ITunesXmlSyncQueue.pendingCount();
-        if (pending == 0) {
-            JOptionPane.showMessageDialog(this,
-                    I18n.t("Aucune correction en attente (renommage ou note sur un fichier importé depuis iTunes)."),
-                    I18n.t("XML iTunes"), JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        JFileChooser fc = new JFileChooser();
-        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("iTunes Music Library.xml", "xml"));
-        fc.setDialogTitle(I18n.t("Fichier XML iTunes à corriger"));
-        // Chemin mémorisé (Préférences > iTunes) — voir Config.itunesXmlFilePath().
-        String remembered = Config.get().itunesXmlFilePath();
-        if (!remembered.isBlank()) fc.setSelectedFile(new java.io.File(remembered));
-        if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        java.io.File xml = fc.getSelectedFile();
-
-        // Même garde que ITunesImportDialog (voir son commentaire, 2026-08-17) : un dossier validé
-        // par erreur au lieu du fichier XML lui-même.
-        if (xml.isDirectory()) {
-            java.io.File candidate = new java.io.File(xml, "iTunes Music Library.xml");
-            if (candidate.isFile()) {
-                xml = candidate;
-            } else {
-                JOptionPane.showMessageDialog(this, I18n.t(
-                        "\"%s\" est un dossier, pas le fichier XML lui-même — et aucun "
-                      + "\"iTunes Music Library.xml\" n'a été trouvé dedans.", xml.getName()),
-                        I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
-                return;
-            }
-        }
-        if (!xml.isFile()) {
-            JOptionPane.showMessageDialog(this,
-                    I18n.t("Fichier introuvable : %s", xml.getAbsolutePath()),
-                    I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        Config.get().set("itunes.xml_file_path", xml.getAbsolutePath());
-
-        int ok = JOptionPane.showConfirmDialog(this, I18n.t(
-                "%d correction(s) en attente vont être écrites dans :\n%s\n\n"
-              + "Une sauvegarde horodatée sera créée AVANT toute modification "
-              + "(fichier.backup_AAAAMMJJ_HHMMSS, dans le même dossier).\n\n"
-              + "Continuer ?", pending, xml.getAbsolutePath()),
-                I18n.t("Confirmer l'écriture"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-        if (ok != JOptionPane.YES_OPTION) return;
-
-        setStatus(I18n.t("Écriture des corrections dans le XML iTunes…"));
-        final java.io.File xmlFinal = xml;
-        new SwingWorker<com.opentagger.ITunesXmlWriter.Result, Void>() {
-            @Override protected com.opentagger.ITunesXmlWriter.Result doInBackground() throws Exception {
-                var changes = com.opentagger.ITunesXmlSyncQueue.snapshotAndClear();
-                return com.opentagger.ITunesXmlWriter.apply(xmlFinal, changes);
-            }
-            @Override protected void done() {
-                try {
-                    var r = get();
-                    JOptionPane.showMessageDialog(MainFrame.this, I18n.t(
-                            "%d chemin(s) corrigé(s), %d note(s) mise(s) à jour, %d ignoré(s) "
-                          + "(vérification aller-retour échouée ou préfixe non configuré).\n\n"
-                          + "Sauvegarde : %s",
-                            r.locationChanges(), r.ratingChanges(), r.skippedUnverified(),
-                            r.backupFile() != null ? r.backupFile().getAbsolutePath() : "—"),
-                            I18n.t("XML iTunes mis à jour"), JOptionPane.INFORMATION_MESSAGE);
-                    setStatus(I18n.t("XML iTunes mis à jour"));
-                } catch (Exception ex) {
-                    showError(I18n.t("Échec de l'écriture du XML iTunes : %s", ex.getMessage()));
-                }
-            }
-        }.execute();
-    }
-
-    /**
-     * Reconstruction COMPLÈTE d'un export XML iTunes depuis l'état actuel d'OpenTagger — voir
-     * ITunesLibraryExporter pour le pourquoi complet (demande utilisateur 2026-09-19 : "comme si
-     * c'était iTunes qui écrivait dedans", ajouts/modifications/renommages/fichiers supprimés tous
-     * couverts naturellement par une régénération complète à chaque fois). Fichier DÉLIBÉRÉMENT
-     * séparé de celui utilisé par writeItunesXmlCorrections() — l'utilisateur a confirmé qu'un vrai
-     * iTunes régénère encore "iTunes Music Library.xml" lui-même, cet export-ci ne doit donc JAMAIS
-     * cibler ce même fichier.
-     */
-    void exportFullItunesXml() {
-        if (tableModel.allEntries().isEmpty()) {
-            setStatus(I18n.t("Aucun fichier à exporter."));
-            return;
-        }
-        JFileChooser fc = new JFileChooser();
-        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("XML", "xml"));
-        fc.setDialogTitle(I18n.t("Fichier de destination de l'export XML iTunes complet"));
-        String remembered = Config.get().itunesExportXmlFilePath();
-        fc.setSelectedFile(new File(!remembered.isBlank() ? remembered : "OpenTagger Library.xml"));
-        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File out = fc.getSelectedFile();
-        if (!out.getName().toLowerCase().endsWith(".xml")) out = new File(out.getAbsolutePath() + ".xml");
-
-        // Garde-fou explicite : jamais le même fichier que celui géré par le vrai iTunes (voir la
-        // Javadoc de classe) — comparaison par chemin absolu normalisé, pas juste par égalité de
-        // File, pour couvrir un chemin relatif/différemment écrit pointant vers la même cible.
-        String realItunes = Config.get().itunesXmlFilePath();
-        if (!realItunes.isBlank() && out.toPath().toAbsolutePath().normalize()
-                .equals(new File(realItunes).toPath().toAbsolutePath().normalize())) {
-            JOptionPane.showMessageDialog(this, I18n.t(
-                "\"%s\" est le fichier du vrai iTunes (Préférences > iTunes) — cet export complet ne "
-              + "doit jamais l'écraser, un vrai iTunes actif le régénérerait de toute façon depuis sa "
-              + "propre base au prochain lancement. Choisis un autre nom de fichier.", out.getName()),
-                I18n.t("Destination refusée"), JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-
-        int total = tableModel.allEntries().size();
-        int ok = JOptionPane.showConfirmDialog(this, I18n.t(
-                "Reconstruit entièrement :\n%s\ndepuis les %d fichier(s) actuellement chargés dans "
-              + "OpenTagger (fichiers manquants sur le disque exclus automatiquement).\n\n"
-              + "Le fichier existant (s'il y en a un) sera remplacé. Continuer ?", out.getAbsolutePath(), total),
-                I18n.t("Confirmer la reconstruction"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-        if (ok != JOptionPane.YES_OPTION) return;
-
-        Config.get().set("itunes.export_xml_file_path", out.getAbsolutePath());
-        List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
-        final File outFinal = out;
-        setStatus(I18n.t("Export XML iTunes complet en cours…"));
-        new SwingWorker<com.opentagger.ITunesLibraryExporter.Result, Integer>() {
-            @Override protected com.opentagger.ITunesLibraryExporter.Result doInBackground() throws Exception {
-                return com.opentagger.ITunesLibraryExporter.export(outFinal, snapshot, this::publish);
-            }
-            @Override protected void process(List<Integer> chunks) {
-                if (!chunks.isEmpty())
-                    setStatus(I18n.t("Export XML iTunes… %d / %d", chunks.get(chunks.size() - 1), total));
-            }
-            @Override protected void done() {
-                try {
-                    var r = get();
-                    setStatus(I18n.t("Export XML iTunes terminé — %d piste(s) écrite(s), %d ignorée(s) (fichier introuvable).",
-                            r.written(), r.skippedMissingFile()));
-                } catch (Exception ex) {
-                    showError(I18n.t("Échec de l'export XML iTunes complet : %s", ex.getMessage()));
-                }
-            }
-        }.execute();
     }
 
     /** Sélection actuelle, DANS L'ORDRE du tableau (pas l'ordre de clic) — voir BandcampMatchDialog,
@@ -3315,7 +3115,6 @@ public class MainFrame extends JFrame {
                 refreshTableRow(mr, ti);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Modifier %s", e.filename()));
                 recordFieldCorrections(correctionsCache, e, snap, ti);
-                if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
                 // Ne marquer TAGGED qu'APRÈS confirmation d'écriture réussie — sinon un échec
                 // d'écriture (permissions, fichier verrouillé...) laissait quand même le statut à
                 // TAGGED, jamais annulé (même défaut déjà corrigé dans les autres pipelines).
@@ -3341,7 +3140,6 @@ public class MainFrame extends JFrame {
                     detailPanel.collect(ti);
                     refreshTableRow(mr, ti);
                     undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Lot %s", e.filename()));
-                    if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
                     pending.add(new PendingWrite(e, mr, snap, ti));
                 }
                 setStatus(I18n.t("Sauvegarde de %d fichier(s)…", pending.size()));
@@ -3406,7 +3204,7 @@ public class MainFrame extends JFrame {
     }
 
     /** Appelé par {@link QuickReviewDialog} à chaque note posée — même séquence que la branche
-     *  fichier unique de {@link #applyDetail()} (snapshot undo, écriture immédiate, suivi iTunes,
+     *  fichier unique de {@link #applyDetail()} (snapshot undo, écriture immédiate, 
      *  traçabilité des corrections), juste sans passer par DetailPanel puisque la revue rapide ne
      *  touche que le champ note. {@code cache} reste ouvert par l'appelant pour toute la durée de
      *  la session de revue (potentiellement des dizaines de notes en rafale) plutôt que rouvert à
@@ -3420,7 +3218,6 @@ public class MainFrame extends JFrame {
         refreshTableRow(mr, ti);
         undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Note rapide %s", e.filename()));
         recordFieldCorrections(cache, e, snap, ti);
-        if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
         if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
     }
 
@@ -3906,6 +3703,14 @@ public class MainFrame extends JFrame {
         if (trimLogHistoryIfNeeded()) return;
         if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
             logModel.addElement(e);
+    }
+
+    /** Ligne libre dans le Journal pour les opérations de fond (analyse, et à terme chaque ajout /
+     *  modification / suppression) — couleur selon {@code status} : PENDING = titre de section,
+     *  IDENTIFIED = information (bleu), SKIPPED = avertissement (orange), TAGGED = réussite (vert),
+     *  ERROR = échec (rouge). À appeler depuis le thread Swing. */
+    void journalLine(String text, FileEntry.Status status) {
+        appendLogLine(text, status, null);
     }
 
     private void rebuildLogModel() {
@@ -4538,6 +4343,8 @@ public class MainFrame extends JFrame {
                     completeScanEntry(scanRow, dirName, r[0], r[1], null);
                     if (Config.get().videoAutoRecover()) autoRecoverVideos(dir);
                     if (Config.get().autoTagOnScan()) scheduleAutoTaggingFollowUp();
+                    // Tags des fichiers lus : synchroniser les compteurs d'écoute (au plus 1 fois / 24 h).
+                    if (Config.get().autoSyncPlayCounts()) scheduleAutoPlayCountSync();
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
@@ -5339,6 +5146,48 @@ public class MainFrame extends JFrame {
      *  chacune leur propre WorkerHub.TaskKind et leur propre worker — seul le point d'entrée visible
      *  a été fusionné, pas le mécanisme interne (services et API réellement distincts).
      */
+    /**
+     * Synchronisation AUTOMATIQUE des compteurs d'écoute, déclenchée à la fin d'un scan de dossier
+     * (donc une fois les tags des fichiers audio lus) si la case « Options de taguage » est cochée.
+     * Au plus une fois par 24 h (PlayCounts.dueForAutoSync) : le classement en ligne est récupéré en
+     * UNE requête par service, mais le refaire à chaque dossier ouvert serait inutile. Silencieuse :
+     * aucune fenêtre, rien si aucun service n'est configuré, taguage en cours ou scan encore actif
+     * (elle sera retentée au prochain scan). ListenBrainz puis Last.fm s'exécutent l'un APRÈS l'autre :
+     * les deux réécrivent les mêmes fichiers, les lancer ensemble risquerait de perdre une mise à jour.
+     */
+    private void scheduleAutoPlayCountSync() {
+        if (!activeScanWorkers.isEmpty()) return;   // attendre la fin de TOUS les scans en cours
+        long now = System.currentTimeMillis();
+        if (!com.opentagger.PlayCounts.dueForAutoSync(Config.get().lastAutoPlayCountSyncMs(), now)) return;
+        boolean hasLb = !Config.get().listenbrainzUsername().isBlank();
+        // Last.fm exige en plus une clé API (voir LastFmClient) : sans elle, rien à tenter.
+        boolean hasLf = !Config.get().lastfmUsername().isBlank() && !Config.get().lastfmKey().isBlank();
+        if (!hasLb && !hasLf) return;
+        if (WorkerHub.get().current(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isPresent()
+                || WorkerHub.get().current(WorkerHub.TaskKind.LASTFM_SYNC).isPresent()) return;
+        if (!WorkerHub.get().blockers(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isEmpty()) return; // taguage en cours
+        Config.get().setLastAutoPlayCountSyncMs(now);
+        System.out.println("[OT] Synchronisation automatique des compteurs d'écoute (fin de scan).");
+        if (hasLb) {
+            syncListenBrainz();
+            if (hasLf) startLastFmAfterListenBrainz();
+        } else {
+            syncLastFm();
+        }
+    }
+
+
+    /** Attend la fin de la synchronisation ListenBrainz puis lance celle de Last.fm (jamais en parallèle). */
+    private void startLastFmAfterListenBrainz() {
+        javax.swing.Timer t = new javax.swing.Timer(2000, null);
+        t.addActionListener(e -> {
+            if (WorkerHub.get().current(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isPresent()) return; // encore en cours
+            t.stop();
+            if (WorkerHub.get().blockers(WorkerHub.TaskKind.LASTFM_SYNC).isEmpty()) syncLastFm();
+        });
+        t.start();
+    }
+
     private void syncPlayCounts() {
         boolean hasLb = !Config.get().listenbrainzUsername().isBlank();
         boolean hasLf = !Config.get().lastfmUsername().isBlank();
@@ -7398,7 +7247,6 @@ public class MainFrame extends JFrame {
                     try {
                         java.nio.file.Files.move(f.toPath(), dest);
                         com.opentagger.PlaylistSync.onFileMoved(f.toPath(), dest);
-                        com.opentagger.ITunesXmlSyncQueue.onFileMoved(f.toPath(), dest);
                         e.currentPath = dest;
                         // result (tags déjà identifiés) survit à l'échec d'écriture d'origine — pas
                         // besoin de tout ré-identifier, juste retenter l'enregistrement sur le

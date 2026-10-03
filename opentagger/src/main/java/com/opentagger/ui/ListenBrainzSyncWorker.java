@@ -21,7 +21,7 @@ import java.util.function.Consumer;
  * classement paginé des pistes les plus écoutées. Un seul appel couvre donc tout le lot
  * (ListenBrainzClient.fetchTopRecordingCounts), puis chaque fichier est mis à jour localement par
  * correspondance recordingMbid — les fichiers sans recordingMbid ou absents du classement (au-delà
- * de listenbrainz.max_tracks, ou jamais écoutés) sont simplement ignorés, pas une erreur.
+ * ou jamais écoutés) sont simplement ignorés, pas une erreur.
  * Action manuelle uniquement (menu Outils / barre d'outils) — jamais déclenchée automatiquement
  * après un taguage, le fetch top-N étant coûteux à refaire pour un petit lot.
  */
@@ -51,7 +51,7 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
 
         log(I18n.t("Récupération des statistiques ListenBrainz pour \"%s\"…", username));
         onProgress.accept(I18n.t("Récupération des statistiques ListenBrainz pour \"%s\"…", username));
-        Map<String, Integer> counts = client.fetchTopRecordingCounts(username, Config.get().listenbrainzMaxTracks());
+        Map<String, Integer> counts = client.fetchTopRecordingCounts(username);
         log(I18n.t("%d piste(s) dans le classement ListenBrainz récupéré.", counts.size()));
         onProgress.accept(I18n.t("%d piste(s) dans le classement ListenBrainz récupéré.", counts.size()));
 
@@ -68,6 +68,8 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
 
             Integer count = counts.get(mbid);
             if (count == null) { skipped++; continue; }
+            // Déjà à jour (ou compteur en ligne plus petit) : ne PAS réécrire le fichier — voir PlayCounts.
+            if (!com.opentagger.PlayCounts.needsUpdate(ti.listenbrainzPlayCount, count)) { skipped++; continue; }
 
             try {
                 File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;

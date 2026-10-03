@@ -305,12 +305,13 @@ public class LastFmClient {
      *         fréquent, la résolution dépend des tags du scrobble d'origine — sont ignorées, pas une
      *         erreur : rien à quoi les rattacher côté fichiers déjà identifiés par MBID).
      */
-    public java.util.Map<String, Integer> fetchTopTrackCounts(String username, int maxTracks) throws Exception {
+    public java.util.Map<String, Integer> fetchTopTrackCounts(String username) throws Exception {
         java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
         int perPage = 1000;
         int page = 1;
-        while (counts.size() < maxTracks) {
-            int want = Math.min(perPage, maxTracks - counts.size());
+        // Sans plafond (plus de réglage « pistes max » depuis le 2026-10-03) ; garde-fou : 2 000 pages de 1000.
+        while (page <= 2000) {
+            int want = perPage;
             String url = BASE_URL + "?method=user.gettoptracks&user=" + encode(username)
                     + "&api_key=" + Config.get().lastfmKey() + "&format=json"
                     + "&limit=" + want + "&page=" + page;
@@ -325,7 +326,8 @@ public class LastFmClient {
             if (response.statusCode() != 200)
                 throw new Exception("Last.fm HTTP " + response.statusCode() + " : " + response.body());
 
-            JsonNode tracks = mapper.readTree(response.body()).path("toptracks").path("track");
+            JsonNode top = mapper.readTree(response.body()).path("toptracks");
+            JsonNode tracks = top.path("track");
             if (!tracks.isArray() || tracks.isEmpty()) break;
 
             for (JsonNode t : tracks) {
@@ -334,7 +336,9 @@ public class LastFmClient {
                 if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
             }
 
-            if (tracks.size() < want) break; // dernière page (moins de résultats que demandé)
+            // Fin du classement : dernière page annoncée par l'API (@attr.totalPages), sinon page incomplète.
+            int totalPages = top.path("@attr").path("totalPages").asInt(-1);
+            if (totalPages >= 0 ? page >= totalPages : tracks.size() < want) break;
             page++;
         }
         return counts;

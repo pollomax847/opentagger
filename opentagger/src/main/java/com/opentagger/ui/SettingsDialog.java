@@ -78,10 +78,8 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet APIs (ListenBrainz) ────────────────────────────────────────────
     private JTextField tfListenBrainzUsername;
-    private JSpinner   spListenBrainzMaxTracks;
     // ── Onglet APIs (Last.fm, synchro écoutes — distinct de tfLastFmKey ci-dessus) ──────────────
     private JTextField tfLastFmUsername;
-    private JSpinner   spLastfmMaxTracks;
     // ── Onglet APIs (Headphones — intégration tierce, voir HeadphonesClient) ───────────────────
     private JCheckBox  chkHeadphonesDbEnabled;
     private JTextField tfHeadphonesDbPath;
@@ -250,7 +248,6 @@ public class SettingsDialog extends JDialog {
     private JTextField tfMbCollectionId;
     @SuppressWarnings("unchecked")
     private JComboBox<String> cmbMbOAuthMode;
-    private JTextField     tfItunesXmlPath, tfItunesXmlPathFrom, tfItunesXmlPathTo;
     private JTextField     tfMbServer;
     private JTextField     tfMbAuthUser;
     private JPasswordField tfMbAuthPass;
@@ -314,7 +311,6 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Automatisation"),   scrollWrap(buildAutomationPanel()));
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
         tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
-        tabs.addTab(I18n.t("iTunes"),       scrollWrap(buildItunesPanel()));
         buildSearchIndex();
         if (lastTabIndex >= 0 && lastTabIndex < tabs.getTabCount()) tabs.setSelectedIndex(lastTabIndex);
         tabs.addChangeListener(e -> lastTabIndex = tabs.getSelectedIndex());
@@ -537,13 +533,7 @@ public class SettingsDialog extends JDialog {
         tfLastFmKey        = tf();
         tfFanArtKey        = tf();
         tfListenBrainzUsername  = tf();
-        spListenBrainzMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
-        spListenBrainzMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
-                + "ListenBrainz (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
         tfLastFmUsername  = tf();
-        spLastfmMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
-        spLastfmMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
-                + "Last.fm (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
         chkHeadphonesDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base Headphones (identification locale)"));
         chkHeadphonesDbEnabled.setToolTipText(I18n.t("Cherche une correspondance dans la base SQLite d'une "
                 + "instance Headphones tierce avant tout appel réseau — lecture seule, jamais d'écriture."));
@@ -583,10 +573,8 @@ public class SettingsDialog extends JDialog {
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testFanArt(tfFanArtKey.getText().trim()) },
             { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testListenBrainz(tfListenBrainzUsername.getText().trim()) },
-            { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null, null },
             { "Nom d'utilisateur Last.fm :", tfLastFmUsername, "https://www.last.fm/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFmUsername(tfLastFmUsername.getText().trim()) },
-            { "Pistes max à synchroniser (Last.fm) :", spLastfmMaxTracks, null, null },
             { "", chkHeadphonesDbEnabled, null, null },
             { "Chemin headphones.db :",     tfHeadphonesDbPath,   null, null },
             { "", chkBeetsDbEnabled, null, null },
@@ -2461,70 +2449,6 @@ public class SettingsDialog extends JDialog {
         return wrap;
     }
 
-    /**
-     * Chemin du XML iTunes + substitution de préfixe Windows→Linux (voir ITunesLibraryImporter/
-     * ITunesXmlWriter) — demande utilisateur (2026-08-16) : le chemin était jusqu'ici re-choisi via
-     * JFileChooser à chaque import/écriture, jamais mémorisé. Le champ chemin est pré-rempli au
-     * prochain lancement des dialogues concernés (voir ITunesImportDialog/MainFrame.
-     * writeItunesXmlCorrections) et mis à jour automatiquement dès qu'un fichier y est choisi.
-     */
-    private JPanel buildItunesPanel() {
-        tfItunesXmlPath     = tf();
-        tfItunesXmlPath.setToolTipText(I18n.t(
-            "Chemin de \"iTunes Music Library.xml\" — mémorisé une fois choisi, pré-rempli au "
-            + "prochain import/écriture (menu Bibliothèque). Laisser vide pour re-choisir à chaque fois."));
-        tfItunesXmlPathFrom = tf();
-        tfItunesXmlPathFrom.setToolTipText(I18n.t(
-            "Préfixe de chemin tel qu'il apparaît dans le XML (souvent un lecteur Windows, ex. "
-            + "\"C:/Users/xxx/OneDrive/Musiques\") — requis pour que les chemins \"Location\" du XML "
-            + "se résolvent vers vos fichiers réels sur ce système, et pour toute correction de "
-            + "chemin en écriture (jamais de Location réécrite sans ce réglage, voir ITunesXmlWriter)."));
-        tfItunesXmlPathTo   = tf();
-        tfItunesXmlPathTo.setToolTipText(I18n.t(
-            "Point de montage réel correspondant sur ce système (ex. \"/mnt/Music\") — l'autre moitié "
-            + "de la substitution ci-dessus."));
-
-        JButton btnBrowse = new JButton(I18n.t("Parcourir…"));
-        btnBrowse.addActionListener(e -> {
-            JFileChooser fc = new JFileChooser();
-            fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
-                    "iTunes Music Library.xml", "xml"));
-            if (!tfItunesXmlPath.getText().isBlank())
-                fc.setSelectedFile(new java.io.File(tfItunesXmlPath.getText().trim()));
-            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
-                tfItunesXmlPath.setText(fc.getSelectedFile().getAbsolutePath());
-        });
-        JPanel pathRow = new JPanel(new BorderLayout(4, 0));
-        pathRow.add(tfItunesXmlPath, BorderLayout.CENTER);
-        pathRow.add(btnBrowse,       BorderLayout.EAST);
-
-        JPanel inner = new JPanel(new GridBagLayout());
-        inner.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), I18n.t("Bibliothèque iTunes (import/écriture — lecture seule sauf action explicite)")));
-
-        Object[][] rows = {
-            { "Fichier XML :",        pathRow,             },
-            { "Préfixe dans le XML :", tfItunesXmlPathFrom, },
-            { "Préfixe réel ici :",   tfItunesXmlPathTo,    },
-        };
-        for (int i = 0; i < rows.length; i++) {
-            GridBagConstraints lc = new GridBagConstraints();
-            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST;
-            lc.insets = new Insets(3, 10, 3, 8);
-            inner.add(new JLabel(I18n.t((String) rows[i][0])), lc);
-
-            GridBagConstraints fc = new GridBagConstraints();
-            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL;
-            fc.weightx = 1.0; fc.insets = new Insets(3, 0, 3, 8);
-            inner.add((JComponent) rows[i][1], fc);
-        }
-
-        JPanel p = new JPanel(new BorderLayout());
-        p.setBorder(new EmptyBorder(12, 12, 12, 12));
-        p.add(inner, BorderLayout.NORTH);
-        return p;
-    }
-
     private void refreshMbStatus(JLabel lbl, JButton btnAction, JButton btnLogout) {
         boolean connected = Config.get().mbConnected();
         String  username  = Config.get().mbUsername();
@@ -2600,9 +2524,7 @@ public class SettingsDialog extends JDialog {
         chkLyricsEnabled.setSelected(cfg.bool("lyrics.enabled",        true));
         chkSaveLrc      .setSelected(cfg.saveLrcFile());
         tfListenBrainzUsername .setText(cfg.listenbrainzUsername());
-        spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
         tfLastFmUsername .setText(cfg.lastfmUsername());
-        spLastfmMaxTracks.setValue(cfg.lastfmMaxTracks());
         chkHeadphonesDbEnabled.setSelected(cfg.headphonesDbEnabled());
         tfHeadphonesDbPath.setText(cfg.headphonesDbPath());
         chkBeetsDbEnabled.setSelected(cfg.beetsDbEnabled());
@@ -2724,9 +2646,6 @@ public class SettingsDialog extends JDialog {
         tfMbAuthPass    .setText(cfg.mbAuthPass());
         spMbRateLimitMs .setValue(cfg.mbRateLimitMs());
 
-        tfItunesXmlPath    .setText(cfg.itunesXmlFilePath());
-        tfItunesXmlPathFrom.setText(cfg.itunesXmlPathFrom());
-        tfItunesXmlPathTo  .setText(cfg.itunesXmlPathTo());
 
         scriptDefs = new java.util.ArrayList<>(TaggerScript.loadScripts());
         currentScriptIndex = -1;
@@ -2757,7 +2676,7 @@ public class SettingsDialog extends JDialog {
     private JSpinner[] allSpinners() {
         return new JSpinner[]{
             spMinScore, spTrackMatchThreshold, spResultsLimit, spCacheDays,
-            spnSkipSongRecMinScore, spListenBrainzMaxTracks, spLastfmMaxTracks,
+            spnSkipSongRecMinScore,
             spFpcalcThreads,
             spBatchThreads, spMbMinGenreUsage, spMbMaxGenres, spTranscodeBitrate, spMbRateLimitMs
         };
@@ -2856,9 +2775,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("lyrics.enabled",                String.valueOf(chkLyricsEnabled.isSelected()));
         p.setProperty("lyrics.save_lrc",               String.valueOf(chkSaveLrc.isSelected()));
         p.setProperty("listenbrainz.username",   tfListenBrainzUsername.getText().trim());
-        p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
         p.setProperty("lastfm.username",   tfLastFmUsername.getText().trim());
-        p.setProperty("lastfm.max_tracks", String.valueOf(spLastfmMaxTracks.getValue()));
         p.setProperty("headphones.db_enabled", String.valueOf(chkHeadphonesDbEnabled.isSelected()));
         p.setProperty("headphones.db_path",    tfHeadphonesDbPath.getText().trim());
         p.setProperty("beets.db_enabled", String.valueOf(chkBeetsDbEnabled.isSelected()));
@@ -2998,9 +2915,6 @@ public class SettingsDialog extends JDialog {
                 ? "https://musicbrainz.org/ws/2" : tfMbServer.getText().trim());
         p.setProperty("musicbrainz.auth_user",        tfMbAuthUser.getText().trim());
         p.setProperty("musicbrainz.auth_pass",        new String(tfMbAuthPass.getPassword()));
-        p.setProperty("itunes.xml_file_path",         tfItunesXmlPath.getText().trim());
-        p.setProperty("itunes.xml_path_from",         tfItunesXmlPathFrom.getText().trim());
-        p.setProperty("itunes.xml_path_to",           tfItunesXmlPathTo.getText().trim());
         p.setProperty("musicbrainz.rate_limit_ms",    String.valueOf(spMbRateLimitMs.getValue()));
 
         // Mémoriser les dossiers déjà connus avant la sauvegarde

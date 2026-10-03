@@ -230,6 +230,12 @@ public class Config {
     // reste IDENTIFIED en mémoire sans jamais être écrit). Désactivable pour repasser en contrôle
     // 100% manuel (façon Picard strict) si préféré — voir chkAutoSaveEnabled.
     public boolean autoSaveEnabled()               { return bool("tagging.auto_save_enabled",    true); }
+    // Synchronisation AUTOMATIQUE des compteurs d'écoute (ListenBrainz / Last.fm → tags des fichiers),
+    // lancée à la fin d'un scan, au plus une fois par 24 h — voir MainFrame.scheduleAutoPlayCountSync().
+    // Désactivée par défaut, comme les autres automatismes du menu Tagger : elle réécrit des tags.
+    public boolean autoSyncPlayCounts()            { return bool("playcounts.auto_sync", false); }
+    public long    lastAutoPlayCountSyncMs()       { try { return Long.parseLong(str("playcounts.last_auto_sync_ms", "0")); } catch (Exception e) { return 0; } }
+    public void    setLastAutoPlayCountSyncMs(long ms) { set("playcounts.last_auto_sync_ms", String.valueOf(ms)); }
     // Défaut true (2026-08-16, demande utilisateur) : synchronise les playlists sidecar (.m3u/
     // .m3u8/.pls) trouvées dans le dossier d'origine à chaque renommage/déplacement de fichier
     // (FileRenamer.moveFile — voir PlaylistSync). Constat réel motivant : plusieurs .pls de la
@@ -257,23 +263,6 @@ public class Config {
     // Cette case à cocher reste utile pour qui veut quand même l'automatique malgré le faible
     // rendement mesuré.
     public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", false); }
-    // Substitution de préfixe pour convertir un chemin "Location" de l'XML iTunes (souvent un
-    // lecteur Windows, ex. "C:/Users/xxx/OneDrive/Musiques") vers le point de montage réel sur ce
-    // système (ex. "/mnt/Music") — voir ITunesLibraryImporter.resolveLocalPath(). Vide par défaut
-    // (aucune substitution) : l'utilisateur doit le configurer une fois pour son propre système,
-    // même logique que le script itunes_path_updater.py déjà utilisé pour ce même problème.
-    public String  itunesXmlPathFrom()             { return str("itunes.xml_path_from", ""); }
-    public String  itunesXmlPathTo()               { return str("itunes.xml_path_to",   ""); }
-    // Chemin du fichier XML lui-même — mémorisé pour ne pas le re-choisir via JFileChooser à
-    // chaque import/écriture (demande utilisateur 2026-08-16). Modifiable dans Préférences >
-    // iTunes, et mis à jour automatiquement dès qu'un fichier est choisi dans ITunesImportDialog/
-    // MainFrame.writeItunesXmlCorrections.
-    public String  itunesXmlFilePath()             { return str("itunes.xml_file_path", ""); }
-    // Fichier de la RECONSTRUCTION COMPLÈTE (ITunesLibraryExporter) — volontairement distinct
-    // d'itunes.xml_file_path (le vrai fichier iTunes, régénéré par un vrai iTunes encore actif
-    // d'après l'utilisateur, jamais écrasé par cet export) — voir la Javadoc de classe pour le
-    // pourquoi complet.
-    public String  itunesExportXmlFilePath()       { return str("itunes.export_xml_file_path", ""); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source
@@ -637,10 +626,8 @@ public class Config {
     public String mbCollectionId() { return str("mb.oauth.collection_id", ""); }
 
     public String listenbrainzUsername()  { return str("listenbrainz.username", ""); }
-    public int    listenbrainzMaxTracks() { return num("listenbrainz.max_tracks", 1000); }
 
     public String lastfmUsername()  { return str("lastfm.username", ""); }
-    public int    lastfmMaxTracks() { return num("lastfm.max_tracks", 1000); }
 
     public boolean headphonesDbEnabled() { return bool("headphones.db_enabled", false); }
     public String  headphonesDbPath()    { return str("headphones.db_path", System.getProperty("user.home") + "/headphones/headphones.db"); }

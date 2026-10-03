@@ -84,12 +84,6 @@ public class FileEntry {
      *  Small Things" (212s/208s fichier vs 171s MB, correctement identifiés mais rejetés à tort par
      *  l'ancien seuil symétrique). Un Math.abs() unique traitait les deux directions identiquement,
      *  alors que ce sont deux signaux de nature différente. */
-    /** "Track ID" de l'entrée iTunes correspondante, si ce fichier a été résolu lors d'un import
-     *  XML iTunes (voir ITunesImportDialog) — {@code null} tant qu'aucun import ne l'a établi.
-     *  Permet de repousser un changement (renommage, note) vers CETTE entrée précise du XML iTunes
-     *  (voir ITunesXmlSyncQueue/ITunesXmlWriter) sans avoir à re-résoudre le chemin à chaque fois. */
-    public Integer itunesTrackId = null;
-
     /** Version STRICTE et symétrique de {@link #isDurationMismatch} (écart de plus de 20 s ET de
      *  20 % de la durée MB, dans les DEUX sens), pour les identifications qui ne reposent pas sur
      *  l'audio (cohérence de groupe : numéro de piste + titre) — là, un fichier nettement plus long
