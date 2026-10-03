@@ -120,26 +120,6 @@ public final class ApiKeyTester {
         }
     }
 
-    public static Result testAudD(String apiToken) {
-        if (apiToken == null || apiToken.isBlank()) return new Result(false, I18n.t("Jeton vide"));
-        try {
-            String url = "https://api.audd.io/?api_token=" + enc(apiToken);
-            JsonNode root = getJson(url, null);
-            if (root == null) return new Result(false, I18n.t("Pas de réponse du serveur"));
-            String status = root.path("status").asText("");
-            if ("error".equals(status)) {
-                int code = root.path("error").path("error_code").asInt(-1);
-                String msg = root.path("error").path("error_message").asText("");
-                if (code == 900 || code == 901 || msg.toLowerCase().contains("token"))
-                    return new Result(false, msg.isBlank() ? I18n.t("Jeton invalide") : msg);
-                return new Result(true, I18n.t("Jeton accepté"));
-            }
-            return new Result(true, I18n.t("Jeton valide"));
-        } catch (Exception e) {
-            return new Result(false, e.getMessage());
-        }
-    }
-
     public static Result testLastFmUsername(String username) {
         if (username == null || username.isBlank()) return new Result(false, I18n.t("Nom d'utilisateur vide"));
         try {

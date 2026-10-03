@@ -11,7 +11,7 @@ import java.util.function.Supplier;
 
 /**
  * Fenêtre affichée une seule fois au tout premier démarrage : propose de renseigner les clés API
- * (AcoustID, Discogs, Last.fm, FanArt.tv, AudD) sans avoir à fouiller les Préférences. Toutes les
+ * (AcoustID, Discogs, Last.fm, FanArt.tv) sans avoir à fouiller les Préférences. Toutes les
  * clés sont facultatives — "Plus tard" ferme sans rien enregistrer, et tout reste modifiable dans
  * Préférences → APIs (mêmes clés de configuration que SettingsDialog).
  */
@@ -24,7 +24,6 @@ public class FirstRunApiKeysDialog extends JDialog {
     private final JTextField tfDiscogsSec = new JTextField(28);
     private final JTextField tfLastFm     = new JTextField(28);
     private final JTextField tfFanArt     = new JTextField(28);
-    private final JTextField tfAudD       = new JTextField(28);
 
     /** Affiche la fenêtre si c'est le premier démarrage ET qu'aucune clé n'est déjà configurée
      *  (un utilisateur existant qui met à jour l'appli ne doit pas la voir). Dans tous les cas le
@@ -34,7 +33,7 @@ public class FirstRunApiKeysDialog extends JDialog {
         if (cfg.bool(PROMPTED_KEY, false)) return;
         cfg.set(PROMPTED_KEY, "true");
         if (!cfg.acoustidKey().isBlank() || !cfg.lastfmKey().isBlank() || !cfg.fanartKey().isBlank()
-                || !cfg.discogsKey().isBlank() || !cfg.str("audd.api_token", "").isBlank()) return;
+                || !cfg.discogsKey().isBlank()) return;
         new FirstRunApiKeysDialog(owner).setVisible(true);
     }
 
@@ -63,8 +62,6 @@ public class FirstRunApiKeysDialog extends JDialog {
                 (Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFm(tfLastFm.getText().trim()) },
             { "FanArt.tv API Key :",       tfFanArt,     "https://fanart.tv/get-an-api-key/",
                 (Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testFanArt(tfFanArt.getText().trim()) },
-            { "AudD API Token :",          tfAudD,       "https://dashboard.audd.io/",
-                (Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAudD(tfAudD.getText().trim()) },
         };
         for (int i = 0; i < rows.length; i++) {
             @SuppressWarnings("unchecked")
@@ -113,7 +110,6 @@ public class FirstRunApiKeysDialog extends JDialog {
         putIfFilled(cfg, "discogs.consumer_secret",  tfDiscogsSec);
         putIfFilled(cfg, "lastfm.api_key",           tfLastFm);
         putIfFilled(cfg, "fanart.api_key",           tfFanArt);
-        putIfFilled(cfg, "audd.api_token",           tfAudD);
     }
 
     private static void putIfFilled(Config cfg, String key, JTextField field) {

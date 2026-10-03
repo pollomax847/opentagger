@@ -155,17 +155,17 @@ public final class TagEnrichment {
 
     /**
      * Cascade d'identification indépendante pour un fichier vidéo (webm/vob/mpg/avi/mkv…) —
-     * SongRec (Shazam) → AcoustID → AudD, même ordre documenté que TaggingWorker.findTags().
+     * SongRec (Shazam) → AcoustID, même ordre documenté que TaggingWorker.findTags().
      * Écrite à neuf plutôt que réutilisée : findTags() est privée, ~400 lignes, et couplée à des
      * hypothèses inapplicables ici (tags déjà présents sur le fichier, ThreadLocal de session).
-     * fpcalc/ffmpeg (dans SongRecClient/AcoustIdClient/AudDClient) n'ont aucune vérification
+     * fpcalc/ffmpeg (dans SongRecClient/AcoustIdClient) n'ont aucune vérification
      * d'extension côté entrée : le fichier vidéo peut leur être passé directement.
      *
      * @return le résultat reconnu, ou {@code null} si rien n'est reconnu — signal pour ne PAS
      *         toucher la vidéo d'origine.
      */
     public static TagInfo identifyFromAudio(File fichier, SongRecClient songRec, AcoustIdClient acoustId,
-                                             AudDClient audd, MusicBrainzClient mb,
+                                             MusicBrainzClient mb,
                                              java.util.function.Consumer<String> log) throws Exception {
         if (SongRecClient.isAvailable()) {
             log.accept("  SongRec...");
@@ -187,18 +187,10 @@ public final class TagEnrichment {
             }
         }
 
-        if (AudDClient.isAvailable()) {
-            log.accept("  AudD...");
-            TagInfo ad = audd.recognize(fichier);
-            if (ad != null && !ad.artist.isBlank() && !ad.title.isBlank()) {
-                return enrichViaMusicBrainz(ad, mb, log);
-            }
-        }
-
         return null;
     }
 
-    /** Complète un résultat SongRec/AudD brut via une recherche MusicBrainz (MBID, album, piste,
+    /** Complète un résultat SongRec brut via une recherche MusicBrainz (MBID, album, piste,
      *  disque…) si elle confirme avec un score ≥ 50 — même seuil que la cascade existante de
      *  TaggingWorker — sinon garde le résultat brut avec score 85. */
     private static TagInfo enrichViaMusicBrainz(TagInfo raw, MusicBrainzClient mb,

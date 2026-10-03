@@ -2,7 +2,7 @@
 
 Tagger audio automatique open-source — alternative libre à Jaikoz.
 
-Identifie et complète les métadonnées de vos fichiers MP3, FLAC, M4A, OGG via une chaîne de reconnaissance audio : **AcoustID → SongRec (Shazam) → AudD**, enrichie par **MusicBrainz**, **Discogs** et **Last.fm**.
+Identifie et complète les métadonnées de vos fichiers MP3, FLAC, M4A, OGG via une chaîne de reconnaissance audio : **AcoustID → SongRec (Shazam)**, enrichie par **MusicBrainz**, **Discogs** et **Last.fm**.
 
 Disponible en français et en anglais (Préférences → Démarrage → Langue).
 
@@ -16,7 +16,6 @@ Disponible en français et en anglais (Préférences → Démarrage → Langue).
 
 - **AcoustID** — empreinte audio (fpcalc) → MusicBrainz (MBID, artiste, album, piste, compilation)
 - **SongRec** — client Shazam open-source, multi-offset (début / 1/3 / 2/3 du fichier), fallback si AcoustID échoue
-- **AudD** — second fallback, retourne aussi l'ISRC Spotify
 - **Discogs + Last.fm** — enrichissement des genres après identification
 - **BPM** — détection automatique via ffmpeg
 - **Essentia** — clé musicale, mode, danceability (si installé)
@@ -133,10 +132,6 @@ Fichier audio chargé
         │ ──► titre+artiste ──► SOURCE_SONGREC (score 85)
         │ échec
         ▼
-  AudD (fallback)
-        │ ──► SOURCE_AUDD (score 70-80)
-        │ échec
-        ▼
   SKIPPED ──► Album Completion (si album voisin identifié par source fiable)
 ```
 
@@ -222,7 +217,6 @@ Au premier lancement, **Préférences** (Ctrl+,) :
 | Onglet | Paramètre | Obtenir la clé |
 |--------|-----------|----------------|
 | APIs | Clé AcoustID | [acoustid.org/login](https://acoustid.org/login) |
-| APIs | Token AudD | [audd.io](https://audd.io) — 100 req/mois gratuit |
 | APIs | Clé Discogs | [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | APIs | Clé Last.fm | [last.fm/api](https://www.last.fm/api/account/create) |
 | APIs | Clé FanArt TV | [fanart.tv/get-an-api-key](https://fanart.tv/get-an-api-key/) |
@@ -270,7 +264,7 @@ Au premier lancement, **Préférences** (Ctrl+,) :
 | Tags audio | JAudioTagger 3.0.1 + AtomicParsley + ffmpeg |
 | JSON | Jackson |
 | Cache | SQLite (Xerial) |
-| Identification | AcoustID, SongRec (Shazam), AudD |
+| Identification | AcoustID, SongRec (Shazam) |
 | Métadonnées | MusicBrainz, Discogs, Last.fm, FanArt TV, Deezer |
 | Podcasts | iTunes Search API + RSS (javax.xml) |
 

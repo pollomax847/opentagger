@@ -76,9 +76,6 @@ public class SettingsDialog extends JDialog {
     private JTextField tfFpcalcPath;
     private JLabel     lblFpcalcStatus;
 
-    // ── Onglet APIs (Shazam / AudD) ──────────────────────────────────────────
-    private JTextField tfAudDToken;
-
     // ── Onglet APIs (ListenBrainz) ────────────────────────────────────────────
     private JTextField tfListenBrainzUsername;
     private JSpinner   spListenBrainzMaxTracks;
@@ -539,7 +536,6 @@ public class SettingsDialog extends JDialog {
         tfDiscogsSecret    = tf();
         tfLastFmKey        = tf();
         tfFanArtKey        = tf();
-        tfAudDToken        = tf();
         tfListenBrainzUsername  = tf();
         spListenBrainzMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
         spListenBrainzMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
@@ -572,8 +568,8 @@ public class SettingsDialog extends JDialog {
         // Champs "MusicBrainz User-Agent" et "RapidAPI Key (Shazam)" retirés (2026-09-19, audit code
         // mort) : le premier fait doublon avec l'en-tête construit automatiquement par
         // Config.userAgent() (app.contact/app.version, déjà correct) ; le second n'a jamais été
-        // relié à un vrai appel réseau — aucune intégration RapidAPI n'existe, SongRec/AudD couvrent
-        // déjà la reconnaissance audio.
+        // relié à un vrai appel réseau — aucune intégration RapidAPI n'existe, SongRec/AcoustID
+        // couvrent déjà la reconnaissance audio.
         Object[][] rows = {
             { "AcoustID API Key :",         tfAcoustIdKey,        "https://acoustid.org/new-application",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAcoustId(tfAcoustIdKey.getText().trim()) },
@@ -585,8 +581,6 @@ public class SettingsDialog extends JDialog {
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFm(tfLastFmKey.getText().trim()) },
             { "FanArt.tv API Key :",        tfFanArtKey,          "https://fanart.tv/get-an-api-key/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testFanArt(tfFanArtKey.getText().trim()) },
-            { "AudD API Token :",           tfAudDToken,          "https://dashboard.audd.io/",
-                (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testAudD(tfAudDToken.getText().trim()) },
             { "Nom d'utilisateur ListenBrainz :", tfListenBrainzUsername, "https://listenbrainz.org/settings/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testListenBrainz(tfListenBrainzUsername.getText().trim()) },
             { "Pistes max à synchroniser :", spListenBrainzMaxTracks, null, null },
@@ -2605,7 +2599,6 @@ public class SettingsDialog extends JDialog {
         tfFpcalcPath    .setText(cfg.str("audio.fpcalc_path",          ""));
         chkLyricsEnabled.setSelected(cfg.bool("lyrics.enabled",        true));
         chkSaveLrc      .setSelected(cfg.saveLrcFile());
-        tfAudDToken  .setText(cfg.str("audd.api_token", ""));
         tfListenBrainzUsername .setText(cfg.listenbrainzUsername());
         spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
         tfLastFmUsername .setText(cfg.lastfmUsername());
@@ -2862,7 +2855,6 @@ public class SettingsDialog extends JDialog {
         p.setProperty("audio.fpcalc_path",             tfFpcalcPath.getText().trim());
         p.setProperty("lyrics.enabled",                String.valueOf(chkLyricsEnabled.isSelected()));
         p.setProperty("lyrics.save_lrc",               String.valueOf(chkSaveLrc.isSelected()));
-        p.setProperty("audd.api_token", tfAudDToken.getText().trim());
         p.setProperty("listenbrainz.username",   tfListenBrainzUsername.getText().trim());
         p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
         p.setProperty("lastfm.username",   tfLastFmUsername.getText().trim());
@@ -3060,7 +3052,7 @@ public class SettingsDialog extends JDialog {
         "app.contact",
         "acoustid.api_key", "acoustid.user_token",
         "discogs.consumer_key", "discogs.consumer_secret",
-        "lastfm.api_key", "fanart.api_key", "audd.api_token",
+        "lastfm.api_key", "fanart.api_key",
         "listenbrainz.username", "lastfm.username",
         "headphones.db_path",
         "beets.db_path", "beets.music_dir",
@@ -3079,7 +3071,7 @@ public class SettingsDialog extends JDialog {
             I18n.t("Réinitialiser TOUTES les options aux valeurs par défaut ?\n\n"
                  + "Cela inclut : dossiers de démarrage, chemin de bibliothèque/renommage, masques, "
                  + "filtres de correspondance, options de tags, transcodage, script, barre d'outils…\n\n"
-                 + "Les clés API et identifiants (AcoustID, Discogs, Last.fm, FanArt.tv, AudD, "
+                 + "Les clés API et identifiants (AcoustID, Discogs, Last.fm, FanArt.tv, "
                  + "RapidAPI, ListenBrainz, connexion MusicBrainz) sont conservés."),
             I18n.t("Réinitialiser les options"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (confirm != JOptionPane.YES_OPTION) return;
