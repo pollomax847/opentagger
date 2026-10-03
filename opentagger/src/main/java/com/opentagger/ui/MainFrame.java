@@ -1001,6 +1001,11 @@ public class MainFrame extends JFrame {
         m.add(mitem(I18n.t("Tagger la sélection"),     "F7",  e -> startTagging(true)));
         m.add(mitem(I18n.t("Enregistrer tout (cochés)"), "F8", e -> saveAll()));
         m.addSeparator();
+        // Les 8 réglages (cases à cocher et sous-menus) étaient mélangés aux actions du menu Tagger :
+        // regroupés ici dans UN sous-menu (2026-10-03, « trop d'options gâchent l'application »).
+        // Les actions à raccourci clavier (F6/F7/F8, Ctrl+R/G/L/K/T) restent au premier niveau.
+        JMenu options = new JMenu(I18n.t("Options de taguage"));
+        m.add(options);
         chkForceAcoustId = new StayOpenCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
         chkForceAcoustId.setSelected(Config.get().bool("tagging.force_acoustid_ui", false));
         chkForceAcoustId.addActionListener(e -> {
@@ -1015,7 +1020,7 @@ public class MainFrame extends JFrame {
                     I18n.t("Configuration requise"), JOptionPane.WARNING_MESSAGE);
             }
         });
-        m.add(chkForceAcoustId);
+        options.add(chkForceAcoustId);
 
         // Basculement rapide avant un gros rattrapage de bibliothèque — voir Config.setExpressMode()
         // pour le détail de ce qui est coupé/restauré et pourquoi.
@@ -1033,7 +1038,7 @@ public class MainFrame extends JFrame {
                 ? I18n.t("Mode Express activé — photo d'artiste, paroles et ReplayGain désactivés.")
                 : I18n.t("Mode Complet restauré — réglages précédents rétablis."));
         });
-        m.add(chkExpressMode);
+        options.add(chkExpressMode);
 
         // Fusion 2026-07-16 des anciennes cases "Compléter aussi les fichiers tagués mais
         // incomplets" et "Compléter les albums automatiquement après le taguage" — elles
@@ -1057,7 +1062,7 @@ public class MainFrame extends JFrame {
             completionGroup.add(rb);
             completionMenu.add(rb);
         }
-        m.add(completionMenu);
+        options.add(completionMenu);
         // Demandé le 2026-07-10, juste après avoir choisi le mode "proactif" (revue manuelle) pour
         // "Grouper par compilations…" plutôt qu'une réécriture automatique — l'utilisateur voulait
         // aussi pouvoir déclencher la RECHERCHE toute seule, sans pour autant perdre la revue avant
@@ -1069,7 +1074,7 @@ public class MainFrame extends JFrame {
         chkAutoGroupCompilations.setSelected(Config.get().bool("tagging.auto_group_compilations", false));
         chkAutoGroupCompilations.addActionListener(e ->
                 Config.get().set("tagging.auto_group_compilations", String.valueOf(chkAutoGroupCompilations.isSelected())));
-        m.add(chkAutoGroupCompilations);
+        options.add(chkAutoGroupCompilations);
 
         // Retour utilisateur (2026-08-10) : ne pas être obligé de cliquer sur "Ré-identifier par
         // empreinte audio…" à chaque fois — si activé, se déclenche tout seul juste après CHAQUE
@@ -1103,7 +1108,7 @@ public class MainFrame extends JFrame {
             }
             Config.get().set("tagging.auto_reidentify_unmatched", String.valueOf(chkAutoReidentifyUnmatched.isSelected()));
         });
-        m.add(chkAutoReidentifyUnmatched);
+        options.add(chkAutoReidentifyUnmatched);
 
         // Demandé le 2026-08-12 : le taguage ne reprend jamais tout seul après un redémarrage (ou
         // l'ajout d'un dossier), obligeant à recliquer "Tagger"/F6 à chaque fois — uniquement
@@ -1115,7 +1120,7 @@ public class MainFrame extends JFrame {
         chkAutoTagOnScan.setSelected(Config.get().autoTagOnScan());
         chkAutoTagOnScan.addActionListener(e ->
                 Config.get().set("tagging.auto_start_on_scan", String.valueOf(chkAutoTagOnScan.isSelected())));
-        m.add(chkAutoTagOnScan);
+        options.add(chkAutoTagOnScan);
 
         // Interrupteur pour scheduleAutoSaveFollowUp() (voir son commentaire) — actif par défaut.
         // Quand actif, le bouton "Enregistrer tout" de l'écran principal est masqué (retour
@@ -1127,7 +1132,7 @@ public class MainFrame extends JFrame {
             Config.get().set("tagging.auto_save_enabled", String.valueOf(chkAutoSaveEnabled.isSelected()));
             if (btnSaveAll != null) btnSaveAll.setVisible(!chkAutoSaveEnabled.isSelected());
         });
-        m.add(chkAutoSaveEnabled);
+        options.add(chkAutoSaveEnabled);
 
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
@@ -1151,7 +1156,7 @@ public class MainFrame extends JFrame {
         chkMoveDurationMismatchMenu.addActionListener(e ->
                 Config.get().set("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatchMenu.isSelected())));
         moveMenu.add(chkMoveDurationMismatchMenu);
-        m.add(moveMenu);
+        options.add(moveMenu);
 
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> stopAll()));
@@ -1332,12 +1337,9 @@ public class MainFrame extends JFrame {
         importExport.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
         importExport.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
         importExport.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
-        importExport.add(mitem(I18n.t("Importer XML iTunes…"), null,
-            e -> new ITunesImportDialog(this, tableModel).setVisible(true)));
-        importExport.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
-            e -> writeItunesXmlCorrections()));
-        importExport.add(mitem(I18n.t("Reconstruire un export XML iTunes complet…"), null,
-            e -> exportFullItunesXml()));
+        // Une seule entrée pour tout iTunes (import/écriture/export XML + analyse de la vraie
+        // bibliothèque sous Windows) — voir ITunesToolDialog (2026-10-03, « tout regroupé »).
+        importExport.add(mitem(I18n.t("iTunes…"), null, e -> ITunesToolDialog.open(this, tableModel)));
         importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
         bibliotheque.add(importExport);
 
@@ -3120,7 +3122,7 @@ public class MainFrame extends JFrame {
      * jamais un DOM complet). Demande utilisateur (2026-08-16) après mise en garde sur le risque
      * réel de désynchronisation avec la vraie base iTunes (.itl).
      */
-    private void writeItunesXmlCorrections() {
+    void writeItunesXmlCorrections() {
         int pending = com.opentagger.ITunesXmlSyncQueue.pendingCount();
         if (pending == 0) {
             JOptionPane.showMessageDialog(this,
@@ -3201,7 +3203,7 @@ public class MainFrame extends JFrame {
      * iTunes régénère encore "iTunes Music Library.xml" lui-même, cet export-ci ne doit donc JAMAIS
      * cibler ce même fichier.
      */
-    private void exportFullItunesXml() {
+    void exportFullItunesXml() {
         if (tableModel.allEntries().isEmpty()) {
             setStatus(I18n.t("Aucun fichier à exporter."));
             return;

@@ -1,14 +1,13 @@
 package com.opentagger.ui;
 
-import com.opentagger.ITunesCom;
 import com.opentagger.I18n;
 
 import javax.swing.*;
 import java.awt.*;
 
 /**
- * « Rapports de la bibliothèque » : UNE fenêtre, des onglets — Non identifiés (par cause), Complétude des
- * tags, Compilations restaurées et, sous Windows seulement, iTunes (pistes manquantes / fichiers absents).
+ * « Rapports de la bibliothèque » : UNE fenêtre, trois onglets — Non identifiés (par cause), Complétude des
+ * tags et Compilations restaurées. (L'analyse iTunes vit dans l'outil {@link ITunesToolDialog}.)
  *
  * <p>Fusion du 2026-10-03 (retour utilisateur : « trop d'options gâchent l'application », le sous-menu
  * Rapports en comptait 10) : ces rapports avaient la même forme (un tableau, un pied de page
@@ -50,10 +49,6 @@ public class LibraryReportsDialog extends JDialog {
         tabs.addTab(I18n.t("Non identifiés"), nonIdentified);
         tabs.addTab(I18n.t("Complétude"), completeness);
         tabs.addTab(I18n.t("Compilations restaurées"), compilations);
-        // Interface COM d'iTunes : Windows uniquement — l'onglet n'existe pas ailleurs.
-        if (ITunesCom.isWindows()) {
-            tabs.addTab("iTunes", new ITunesReportPanel(owner, tableModel, close));
-        }
         // Ces trois rapports se relisent en mémoire : les rafraîchir à chaque retour sur leur onglet est gratuit.
         tabs.addChangeListener(e -> refreshCurrent());
         getContentPane().add(tabs, BorderLayout.CENTER);
