@@ -1325,6 +1325,11 @@ public class MainFrame extends JFrame {
             e -> new CompletenessReportDialog(this, tableModel).setVisible(true)));
         rapports.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
             e -> new CompilationRestoreReportDialog(this).setVisible(true)));
+        // Interface COM d'iTunes : Windows uniquement — l'entrée n'existe tout simplement pas sous Linux.
+        if (com.opentagger.ITunesCom.isWindows()) {
+            rapports.add(mitem(I18n.t("Rapport iTunes (pistes manquantes, fichiers absents)…"), null,
+                e -> ITunesReportDialog.open(this, tableModel)));
+        }
         rapports.addSeparator();
         rapports.add(mitem(I18n.t("Exporter un rapport JSON (diagnostic)…"), null,
             e -> exportDiagnosticReport()));
