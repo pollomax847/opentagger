@@ -1844,7 +1844,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         if (artist.isBlank() && title.isBlank() && !nonLatinInput) {
             log(I18n.t("  → rien à chercher"));
-            return List.of();
+            // Rien à chercher en texte : seule l'écoute de l'audio peut encore identifier ce fichier.
+            List<TagInfo> byAudio = tryAudD(fichier, mb);
+            return byAudio != null ? byAudio : List.of();
         }
 
         List<TagInfo> results = List.of();
@@ -2045,38 +2047,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
         // 5e. AudD — dernier recours après SongRec : algorithme de reconnaissance différent,
         // utile quand SongRec ne reconnaît pas le morceau (cf. README : AcoustID → SongRec → AudD).
-        if (AudDClient.isAvailable()) {
-            log(I18n.t("  AudD fallback..."));
-            try {
-                TagInfo ad = audd.recognize(fichier);
-                if (ad != null) {
-                    log(I18n.t("  AudD → %s – %s", ad.artist, ad.title));
-                    List<TagInfo> mbResults = mb.searchRecording(ad.artist, ad.title);
-                    if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
-                        TagInfo mbr = mbResults.get(0);
-                        // AudD comble ce que MB n'a pas (il fournit aussi l'ISRC Spotify)
-                        if (mbr.album.isBlank()   && !ad.album.isBlank())   mbr.album   = ad.album;
-                        if (mbr.year.isBlank()    && !ad.year.isBlank())    mbr.year    = ad.year;
-                        if (mbr.isrc.isBlank()    && !ad.isrc.isBlank())    mbr.isrc    = ad.isrc;
-                        mbr.score = 90;
-                        log(I18n.t("  AudD+MB → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
-                        return List.of(mbr);
-                    }
-                    if (ad.artistMbid.isBlank()) {
-                        try {
-                            String amid = mb.searchArtistMbid(ad.artist);
-                            if (!amid.isBlank()) { ad.artistMbid = amid; log(I18n.t("  artistMbid←MB: %s", amid)); }
-                        } catch (Exception ignored) {}
-                    }
-                    ad.score = 85;
-                    log(I18n.t("  AudD seul (MB non confirmé) → %s – %s", ad.artist, ad.title));
-                    return List.of(ad);
-                }
-                log(I18n.t("  AudD → rien trouvé"));
-            } catch (Exception e) {
-                log(I18n.t("  AudD erreur: %s", e.getMessage()));
-                AudDClient.maybePromptTokenUpdate(e.getMessage());
-            }
+        {
+            List<TagInfo> ad = tryAudD(fichier, mb);
+            if (ad != null) return ad;
         }
 
         // 6a. Dernier recours VÉRIFIÉ EXTERNE : deviner une page piste Bandcamp depuis
@@ -2249,6 +2222,47 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
         lastFindTagsSource.set(MetadataCache.SOURCE_ACOUSTID);
         return r;
+    }
+
+    /** Étape "AudD" de la cascade findTags() — extraite (2026-10-03) pour pouvoir aussi être tentée
+     *  quand il n'y a RIEN à chercher en texte (nom de fichier générique type "download.m4a",
+     *  aucun tag) : avant, findTags() rendait alors "rien à chercher" sans jamais atteindre AudD,
+     *  pourtant la seule méthode par l'audio disponible sous Windows sans clé AcoustID.
+     *  @return le résultat si résolu, {@code null} sinon (AudD absent, rien trouvé, erreur). */
+    private List<TagInfo> tryAudD(File fichier, MusicBrainzClient mb) {
+        if (!AudDClient.isAvailable()) return null;
+        log(I18n.t("  AudD fallback..."));
+        try {
+            TagInfo ad = audd.recognize(fichier);
+            if (ad != null) {
+                log(I18n.t("  AudD → %s – %s", ad.artist, ad.title));
+                List<TagInfo> mbResults = mb.searchRecording(ad.artist, ad.title);
+                if (!mbResults.isEmpty() && mbResults.get(0).score >= 50) {
+                    TagInfo mbr = mbResults.get(0);
+                    // AudD comble ce que MB n'a pas (il fournit aussi l'ISRC Spotify)
+                    if (mbr.album.isBlank()   && !ad.album.isBlank())   mbr.album   = ad.album;
+                    if (mbr.year.isBlank()    && !ad.year.isBlank())    mbr.year    = ad.year;
+                    if (mbr.isrc.isBlank()    && !ad.isrc.isBlank())    mbr.isrc    = ad.isrc;
+                    mbr.score = 90;
+                    log(I18n.t("  AudD+MB → %s – %s [%s]", mbr.artist, mbr.title, mbr.album));
+                    return List.of(mbr);
+                }
+                if (ad.artistMbid.isBlank()) {
+                    try {
+                        String amid = mb.searchArtistMbid(ad.artist);
+                        if (!amid.isBlank()) { ad.artistMbid = amid; log(I18n.t("  artistMbid←MB: %s", amid)); }
+                    } catch (Exception ignored) {}
+                }
+                ad.score = 85;
+                log(I18n.t("  AudD seul (MB non confirmé) → %s – %s", ad.artist, ad.title));
+                return List.of(ad);
+            }
+            log(I18n.t("  AudD → rien trouvé"));
+        } catch (Exception e) {
+            log(I18n.t("  AudD erreur: %s", e.getMessage()));
+            AudDClient.maybePromptTokenUpdate(e.getMessage());
+        }
+        return null;
     }
 
     /** Étape "SongRec" de la cascade findTags() — extraite (2026-09-02), même raison/mêmes
