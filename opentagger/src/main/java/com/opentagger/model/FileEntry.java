@@ -119,10 +119,17 @@ public class FileEntry {
      */
     public Path scanRoot;
 
+    /** Taille du fichier en octets, lue UNE fois à la création (0 si illisible) — sert au total
+     *  « taille de la bibliothèque » de la barre d'état. Volontairement pas relue ensuite : le total
+     *  est rafraîchi toutes les quelques secondes, relire le disque (surtout un NAS) à chaque fois
+     *  serait inacceptable. */
+    public final long sizeBytes;
+
     public FileEntry(File file, TagInfo current) {
         this.file        = file;
         this.currentPath = file.toPath();
         this.current     = current != null ? current : new TagInfo();
+        this.sizeBytes   = Math.max(0, file.length());
     }
 
     /** Nom court du fichier actuel (après renommage éventuel). */

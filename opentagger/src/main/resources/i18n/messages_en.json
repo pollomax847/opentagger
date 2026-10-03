@@ -1,5 +1,8 @@
 {
   "Bienvenue dans OpenTagger": "Welcome to OpenTagger",
+  "Bibliothèque : %s (%d fichiers)": "Library: %s (%d files)",
+  "Taille des fichiers chargés dans OpenTagger": "Size of the files loaded in OpenTagger",
+  "Espace libre sur le disque : %s": "Free space on the disk: %s",
   "  Cohérence de groupe ⚠ durée du fichier (%ds) incompatible avec '%s' (%ds) → identification par l'audio": "  Group consistency ⚠ file duration (%ds) incompatible with '%s' (%ds) → identifying from audio",
   "Pour identifier vos fichiers, OpenTagger utilise des services en ligne gratuits qui demandent chacun une clé personnelle. Renseignez celles que vous avez (toutes sont facultatives) — vous pourrez les modifier plus tard dans Préférences → APIs.": "To identify your files, OpenTagger uses free online services that each require a personal key. Fill in the ones you have (all are optional) — you can change them later in Preferences → APIs.",
   "Plus tard": "Later",

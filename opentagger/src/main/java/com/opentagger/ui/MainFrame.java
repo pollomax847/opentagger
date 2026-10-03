@@ -94,6 +94,8 @@ public class MainFrame extends JFrame {
     // applyFilter(). Réinitialisé par le bouton "Effacer les filtres" et par tout clic sur un chip.
     private com.opentagger.model.SkipReason activeSkipReasonFilter = null;
     private JLabel lblMemory;
+    // Taille totale des fichiers chargés (barre d'état, à gauche de la RAM) — voir refreshStats().
+    private JLabel lblLibrarySize;
 
     // ── Débit/ETA global (chip informatif, pas un filtre) ────────────────────────────────────
     // Échantillonné dans refreshStats() (déjà appelé partout, déjà throttlé à 300ms) — fenêtre
@@ -1886,6 +1888,7 @@ public class MainFrame extends JFrame {
             restoreTableSelection(sel);
         }
         int tagged = 0, identified = 0, skipped = 0, error = 0, pending = 0;
+        long libraryBytes = 0;
         // Chips de statut (hors "Total") : TOUJOURS le vrai compte global par statut, sur
         // tableModel.allEntries() (jamais affecté par le filtre, contrairement à getRowCount()/
         // get() qui portent sur la vue déjà filtrée) — sinon activer un filtre sur UN statut fait
@@ -1897,12 +1900,25 @@ public class MainFrame extends JFrame {
         // contrairement à l'ancien commentaire sur la vue arborescence. Seuls le TABLEAU et le
         // second nombre du chip "Total" ci-dessous continuent de refléter le filtre actif.
         for (FileEntry e : tableModel.allEntries()) {
+            libraryBytes += e.sizeBytes;
             switch (e.status) {
                 case TAGGED     -> tagged++;
                 case IDENTIFIED -> identified++;
                 case SKIPPED    -> skipped++;
                 case ERROR      -> error++;
                 default         -> pending++;
+            }
+        }
+        // Taille totale de la bibliothèque chargée (tout ce qui est en mémoire, indépendamment du
+        // filtre actif — comme les chips de statut ci-dessus).
+        if (lblLibrarySize != null) {
+            int loaded = tableModel.allEntries().size();
+            if (loaded == 0) {
+                lblLibrarySize.setVisible(false);
+            } else {
+                lblLibrarySize.setText(I18n.t("Bibliothèque : %s (%d fichiers)",
+                        com.opentagger.ByteFormat.format(libraryBytes), loaded));
+                lblLibrarySize.setVisible(true);
             }
         }
         // "Total" reste lié au filtre actif (lignes visibles / total réel) — c'est le seul chip
@@ -3636,8 +3652,20 @@ public class MainFrame extends JFrame {
         // indépendant de tout worker garantit que l'écart ne dépasse jamais quelques secondes.
         new javax.swing.Timer(3000, e -> refreshStats()).start();
 
+        // Taille réelle (somme des tailles de fichiers) de la bibliothèque chargée, en Go/To. Masqué
+        // tant que rien n'est chargé. L'infobulle (détail par format + espace libre du disque) n'est
+        // calculée qu'au survol — jamais en tâche de fond.
+        lblLibrarySize = new JLabel() {
+            @Override public String getToolTipText() { return librarySizeTooltip(); }
+        };
+        lblLibrarySize.setForeground(new Color(0x90A4AE));
+        lblLibrarySize.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
+        lblLibrarySize.setToolTipText("");   // active le mécanisme d'infobulle de Swing
+        lblLibrarySize.setVisible(false);
+
         JPanel eastPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         eastPanel.setOpaque(false);
+        eastPanel.add(lblLibrarySize);
         eastPanel.add(lblMemory);
         eastPanel.add(progressPanel);
 
@@ -3648,6 +3676,42 @@ public class MainFrame extends JFrame {
         bar.add(lblStatus,  BorderLayout.WEST);
         bar.add(eastPanel,  BorderLayout.EAST);
         return bar;
+    }
+
+    /** Infobulle du total « bibliothèque » : détail par format (extension) puis espace libre du
+     *  disque du premier fichier chargé. Calculée à la demande sur l'EDT (O(n) sur les entrées déjà
+     *  en mémoire, aucun accès disque sauf l'espace libre, protégé par try/catch). */
+    private String librarySizeTooltip() {
+        java.util.List<FileEntry> all = tableModel.allEntries();
+        if (all.isEmpty()) return null;
+        java.util.Map<String, long[]> byExt = new java.util.HashMap<>();
+        long total = 0;
+        for (FileEntry e : all) {
+            String n = e.filename();
+            int dot = n.lastIndexOf('.');
+            String ext = dot >= 0 ? n.substring(dot + 1).toLowerCase(java.util.Locale.ROOT) : "?";
+            long[] a = byExt.computeIfAbsent(ext, k -> new long[2]);
+            a[0]++; a[1] += e.sizeBytes; total += e.sizeBytes;
+        }
+        java.util.List<java.util.Map.Entry<String, long[]>> rows = new java.util.ArrayList<>(byExt.entrySet());
+        rows.sort((x, y) -> Long.compare(y.getValue()[1], x.getValue()[1]));
+        StringBuilder sb = new StringBuilder("<html><b>")
+            .append(I18n.t("Taille des fichiers chargés dans OpenTagger")).append("</b><br>");
+        int shown = 0;
+        for (java.util.Map.Entry<String, long[]> r : rows) {
+            if (++shown > 8) break;
+            sb.append(r.getKey().toUpperCase(java.util.Locale.ROOT)).append(" : ")
+              .append(com.opentagger.ByteFormat.format(r.getValue()[1]))
+              .append(" (").append(r.getValue()[0]).append(")<br>");
+        }
+        if (rows.size() > 8) sb.append("…<br>");
+        try {
+            java.nio.file.Path p = all.get(0).currentPath != null ? all.get(0).currentPath : all.get(0).file.toPath();
+            java.nio.file.FileStore fs = java.nio.file.Files.getFileStore(p);
+            sb.append("<br>").append(I18n.t("Espace libre sur le disque : %s",
+                com.opentagger.ByteFormat.format(fs.getUsableSpace())));
+        } catch (Exception ignored) { /* disque réseau injoignable, chemin disparu… : on n'affiche rien */ }
+        return sb.append("</html>").toString();
     }
 
     /** Mémoire JVM réellement utilisée / plafond -Xmx — rafraîchi périodiquement (Timer EDT). */
