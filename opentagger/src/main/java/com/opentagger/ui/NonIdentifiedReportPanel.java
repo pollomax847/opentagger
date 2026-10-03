@@ -27,23 +27,22 @@ import java.util.Map;
  * pas de requête SQLite, les causes (FileEntry.skipReason) ne sont jamais persistées, cohérent avec
  * le reste de la barre de stats qui se réinitialise déjà au redémarrage.
  */
-public class NonIdentifiedReportDialog extends JDialog {
+public class NonIdentifiedReportPanel extends JPanel {
 
     private static final String[] COLS = {I18n.t("Cause"), I18n.t("Nombre"), "%"};
 
     private final MainFrame         owner;
     private final FileTableModel    tableModel;
+    private final Runnable          onClose;
     private final JTable            table;
     private final DefaultTableModel model;
     private final JLabel            lblCount = new JLabel();
 
-    public NonIdentifiedReportDialog(MainFrame owner, FileTableModel tableModel) {
-        super(owner, I18n.t("Rapport Non identifiés — OpenTagger"), false);
+    /** Onglet de {@link LibraryReportsDialog} (fusion des rapports, 2026-10-03 : « trop d'options »). */
+    public NonIdentifiedReportPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose) {
         this.owner      = owner;
         this.tableModel = tableModel;
-        setSize(560, 420);
-        setMinimumSize(new Dimension(420, 280));
-        setLocationRelativeTo(owner);
+        this.onClose    = onClose;
 
         model = new DefaultTableModel(COLS, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
@@ -67,21 +66,19 @@ public class NonIdentifiedReportDialog extends JDialog {
                 SkipReason reason = rowReasons.get(modelRow);
                 if (reason == null) return;
                 owner.filterBySkipReason(reason);
-                dispose();
+                onClose.run();
             }
         });
 
-        getContentPane().setLayout(new BorderLayout(0, 0));
-        getContentPane().add(new JScrollPane(table), BorderLayout.CENTER);
-        getContentPane().add(buildFooter(), BorderLayout.SOUTH);
+        setLayout(new BorderLayout(0, 0));
+        add(new JScrollPane(table), BorderLayout.CENTER);
+        add(buildFooter(), BorderLayout.SOUTH);
 
         load();
-
-        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
-        getRootPane().getActionMap().put("close",
-                new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
     }
+
+    /** Relit l'état en mémoire (appelé quand on revient sur l'onglet). */
+    void refresh() { load(); }
 
     // Ligne de table (index modèle) → SkipReason correspondant, pour le double-clic — reconstruit à
     // chaque load() puisque l'ordre/le nombre de lignes peut changer.
@@ -137,7 +134,7 @@ public class NonIdentifiedReportDialog extends JDialog {
         JButton btnClose    = new JButton(I18n.t("Fermer"));
         JButton btnExport   = new JButton("📤  " + I18n.t("Exporter JSON"));
         btnRefresh.addActionListener(e -> load());
-        btnClose  .addActionListener(e -> dispose());
+        btnClose  .addActionListener(e -> onClose.run());
         btnExport .addActionListener(e -> exportJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder ce rapport dans un fichier JSON"));
 

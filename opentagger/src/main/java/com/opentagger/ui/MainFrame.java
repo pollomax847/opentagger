@@ -1319,17 +1319,10 @@ public class MainFrame extends JFrame {
         rapports.add(mitem(I18n.t("Revue des fichiers suspects…"), null,
             e -> SuspectFilesReviewDialog.show(this, tableModel)));
         rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
-        rapports.add(mitem(I18n.t("Rapport Non identifiés…"), null,
-            e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
-        rapports.add(mitem(I18n.t("Rapport de complétude…"), null,
-            e -> new CompletenessReportDialog(this, tableModel).setVisible(true)));
-        rapports.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
-            e -> new CompilationRestoreReportDialog(this).setVisible(true)));
-        // Interface COM d'iTunes : Windows uniquement — l'entrée n'existe tout simplement pas sous Linux.
-        if (com.opentagger.ITunesCom.isWindows()) {
-            rapports.add(mitem(I18n.t("Rapport iTunes (pistes manquantes, fichiers absents)…"), null,
-                e -> ITunesReportDialog.open(this, tableModel)));
-        }
+        // Une seule entrée pour tous les rapports chiffrés (Non identifiés, Complétude, Compilations
+        // restaurées, iTunes sous Windows) — voir LibraryReportsDialog (2026-10-03, « trop d'options »).
+        rapports.add(mitem(I18n.t("Rapports de la bibliothèque…"), null,
+            e -> LibraryReportsDialog.open(this, tableModel)));
         rapports.addSeparator();
         rapports.add(mitem(I18n.t("Exporter un rapport JSON (diagnostic)…"), null,
             e -> exportDiagnosticReport()));

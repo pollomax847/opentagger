@@ -24,7 +24,7 @@ import java.util.Map;
  * même restreinte, elle fait confiance à d'anciens tags jamais revérifiés, donc autant garder une
  * trace consultable de chaque cas plutôt que de le faire silencieusement.
  */
-public class CompilationRestoreReportDialog extends JDialog {
+public class CompilationRestoreReportPanel extends JPanel {
 
     private static final String[] COLS = {
         I18n.t("Heure"), I18n.t("Fichier"), I18n.t("Album restauré"), I18n.t("Artiste album restauré"),
@@ -33,14 +33,13 @@ public class CompilationRestoreReportDialog extends JDialog {
     private static final DateTimeFormatter TIME_FMT =
             DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 
+    private final Runnable          onClose;
     private final DefaultTableModel model;
     private final JLabel            lblCount = new JLabel();
 
-    public CompilationRestoreReportDialog(MainFrame owner) {
-        super(owner, I18n.t("Compilations restaurées — OpenTagger"), false);
-        setSize(820, 420);
-        setMinimumSize(new Dimension(500, 280));
-        setLocationRelativeTo(owner);
+    /** Onglet de {@link LibraryReportsDialog} (fusion des rapports, 2026-10-03 : « trop d'options »). */
+    public CompilationRestoreReportPanel(Runnable onClose) {
+        this.onClose = onClose;
 
         model = new DefaultTableModel(COLS, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
@@ -59,17 +58,15 @@ public class CompilationRestoreReportDialog extends JDialog {
         setColWidth(cm, 4, 160, 100, 300); // Album écarté
         setColWidth(cm, 5, 140, 100, 260); // Artiste écarté
 
-        getContentPane().setLayout(new BorderLayout(0, 0));
-        getContentPane().add(new JScrollPane(table), BorderLayout.CENTER);
-        getContentPane().add(buildFooter(), BorderLayout.SOUTH);
+        setLayout(new BorderLayout(0, 0));
+        add(new JScrollPane(table), BorderLayout.CENTER);
+        add(buildFooter(), BorderLayout.SOUTH);
 
         load();
-
-        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
-        getRootPane().getActionMap().put("close",
-                new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
     }
+
+    /** Relit le journal de la session (appelé quand on revient sur l'onglet). */
+    void refresh() { load(); }
 
     private void load() {
         model.setRowCount(0);
@@ -89,7 +86,7 @@ public class CompilationRestoreReportDialog extends JDialog {
         JButton btnClose   = new JButton(I18n.t("Fermer"));
         JButton btnExport  = new JButton("📤  " + I18n.t("Exporter JSON"));
         btnRefresh.addActionListener(e -> load());
-        btnClose  .addActionListener(e -> dispose());
+        btnClose  .addActionListener(e -> onClose.run());
         btnExport .addActionListener(e -> exportJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder ce rapport dans un fichier JSON"));
 

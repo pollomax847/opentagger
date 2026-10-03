@@ -1,7 +1,10 @@
 {
   "Bienvenue dans OpenTagger": "Welcome to OpenTagger",
   "Rapport iTunes": "iTunes report",
-  "Rapport iTunes (pistes manquantes, fichiers absents)…": "iTunes report (missing tracks, files not in iTunes)…",
+  "Rapports de la bibliothèque": "Library reports",
+  "Rapports de la bibliothèque…": "Library reports…",
+  "Complétude": "Completeness",
+  "Compilations restaurées": "Restored compilations",
   "Lancer l'analyse": "Run analysis",
   "Exporter en CSV…": "Export as CSV…",
   "Dossier": "Folder",

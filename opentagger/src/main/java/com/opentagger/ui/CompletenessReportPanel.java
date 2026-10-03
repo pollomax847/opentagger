@@ -27,22 +27,21 @@ import java.util.function.Predicate;
  * (même squelette JTable/export JSON), lecture directe de tableModel.allEntries() sans requête
  * SQLite.
  */
-public class CompletenessReportDialog extends JDialog {
+public class CompletenessReportPanel extends JPanel {
 
     private static final String[] COLS = {I18n.t("Champ"), I18n.t("Renseigné"), I18n.t("Manquant"), "%"};
 
     private record Field(String label, Predicate<TagInfo> present) {}
 
     private final FileTableModel    tableModel;
+    private final Runnable          onClose;
     private final DefaultTableModel model;
     private final JLabel            lblCount = new JLabel();
 
-    public CompletenessReportDialog(MainFrame owner, FileTableModel tableModel) {
-        super(owner, I18n.t("Rapport de complétude — OpenTagger"), false);
+    /** Onglet de {@link LibraryReportsDialog} (fusion des rapports, 2026-10-03 : « trop d'options »). */
+    public CompletenessReportPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose) {
         this.tableModel = tableModel;
-        setSize(520, 320);
-        setMinimumSize(new Dimension(420, 260));
-        setLocationRelativeTo(owner);
+        this.onClose    = onClose;
 
         model = new DefaultTableModel(COLS, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
@@ -59,17 +58,15 @@ public class CompletenessReportDialog extends JDialog {
         setColWidth(cm, 2, 100, 70,  140); // Manquant
         setColWidth(cm, 3, 70,  50,  100); // %
 
-        getContentPane().setLayout(new BorderLayout(0, 0));
-        getContentPane().add(new JScrollPane(table), BorderLayout.CENTER);
-        getContentPane().add(buildFooter(), BorderLayout.SOUTH);
+        setLayout(new BorderLayout(0, 0));
+        add(new JScrollPane(table), BorderLayout.CENTER);
+        add(buildFooter(), BorderLayout.SOUTH);
 
         load();
-
-        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke("ESCAPE"), "close");
-        getRootPane().getActionMap().put("close",
-                new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent e) { dispose(); } });
     }
+
+    /** Relit l'état en mémoire (appelé quand on revient sur l'onglet). */
+    void refresh() { load(); }
 
     // Mêmes 5 champs, dans le même ordre, que TaggingWorker.incompletenessScore().
     private static final Field[] FIELDS = {
@@ -107,7 +104,7 @@ public class CompletenessReportDialog extends JDialog {
         JButton btnClose    = new JButton(I18n.t("Fermer"));
         JButton btnExport   = new JButton("📤  " + I18n.t("Exporter JSON"));
         btnRefresh.addActionListener(e -> load());
-        btnClose  .addActionListener(e -> dispose());
+        btnClose  .addActionListener(e -> onClose.run());
         btnExport .addActionListener(e -> exportJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder ce rapport dans un fichier JSON"));
 

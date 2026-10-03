@@ -25,11 +25,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * OpenTagger. Deux listes : les pistes iTunes dont le fichier a disparu, et les fichiers chargés
  * qu'iTunes ne connaît pas. STRICTEMENT EN LECTURE SEULE : rien n'est modifié dans iTunes.
  */
-public class ITunesReportDialog extends JDialog {
+public class ITunesReportPanel extends JPanel {
 
     private record Outcome(ITunesReport.ScanResult scan, List<Path> notInITunes, int loadedCount) {}
 
     private final FileTableModel tableModel;
+    private final Runnable onClose;
     private final AtomicBoolean cancel = new AtomicBoolean(false);
 
     private final JButton btnStart  = new JButton(I18n.t("Lancer l'analyse"));
@@ -45,19 +46,14 @@ public class ITunesReportDialog extends JDialog {
     private final DefaultTableModel missingModel = nonEditable(I18n.t("Fichier"), I18n.t("Dossier"));
     private SwingWorker<Outcome, Integer> worker;
 
-    public static void open(MainFrame owner, FileTableModel tableModel) {
-        new ITunesReportDialog(owner, tableModel).setVisible(true);
-    }
-
-    private ITunesReportDialog(MainFrame owner, FileTableModel tableModel) {
-        super(owner, I18n.t("Rapport iTunes"), false);
+    /** Onglet de {@link LibraryReportsDialog} (Windows uniquement). */
+    public ITunesReportPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose) {
         this.tableModel = tableModel;
-        setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(920, 560);
-        setLocationRelativeTo(owner);
+        this.onClose    = onClose;
 
-        JPanel content = new JPanel(new BorderLayout(0, 8));
-        content.setBorder(new EmptyBorder(12, 14, 10, 14));
+        JPanel content = this;
+        setLayout(new BorderLayout(0, 8));
+        setBorder(new EmptyBorder(12, 14, 10, 14));
 
         JLabel info = new JLabel("<html>" + I18n.t(
                 "<b>Lecture seule</b> : cette analyse ne modifie rien dans iTunes. Elle interroge votre "
@@ -86,18 +82,22 @@ public class ITunesReportDialog extends JDialog {
         buttons.add(btnCancel);
         buttons.add(btnExport);
         JButton close = new JButton(I18n.t("Fermer"));
-        close.addActionListener(e -> dispose());
+        close.addActionListener(e -> onClose.run());
         buttons.add(close);
         south.add(buttons, BorderLayout.EAST);
         content.add(south, BorderLayout.SOUTH);
-        setContentPane(content);
 
         btnStart.addActionListener(e -> start());
         btnCancel.addActionListener(e -> { cancel.set(true); lblStatus.setText(I18n.t("Annulation…")); });
         btnExport.addActionListener(e -> exportCsv());
-        addWindowListener(new java.awt.event.WindowAdapter() {
-            @Override public void windowClosed(java.awt.event.WindowEvent e) { cancel.set(true); }
-        });
+    }
+
+    /** Quand la fenêtre du hub se ferme, ses composants sont détachés : on arrête alors l'analyse
+     *  en cours (le processus PowerShell est tué par ITunesCom.scan). Changer d'onglet ne passe
+     *  PAS par ici — l'analyse continue en arrière-plan. */
+    @Override public void removeNotify() {
+        cancel.set(true);
+        super.removeNotify();
     }
 
     private static DefaultTableModel nonEditable(String... cols) {
