@@ -92,7 +92,7 @@ Tags podcast écrits (compatibles iTunes / Plex / Jellyfin) :
 
 - **Clic droit → Ouvrir avec OpenTagger** (Linux `.desktop` + Windows registre)
 - **Dossiers de démarrage automatiques** configurables (ignorés si fichiers passés en argument)
-- **Windows** — compatible : configDir dans `%APPDATA%\OpenTagger\`, SongRec gracefully skippé, `where` au lieu de `which`
+- **Windows** — installeur graphique avec toutes les dépendances (voir [Installation](#installation)) ; configuration dans `%APPDATA%\OpenTagger\` ; SongRec non utilisé, l'identification par l'audio passe par AcoustID
 
 ### Interface
 
@@ -100,6 +100,7 @@ Tags podcast écrits (compatibles iTunes / Plex / Jellyfin) :
 - **3 modes d'affichage** (menu Affichage) — Liste à plat, Arborescence par album, ou Cover Flow (bêta)
 - **Chips de statut cliquables** (Total / Tagués / Non identifiés / Erreurs / En attente) — cliquer filtre directement la table par statut, recliquer désactive ; recherche texte + sélecteur de champ juste à côté
 - **Recherche dans les Préférences** — ~75 réglages répartis sur 9 onglets, un champ en haut du dialogue saute directement au bon onglet/champ sans avoir à deviner où il se trouve
+- **Taille de la bibliothèque chargée** (Go/To) et nombre de fichiers dans la barre d'état, avec le détail par format et l'espace libre du disque en infobulle
 - **Indicateur RAM en direct** (bas de fenêtre) — utile pour surveiller une session longue sur une grosse bibliothèque
 - Thème dark FlatLaf, accent teal
 - **Journal de correction** généré après chaque session
@@ -139,10 +140,47 @@ Fichier audio chargé
 
 ## Installation
 
-### Prérequis
+### Windows
+
+Télécharger puis lancer l'installeur **`OpenTagger-x.y.z.exe`** (dépôt [opentagger-releases](https://github.com/pollomax847/opentagger-releases)). C'est un assistant graphique classique : aucun droit administrateur requis, rien à installer avant.
+
+L'installeur apporte **toutes les dépendances** :
+
+- **Java 21** embarqué (aucune installation de Java nécessaire)
+- **ffmpeg** et **ffprobe** (BPM, transcodage, écriture M4A)
+- **AtomicParsley** (écriture des tags M4A)
+- **fpcalc** (Chromaprint, empreintes AcoustID)
+
+Il ajoute un raccourci dans le menu Démarrer (groupe « OpenTagger ») et sur le bureau, et se désinstalle depuis **Paramètres → Applications**. La configuration reste dans `%APPDATA%\OpenTagger\` et survit aux mises à jour comme à la désinstallation.
+
+> L'installeur n'est pas signé : au premier lancement, Windows SmartScreen peut afficher « Éditeur inconnu » — cliquer sur **Informations complémentaires → Exécuter quand même**.
+
+**Au premier démarrage**, une fenêtre propose de saisir les clés API (AcoustID, Discogs, Last.fm, FanArt.tv), avec un lien pour obtenir chacune et un bouton « Tester ». Tout est facultatif et modifiable ensuite dans **Préférences → APIs**.
+
+**Limites sous Windows :**
+
+- **SongRec (Shazam) n'est pas utilisé** : il n'est pas utilisable depuis OpenTagger sous Windows. L'identification par l'audio repose sur **AcoustID** — une clé AcoustID est donc nécessaire pour identifier autre chose que par le nom ou les tags. Les extraits très courts (aperçus de ~30 s) ne sont en général pas reconnus par AcoustID.
+- L'entrée de clic droit « Ouvrir avec OpenTagger » n'est pas ajoutée par l'installeur.
+
+**Générer l'installeur depuis les sources** (JDK 21 et [WiX Toolset 3](https://github.com/wixtoolset/wix3/releases) dans le PATH) :
+
+```bat
+cd opentagger
+mvn package -DskipTests
+:: placer opentagger.jar dans un dossier "in", et ffmpeg.exe, ffprobe.exe (+ leurs DLL, build "shared"),
+:: AtomicParsley.exe et fpcalc.exe dans un dossier "tools"
+jpackage --type exe --name OpenTagger --app-version 0.9.19 --input in --main-jar opentagger.jar ^
+  --icon logo.ico --app-content tools\ffmpeg.exe,tools\ffprobe.exe,tools\AtomicParsley.exe,tools\fpcalc.exe,tools\avcodec-63.dll,... ^
+  --win-menu --win-menu-group OpenTagger --win-shortcut --win-dir-chooser --win-per-user-install --dest dist
+```
+
+`--app-content` dépose les fichiers à côté de `OpenTagger.exe`, où Windows les trouve par leur simple nom, sans toucher au PATH. Le jeu de DLL de ffmpeg dépend du build utilisé : toutes les lister.
+
+### Prérequis (Linux, lancement manuel, compilation)
 
 - **Java 21+**
 - **ffmpeg** (BPM, extraction segment audio pour SongRec, transcodage audio)
+- **AtomicParsley** (écriture des tags M4A)
 - **fpcalc** (Chromaprint) — téléchargeable via **Préférences → Audio** si absent
 - **SongRec** (optionnel, Linux/macOS) — pas dans les dépôts officiels Debian/Ubuntu, nécessite d'ajouter la PPA tierce avant `apt install` :
   ```bash
@@ -172,14 +210,6 @@ bash install-opentagger.sh
 ```
 
 Installe le `.desktop` (avec intégration clic-droit "Ouvrir avec"), l'icône et un lanceur autonome dans `~/.local/bin/opentagger` — le `.jar` est copié dans `~/.local/share/opentagger/`, indépendant du dépôt cloné.
-
-### Windows
-
-```bat
-install-windows.bat
-```
-
-Installe le JAR dans `%APPDATA%\OpenTagger\` et enregistre l'entrée "Ouvrir avec OpenTagger" dans le registre (clic droit sur fichier ET dossier).
 
 ### Lancement manuel
 
@@ -212,7 +242,7 @@ Les binaires publiés sont hébergés sur un dépôt séparé, [opentagger-relea
 
 ## Configuration
 
-Au premier lancement, **Préférences** (Ctrl+,) :
+Au premier lancement, une fenêtre propose de saisir les clés API (facultatives). Elles restent modifiables à tout moment dans **Préférences** (Ctrl+,) :
 
 | Onglet | Paramètre | Obtenir la clé |
 |--------|-----------|----------------|
@@ -221,7 +251,7 @@ Au premier lancement, **Préférences** (Ctrl+,) :
 | APIs | Clé Last.fm | [last.fm/api](https://www.last.fm/api/account/create) |
 | APIs | Clé FanArt TV | [fanart.tv/get-an-api-key](https://fanart.tv/get-an-api-key/) |
 | APIs | Nom d'utilisateur ListenBrainz | Aucune clé requise — juste votre pseudo public |
-| Audio | Chemin fpcalc | Ou cliquer **Télécharger fpcalc** |
+| Audio | Chemin fpcalc | Ou cliquer **Télécharger fpcalc** (déjà inclus par l'installeur Windows) |
 | Renommage | Dossier racine bibliothèque | Ex. `/nas/Musique` |
 | Renommage | Dossier racine podcasts | Ex. `/nas/Podcasts` |
 
