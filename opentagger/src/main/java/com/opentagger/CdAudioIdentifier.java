@@ -62,16 +62,24 @@ public final class CdAudioIdentifier {
      * @return le MBID de release, ou {@code null} si rien de sûr
      */
     static String pickRelease(List<Set<String>> perSample) {
+        List<String> ranked = rankReleases(perSample);
+        return ranked.isEmpty() ? null : ranked.get(0);
+    }
+
+    /** Toutes les releases recevables, de la plus citée à la moins citée (mêmes règles que {@link #pickRelease}) : sert à proposer
+     *  plusieurs versions à l'utilisateur. Égalité : ordre de première citation. */
+    static List<String> rankReleases(List<Set<String>> perSample) {
         List<Set<String>> usable = new ArrayList<>();
         for (Set<String> s : perSample) if (s != null && !s.isEmpty()) usable.add(s);
-        if (usable.isEmpty()) return null;
-        if (usable.size() == 1) return usable.get(0).size() == 1 ? usable.get(0).iterator().next() : null;
+        if (usable.isEmpty()) return List.of();
+        if (usable.size() == 1) return usable.get(0).size() == 1 ? List.of(usable.get(0).iterator().next()) : List.of();
         Map<String, Integer> votes = new LinkedHashMap<>();
         for (Set<String> s : usable) for (String r : s) votes.merge(r, 1, Integer::sum);
-        String best = null;
-        int bestVotes = 0;
-        for (var e : votes.entrySet()) if (e.getValue() > bestVotes) { best = e.getKey(); bestVotes = e.getValue(); }
-        return bestVotes >= 2 ? best : null;
+        List<Map.Entry<String, Integer>> entries = new ArrayList<>(votes.entrySet());
+        entries.sort((a, b) -> Integer.compare(b.getValue(), a.getValue())); // tri stable : l'égalité garde l'ordre de citation
+        List<String> out = new ArrayList<>();
+        for (var e : entries) if (e.getValue() >= 2) out.add(e.getKey());
+        return out;
     }
 
     /**
@@ -80,7 +88,15 @@ public final class CdAudioIdentifier {
      */
     public static MusicBrainzClient.ReleaseTracklist identify(CdRipper.Toc toc, CdRipper ripper, MusicBrainzClient mb,
                                                               AcoustIdClient acoustId, Consumer<String> progress) throws Exception {
-        if (Config.get().acoustidKey().isBlank()) return null; // pas de clé : pas d'empreinte possible
+        String mbid = pickRelease(collectSamples(toc, ripper, mb, acoustId, progress));
+        return mbid == null ? null : mb.lookupRelease(mbid);
+    }
+
+    /** Extrait les pistes échantillons, les identifie par empreinte, et renvoie pour chacune l'ensemble des releases (au bon
+     *  nombre de pistes) qui la contiennent. Liste vide si AcoustID n'a pas de clé. */
+    static List<Set<String>> collectSamples(CdRipper.Toc toc, CdRipper ripper, MusicBrainzClient mb,
+                                            AcoustIdClient acoustId, Consumer<String> progress) throws Exception {
+        if (Config.get().acoustidKey().isBlank()) return List.of(); // pas de clé : pas d'empreinte possible
         int n = toc.tracks().size();
         Path tmp = Files.createTempDirectory("opentagger-cdid");
         List<Set<String>> perSample = new ArrayList<>();
@@ -113,7 +129,20 @@ public final class CdAudioIdentifier {
             try (var files = Files.list(tmp)) { for (Path f : (Iterable<Path>) files::iterator) Files.deleteIfExists(f); } catch (IOException ignored) {}
             try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
         }
-        String mbid = pickRelease(perSample);
-        return mbid == null ? null : mb.lookupRelease(mbid);
+        return perSample;
+    }
+
+    /** Comme {@link #identify} mais renvoie jusqu'à {@code max} versions plausibles (la plus citée d'abord), pour que l'utilisateur
+     *  choisisse. Les détails d'une release ne sont lus que pour celles qu'on renvoie. */
+    public static List<MusicBrainzClient.ReleaseTracklist> identifyAll(CdRipper.Toc toc, CdRipper ripper, MusicBrainzClient mb,
+                                                                       AcoustIdClient acoustId, Consumer<String> progress,
+                                                                       int max) throws Exception {
+        List<Set<String>> perSample = collectSamples(toc, ripper, mb, acoustId, progress);
+        List<MusicBrainzClient.ReleaseTracklist> out = new ArrayList<>();
+        for (String mbid : rankReleases(perSample)) {
+            if (out.size() >= max) break;
+            out.add(mb.lookupRelease(mbid));
+        }
+        return out;
     }
 }

@@ -131,6 +131,18 @@ public class CdImportDialog extends JDialog {
         lblDest.setBorder(new EmptyBorder(0, 10, 8, 10));
         lblDest.putClientProperty("FlatLaf.style", "foreground: #8a8a8a");
         north.add(lblDest);
+        // Plusieurs versions possibles du disque (comme MediaMonkey) : liste visible seulement quand il y a un choix.
+        proposalRow.setBorder(new EmptyBorder(0, 10, 8, 10));
+        proposalRow.add(new JLabel(I18n.t("Version du disque :")), BorderLayout.WEST);
+        proposalRow.add(cbProposals, BorderLayout.CENTER);
+        proposalRow.setVisible(false);
+        cbProposals.addActionListener(e -> {
+            if (!fillingProposals && cbProposals.getSelectedItem() instanceof Proposal p) {
+                btnDetect.setEnabled(false);
+                applyProposal(p);
+            }
+        });
+        north.add(proposalRow);
         refreshDestLabel();
         setAlbumHeader(null);
 
@@ -205,6 +217,8 @@ public class CdImportDialog extends JDialog {
         audioMatch = false;
         identifyError = "";
         diskMatches = java.util.Map.of();
+        proposals = List.of();
+        fillProposalChoices(List.of());
         setAlbumHeader(null);
         centerCards.show(centerPanel, CARD_EMPTY);
         lblStatus.setText(I18n.t("Lecture de la table des pistes…"));
@@ -245,19 +259,22 @@ public class CdImportDialog extends JDialog {
      *  classe). Échec silencieux (identified reste null) : l'extraction reste possible sans titre
      *  connu à l'avance, juste sans le confort de l'aperçu ni la détection de doublon. */
     private void identify() {
-        new SwingWorker<MusicBrainzClient.ReleaseTracklist, String>() {
+        new SwingWorker<List<Proposal>, String>() {
             @Override protected void process(List<String> messages) {
                 if (!messages.isEmpty()) lblStatus.setText(messages.get(messages.size() - 1));
             }
-            @Override protected MusicBrainzClient.ReleaseTracklist doInBackground() {
+            @Override protected List<Proposal> doInBackground() {
+                // Plusieurs versions possibles, comme MediaMonkey : on les rassemble toutes, l'utilisateur choisit.
+                List<Proposal> out = new ArrayList<>();
+                java.util.Set<String> seen = new java.util.HashSet<>();
                 try {
                     MusicBrainzClient mb = new MusicBrainzClient();
                     // 1) Disc ID EXACT, calculé depuis les secteurs réels du disque : même disque pressé = même identifiant.
                     List<MusicBrainzClient.DiscIdCandidate> exact = mb.lookupByDiscId(toc.discId());
+                    int taken = 0;
                     for (var c : exact) {
-                        if (c.trackCount() != toc.tracks().size()) continue;
-                        exactMatch = true;
-                        return mb.lookupRelease(c.releaseMbid());
+                        if (c.trackCount() != toc.tracks().size() || taken >= MAX_PROPOSALS_PER_SOURCE) continue;
+                        if (seen.add(c.releaseMbid())) { out.add(new Proposal(mb.lookupRelease(c.releaseMbid()), "exact")); taken++; }
                     }
 
                     // 2) Repli approximatif (durées arrondies à la seconde) : accepté seulement si l'écart de durée totale reste
@@ -267,58 +284,107 @@ public class CdImportDialog extends JDialog {
                     List<MusicBrainzClient.DiscIdCandidate> candidates = mb.lookupByToc(durations);
 
                     int expectedSectors = toc.totalSectors();
-                    String bestMbid = null;
-                    int bestDiff = Integer.MAX_VALUE;
-                    for (var c : candidates) {
-                        if (c.trackCount() != toc.tracks().size()) continue;
-                        int diff = Math.abs(c.sectors() - expectedSectors);
-                        if (diff < bestDiff) { bestDiff = diff; bestMbid = c.releaseMbid(); }
-                    }
-                    if (bestMbid != null && bestDiff <= MAX_FUZZY_SECTOR_DIFF) {
+                    List<MusicBrainzClient.DiscIdCandidate> near = new ArrayList<>();
+                    for (var c : candidates)
+                        if (c.trackCount() == toc.tracks().size() && Math.abs(c.sectors() - expectedSectors) <= MAX_FUZZY_SECTOR_DIFF) near.add(c);
+                    near.sort(java.util.Comparator.comparingInt(c -> Math.abs(c.sectors() - expectedSectors)));
+                    int approx = 0;
+                    for (var c : near) {
+                        if (approx >= MAX_PROPOSALS_PER_SOURCE || !seen.add(c.releaseMbid())) continue;
                         // Une durée totale proche et le même nombre de pistes ne prouvent rien (un CD de 80 min en a vite autant) :
-                        // on vérifie que presque chaque piste a bien la durée annoncée, sinon on passe à l'analyse audio.
-                        var candidate = mb.lookupRelease(bestMbid);
+                        // on vérifie que presque chaque piste a bien la durée annoncée avant de PROPOSER cette version.
+                        var candidate = mb.lookupRelease(c.releaseMbid());
                         List<Integer> releaseSec = new ArrayList<>();
                         for (var rt : candidate.tracks()) releaseSec.add(rt.lengthMs() / 1000);
-                        if (com.opentagger.CdAudioIdentifier.describesDisc(durations, releaseSec)) return candidate;
+                        if (com.opentagger.CdAudioIdentifier.describesDisc(durations, releaseSec)) { out.add(new Proposal(candidate, "approx")); approx++; }
                     }
 
                     // 3) Disque inconnu par son sommaire (CD gravé, parution absente de MusicBrainz) : on retrouve son nom par
                     //    l'AUDIO — quelques pistes extraites, identifiées par empreinte, puis la release commune à plusieurs.
-                    var byAudio = com.opentagger.CdAudioIdentifier.identify(toc, new CdRipper(), mb, new com.opentagger.AcoustIdClient(), this::publish);
-                    if (byAudio != null) audioMatch = true;
-                    return byAudio;
+                    if (out.isEmpty()) {
+                        for (var rt : com.opentagger.CdAudioIdentifier.identifyAll(toc, new CdRipper(), mb,
+                                new com.opentagger.AcoustIdClient(), this::publish, MAX_PROPOSALS_PER_SOURCE))
+                            if (seen.add(rt.releaseMbid())) out.add(new Proposal(rt, "audio"));
+                    }
                 } catch (Exception e) {
                     identifyError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                     System.err.println("[OT] CD : identification impossible : " + e);
-                    return null;
                 }
+                return out;
             }
             @Override protected void done() {
-                try { identified = get(); }
+                List<Proposal> list = List.of();
+                try { list = get(); }
                 catch (Exception ex) {
                     Throwable c = ex.getCause() != null ? ex.getCause() : ex;
                     identifyError = c.getMessage() != null ? c.getMessage() : c.getClass().getSimpleName();
                     System.err.println("[OT] CD : identification impossible : " + c);
                 }
-                // Pistes déjà présentes SUR LE DISQUE (dossier de bibliothèque) : fait en arrière-plan, la liste peut être longue.
-                final Path lib = libraryRoot();
-                if (identified == null || lib == null) {
-                    diskMatches = java.util.Map.of();
-                    btnDetect.setEnabled(true);
-                    populateTable();
-                    return;
-                }
-                lblStatus.setText(I18n.t("Recherche de l'album dans la bibliothèque…"));
-                final MusicBrainzClient.ReleaseTracklist rt = identified;
-                new SwingWorker<java.util.Map<Integer, List<Path>>, Void>() {
-                    @Override protected java.util.Map<Integer, List<Path>> doInBackground() { return findOnDisk(lib, rt); }
-                    @Override protected void done() {
-                        try { diskMatches = get(); } catch (Exception ex) { diskMatches = java.util.Map.of(); }
-                        btnDetect.setEnabled(true); // fin de TOUTE lecture du lecteur : on peut relancer
-                        populateTable();
-                    }
-                }.execute();
+                proposals = list;
+                fillProposalChoices(list);
+                applyProposal(list.isEmpty() ? null : list.get(0));
+            }
+        }.execute();
+    }
+
+    /** Une version possible du disque : la release et d'où elle vient (« exact » : Disc ID, « approx » : durées vérifiées piste par
+     *  piste, « audio » : empreintes des pistes). */
+    private record Proposal(MusicBrainzClient.ReleaseTracklist rt, String source) {
+        @Override public String toString() {
+            String year = rt.year() != null && !rt.year().isBlank() ? " (" + rt.year() + ")" : "";
+            String src = switch (source) {
+                case "exact" -> I18n.t("disque reconnu exactement");
+                case "audio" -> I18n.t("identifié par l'audio");
+                default -> I18n.t("durées concordantes");
+            };
+            String extra = (rt.label() != null && !rt.label().isBlank() ? rt.label() + ", " : "")
+                    + (rt.country() != null && !rt.country().isBlank() ? rt.country() + ", " : "");
+            return rt.albumArtist() + " — " + rt.album() + year + "   ·   " + extra + src;
+        }
+    }
+
+    private static final int MAX_PROPOSALS_PER_SOURCE = 3;
+    private volatile List<Proposal> proposals = List.of();
+    private final JComboBox<Proposal> cbProposals = new JComboBox<>();
+    private final JPanel proposalRow = new JPanel(new BorderLayout(8, 0));
+    private boolean fillingProposals;
+
+    /** Remplit la liste des versions : visible seulement s'il y a un choix à faire. */
+    private void fillProposalChoices(List<Proposal> list) {
+        fillingProposals = true;
+        try {
+            cbProposals.removeAllItems();
+            for (Proposal p : list) cbProposals.addItem(p);
+            if (!list.isEmpty()) cbProposals.setSelectedIndex(0);
+        } finally {
+            fillingProposals = false;
+        }
+        proposalRow.setVisible(list.size() > 1);
+    }
+
+    /** Applique la version choisie (ou aucune) : album affiché, pistes déjà présentes dans la bibliothèque, tableau. */
+    private void applyProposal(Proposal p) {
+        identified = p == null ? null : p.rt();
+        exactMatch = p != null && "exact".equals(p.source());
+        audioMatch = p != null && "audio".equals(p.source());
+        diskMatches = java.util.Map.of();
+        btnExtract.setEnabled(false);
+        // Pistes déjà présentes SUR LE DISQUE (dossier de bibliothèque) : fait en arrière-plan, la liste peut être longue.
+        final Path lib = libraryRoot();
+        if (identified == null || lib == null) {
+            btnDetect.setEnabled(true);
+            populateTable();
+            return;
+        }
+        lblStatus.setText(I18n.t("Recherche de l'album dans la bibliothèque…"));
+        final MusicBrainzClient.ReleaseTracklist rt = identified;
+        new SwingWorker<java.util.Map<Integer, List<Path>>, Void>() {
+            @Override protected java.util.Map<Integer, List<Path>> doInBackground() { return findOnDisk(lib, rt); }
+            @Override protected void done() {
+                if (identified != rt) return; // une autre version a été choisie entre-temps
+                try { diskMatches = get(); } catch (Exception ex) { diskMatches = java.util.Map.of(); }
+                btnDetect.setEnabled(true); // fin de TOUTE lecture du lecteur : on peut relancer
+                populateTable();
             }
         }.execute();
     }
