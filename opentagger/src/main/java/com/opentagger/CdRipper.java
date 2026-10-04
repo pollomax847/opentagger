@@ -27,9 +27,8 @@ import java.util.regex.Pattern;
  *
  * <p>Un CD de données se traite par simple copie de fichiers (voir CdImportDialog), sans passer par ici.
  *
- * <p>ATTENTION : le lecteur natif n'a PAS pu être essayé avec un disque réel (aucun lecteur de CD sur la machine de
- * développement) ; seuls l'analyse des réponses, la compilation et les chemins d'erreur (pas de lecteur, lecteur
- * inconnu) sont testés. Le premier essai avec un vrai CD audio reste à faire.
+ * <p>Essayé avec un vrai CD audio sous Windows (19 pistes lues, extraction d'une piste en WAV). Sous Linux, seuls
+ * l'analyse des réponses et les chemins d'erreur sont testés.
  */
 public class CdRipper {
 
@@ -42,6 +41,40 @@ public class CdRipper {
     /** tracks vide = pas de piste audio détectée (CD de données pur). */
     public record Toc(List<Track> tracks) {
         public boolean isAudioDisc() { return !tracks.isEmpty(); }
+
+        /** Disc ID MusicBrainz EXACT (SHA-1 du premier/dernier numéro de piste puis des 100 offsets en hexadécimal, base64
+         *  adapté : {@code + / =} → {@code . _ -}). Sert à une recherche exacte, là où le lookup par durées arrondies est
+         *  approximatif. Vide si le disque n'est pas un CD audio simple (pistes non contiguës, CD mixte...). */
+        public String discId() {
+            if (tracks.isEmpty() || tracks.size() > 99) return "";
+            int first = tracks.get(0).number();
+            int last = tracks.get(tracks.size() - 1).number();
+            if (first != 1 || last != tracks.size()) return "";
+            int[] offsets = new int[100];
+            int cursor = 150; // lead-in de 2 s
+            for (int i = 0; i < tracks.size(); i++) {
+                if (tracks.get(i).number() != first + i) return "";
+                offsets[i + 1] = cursor;
+                cursor += tracks.get(i).lengthSectors();
+            }
+            offsets[0] = cursor; // lead-out
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format(Locale.ROOT, "%02X%02X", first, last));
+            for (int o : offsets) sb.append(String.format(Locale.ROOT, "%08X", o));
+            try {
+                byte[] sha = java.security.MessageDigest.getInstance("SHA-1").digest(sb.toString().getBytes(StandardCharsets.US_ASCII));
+                return java.util.Base64.getEncoder().encodeToString(sha).replace('+', '.').replace('/', '_').replace('=', '-');
+            } catch (java.security.NoSuchAlgorithmException e) {
+                return "";
+            }
+        }
+
+        /** Somme des secteurs avec le lead-in, telle que la compare MusicBrainz. */
+        public int totalSectors() {
+            int n = 150;
+            for (Track t : tracks) n += t.lengthSectors();
+            return n;
+        }
     }
 
     /** Résultat de l'analyse des lignes d'un script natif. */

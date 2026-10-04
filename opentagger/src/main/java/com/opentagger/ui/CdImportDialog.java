@@ -41,6 +41,10 @@ public class CdImportDialog extends JDialog {
     private final MainFrame owner;
     private CdRipper.Toc toc;
     private MusicBrainzClient.ReleaseTracklist identified; // null si non identifié
+    /** Vrai si le Disc ID exact du disque a été retrouvé (sinon identification approximative, à vérifier). */
+    private volatile boolean exactMatch;
+    /** Écart maximal (secteurs, 75/s) toléré entre la durée du disque et celle d'une release trouvée par durées arrondies. */
+    private static final int MAX_FUZZY_SECTOR_DIFF = 750; // 10 s
 
     private static final int COL_STATUS = 5;
 
@@ -167,6 +171,7 @@ public class CdImportDialog extends JDialog {
         btnExtract.setEnabled(false);
         trackTableModel.setRowCount(0);
         identified = null;
+        exactMatch = false;
         setAlbumHeader(null);
         centerCards.show(centerPanel, CARD_EMPTY);
         lblStatus.setText(I18n.t("Lecture de la table des pistes…"));
@@ -207,14 +212,22 @@ public class CdImportDialog extends JDialog {
         new SwingWorker<MusicBrainzClient.ReleaseTracklist, Void>() {
             @Override protected MusicBrainzClient.ReleaseTracklist doInBackground() {
                 try {
+                    MusicBrainzClient mb = new MusicBrainzClient();
+                    // 1) Disc ID EXACT, calculé depuis les secteurs réels du disque : même disque pressé = même identifiant.
+                    List<MusicBrainzClient.DiscIdCandidate> exact = mb.lookupByDiscId(toc.discId());
+                    for (var c : exact) {
+                        if (c.trackCount() != toc.tracks().size()) continue;
+                        exactMatch = true;
+                        return mb.lookupRelease(c.releaseMbid());
+                    }
+
+                    // 2) Repli approximatif (durées arrondies à la seconde) : accepté seulement si l'écart de durée totale reste
+                    //    faible. Sans ce seuil, n'importe quelle release de même nombre de pistes était prise pour le disque.
                     List<Integer> durations = new ArrayList<>();
                     for (CdRipper.Track t : toc.tracks()) durations.add(t.durationSec());
-                    MusicBrainzClient mb = new MusicBrainzClient();
                     List<MusicBrainzClient.DiscIdCandidate> candidates = mb.lookupByToc(durations);
 
-                    int expectedSectors = 150;
-                    for (CdRipper.Track t : toc.tracks()) expectedSectors += t.lengthSectors();
-
+                    int expectedSectors = toc.totalSectors();
                     String bestMbid = null;
                     int bestDiff = Integer.MAX_VALUE;
                     for (var c : candidates) {
@@ -222,7 +235,7 @@ public class CdImportDialog extends JDialog {
                         int diff = Math.abs(c.sectors() - expectedSectors);
                         if (diff < bestDiff) { bestDiff = diff; bestMbid = c.releaseMbid(); }
                     }
-                    if (bestMbid == null) return null;
+                    if (bestMbid == null || bestDiff > MAX_FUZZY_SECTOR_DIFF) return null;
                     return mb.lookupRelease(bestMbid);
                 } catch (Exception e) {
                     return null;
@@ -253,7 +266,9 @@ public class CdImportDialog extends JDialog {
         centerCards.show(centerPanel, CARD_TABLE);
         setAlbumHeader(identified);
         lblStatus.setText(identified != null
-                ? I18n.t("Identifié : %s – %s", identified.albumArtist(), identified.album())
+                ? (exactMatch
+                    ? I18n.t("Identifié (disque exact) : %s – %s", identified.albumArtist(), identified.album())
+                    : I18n.t("Identifié approximativement, à vérifier : %s – %s", identified.albumArtist(), identified.album()))
                 : I18n.t("Non identifié — les pistes seront extraites sans titre, "
                        + "à identifier ensuite normalement."));
         btnExtract.setEnabled(true);
@@ -341,24 +356,39 @@ public class CdImportDialog extends JDialog {
         // décochée entre-temps — impossible ici puisque les cases sont lues une seule fois avant de
         // désactiver la fenêtre, mais la map reste correcte même si ce contrat change plus tard).
         java.util.Map<Integer, Integer> rowByTrackNo = new java.util.HashMap<>();
-        boolean anyDup = false;
+        List<Integer> dupTracks = new ArrayList<>();
         for (int i = 0; i < trackTableModel.getRowCount(); i++) {
             int trackNo = (Integer) trackTableModel.getValueAt(i, 1);
             rowByTrackNo.put(trackNo, i);
             if (!Boolean.TRUE.equals(trackTableModel.getValueAt(i, 0))) continue;
             selected.add(trackNo);
-            if (I18n.t("oui").equals(trackTableModel.getValueAt(i, 4))) anyDup = true;
+            if (I18n.t("oui").equals(trackTableModel.getValueAt(i, 4))) dupTracks.add(trackNo);
         }
         if (selected.isEmpty()) {
             JOptionPane.showMessageDialog(this, I18n.t("Aucune piste cochée."));
             return;
         }
-        if (anyDup) {
-            int ok = JOptionPane.showConfirmDialog(this,
-                    I18n.t("Certaines pistes cochées semblent déjà présentes dans la bibliothèque.\n"
-                         + "Extraire quand même (créera potentiellement un doublon) ?"),
-                    I18n.t("Doublons détectés"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-            if (ok != JOptionPane.YES_OPTION) return;
+        if (!dupTracks.isEmpty()) {
+            // L'extraction va toujours dans un dossier de travail à part : rien de la bibliothèque n'est jamais écrasé. Le choix
+            // porte donc seulement sur les pistes déjà présentes : les ignorer (défaut) ou les extraire quand même.
+            String skip = I18n.t("Ignorer les pistes déjà présentes");
+            String all  = I18n.t("Extraire quand même");
+            String cancel = I18n.t("Annuler");
+            int choice = JOptionPane.showOptionDialog(this,
+                    I18n.t("%d piste(s) cochée(s) sur %d semblent déjà présentes dans la bibliothèque.\n"
+                         + "L'extraction se fait dans un dossier à part : aucun fichier existant n'est écrasé.",
+                            dupTracks.size(), selected.size()),
+                    I18n.t("Doublons détectés"), JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null,
+                    new Object[]{skip, all, cancel}, skip);
+            if (choice == 0) {
+                selected.removeAll(dupTracks);
+                if (selected.isEmpty()) {
+                    JOptionPane.showMessageDialog(this, I18n.t("Toutes les pistes cochées sont déjà présentes : rien à extraire."));
+                    return;
+                }
+            } else if (choice != 1) {
+                return; // Annuler ou fenêtre fermée
+            }
         }
 
         AudioTranscoder.Format format = (AudioTranscoder.Format) cbFormat.getSelectedItem();

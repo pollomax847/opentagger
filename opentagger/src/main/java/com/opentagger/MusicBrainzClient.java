@@ -767,6 +767,30 @@ public class MusicBrainzClient {
 
     // ── Identification d'album par TOC (façon "Albunack Disc IDs" de SongKong) ───────────────
 
+    /** Releases qui portent EXACTEMENT ce Disc ID (calculé depuis les secteurs réels d'un CD physique, voir
+     *  {@code CdRipper.Toc.discId()}). Liste vide si le disque n'est pas connu de MusicBrainz (HTTP 404). */
+    public List<DiscIdCandidate> lookupByDiscId(String discId) throws Exception {
+        if (discId == null || discId.isBlank()) return List.of();
+        String url = mbBaseUrl() + "/discid/" + URLEncoder.encode(discId, StandardCharsets.UTF_8)
+                + "?fmt=json&cdstubs=no&inc=artist-credits";
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return List.of();
+        JsonNode root = mapper.readTree(response.body());
+        List<DiscIdCandidate> out = new ArrayList<>();
+        for (JsonNode rel : root.path("releases")) {
+            String relMbid = JsonText.of(rel.path("id"), "").trim();
+            String title   = JsonText.of(rel.path("title"), "").trim();
+            for (JsonNode medium : rel.path("media")) {
+                int tc = medium.path("track-count").asInt(0);
+                for (JsonNode disc : medium.path("discs")) {
+                    if (discId.equals(JsonText.of(disc.path("id"), "")))
+                        out.add(new DiscIdCandidate(relMbid, title, tc, disc.path("sectors").asInt(0)));
+                }
+            }
+        }
+        return out;
+    }
+
     /** Candidat brut renvoyé par lookupByToc() — l'appelant filtre sur trackCount avant d'aller
      *  chercher le détail complet via lookupRelease(releaseMbid). */
     public record DiscIdCandidate(String releaseMbid, String album, int trackCount, int sectors) {}
