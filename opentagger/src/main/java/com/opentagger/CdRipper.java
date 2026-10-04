@@ -190,6 +190,20 @@ public class CdRipper {
     /** Lance le script natif et renvoie ses lignes ; {@code progress} reçoit 0-100 pendant une extraction. */
     private NativeReply runNative(List<String> scriptArgs, IntConsumer progress, int timeoutSec)
             throws IOException, InterruptedException {
+        // Un lecteur de CD ne sert pas deux lectures à la fois : lancées en parallèle (deux identifications, une
+        // identification pendant une extraction), elles se bloquent mutuellement. Tout accès au lecteur passe donc ici, un à la fois.
+        DRIVE.lockInterruptibly();
+        try {
+            return runNativeLocked(scriptArgs, progress, timeoutSec);
+        } finally {
+            DRIVE.unlock();
+        }
+    }
+
+    private static final java.util.concurrent.locks.ReentrantLock DRIVE = new java.util.concurrent.locks.ReentrantLock();
+
+    private NativeReply runNativeLocked(List<String> scriptArgs, IntConsumer progress, int timeoutSec)
+            throws IOException, InterruptedException {
         Path script = scriptFile();
         try {
             List<String> cmd = new ArrayList<>();
@@ -307,6 +321,11 @@ public class CdRipper {
     }
 
     public Path ripTrackToWav(int trackNumber, Path destDir, IntConsumer progress) throws IOException, InterruptedException {
+        return ripTrackToWav(trackNumber, destDir, progress, 1800); // 30 min : large marge, relectures comprises
+    }
+
+    /** @param timeoutSec délai maximal pour CETTE piste (une piste échantillon d'identification n'attend pas 30 minutes) */
+    public Path ripTrackToWav(int trackNumber, Path destDir, IntConsumer progress, int timeoutSec) throws IOException, InterruptedException {
         Files.createDirectories(destDir);
         if (useNative()) {
             Path wav = destDir.resolve(String.format("track%02d.wav", trackNumber));
@@ -318,7 +337,7 @@ public class CdRipper {
                 args.addAll(List.of("rip", String.valueOf(trackNumber), wav.toAbsolutePath().toString()));
                 if (!device().isBlank()) args.add(device());
             }
-            NativeReply r = runNative(args, progress, 1800);   // 30 min : large marge, relectures comprises
+            NativeReply r = runNative(args, progress, timeoutSec);
             if (r.errorCode().isEmpty() && r.done() && Files.exists(wav) && Files.size(wav) > 44) {
                 if (r.readErrors() > 0)
                     System.out.println("[OT] CD piste " + trackNumber + " : " + r.readErrors() + " secteur(s) illisible(s) remplacé(s) par du silence.");

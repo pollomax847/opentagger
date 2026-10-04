@@ -45,6 +45,8 @@ public class CdImportDialog extends JDialog {
     private volatile boolean exactMatch;
     /** Vrai si le nom du disque vient de l'analyse de l'audio (empreintes) plutôt que de sa table des pistes. */
     private volatile boolean audioMatch;
+    /** Raison lisible si l'identification a échoué (réseau, clé AcoustID, lecteur bloqué…), vide sinon. */
+    private volatile String identifyError = "";
     /** Écart maximal (secteurs, 75/s) toléré entre la durée du disque et celle d'une release trouvée par durées arrondies. */
     private static final int MAX_FUZZY_SECTOR_DIFF = 750; // 10 s
 
@@ -175,6 +177,7 @@ public class CdImportDialog extends JDialog {
         identified = null;
         exactMatch = false;
         audioMatch = false;
+        identifyError = "";
         setAlbumHeader(null);
         centerCards.show(centerPanel, CARD_EMPTY);
         lblStatus.setText(I18n.t("Lecture de la table des pistes…"));
@@ -183,15 +186,18 @@ public class CdImportDialog extends JDialog {
                 return new CdRipper().queryToc();
             }
             @Override protected void done() {
-                btnDetect.setEnabled(true);
+                // Le bouton reste DÉSACTIVÉ pendant l'identification (qui lit aussi le lecteur) : un second clic lançait une
+                // seconde lecture en parallèle et bloquait le lecteur. Il est réactivé quand tout est fini (ou en cas d'échec).
                 try {
                     toc = get();
                 } catch (Exception ex) {
+                    btnDetect.setEnabled(true);
                     String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
                     lblStatus.setText(I18n.t("Échec de lecture : %s", msg));
                     return;
                 }
                 if (!toc.isAudioDisc()) {
+                    btnDetect.setEnabled(true);
                     lblEmptyState.setText(I18n.t(
                             "<html><center>💿<br><br>Aucune piste audio détectée.<br>"
                           + "CD de données ? Utilise le bouton dédié ci-dessus.</center></html>"));
@@ -249,11 +255,19 @@ public class CdImportDialog extends JDialog {
                     if (byAudio != null) audioMatch = true;
                     return byAudio;
                 } catch (Exception e) {
+                    identifyError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                    System.err.println("[OT] CD : identification impossible : " + e);
                     return null;
                 }
             }
             @Override protected void done() {
-                try { identified = get(); } catch (Exception ignored) {}
+                try { identified = get(); }
+                catch (Exception ex) {
+                    Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                    identifyError = c.getMessage() != null ? c.getMessage() : c.getClass().getSimpleName();
+                    System.err.println("[OT] CD : identification impossible : " + c);
+                }
+                btnDetect.setEnabled(true); // fin de TOUTE lecture du lecteur : on peut relancer
                 populateTable();
             }
         }.execute();
@@ -283,7 +297,8 @@ public class CdImportDialog extends JDialog {
                         ? I18n.t("Identifié par l'audio : %s – %s", identified.albumArtist(), identified.album())
                         : I18n.t("Identifié approximativement, à vérifier : %s – %s", identified.albumArtist(), identified.album()))
                 : I18n.t("Non identifié — les pistes seront extraites sans titre, "
-                       + "à identifier ensuite normalement."));
+                       + "à identifier ensuite normalement.")
+                    + (identifyError.isBlank() ? "" : " (" + identifyError + ")"));
         btnExtract.setEnabled(true);
     }
 

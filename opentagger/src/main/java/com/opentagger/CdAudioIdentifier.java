@@ -22,6 +22,8 @@ public final class CdAudioIdentifier {
 
     /** Nombre maximal de pistes échantillons extraites (≈ 15 s chacune). */
     static final int MAX_SAMPLES = 3;
+    /** Délai maximal par piste échantillon : une piste de CD s'extrait en ~15 s, au-delà c'est que le lecteur est bloqué. */
+    static final int SAMPLE_TIMEOUT_SEC = 120;
 
     /** Numéros des pistes à échantillonner : la première, la deuxième, puis une du milieu — distinctes. */
     static List<Integer> sampleTracks(int trackCount) {
@@ -69,7 +71,7 @@ public final class CdAudioIdentifier {
                 if (progress != null) progress.accept("Identification par l'audio : piste " + no + " (" + (i + 1) + "/" + samples.size() + ")…");
                 Path wav = null;
                 try {
-                    wav = ripper.ripTrackToWav(no, tmp);
+                    wav = ripper.ripTrackToWav(no, tmp, null, SAMPLE_TIMEOUT_SEC);
                     Set<String> recs = acoustId.knownRecordingIds(Fingerprinter.compute(wav.toFile()));
                     Set<String> releases = new HashSet<>();
                     if (recs != null) {
