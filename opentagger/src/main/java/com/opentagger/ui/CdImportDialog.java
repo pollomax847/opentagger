@@ -47,7 +47,7 @@ public class CdImportDialog extends JDialog {
     /** Raison lisible si l'identification a échoué (réseau, clé AcoustID, lecteur bloqué…), vide sinon. */
     private volatile String identifyError = "";
     /** Écart maximal (secteurs, 75/s) toléré entre la durée du disque et celle d'une release trouvée par durées arrondies. */
-    private static final int MAX_FUZZY_SECTOR_DIFF = 750; // 10 s
+    private static final int MAX_FUZZY_SECTOR_DIFF = 3000; // 40 s : le contrôle piste par piste (describesDisc) décide ensuite
 
     // Colonnes : case, n°, artiste, titre, durée, déjà présent, statut
     private static final int COL_NO = 1, COL_ARTIST = 2, COL_TITLE = 3, COL_DUR = 4, COL_DUP = 5, COL_STATUS = 6;
@@ -204,6 +204,7 @@ public class CdImportDialog extends JDialog {
         exactMatch = false;
         audioMatch = false;
         identifyError = "";
+        diskMatches = java.util.Map.of();
         setAlbumHeader(null);
         centerCards.show(centerPanel, CARD_EMPTY);
         lblStatus.setText(I18n.t("Lecture de la table des pistes…"));
@@ -273,7 +274,14 @@ public class CdImportDialog extends JDialog {
                         int diff = Math.abs(c.sectors() - expectedSectors);
                         if (diff < bestDiff) { bestDiff = diff; bestMbid = c.releaseMbid(); }
                     }
-                    if (bestMbid != null && bestDiff <= MAX_FUZZY_SECTOR_DIFF) return mb.lookupRelease(bestMbid);
+                    if (bestMbid != null && bestDiff <= MAX_FUZZY_SECTOR_DIFF) {
+                        // Une durée totale proche et le même nombre de pistes ne prouvent rien (un CD de 80 min en a vite autant) :
+                        // on vérifie que presque chaque piste a bien la durée annoncée, sinon on passe à l'analyse audio.
+                        var candidate = mb.lookupRelease(bestMbid);
+                        List<Integer> releaseSec = new ArrayList<>();
+                        for (var rt : candidate.tracks()) releaseSec.add(rt.lengthMs() / 1000);
+                        if (com.opentagger.CdAudioIdentifier.describesDisc(durations, releaseSec)) return candidate;
+                    }
 
                     // 3) Disque inconnu par son sommaire (CD gravé, parution absente de MusicBrainz) : on retrouve son nom par
                     //    l'AUDIO — quelques pistes extraites, identifiées par empreinte, puis la release commune à plusieurs.
@@ -293,8 +301,24 @@ public class CdImportDialog extends JDialog {
                     identifyError = c.getMessage() != null ? c.getMessage() : c.getClass().getSimpleName();
                     System.err.println("[OT] CD : identification impossible : " + c);
                 }
-                btnDetect.setEnabled(true); // fin de TOUTE lecture du lecteur : on peut relancer
-                populateTable();
+                // Pistes déjà présentes SUR LE DISQUE (dossier de bibliothèque) : fait en arrière-plan, la liste peut être longue.
+                final Path lib = libraryRoot();
+                if (identified == null || lib == null) {
+                    diskMatches = java.util.Map.of();
+                    btnDetect.setEnabled(true);
+                    populateTable();
+                    return;
+                }
+                lblStatus.setText(I18n.t("Recherche de l'album dans la bibliothèque…"));
+                final MusicBrainzClient.ReleaseTracklist rt = identified;
+                new SwingWorker<java.util.Map<Integer, List<Path>>, Void>() {
+                    @Override protected java.util.Map<Integer, List<Path>> doInBackground() { return findOnDisk(lib, rt); }
+                    @Override protected void done() {
+                        try { diskMatches = get(); } catch (Exception ex) { diskMatches = java.util.Map.of(); }
+                        btnDetect.setEnabled(true); // fin de TOUTE lecture du lecteur : on peut relancer
+                        populateTable();
+                    }
+                }.execute();
             }
         }.execute();
     }
@@ -309,7 +333,8 @@ public class CdImportDialog extends JDialog {
                     if (rt.trackNo() == t.number()) { title = rt.title(); artist = rt.artist(); break; }
                 }
             }
-            boolean dup = identified != null && isAlreadyInLibrary(artist, identified.album(), title);
+            boolean dup = identified != null && (diskMatches.containsKey(t.number())
+                    || isAlreadyInLibrary(artist, identified.album(), title));
             trackTableModel.addRow(new Object[]{
                     Boolean.TRUE, t.number(), artist, title, formatDuration(t.durationSec()), dup ? I18n.t("oui") : "", ""
             });
@@ -332,6 +357,60 @@ public class CdImportDialog extends JDialog {
      *  une requête base de données, juste un parcours en mémoire (déjà rapide même sur 200k+
      *  entrées, aucune E/S). Suffisant pour avertir "tu as peut-être déjà ça", pas une garantie
      *  absolue — l'utilisateur tranche via la confirmation avant extraction. */
+    /** Pistes de ce disque déjà présentes SUR LE DISQUE, dans le dossier de bibliothèque (numéro de piste → fichiers). Ne dépend
+     *  ni de ce que l'app a déjà chargé dans sa liste, ni de la fin d'un scan. */
+    private volatile java.util.Map<Integer, List<Path>> diskMatches = java.util.Map.of();
+
+    private static final java.util.Set<String> AUDIO_EXT = java.util.Set.of(
+            ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".wma", ".ape", ".wv", ".aiff", ".aif");
+
+    /** Minuscules, sans accents ni ponctuation, espaces réduits : « Christophe Maé », « christophe mae » et « Christophe Mae » se
+     *  valent. */
+    static String norm(String s) {
+        if (s == null) return "";
+        String d = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD).replaceAll("\\p{M}+", "");
+        return d.toLowerCase(java.util.Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]+", " ").trim();
+    }
+
+    /** Titre d'un nom de fichier de bibliothèque : sans extension, sans « 01 - » en tête ni « (2) » de copie en fin. */
+    static String titleOfFileName(String fileName) {
+        String stem = fileName;
+        int dot = stem.lastIndexOf('.');
+        if (dot > 0) stem = stem.substring(0, dot);
+        stem = stem.replaceFirst("^\\d+\\s*[-._ ]+\\s*", "").replaceFirst("\\s*\\(\\d+\\)\\s*$", "");
+        return norm(stem);
+    }
+
+    /** Cherche dans {@code library} les pistes de {@code rt} : dossiers dont le nom correspond à l'artiste puis à l'album, fichiers
+     *  dont le titre correspond à celui de la piste. Indépendant du masque de renommage. */
+    static java.util.Map<Integer, List<Path>> findOnDisk(Path library, MusicBrainzClient.ReleaseTracklist rt) {
+        java.util.Map<Integer, List<Path>> out = new java.util.HashMap<>();
+        if (library == null || rt == null || !Files.isDirectory(library)) return out;
+        String artistN = norm(rt.albumArtist()), albumN = norm(rt.album());
+        if (artistN.isBlank() || albumN.isBlank()) return out;
+        try (var artists = Files.list(library)) {
+            for (Path artistDir : (Iterable<Path>) artists::iterator) {
+                if (!Files.isDirectory(artistDir) || !norm(artistDir.getFileName().toString()).equals(artistN)) continue;
+                try (var albums = Files.list(artistDir)) {
+                    for (Path albumDir : (Iterable<Path>) albums::iterator) {
+                        if (!Files.isDirectory(albumDir) || !norm(albumDir.getFileName().toString()).equals(albumN)) continue;
+                        try (var files = Files.walk(albumDir, 2)) {
+                            for (Path f : (Iterable<Path>) files::iterator) {
+                                String name = f.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                                if (!Files.isRegularFile(f) || AUDIO_EXT.stream().noneMatch(name::endsWith)) continue;
+                                String stem = titleOfFileName(f.getFileName().toString());
+                                for (var t : rt.tracks())
+                                    if (!stem.isBlank() && stem.equals(norm(t.title())))
+                                        out.computeIfAbsent(t.trackNo(), k -> new ArrayList<>()).add(f);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (IOException | java.io.UncheckedIOException ignored) { /* lecture impossible : on ne signale rien plutôt que de se tromper */ }
+        return out;
+    }
+
     /** Fichiers de la bibliothèque qui sont CETTE piste : même titre (et même artiste s'il est connu), ou même album et même
      *  numéro de piste. Plus strict que {@link #isAlreadyInLibrary} (qui s'arrête à « même album ») : sert à choisir ce qu'on
      *  remplace, jamais plus que la piste extraite. */
@@ -520,7 +599,7 @@ public class CdImportDialog extends JDialog {
             return;
         }
         // Pistes de la bibliothèque à mettre à la corbeille APRÈS extraction réussie de leur remplaçante (choix « Écraser »).
-        java.util.Map<Integer, List<FileEntry>> toReplace = new java.util.HashMap<>();
+        java.util.Map<Integer, List<Path>> toReplace = new java.util.HashMap<>();
         if (!dupTracks.isEmpty()) {
             // Écraser n'est proposé que si le disque est reconnu EXACTEMENT (Disc ID) : sur un nom approximatif, un mauvais
             // album pourrait désigner de vrais fichiers. L'ancien fichier part à la corbeille (récupérable), jamais supprimé.
@@ -551,12 +630,16 @@ public class CdImportDialog extends JDialog {
                     String title = String.valueOf(trackTableModel.getValueAt(rowByTrackNo.get(trackNo), COL_TITLE));
                     String artist = "";
                     if (identified != null) for (var rt : identified.tracks()) if (rt.trackNo() == trackNo) { artist = rt.artist(); break; }
-                    List<FileEntry> m = libraryMatchesForTrack(artist, identified == null ? "" : identified.album(), title, trackNo);
-                    if (!m.isEmpty()) toReplace.put(trackNo, m);
+                    // Fichiers de la liste de l'app ET fichiers trouvés sur le disque dans la bibliothèque, sans doublon de chemin.
+                    java.util.LinkedHashSet<Path> paths = new java.util.LinkedHashSet<>();
+                    for (FileEntry fe : libraryMatchesForTrack(artist, identified == null ? "" : identified.album(), title, trackNo))
+                        paths.add(fe.currentPath != null ? fe.currentPath : fe.file.toPath());
+                    paths.addAll(diskMatches.getOrDefault(trackNo, List.of()));
+                    if (!paths.isEmpty()) toReplace.put(trackNo, new ArrayList<>(paths));
                 }
             }
         }
-        final java.util.Set<FileEntry> trashed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        final java.util.Set<Path> trashed = java.util.concurrent.ConcurrentHashMap.newKeySet();
         final java.util.concurrent.atomic.AtomicInteger trashFailed = new java.util.concurrent.atomic.AtomicInteger();
 
         AudioTranscoder.Format format = (AudioTranscoder.Format) cbFormat.getSelectedItem();
@@ -653,8 +736,9 @@ public class CdImportDialog extends JDialog {
                         }
                         // « Écraser » : la nouvelle piste existe (extraction réussie), l'ancienne va maintenant à la corbeille.
                         // Jamais avant : si l'extraction échoue, la bibliothèque reste intacte.
-                        for (FileEntry old : toReplace.getOrDefault(trackNo, List.of())) {
-                            if (com.opentagger.TrashHelper.moveToTrash(old.file)) trashed.add(old);
+                        for (Path old : toReplace.getOrDefault(trackNo, List.of())) {
+                            if (!Files.exists(old)) continue;
+                            if (com.opentagger.TrashHelper.moveToTrash(old.toFile())) trashed.add(old);
                             else trashFailed.incrementAndGet();
                         }
                         ok++;
@@ -686,7 +770,11 @@ public class CdImportDialog extends JDialog {
                 try { r = get(); } catch (Exception ex) { r = new int[]{0, selected.size()}; }
                 lblStatus.setText(I18n.t("%d piste(s) extraite(s), %d échec(s).", r[0], r[1]));
                 if (!trashed.isEmpty()) {
-                    owner.removeFromList(trashed); // retirées de la liste : leurs fichiers sont à la corbeille
+                    // retirées de la liste affichée (si elles y figuraient) : leurs fichiers sont à la corbeille
+                    java.util.Set<FileEntry> gone = new java.util.LinkedHashSet<>();
+                    for (FileEntry fe : owner.allEntries())
+                        if (trashed.contains(fe.currentPath != null ? fe.currentPath : fe.file.toPath())) gone.add(fe);
+                    if (!gone.isEmpty()) owner.removeFromList(gone);
                     lblStatus.setText(lblStatus.getText() + " " + I18n.t("%d ancien(s) fichier(s) mis à la corbeille.", trashed.size())
                             + (trashFailed.get() > 0 ? " " + I18n.t("%d non remplacé(s) (corbeille impossible).", trashFailed.get()) : ""));
                 }

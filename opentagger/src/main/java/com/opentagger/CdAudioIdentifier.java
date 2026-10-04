@@ -25,6 +25,26 @@ public final class CdAudioIdentifier {
     /** Délai maximal par piste échantillon : une piste de CD s'extrait en ~15 s, au-delà c'est que le lecteur est bloqué. */
     static final int SAMPLE_TIMEOUT_SEC = 120;
 
+    /** Écart toléré par piste (secondes) entre le disque et une release proposée par une base de données. */
+    public static final int TRACK_TOLERANCE_SEC = 3;
+    /** Part minimale de pistes concordantes pour accepter une release trouvée par durées approximatives. */
+    public static final double MIN_MATCHING_SHARE = 0.9;
+
+    /** Nombre de pistes dont la durée concorde à {@code tolSec} près (comparées dans l'ordre). */
+    public static int tracksWithinTolerance(List<Integer> cdSeconds, List<Integer> releaseSeconds, int tolSec) {
+        int n = Math.min(cdSeconds.size(), releaseSeconds.size()), ok = 0;
+        for (int i = 0; i < n; i++) if (Math.abs(cdSeconds.get(i) - releaseSeconds.get(i)) <= tolSec) ok++;
+        return ok;
+    }
+
+    /** Vrai si la release proposée décrit bien CE disque : même nombre de pistes et presque toutes de la bonne durée. Un même
+     *  total et un même nombre de pistes ne suffisent pas : sur un CD de 80 minutes, cela arrive par hasard. */
+    public static boolean describesDisc(List<Integer> cdSeconds, List<Integer> releaseSeconds) {
+        if (cdSeconds.isEmpty() || cdSeconds.size() != releaseSeconds.size()) return false;
+        return tracksWithinTolerance(cdSeconds, releaseSeconds, TRACK_TOLERANCE_SEC)
+                >= Math.ceil(cdSeconds.size() * MIN_MATCHING_SHARE);
+    }
+
     /** Numéros des pistes à échantillonner : la première, la deuxième, puis une du milieu — distinctes. */
     static List<Integer> sampleTracks(int trackCount) {
         Set<Integer> s = new java.util.LinkedHashSet<>();
