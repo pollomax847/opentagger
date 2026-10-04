@@ -767,6 +767,26 @@ public class MusicBrainzClient {
 
     // ── Identification d'album par TOC (façon "Albunack Disc IDs" de SongKong) ───────────────
 
+    /** Une release qui contient un enregistrement donné, avec le nombre de pistes de chacun de ses disques. */
+    public record ReleaseRef(String releaseMbid, String title, java.util.List<Integer> trackCounts) {}
+
+    /** Releases (jusqu'à 100) qui contiennent cet enregistrement — pour retrouver, parmi elles, celle qui est commune à
+     *  plusieurs pistes d'un même CD (une compilation, là où chaque titre renvoie d'abord son album d'origine). */
+    public List<ReleaseRef> releasesOfRecording(String recordingMbid) throws Exception {
+        if (recordingMbid == null || recordingMbid.isBlank()) return List.of();
+        String url = mbBaseUrl() + "/release?recording=" + URLEncoder.encode(recordingMbid, StandardCharsets.UTF_8)
+                + "&inc=media&limit=100&fmt=json";
+        HttpResponse<String> response = getWithRetry(url);
+        if (response == null) return List.of();
+        List<ReleaseRef> out = new ArrayList<>();
+        for (JsonNode rel : mapper.readTree(response.body()).path("releases")) {
+            List<Integer> counts = new ArrayList<>();
+            for (JsonNode medium : rel.path("media")) counts.add(medium.path("track-count").asInt(0));
+            out.add(new ReleaseRef(JsonText.of(rel.path("id"), "").trim(), JsonText.of(rel.path("title"), "").trim(), counts));
+        }
+        return out;
+    }
+
     /** Releases qui portent EXACTEMENT ce Disc ID (calculé depuis les secteurs réels d'un CD physique, voir
      *  {@code CdRipper.Toc.discId()}). Liste vide si le disque n'est pas connu de MusicBrainz (HTTP 404). */
     public List<DiscIdCandidate> lookupByDiscId(String discId) throws Exception {

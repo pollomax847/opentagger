@@ -43,6 +43,8 @@ public class CdImportDialog extends JDialog {
     private MusicBrainzClient.ReleaseTracklist identified; // null si non identifié
     /** Vrai si le Disc ID exact du disque a été retrouvé (sinon identification approximative, à vérifier). */
     private volatile boolean exactMatch;
+    /** Vrai si le nom du disque vient de l'analyse de l'audio (empreintes) plutôt que de sa table des pistes. */
+    private volatile boolean audioMatch;
     /** Écart maximal (secteurs, 75/s) toléré entre la durée du disque et celle d'une release trouvée par durées arrondies. */
     private static final int MAX_FUZZY_SECTOR_DIFF = 750; // 10 s
 
@@ -172,6 +174,7 @@ public class CdImportDialog extends JDialog {
         trackTableModel.setRowCount(0);
         identified = null;
         exactMatch = false;
+        audioMatch = false;
         setAlbumHeader(null);
         centerCards.show(centerPanel, CARD_EMPTY);
         lblStatus.setText(I18n.t("Lecture de la table des pistes…"));
@@ -209,7 +212,10 @@ public class CdImportDialog extends JDialog {
      *  classe). Échec silencieux (identified reste null) : l'extraction reste possible sans titre
      *  connu à l'avance, juste sans le confort de l'aperçu ni la détection de doublon. */
     private void identify() {
-        new SwingWorker<MusicBrainzClient.ReleaseTracklist, Void>() {
+        new SwingWorker<MusicBrainzClient.ReleaseTracklist, String>() {
+            @Override protected void process(List<String> messages) {
+                if (!messages.isEmpty()) lblStatus.setText(messages.get(messages.size() - 1));
+            }
             @Override protected MusicBrainzClient.ReleaseTracklist doInBackground() {
                 try {
                     MusicBrainzClient mb = new MusicBrainzClient();
@@ -235,8 +241,13 @@ public class CdImportDialog extends JDialog {
                         int diff = Math.abs(c.sectors() - expectedSectors);
                         if (diff < bestDiff) { bestDiff = diff; bestMbid = c.releaseMbid(); }
                     }
-                    if (bestMbid == null || bestDiff > MAX_FUZZY_SECTOR_DIFF) return null;
-                    return mb.lookupRelease(bestMbid);
+                    if (bestMbid != null && bestDiff <= MAX_FUZZY_SECTOR_DIFF) return mb.lookupRelease(bestMbid);
+
+                    // 3) Disque inconnu par son sommaire (CD gravé, parution absente de MusicBrainz) : on retrouve son nom par
+                    //    l'AUDIO — quelques pistes extraites, identifiées par empreinte, puis la release commune à plusieurs.
+                    var byAudio = com.opentagger.CdAudioIdentifier.identify(toc, new CdRipper(), mb, new com.opentagger.AcoustIdClient(), this::publish);
+                    if (byAudio != null) audioMatch = true;
+                    return byAudio;
                 } catch (Exception e) {
                     return null;
                 }
@@ -268,7 +279,9 @@ public class CdImportDialog extends JDialog {
         lblStatus.setText(identified != null
                 ? (exactMatch
                     ? I18n.t("Identifié (disque exact) : %s – %s", identified.albumArtist(), identified.album())
-                    : I18n.t("Identifié approximativement, à vérifier : %s – %s", identified.albumArtist(), identified.album()))
+                    : audioMatch
+                        ? I18n.t("Identifié par l'audio : %s – %s", identified.albumArtist(), identified.album())
+                        : I18n.t("Identifié approximativement, à vérifier : %s – %s", identified.albumArtist(), identified.album()))
                 : I18n.t("Non identifié — les pistes seront extraites sans titre, "
                        + "à identifier ensuite normalement."));
         btnExtract.setEnabled(true);
