@@ -86,7 +86,7 @@ public class FanArtClient {
             int likes = img.path("likes").asInt(0);
             if (likes > maxLikes) { maxLikes = likes; best = img; }
         }
-        return best != null ? best.path("url").asText(null) : null;
+        return best != null ? JsonText.of(best.path("url"), null) : null;
     }
 
     private Path download(String imageUrl, MetadataCache cache) throws Exception {

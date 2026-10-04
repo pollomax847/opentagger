@@ -126,6 +126,11 @@ public final class ThemeManager {
     static void applyAppTweaks() {
         boolean dark = FlatLaf.isLafDark();
 
+        // Repartir des couleurs PROPRES du thème : les corrections de lisibilité du thème précédent (voir
+        // ensureReadable) vivent dans les défauts utilisateur et survivraient au changement de thème.
+        for (String[] p : READABLE) UIManager.put(p[0], null);
+        UIManager.put("Table.alternateRowColor", null);
+
         // Accent unique = le teal des boutons principaux — sinon coches/radios/curseurs/barres de
         // progression gardent l'accent du thème, en désaccord avec les composants dessinés à la main.
         UIManager.put("Component.accentColor", ACCENT);
@@ -170,8 +175,15 @@ public final class ThemeManager {
         UIManager.put("Button.borderWidth",       1);
         UIManager.put("ToggleButton.borderWidth", 1);
         UIManager.put("ToggleButton.selectedBackground", ACCENT);
+        // UIManager.put() écrit dans les défauts UTILISATEUR, que setLookAndFeel() NE réinitialise PAS : sans ce
+        // nettoyage, passer d'un thème sombre à un thème clair en cours de session laissait les gris anthracite des
+        // boutons et des lignes alternées sur fond blanc (texte quasi invisible). On retire donc explicitement ces
+        // valeurs quand le thème n'est pas sombre.
+        final String[] darkOnly = {
+            "Button.background", "Button.borderColor", "Button.hoverBackground", "Button.pressedBackground",
+            "ToggleButton.background", "ToggleButton.borderColor", "ToggleButton.hoverBackground",
+            "ToggleButton.pressedBackground" };
         if (dark) {
-            UIManager.put("Table.alternateRowColor",        new Color(45, 47, 52));
             UIManager.put("Button.background",              new Color(0x3A3A3E));
             UIManager.put("Button.borderColor",             new Color(0x4A4A4E));
             UIManager.put("Button.hoverBackground",         new Color(0x45454A));
@@ -180,6 +192,87 @@ public final class ThemeManager {
             UIManager.put("ToggleButton.borderColor",       new Color(0x4A4A4E));
             UIManager.put("ToggleButton.hoverBackground",   new Color(0x45454A));
             UIManager.put("ToggleButton.pressedBackground", new Color(0x2E2E32));
+        } else {
+            for (String k : darkOnly) UIManager.put(k, null);
+            UIManager.put("Table.alternateRowColor", null);
+        }
+        ensureReadable();
+    }
+
+    // ── Lisibilité garantie, quel que soit le thème ───────────────────────────────────────────────────────
+
+    /** {texte, fond, contraste minimal WCAG}. 4,5 = texte courant ; 3 = texte désactivé / secondaire. */
+    private static final String[][] READABLE = {
+        {"Label.foreground", "Panel.background", "4.5"},
+        {"Label.disabledForeground", "Panel.background", "3.0"},
+        {"Table.foreground", "Table.background", "4.5"},
+        {"Table.selectionForeground", "Table.selectionBackground", "4.5"},
+        {"TextField.foreground", "TextField.background", "4.5"},
+        {"TextField.inactiveForeground", "TextField.inactiveBackground", "3.0"},
+        {"TextField.placeholderForeground", "TextField.background", "3.0"},
+        {"Button.foreground", "Button.background", "4.5"},
+        {"Button.disabledText", "Button.background", "3.0"},
+        {"ToggleButton.foreground", "ToggleButton.background", "4.5"},
+        {"ToggleButton.selectedForeground", "ToggleButton.selectedBackground", "4.5"},
+        {"MenuItem.foreground", "MenuItem.background", "4.5"},
+        {"MenuItem.selectionForeground", "MenuItem.selectionBackground", "4.5"},
+        {"MenuItem.disabledForeground", "MenuItem.background", "3.0"},
+        {"Menu.foreground", "Menu.background", "4.5"},
+        {"TabbedPane.foreground", "TabbedPane.background", "4.5"},
+        {"TabbedPane.selectedForeground", "TabbedPane.background", "4.5"},
+        {"ComboBox.foreground", "ComboBox.background", "4.5"},
+        {"List.foreground", "List.background", "4.5"},
+        {"List.selectionForeground", "List.selectionBackground", "4.5"},
+        {"ToolTip.foreground", "ToolTip.background", "4.5"},
+        {"CheckBox.foreground", "CheckBox.background", "4.5"},
+    };
+
+    static double luminance(Color c) {
+        double[] v = { c.getRed() / 255.0, c.getGreen() / 255.0, c.getBlue() / 255.0 };
+        for (int i = 0; i < 3; i++) v[i] = v[i] <= 0.03928 ? v[i] / 12.92 : Math.pow((v[i] + 0.055) / 1.055, 2.4);
+        return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+    }
+
+    static double contrast(Color a, Color b) {
+        double l1 = luminance(a), l2 = luminance(b);
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    }
+
+    private static Color mix(Color from, Color to, double t) {
+        return new Color(
+            (int) Math.round(from.getRed()   + (to.getRed()   - from.getRed())   * t),
+            (int) Math.round(from.getGreen() + (to.getGreen() - from.getGreen()) * t),
+            (int) Math.round(from.getBlue()  + (to.getBlue()  - from.getBlue())  * t));
+    }
+
+    /** Éclaircit ou assombrit {@code fg} (vers le blanc ou le noir, selon ce qui contraste le mieux avec {@code bg})
+     *  jusqu'à atteindre {@code min}. Renvoie {@code fg} inchangé s'il suffit déjà. */
+    static Color readable(Color fg, Color bg, double min) {
+        if (contrast(fg, bg) >= min) return fg;
+        Color extreme = contrast(Color.WHITE, bg) >= contrast(Color.BLACK, bg) ? Color.WHITE : Color.BLACK;
+        for (int i = 1; i <= 20; i++) {
+            Color c = mix(fg, extreme, i / 20.0);
+            if (contrast(c, bg) >= min) return c;
+        }
+        return extreme;
+    }
+
+    /** Corrige, pour le thème courant, toute paire texte/fond sous le contraste minimal, et dérive les lignes
+     *  alternées du tableau de SES propres couleurs (au lieu d'un gris fixe qui ne va qu'à quelques thèmes sombres). */
+    static void ensureReadable() {
+        for (String[] p : READABLE) {
+            Color fg = UIManager.getColor(p[0]), bg = UIManager.getColor(p[1]);
+            if (fg == null || bg == null) continue;
+            Color fixed = readable(fg, bg, Double.parseDouble(p[2]));
+            if (!fixed.equals(fg)) UIManager.put(p[0], new javax.swing.plaf.ColorUIResource(fixed));
+        }
+        Color tb = UIManager.getColor("Table.background"), tf = UIManager.getColor("Table.foreground");
+        if (tb != null && tf != null) {
+            Color alt = mix(tb, tf, 0.035);
+            UIManager.put("Table.alternateRowColor", new javax.swing.plaf.ColorUIResource(alt));
+            // Le texte doit aussi rester lisible sur les lignes alternées (FlatDark : 4,4 contre 4,5 requis).
+            Color tf2 = readable(tf, alt, 4.5);
+            if (!tf2.equals(tf)) UIManager.put("Table.foreground", new javax.swing.plaf.ColorUIResource(tf2));
         }
     }
 

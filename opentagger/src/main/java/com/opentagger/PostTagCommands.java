@@ -23,6 +23,13 @@ public class PostTagCommands {
      * elle est reprise comme premier (et seul) élément — pour ne rien perdre de la config
      * existante. Même pattern que {@link TaggerScript#loadScripts()}.
      */
+    /** Lanceur de commande « shell » du système : {@code sh -c} (Linux/macOS) ou {@code cmd.exe /c} (Windows, où
+     *  {@code sh} n'existe pas — la commande post-taguage échouait toujours à se lancer). */
+    public static ProcessBuilder shell(String command) {
+        boolean win = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+        return win ? new ProcessBuilder("cmd.exe", "/c", command) : new ProcessBuilder("sh", "-c", command);
+    }
+
     public static List<String> load() {
         File f = new File(STORE_PATH);
         if (!f.exists()) {

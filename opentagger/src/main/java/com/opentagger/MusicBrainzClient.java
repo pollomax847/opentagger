@@ -97,32 +97,32 @@ public class MusicBrainzClient {
             JsonNode rec = mapper.readTree(json);
             TagInfo info = new TagInfo();
             info.score         = 100;
-            info.title         = rec.path("title").asText("").trim();
-            info.comment       = rec.path("disambiguation").asText("").trim();
-            info.recordingMbid = rec.path("id").asText("").trim();
+            info.title         = JsonText.of(rec.path("title"), "").trim();
+            info.comment       = JsonText.of(rec.path("disambiguation"), "").trim();
+            info.recordingMbid = JsonText.of(rec.path("id"), "").trim();
             extractTrackArtists(rec.path("artist-credit"), info);
             JsonNode isrcsCached = rec.path("isrcs");
-            if (isrcsCached.isArray() && !isrcsCached.isEmpty()) info.isrc = isrcsCached.get(0).asText("").trim();
+            if (isrcsCached.isArray() && !isrcsCached.isEmpty()) info.isrc = JsonText.of(isrcsCached.get(0), "").trim();
             int lengthMsCached = rec.path("length").asInt(0);
             if (lengthMsCached > 0) info.mbDurationSec = lengthMsCached / 1000;
             boolean onlyOfficial = Config.get().bool("musicbrainz.only_official", true);
             JsonNode chosen = findBestRelease(rec.path("releases"), onlyOfficial);
             if (chosen == null) chosen = findBestRelease(rec.path("releases"), false);
             if (chosen != null) {
-                info.releaseMbid      = chosen.path("id").asText("").trim();
-                info.album            = chosen.path("title").asText("").trim();
-                info.releaseGroupMbid = chosen.path("release-group").path("id").asText("").trim();
-                String date = chosen.path("date").asText("");
+                info.releaseMbid      = JsonText.of(chosen.path("id"), "").trim();
+                info.album            = JsonText.of(chosen.path("title"), "").trim();
+                info.releaseGroupMbid = JsonText.of(chosen.path("release-group").path("id"), "").trim();
+                String date = JsonText.of(chosen.path("date"), "");
                 info.year = date.length() >= 4 ? date.substring(0, 4) : date;
                 info.date = fullDate(date);
                 JsonNode rc = chosen.path("artist-credit");
                 if (rc.isArray() && !rc.isEmpty()) {
-                    info.albumArtist     = rc.get(0).path("name").asText("").trim();
-                    info.albumArtistSort = rc.get(0).path("artist").path("sort-name").asText("").trim();
+                    info.albumArtist     = JsonText.of(rc.get(0).path("name"), "").trim();
+                    info.albumArtistSort = JsonText.of(rc.get(0).path("artist").path("sort-name"), "").trim();
                 }
                 if (info.albumArtist.isBlank())     info.albumArtist     = info.artist;
                 if (info.albumArtistSort.isBlank()) info.albumArtistSort = info.artistSort;
-                info.language = chosen.path("text-representation").path("language").asText("").trim();
+                info.language = JsonText.of(chosen.path("text-representation").path("language"), "").trim();
                 extractSecondaryTypes(chosen, info);
                 extractReleaseDetails(chosen, info);
                 extractMediaInfo(chosen, info);
@@ -209,7 +209,84 @@ public class MusicBrainzClient {
      * GET avec retry exponentiel sur 503/429 (MB rate-limit ou surcharge).
      * Comme Picard ratecontrol.py : backoff jusqu'à ~30 secondes.
      */
+    // ── Compteur de requêtes réelles par type (diagnostic : où part le quota de 1 requête / 1,1 s ?) ─────────
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> REQUEST_STATS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Type de requête déduit de l'URL : « recherche recording », « lookup release »… (sans identifiants). */
+    static String requestKind(String url) {
+        String path = url.replaceFirst("^https?://[^/]+(/[^/]+)?/ws/2/?", "").replaceFirst("^.*?/ws/2/?", "");
+        int q = path.indexOf('?');
+        String head = q >= 0 ? path.substring(0, q) : path;
+        String type = head.contains("/") ? head.substring(0, head.indexOf('/')) : head;
+        boolean lookup = head.contains("/");
+        return type.isEmpty() ? "autre" : (lookup ? "lookup " : "recherche ") + type;
+    }
+
+    /** Nombre de requêtes MusicBrainz réellement envoyées depuis le dernier {@link #resetRequestStats()}. */
+    public static java.util.Map<String, Long> requestStats() {
+        java.util.Map<String, Long> m = new java.util.TreeMap<>();
+        REQUEST_STATS.forEach((k, v) -> m.put(k, v.sum()));
+        return m;
+    }
+
+    public static void resetRequestStats() { REQUEST_STATS.clear(); URL_STATS.clear(); }
+
+    // URL exactes → nombre de fois demandées : repère les requêtes IDENTIQUES refaites (donc mettables en cache).
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> URL_STATS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static java.util.Map<String, Long> requestUrlStats() {
+        java.util.Map<String, Long> m = new java.util.HashMap<>();
+        URL_STATS.forEach((k, v) -> m.put(k, v.sum()));
+        return m;
+    }
+
+    // ── Cache de session des lookups (release / recording) ───────────────────────────────────────────────────
+    // Un lookup release est demandé une fois PAR PISTE d'un même album (fillTrackPositionFromRelease) : 12 pistes = 12
+    // fois la même requête de 1,1 s de quota. Le corps est donc partagé entre toutes les instances et tous les outils
+    // (identification, complétion d'album, compilations…) pendant 60 min, et les demandes SIMULTANÉES de la même URL
+    // n'en font qu'une (le thread suivant attend la réponse du premier).
+    private static final long BODY_TTL_MS = 60L * 60 * 1000;
+    private static final java.util.LinkedHashMap<String, Object[]> BODY_LRU =
+            new java.util.LinkedHashMap<>(64, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(java.util.Map.Entry<String, Object[]> e) { return size() > 400; }
+            };
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<String>> BODY_INFLIGHT =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Corps JSON de {@code url} (200 seulement), depuis le cache de session si présent ; {@code null} en cas d'échec. */
+    private String getBodyCached(String url) throws Exception {
+        if (!Config.get().bool("musicbrainz.session_cache", true)) {   // réglage de secours / comparaisons de mesure
+            HttpResponse<String> direct = getWithRetry(url);
+            return direct == null ? null : direct.body();
+        }
+        synchronized (BODY_LRU) {
+            Object[] hit = BODY_LRU.get(url);
+            if (hit != null && System.currentTimeMillis() - (Long) hit[1] < BODY_TTL_MS) return (String) hit[0];
+        }
+        java.util.concurrent.CompletableFuture<String> mine = new java.util.concurrent.CompletableFuture<>();
+        java.util.concurrent.CompletableFuture<String> other = BODY_INFLIGHT.putIfAbsent(url, mine);
+        if (other != null) {
+            try { return other.get(); }                       // un autre thread charge déjà cette URL
+            catch (java.util.concurrent.ExecutionException ee) { return null; }
+        }
+        try {
+            HttpResponse<String> r = getWithRetry(url);
+            String body = r == null ? null : r.body();
+            if (body != null) synchronized (BODY_LRU) { BODY_LRU.put(url, new Object[]{ body, System.currentTimeMillis() }); }
+            mine.complete(body);
+            return body;
+        } catch (Exception ex) {
+            mine.completeExceptionally(ex);
+            throw ex;
+        } finally {
+            BODY_INFLIGHT.remove(url, mine);
+        }
+    }
     private HttpResponse<String> getWithRetry(String url) throws Exception {
+        REQUEST_STATS.computeIfAbsent(requestKind(url), k -> new java.util.concurrent.atomic.LongAdder()).increment();
+        URL_STATS.computeIfAbsent(url, k -> new java.util.concurrent.atomic.LongAdder()).increment();
         lastHttpErrorStatus = 0;
         int delayMs = 1000;
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -267,11 +344,11 @@ public class MusicBrainzClient {
         for (JsonNode rec : root.path("recordings")) {
             TagInfo info = new TagInfo();
             info.score         = rec.path("score").asInt();
-            info.title         = rec.path("title").asText("").trim();
-            info.comment       = rec.path("disambiguation").asText("").trim();
-            info.recordingMbid = rec.path("id").asText("").trim();
+            info.title         = JsonText.of(rec.path("title"), "").trim();
+            info.comment       = JsonText.of(rec.path("disambiguation"), "").trim();
+            info.recordingMbid = JsonText.of(rec.path("id"), "").trim();
             JsonNode isrcsNode = rec.path("isrcs");
-            if (isrcsNode.isArray() && !isrcsNode.isEmpty()) info.isrc = isrcsNode.get(0).asText("").trim();
+            if (isrcsNode.isArray() && !isrcsNode.isEmpty()) info.isrc = JsonText.of(isrcsNode.get(0), "").trim();
             // Durée déclarée par MB pour CET enregistrement (ms) — voir TagInfo.mbDurationSec et
             // TaggingWorker.isDurationMismatch() pour la détection de rip tronqué/mauvais match.
             int lengthMs = rec.path("length").asInt(0);
@@ -285,12 +362,12 @@ public class MusicBrainzClient {
             JsonNode chosen   = findBestRelease(releases, onlyOfficial);
             if (chosen == null) chosen = findBestRelease(releases, false);
             if (chosen != null) {
-                info.releaseMbid      = chosen.path("id").asText("").trim();
-                info.album            = chosen.path("title").asText("").trim();
-                info.releaseGroupMbid = chosen.path("release-group").path("id").asText("").trim();
+                info.releaseMbid      = JsonText.of(chosen.path("id"), "").trim();
+                info.album            = JsonText.of(chosen.path("title"), "").trim();
+                info.releaseGroupMbid = JsonText.of(chosen.path("release-group").path("id"), "").trim();
 
                 // Année (MB peut renvoyer "2003-05-01" → on tronque à 4)
-                String date = chosen.path("date").asText("");
+                String date = JsonText.of(chosen.path("date"), "");
                 info.year = date.length() >= 4 ? date.substring(0, 4) : date;
                 info.date = fullDate(date);
 
@@ -298,8 +375,8 @@ public class MusicBrainzClient {
                 JsonNode releaseCredits = chosen.path("artist-credit");
                 if (releaseCredits.isArray() && !releaseCredits.isEmpty()) {
                     JsonNode rac = releaseCredits.get(0);
-                    info.albumArtist     = rac.path("name").asText("").trim();
-                    info.albumArtistSort = rac.path("artist").path("sort-name").asText("").trim();
+                    info.albumArtist     = JsonText.of(rac.path("name"), "").trim();
+                    info.albumArtistSort = JsonText.of(rac.path("artist").path("sort-name"), "").trim();
                 }
                 if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
                 if (info.albumArtistSort.isBlank()) info.albumArtistSort = info.artistSort;
@@ -313,7 +390,7 @@ public class MusicBrainzClient {
             }
 
             // Année de première sortie (disponible dans les résultats de recherche)
-            String frd = rec.path("first-release-date").asText("").trim();
+            String frd = JsonText.of(rec.path("first-release-date"), "").trim();
             if (frd.length() >= 4 && info.originalYear.isBlank())
                 info.originalYear = frd.substring(0, 4);
             if (info.originalDate.isBlank()) info.originalDate = fullDate(frd);
@@ -334,7 +411,7 @@ public class MusicBrainzClient {
         // type primaire ("Album") était écrit, les secondaires n'alimentaient que les drapeaux
         // isLive/isCompilation... sans jamais apparaître dans le tag "MusicBrainz Album Type".
         java.util.List<String> types = new java.util.ArrayList<>();
-        String ptype = release.path("release-group").path("primary-type").asText("").trim();
+        String ptype = JsonText.of(release.path("release-group").path("primary-type"), "").trim();
         if (!ptype.isBlank()) types.add(ptype.toLowerCase(java.util.Locale.ROOT));
         if (secTypes.isArray()) {
             for (JsonNode t : secTypes) {
@@ -373,15 +450,15 @@ public class MusicBrainzClient {
         for (int i = 0; i < credits.size(); i++) {
             JsonNode ac    = credits.get(i);
             // credit name = tel qu'imprimé sur le disque, standard name = nom MB officiel
-            String creditName  = ac.path("name").asText("").trim();
-            String standardName= ac.path("artist").path("name").asText("").trim();
+            String creditName  = JsonText.of(ac.path("name"), "").trim();
+            String standardName= JsonText.of(ac.path("artist").path("name"), "").trim();
             String name = (standardize && !standardName.isBlank()) ? standardName : creditName;
-            String sort   = ac.path("artist").path("sort-name").asText("").trim();
-            String join   = ac.path("joinphrase").asText(""); // ex: " & ", " feat. "
+            String sort   = JsonText.of(ac.path("artist").path("sort-name"), "").trim();
+            String join   = JsonText.of(ac.path("joinphrase"), ""); // ex: " & ", " feat. "
             fullName.append(name).append(join);
             if (i == 0) {
                 info.artistSort = sort;
-                info.artistMbid = ac.path("artist").path("id").asText("").trim();
+                info.artistMbid = JsonText.of(ac.path("artist").path("id"), "").trim();
             }
             if (!name.isBlank()) { if (names.length() > 0) names.append('\0'); names.append(name); }
             if (!sort.isBlank()) { if (sorts.length() > 0) sorts.append('\0'); sorts.append(sort); }
@@ -400,28 +477,28 @@ public class MusicBrainzClient {
      * Picard sur le même fichier, ces champs étaient présents côté MusicBrainz mais jamais lus ici.
      */
     private void extractReleaseDetails(JsonNode release, TagInfo info) {
-        String sc = release.path("text-representation").path("script").asText("").trim();
+        String sc = JsonText.of(release.path("text-representation").path("script"), "").trim();
         if (!sc.isBlank() && info.script.isBlank()) info.script = sc;
 
         // Langue de la parution — jusqu'ici lue UNIQUEMENT dans le chemin lookupRecording ; le chemin
         // recherche texte et les tracklists (TOC/groupe/complétion d'album) la laissaient vide.
-        String lang = release.path("text-representation").path("language").asText("").trim();
+        String lang = JsonText.of(release.path("text-representation").path("language"), "").trim();
         if (!lang.isBlank() && info.language.isBlank()) info.language = lang;
 
-        String co = release.path("country").asText("").trim();
+        String co = JsonText.of(release.path("country"), "").trim();
         if (!co.isBlank() && info.country.isBlank()) info.country = co;
 
-        String bc = release.path("barcode").asText("").trim();
+        String bc = JsonText.of(release.path("barcode"), "").trim();
         if (!bc.isBlank() && info.barcode.isBlank()) info.barcode = bc;
 
-        String status = release.path("status").asText("").trim();
+        String status = JsonText.of(release.path("status"), "").trim();
         if (!status.isBlank() && info.releaseStatus.isBlank()) info.releaseStatus = status;
 
         // ASIN — champ de premier niveau, TOUJOURS présent dans la réponse si MB le connaît, sans
         // inc= particulier (vérifié en direct, ex. Thriller de Michael Jackson : "asin":"B00002663R")
         // — jamais lu jusqu'ici malgré ce même appel /release déjà fait pour barcode/statut/label
         // juste au-dessus (2026-09-13, trouvé par audit).
-        String asin = release.path("asin").asText("").trim();
+        String asin = JsonText.of(release.path("asin"), "").trim();
         if (!asin.isBlank() && info.amazonId.isBlank()) info.amazonId = asin;
 
         // URLs officiel/Wikipedia de la PARUTION — présent seulement si inc=url-rels a été demandé.
@@ -434,8 +511,8 @@ public class MusicBrainzClient {
         JsonNode relUrls = release.path("relations");
         if (relUrls.isArray()) {
             for (JsonNode r : relUrls) {
-                String type = r.path("type").asText("");
-                String url  = r.path("url").path("resource").asText("").trim();
+                String type = JsonText.of(r.path("type"), "");
+                String url  = JsonText.of(r.path("url").path("resource"), "").trim();
                 if (url.isBlank()) continue;
                 if ("license".equals(type) && info.license.isBlank())
                     info.license = url;
@@ -451,8 +528,8 @@ public class MusicBrainzClient {
         JsonNode labelInfo = release.path("label-info");
         if (labelInfo.isArray() && !labelInfo.isEmpty()) {
             JsonNode first = labelInfo.get(0);
-            String labelName = first.path("label").path("name").asText("").trim();
-            String catNo     = first.path("catalog-number").asText("").trim();
+            String labelName = JsonText.of(first.path("label").path("name"), "").trim();
+            String catNo     = JsonText.of(first.path("catalog-number"), "").trim();
             if (!labelName.isBlank() && info.label.isBlank())    info.label    = labelName;
             if (!catNo.isBlank()     && info.catalogNo.isBlank()) info.catalogNo = catNo;
         }
@@ -463,7 +540,7 @@ public class MusicBrainzClient {
         // méthode partagée plutôt que dupliquer l'extraction dans les deux call sites.
         JsonNode releaseCredits = release.path("artist-credit");
         if (releaseCredits.isArray() && !releaseCredits.isEmpty() && info.albumArtistMbid.isBlank()) {
-            String raid = releaseCredits.get(0).path("artist").path("id").asText("").trim();
+            String raid = JsonText.of(releaseCredits.get(0).path("artist").path("id"), "").trim();
             if (!raid.isBlank()) info.albumArtistMbid = raid;
         }
     }
@@ -495,12 +572,12 @@ public class MusicBrainzClient {
         int      bestScore = Integer.MIN_VALUE;
 
         for (JsonNode r : releases) {
-            String status  = r.path("status").asText("");
+            String status  = JsonText.of(r.path("status"), "");
             if (onlyOfficial && !"Official".equalsIgnoreCase(status)) continue;
 
             // Filtre type primaire (Album, Single, EP, Broadcast, Other)
             if (allowedPrimary.length > 0) {
-                String ptype = r.path("release-group").path("primary-type").asText("").trim();
+                String ptype = JsonText.of(r.path("release-group").path("primary-type"), "").trim();
                 boolean ok = false;
                 for (String t : allowedPrimary) if (t.trim().equalsIgnoreCase(ptype)) { ok = true; break; }
                 if (!ok) continue;
@@ -531,11 +608,11 @@ public class MusicBrainzClient {
             // release (Album/Compilation/Live...) n'était pas scoré du tout avant ce fix (seulement
             // filtré en tout-ou-rien via allowedPrimary/excludedSecondary ci-dessus) — neutre par
             // défaut (0.5 partout) tant que releases.type_scores n'est pas configuré.
-            String country = r.path("country").asText("").trim();
+            String country = JsonText.of(r.path("country"), "").trim();
             List<String> mediaFormats = new ArrayList<>();
             JsonNode media = r.path("media");
-            if (media.isArray()) for (JsonNode m : media) mediaFormats.add(m.path("format").asText("").trim());
-            String primaryType = r.path("release-group").path("primary-type").asText("").trim();
+            if (media.isArray()) for (JsonNode m : media) mediaFormats.add(JsonText.of(m.path("format"), "").trim());
+            String primaryType = JsonText.of(r.path("release-group").path("primary-type"), "").trim();
             List<String> secondaryTypesForScore = new ArrayList<>();
             JsonNode secTypesForScore = r.path("release-group").path("secondary-types");
             if (secTypesForScore.isArray()) for (JsonNode st : secTypesForScore) secondaryTypesForScore.add(st.asText());
@@ -549,7 +626,7 @@ public class MusicBrainzClient {
             // fourni (tag existant ou nom de dossier iTunes). Permet de préférer la release
             // compilation quand le fichier vient d'un dossier "100 Club Hits Edition 2022".
             if (!preferredAlbum.isBlank()) {
-                String mbAlbum = r.path("title").asText("").trim();
+                String mbAlbum = JsonText.of(r.path("title"), "").trim();
                 if (!mbAlbum.isBlank()) {
                     String normMb   = normalizeAlbumName(mbAlbum);
                     String normPref = normalizeAlbumName(preferredAlbum);
@@ -589,8 +666,8 @@ public class MusicBrainzClient {
     }
 
     private JsonNode preferByYear(JsonNode a, JsonNode b) {
-        String dateA = a.path("date").asText("");
-        String dateB = b.path("date").asText("");
+        String dateA = JsonText.of(a.path("date"), "");
+        String dateB = JsonText.of(b.path("date"), "");
         if (dateA.isBlank()) return dateB.isBlank() ? a : b;
         if (dateB.isBlank()) return a;
         boolean preferOldest = "original".equalsIgnoreCase(Config.get().str("musicbrainz.preferred_year", "original"));
@@ -616,12 +693,12 @@ public class MusicBrainzClient {
 
                 // Numéro de piste
                 JsonNode t = tracks.get(0);
-                info.track = t.path("number").asText("").trim();
+                info.track = JsonText.of(t.path("number"), "").trim();
                 // "MusicBrainz Release Track Id" (id de la piste dans CETTE parution) et titre du disque —
                 // deux tags que Picard écrit et qu'OpenTagger n'écrivait jamais (2026-09-20).
-                String rtid = t.path("id").asText("").trim();
+                String rtid = JsonText.of(t.path("id"), "").trim();
                 if (!rtid.isBlank() && info.releaseTrackMbid.isBlank()) info.releaseTrackMbid = rtid;
-                String dtitle = medium.path("title").asText("").trim();
+                String dtitle = JsonText.of(medium.path("title"), "").trim();
                 if (!dtitle.isBlank() && info.discSubtitle.isBlank()) info.discSubtitle = dtitle;
 
                 // Numéro de disc (position du medium)
@@ -630,7 +707,7 @@ public class MusicBrainzClient {
 
                 // Support (CD, Digital Media, Vinyl…) — jamais lu avant ce correctif alors que
                 // "format" est présent sur ce même nœud medium déjà parcouru pour track/discNo.
-                String fmt = medium.path("format").asText("").trim();
+                String fmt = JsonText.of(medium.path("format"), "").trim();
                 if (!fmt.isBlank() && info.media.isBlank()) info.media = fmt;
                 break;
             }
@@ -685,7 +762,7 @@ public class MusicBrainzClient {
         JsonNode best  = list.get(0);
         int      score = best.path("score").asInt(0);
         if (score < 70) return null;
-        return best.path("id").asText("").trim();
+        return JsonText.of(best.path("id"), "").trim();
     }
 
     // ── Identification d'album par TOC (façon "Albunack Disc IDs" de SongKong) ───────────────
@@ -743,8 +820,8 @@ public class MusicBrainzClient {
         JsonNode root = mapper.readTree(response.body());
         List<DiscIdCandidate> out = new ArrayList<>();
         for (JsonNode rel : root.path("releases")) {
-            String relMbid = rel.path("id").asText("").trim();
-            String title   = rel.path("title").asText("").trim();
+            String relMbid = JsonText.of(rel.path("id"), "").trim();
+            String title   = JsonText.of(rel.path("title"), "").trim();
             for (JsonNode medium : rel.path("media")) {
                 int tc = medium.path("track-count").asInt(0);
                 for (JsonNode disc : medium.path("discs")) {
@@ -780,10 +857,10 @@ public class MusicBrainzClient {
         String url = mbBaseUrl() + "/release/" + releaseMbid.trim()
                 + "?fmt=json&inc=recordings+artist-credits+release-groups+labels";
 
-        HttpResponse<String> response = getWithRetry(url);
-        if (response == null) return null;
+        String body = getBodyCached(url);
+        if (body == null) return null;
 
-        JsonNode root = mapper.readTree(response.body());
+        JsonNode root = mapper.readTree(body);
         return parseReleaseTracklist(releaseMbid, root);
     }
 
@@ -792,24 +869,24 @@ public class MusicBrainzClient {
      *  les deux autres chemins d'identification) via un TagInfo jetable plutôt que dupliquer leur
      *  contenu ici. */
     private ReleaseTracklist parseReleaseTracklist(String releaseMbid, JsonNode root) {
-        String album     = root.path("title").asText("").trim();
-        String date      = root.path("date").asText("");
+        String album     = JsonText.of(root.path("title"), "").trim();
+        String date      = JsonText.of(root.path("date"), "");
         String year      = date.length() >= 4 ? date.substring(0, 4) : date;
-        String rgMbid    = root.path("release-group").path("id").asText("").trim();
+        String rgMbid    = JsonText.of(root.path("release-group").path("id"), "").trim();
 
         String albumArtist     = "";
         String albumArtistSort = "";
         JsonNode ac = root.path("artist-credit");
         if (ac.isArray() && !ac.isEmpty()) {
-            albumArtist     = ac.get(0).path("name").asText("").trim();
-            albumArtistSort = ac.get(0).path("artist").path("sort-name").asText("").trim();
+            albumArtist     = JsonText.of(ac.get(0).path("name"), "").trim();
+            albumArtistSort = JsonText.of(ac.get(0).path("artist").path("sort-name"), "").trim();
         }
 
         TagInfo tmp = new TagInfo();
         tmp.albumArtist = albumArtist;
         extractSecondaryTypes(root, tmp); // isCompilation/isLive/isSoundtrack/isGreatestHits + releaseType
         extractReleaseDetails(root, tmp); // script/country/barcode/status/label/catalogNo/albumArtistMbid
-        String frd = root.path("release-group").path("first-release-date").asText("").trim();
+        String frd = JsonText.of(root.path("release-group").path("first-release-date"), "").trim();
         if (frd.length() >= 4) tmp.originalYear = frd.substring(0, 4);
         tmp.originalDate = fullDate(frd);
         tmp.year = year;
@@ -834,22 +911,22 @@ public class MusicBrainzClient {
             for (JsonNode medium : media) {
                 int disc       = medium.path("position").asInt(1);
                 int trackTotal = medium.path("track-count").asInt(0);
-                String discTitle = medium.path("title").asText("").trim();
+                String discTitle = JsonText.of(medium.path("title"), "").trim();
                 for (JsonNode t : medium.path("tracks")) {
                     int    pos      = t.path("position").asInt(0);
-                    String tTitle   = t.path("title").asText("").trim();
-                    String recMbid  = t.path("recording").path("id").asText("").trim();
+                    String tTitle   = JsonText.of(t.path("title"), "").trim();
+                    String recMbid  = JsonText.of(t.path("recording").path("id"), "").trim();
                     int    lengthMs = t.path("length").asInt(0);
                     String tArtist     = "";
                     String tArtistMbid = "";
                     JsonNode tac = t.path("recording").path("artist-credit");
                     if (tac.isArray() && !tac.isEmpty()) {
-                        tArtist     = tac.get(0).path("name").asText("").trim();
-                        tArtistMbid = tac.get(0).path("artist").path("id").asText("").trim();
+                        tArtist     = JsonText.of(tac.get(0).path("name"), "").trim();
+                        tArtistMbid = JsonText.of(tac.get(0).path("artist").path("id"), "").trim();
                     }
                     tracks.add(new ReleaseTrack(discCount > 1 ? disc : 0, pos, trackTotal,
                                                tTitle, tArtist.isBlank() ? albumArtist : tArtist, recMbid, lengthMs,
-                                               tArtistMbid, t.path("id").asText("").trim(), discTitle));
+                                               tArtistMbid, JsonText.of(t.path("id"), "").trim(), discTitle));
                 }
             }
         }
@@ -860,8 +937,8 @@ public class MusicBrainzClient {
     public ReleaseTracklist parseReleaseFromCache(String json) {
         try {
             JsonNode root = mapper.readTree(json);
-            String relMbid = root.path("id").asText("").trim();
-            String album   = root.path("title").asText("").trim();
+            String relMbid = JsonText.of(root.path("id"), "").trim();
+            String album   = JsonText.of(root.path("title"), "").trim();
             if (relMbid.isBlank() || album.isBlank()) return null;
             return parseReleaseTracklist(relMbid, root);
         } catch (Exception e) { return null; }
@@ -885,20 +962,23 @@ public class MusicBrainzClient {
                 + (mbGenres ? "+genres" : "")
                 + "+artist-rels+recording-rels+work-rels";
 
-        HttpResponse<String> response = getWithRetry(url);
-        if (response == null) return null;
+        String body = getBodyCached(url);
+        if (body == null) return null;
+        // Corps réel de CE lookup (les appelants le mettent en cache persistant, voir TaggingWorker) : avant, lastRawJson
+        // gardait le JSON d'une RECHERCHE précédente, ou restait vide, et c'est cela qu'on mémorisait comme « lookup ».
+        lastRawJson = body;
 
-        JsonNode rec = mapper.readTree(response.body());
+        JsonNode rec = mapper.readTree(body);
         TagInfo info = new TagInfo();
         info.score         = 100;
-        info.title         = rec.path("title").asText("").trim();
-        info.comment       = rec.path("disambiguation").asText("").trim();
-        info.recordingMbid = rec.path("id").asText("").trim();
+        info.title         = JsonText.of(rec.path("title"), "").trim();
+        info.comment       = JsonText.of(rec.path("disambiguation"), "").trim();
+        info.recordingMbid = JsonText.of(rec.path("id"), "").trim();
 
         extractTrackArtists(rec.path("artist-credit"), info);
 
         JsonNode isrcsLookup = rec.path("isrcs");
-        if (isrcsLookup.isArray() && !isrcsLookup.isEmpty()) info.isrc = isrcsLookup.get(0).asText("").trim();
+        if (isrcsLookup.isArray() && !isrcsLookup.isEmpty()) info.isrc = JsonText.of(isrcsLookup.get(0), "").trim();
         int lengthMsLookup = rec.path("length").asInt(0);
         if (lengthMsLookup > 0) info.mbDurationSec = lengthMsLookup / 1000;
 
@@ -909,22 +989,22 @@ public class MusicBrainzClient {
         // pour récupérer au moins l'album et l'année
         if (chosen == null) chosen = findBestRelease(releases, false);
         if (chosen != null) {
-            info.releaseMbid      = chosen.path("id").asText("").trim();
-            info.album            = chosen.path("title").asText("").trim();
-            info.releaseGroupMbid = chosen.path("release-group").path("id").asText("").trim();
-            String date = chosen.path("date").asText("");
+            info.releaseMbid      = JsonText.of(chosen.path("id"), "").trim();
+            info.album            = JsonText.of(chosen.path("title"), "").trim();
+            info.releaseGroupMbid = JsonText.of(chosen.path("release-group").path("id"), "").trim();
+            String date = JsonText.of(chosen.path("date"), "");
             info.year = date.length() >= 4 ? date.substring(0, 4) : date;
                 info.date = fullDate(date);
 
             JsonNode releaseCredits = chosen.path("artist-credit");
             if (releaseCredits.isArray() && !releaseCredits.isEmpty()) {
                 JsonNode rac = releaseCredits.get(0);
-                info.albumArtist     = rac.path("name").asText("").trim();
-                info.albumArtistSort = rac.path("artist").path("sort-name").asText("").trim();
+                info.albumArtist     = JsonText.of(rac.path("name"), "").trim();
+                info.albumArtistSort = JsonText.of(rac.path("artist").path("sort-name"), "").trim();
             }
             if (info.albumArtist.isBlank()) info.albumArtist = info.artist;
 
-            info.language = chosen.path("text-representation").path("language").asText("").trim();
+            info.language = JsonText.of(chosen.path("text-representation").path("language"), "").trim();
             extractSecondaryTypes(chosen, info);
             extractReleaseDetails(chosen, info);
             extractMediaInfo(chosen, info);
@@ -960,7 +1040,7 @@ public class MusicBrainzClient {
             }
         }
         // originalYear : date de première sortie du recording
-        String frd = rec.path("first-release-date").asText("").trim();
+        String frd = JsonText.of(rec.path("first-release-date"), "").trim();
         if (frd.length() >= 4 && info.originalYear.isBlank()) info.originalYear = frd.substring(0, 4);
         if (info.originalDate.isBlank()) info.originalDate = fullDate(frd);
 
@@ -1025,11 +1105,11 @@ public class MusicBrainzClient {
                 List<String> secTypes = new ArrayList<>();
                 for (JsonNode t : releaseGroup.path("secondary-types")) secTypes.add(t.asText());
                 result.add(new RecordingRelease(
-                        release.path("id").asText("").trim(),
-                        release.path("title").asText("").trim(),
-                        releaseGroup.path("title").asText("").trim(),
+                        JsonText.of(release.path("id"), "").trim(),
+                        JsonText.of(release.path("title"), "").trim(),
+                        JsonText.of(releaseGroup.path("title"), "").trim(),
                         secTypes,
-                        release.path("country").asText("").trim()));
+                        JsonText.of(release.path("country"), "").trim()));
             }
             return result;
         } catch (Exception e) {
@@ -1056,7 +1136,7 @@ public class MusicBrainzClient {
         java.util.List<GenreFilter.Candidate> candidates = new java.util.ArrayList<>();
         java.util.List<String> rawNames = new java.util.ArrayList<>();
         for (JsonNode g : genres) {
-            String name  = g.path("name").asText("").trim();
+            String name  = JsonText.of(g.path("name"), "").trim();
             int    count = g.path("count").asInt(0);
             candidates.add(new GenreFilter.Candidate(name, count));
             rawNames.add(name);
@@ -1082,12 +1162,12 @@ public class MusicBrainzClient {
         // de boucle pour ne pas avoir à re-parser la chaîne déjà écrite à chaque nouvelle relation.
         List<String> performerCredits = new ArrayList<>();
         for (JsonNode rel : relations) {
-            String type = rel.path("type").asText("").toLowerCase().trim();
+            String type = JsonText.of(rel.path("type"), "").toLowerCase().trim();
             if (type.isBlank()) continue;
 
             // Relation URL de licence (Picard : `license`) — nœud "url", pas "artist".
             if ("license".equals(type)) {
-                String lic = rel.path("url").path("resource").asText("").trim();
+                String lic = JsonText.of(rel.path("url").path("resource"), "").trim();
                 if (!lic.isBlank() && info.license.isBlank()) info.license = lic;
                 continue;
             }
@@ -1096,8 +1176,8 @@ public class MusicBrainzClient {
             // ci-dessous (qui suppose toujours un nœud "artist" et sinon ignore la relation).
             if ("performance".equals(type)) {
                 JsonNode workNode = rel.path("work");
-                String wTitle = workNode.path("title").asText("").trim();
-                String wId    = workNode.path("id").asText("").trim();
+                String wTitle = JsonText.of(workNode.path("title"), "").trim();
+                String wId    = JsonText.of(workNode.path("id"), "").trim();
                 if (info.workMbid.isBlank() && !wTitle.isBlank() && !wId.isBlank()) {
                     info.work     = wTitle;
                     info.workMbid = wId;
@@ -1108,8 +1188,8 @@ public class MusicBrainzClient {
             // Les relations artist-rels ont un nœud "artist", les recording-rels ont "recording"
             JsonNode artistNode = rel.path("artist");
             if (artistNode.isMissingNode()) continue;
-            String name     = artistNode.path("name").asText("").trim();
-            String sortName = artistNode.path("sort-name").asText("").trim();
+            String name     = JsonText.of(artistNode.path("name"), "").trim();
+            String sortName = JsonText.of(artistNode.path("sort-name"), "").trim();
             if (name.isBlank()) continue;
 
             switch (type) {
@@ -1137,7 +1217,7 @@ public class MusicBrainzClient {
                     // (sans attribut, cas rare) → juste le nom, sans préfixe.
                     JsonNode attrs = rel.path("attributes");
                     String instrument = (attrs.isArray() && !attrs.isEmpty())
-                            ? attrs.get(0).asText("").trim() : "";
+                            ? JsonText.of(attrs.get(0), "").trim() : "";
                     String credit = instrument.isBlank()
                             ? name
                             : Character.toUpperCase(instrument.charAt(0)) + instrument.substring(1) + ": " + name;
@@ -1211,14 +1291,14 @@ public class MusicBrainzClient {
         // "disambiguation" dans ce fichier portent toutes sur la ressource RECORDING (→ info.comment),
         // jamais sur cette ressource WORK déjà récupérée ici pour tout fichier classique (2026-09-13,
         // trouvé par audit — zéro appel réseau de plus).
-        String nickname = work.path("disambiguation").asText("").trim();
+        String nickname = JsonText.of(work.path("disambiguation"), "").trim();
         if (!nickname.isBlank() && info.classicalNickname.isBlank()) info.classicalNickname = nickname;
 
-        String catalogSourceTitle = work.path("title").asText("").trim();
+        String catalogSourceTitle = JsonText.of(work.path("title"), "").trim();
         JsonNode parentRel = findPartsRelation(work.path("relations"), "backward");
         if (parentRel != null) {
             JsonNode parent = parentRel.path("work");
-            String parentTitle = parent.path("title").asText("").trim();
+            String parentTitle = JsonText.of(parent.path("title"), "").trim();
             if (!parentTitle.isBlank()) {
                 if (info.overallWork.isBlank()) info.overallWork = parentTitle;
                 catalogSourceTitle = parentTitle; // opus/catalogue se lit sur l'œuvre globale
@@ -1227,12 +1307,12 @@ public class MusicBrainzClient {
                 if (orderingKey > 0 && info.movementNo.isBlank()) info.movementNo = String.valueOf(orderingKey);
 
                 if (info.titleMovement.isBlank()) {
-                    String own = work.path("title").asText("").trim();
+                    String own = JsonText.of(work.path("title"), "").trim();
                     String prefix = parentTitle + ":";
                     info.titleMovement = own.startsWith(prefix) ? own.substring(prefix.length()).trim() : own;
                 }
 
-                String parentId = parent.path("id").asText("").trim();
+                String parentId = JsonText.of(parent.path("id"), "").trim();
                 if (info.movementTotal.isBlank() && !parentId.isBlank()) {
                     JsonNode parentWork = fetchWork(parentId, cache);
                     if (parentWork != null) {
@@ -1284,8 +1364,8 @@ public class MusicBrainzClient {
     private JsonNode findPartsRelation(JsonNode relations, String direction) {
         if (!relations.isArray()) return null;
         for (JsonNode rel : relations) {
-            if ("parts".equals(rel.path("type").asText(""))
-                    && direction.equals(rel.path("direction").asText(""))) {
+            if ("parts".equals(JsonText.of(rel.path("type"), ""))
+                    && direction.equals(JsonText.of(rel.path("direction"), ""))) {
                 return rel;
             }
         }
@@ -1296,8 +1376,8 @@ public class MusicBrainzClient {
         if (!relations.isArray()) return 0;
         int n = 0;
         for (JsonNode rel : relations) {
-            if ("parts".equals(rel.path("type").asText(""))
-                    && direction.equals(rel.path("direction").asText(""))) n++;
+            if ("parts".equals(JsonText.of(rel.path("type"), ""))
+                    && direction.equals(JsonText.of(rel.path("direction"), ""))) n++;
         }
         return n;
     }
@@ -1307,8 +1387,8 @@ public class MusicBrainzClient {
     private void extractOpusCatalog(JsonNode attributes, String title, TagInfo info) {
         if (attributes.isArray()) {
             for (JsonNode attr : attributes) {
-                String type  = attr.path("type").asText("");
-                String value = attr.path("value").asText("").trim();
+                String type  = JsonText.of(attr.path("type"), "");
+                String value = JsonText.of(attr.path("value"), "").trim();
                 if (value.isBlank()) continue;
                 if (info.classicalCatalog.isBlank() && "Catalogue number".equalsIgnoreCase(type))
                     info.classicalCatalog = value;
@@ -1373,34 +1453,40 @@ public class MusicBrainzClient {
 
         // Dernier repli : n'importe quel alias "Artist name" déjà en écriture latine, peu importe
         // son locale déclaré (certains alias utiles n'ont carrément pas de locale renseigné).
+        String firstLatin = "";
         for (JsonNode alias : aliases) {
-            String type = alias.path("type").asText("");
-            String name = alias.path("name").asText("").trim();
+            String type = JsonText.of(alias.path("type"), "");
+            String name = JsonText.of(alias.path("name"), "").trim();
             if (!name.isBlank() && "Artist name".equalsIgnoreCase(type) && !TagEnrichment.hasNonLatinChars(name)) {
-                return name;
+                if (alias.path("primary").asBoolean(false)) return name;
+                if (firstLatin.isEmpty()) firstLatin = name;
             }
         }
-        return "";
+        return firstLatin;
     }
 
-    private static String findAliasByLocale(JsonNode aliases, String prefix) {
-        // 1er passage : alias dont le locale commence par le préféré et dont le type est "Artist name"
+    /** Alias en écriture LATINE (c'est le but de la translittération) pour la locale demandée. Le drapeau
+     *  « primary » de MusicBrainz départage : sans lui, le premier alias « en » venait en tête — « Cubic U »
+     *  (alias secondaire) au lieu de « Hikaru Utada » (alias principal) pour 宇多田ヒカル, constaté sur l'API réelle. */
+    static String findAliasByLocale(JsonNode aliases, String prefix) {
+        String primaryTyped = "", anyTyped = "", primaryAny = "", anyAny = "";
         for (JsonNode alias : aliases) {
-            String locale = alias.path("locale").asText("").toLowerCase();
-            String type   = alias.path("type").asText("");
-            String name   = alias.path("name").asText("").trim();
-            if (!name.isBlank() && locale.startsWith(prefix)
-                    && ("Artist name".equalsIgnoreCase(type) || type.isBlank())) {
-                return name;
-            }
+            String locale = JsonText.of(alias.path("locale"), "").toLowerCase();
+            String type   = JsonText.of(alias.path("type"), "");
+            String name   = JsonText.of(alias.path("name"), "").trim();
+            if (name.isBlank() || !locale.startsWith(prefix) || TagEnrichment.hasNonLatinChars(name)) continue;
+            boolean primary = alias.path("primary").asBoolean(false);
+            boolean typed   = "Artist name".equalsIgnoreCase(type) || type.isBlank();
+            if (typed && primary && primaryTyped.isEmpty()) primaryTyped = name;
+            else if (typed && anyTyped.isEmpty())           anyTyped = name;
+            else if (primary && primaryAny.isEmpty())       primaryAny = name;
+            else if (anyAny.isEmpty())                      anyAny = name;
         }
-        // 2e passage : n'importe quel alias avec le bon locale
-        for (JsonNode alias : aliases) {
-            String locale = alias.path("locale").asText("").toLowerCase();
-            String name   = alias.path("name").asText("").trim();
-            if (!name.isBlank() && locale.startsWith(prefix)) return name;
-        }
-        return "";
+        // Ordre : principal du bon type, puis tout alias du bon type, puis principal d'un autre type, puis le reste.
+        if (!primaryTyped.isEmpty()) return primaryTyped;
+        if (!anyTyped.isEmpty())     return anyTyped;
+        if (!primaryAny.isEmpty())   return primaryAny;
+        return anyAny;
     }
 
     /**
@@ -1428,7 +1514,7 @@ public class MusicBrainzClient {
         JsonNode artists = root.path("artists");
         if (artists.isArray() && artists.size() > 0) {
             int score = artists.get(0).path("score").asInt(0);
-            if (score >= 80) return artists.get(0).path("id").asText("").trim();
+            if (score >= 80) return JsonText.of(artists.get(0).path("id"), "").trim();
         }
         return "";
     }

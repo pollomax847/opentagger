@@ -65,7 +65,7 @@ public class ListenBrainzClient {
             if (!recordings.isArray() || recordings.isEmpty()) break;
 
             for (JsonNode rec : recordings) {
-                String mbid = rec.path("recording_mbid").asText("").trim();
+                String mbid = JsonText.of(rec.path("recording_mbid"), "").trim();
                 int    n    = rec.path("listen_count").asInt(0);
                 if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
             }

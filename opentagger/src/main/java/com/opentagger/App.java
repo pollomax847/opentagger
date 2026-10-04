@@ -176,6 +176,7 @@ public class App {
 
         // 4. Choix utilisateur
         System.out.print("Ton choix (0-" + resultats.size() + ") : ");
+        @SuppressWarnings("resource")   // ne JAMAIS fermer un Scanner sur System.in : cela fermerait l'entrée standard
         Scanner scanner = new Scanner(System.in);
         int choix;
         try {

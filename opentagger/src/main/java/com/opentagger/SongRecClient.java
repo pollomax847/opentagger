@@ -258,8 +258,8 @@ public class SongRecClient {
         JsonNode track = root.path("track");
         if (track.isMissingNode() || track.isNull()) return null;
 
-        String title  = track.path("title").asText("").trim();
-        String artist = track.path("subtitle").asText("").trim();
+        String title  = JsonText.of(track.path("title"), "").trim();
+        String artist = JsonText.of(track.path("subtitle"), "").trim();
         if (title.isBlank() && artist.isBlank()) return null;
 
         TagInfo ti = new TagInfo();
@@ -270,32 +270,32 @@ public class SongRecClient {
 
         JsonNode genres = track.path("genres");
         if (!genres.isMissingNode()) {
-            String g = genres.path("primary").asText("").trim();
+            String g = JsonText.of(genres.path("primary"), "").trim();
             if (!g.isBlank()) ti.genre = g;
         }
 
-        String isrc = track.path("isrc").asText("").trim();
+        String isrc = JsonText.of(track.path("isrc"), "").trim();
         if (!isrc.isBlank()) ti.isrc = isrc;
 
         // ID Apple Music (adamid album) — référence précise, contrairement aux liens Spotify/
         // Deezer/YouTube Music de la réponse Shazam qui ne sont que des requêtes de recherche
         // texte ("spotify:search:...", "...deezer.com/play?query=..."), pas de vrais identifiants
         // de piste : les stocker n'apporterait aucune précision réelle, donc pas repris ici.
-        String appleId = track.path("albumadamid").asText("").trim();
+        String appleId = JsonText.of(track.path("albumadamid"), "").trim();
         if (!appleId.isBlank()) ti.appleMusicId = appleId;
 
         // Pochette HD si disponible, sinon la version standard — voir TagEnrichment (fournisseur
         // "shazam") pour l'utilisation : évite de re-chercher une pochette à l'aveugle alors que
         // l'identification vient déjà d'en trouver une.
         JsonNode images = track.path("images");
-        String coverUrl = images.path("coverarthq").asText("").trim();
-        if (coverUrl.isBlank()) coverUrl = images.path("coverart").asText("").trim();
+        String coverUrl = JsonText.of(images.path("coverarthq"), "").trim();
+        if (coverUrl.isBlank()) coverUrl = JsonText.of(images.path("coverart"), "").trim();
         if (!coverUrl.isBlank()) ti.shazamCoverUrl = coverUrl;
 
         for (JsonNode section : track.path("sections")) {
             for (JsonNode meta : section.path("metadata")) {
-                String name = meta.path("title").asText("").trim();
-                String text = meta.path("text").asText("").trim();
+                String name = JsonText.of(meta.path("title"), "").trim();
+                String text = JsonText.of(meta.path("text"), "").trim();
                 switch (name) {
                     case "Album"    -> { if (!isNoAlbumPlaceholder(text)) ti.album = text; }
                     case "Released" -> ti.year  = text.length() >= 4 ? text.substring(0, 4) : text;

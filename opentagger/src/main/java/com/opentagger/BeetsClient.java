@@ -138,6 +138,7 @@ public class BeetsClient {
     }
 
     private static List<Row> fetchRowsWithHardTimeout(String dbPath, long timeoutMs) {
+        @SuppressWarnings("unchecked")
         final List<Row>[] result = new List[]{ null };
         // Voir HeadphonesClient.fetchRowsWithHardTimeout() (même pattern, corrigé le même jour) :
         // worker.join(timeoutMs) n'annulait rien, juste l'attente — le thread daemon continuait de

@@ -47,7 +47,7 @@ public class UpdateChecker {
             throw new Exception("GitHub API HTTP " + response.statusCode() + " : " + response.body());
 
         JsonNode root = mapper.readTree(response.body());
-        String tag = root.path("tag_name").asText("").trim();
+        String tag = JsonText.of(root.path("tag_name"), "").trim();
         String remoteVersion = tag.startsWith("v") ? tag.substring(1) : tag;
         if (remoteVersion.isBlank()) return null;
 
@@ -56,15 +56,15 @@ public class UpdateChecker {
 
         String jarUrl = null;
         for (JsonNode asset : root.path("assets")) {
-            String name = asset.path("name").asText("");
+            String name = JsonText.of(asset.path("name"), "");
             if (name.endsWith(".jar")) {
-                jarUrl = asset.path("browser_download_url").asText("");
+                jarUrl = JsonText.of(asset.path("browser_download_url"), "");
                 break;
             }
         }
         if (jarUrl == null || jarUrl.isBlank()) return null;
 
-        return new UpdateInfo(remoteVersion, jarUrl, root.path("body").asText(""));
+        return new UpdateInfo(remoteVersion, jarUrl, JsonText.of(root.path("body"), ""));
     }
 
     /** Compare deux versions "X.Y.Z" — true si a strictement plus récente que b. */

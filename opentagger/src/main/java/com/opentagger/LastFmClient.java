@@ -69,7 +69,7 @@ public class LastFmClient {
 
         JsonNode artist = root.path("artist");
         if (info.artistOfficialUrl.isBlank()) {
-            String url = artist.path("url").asText("").trim();
+            String url = JsonText.of(artist.path("url"), "").trim();
             if (!url.isBlank()) info.artistOfficialUrl = url;
         }
         // Last.fm inclut parfois un lien Wikipedia dans les "links"
@@ -77,7 +77,7 @@ public class LastFmClient {
             JsonNode links = artist.path("bio").path("links").path("link");
             if (links.isArray()) {
                 for (JsonNode link : links) {
-                    String href = link.path("href").asText("").trim();
+                    String href = JsonText.of(link.path("href"), "").trim();
                     if (href.contains("wikipedia.org")) {
                         info.artistWikipediaUrl = href;
                         break;
@@ -86,7 +86,7 @@ public class LastFmClient {
             }
         }
         if (info.artistBio.isBlank()) {
-            String summary = artist.path("bio").path("summary").asText("").trim();
+            String summary = JsonText.of(artist.path("bio").path("summary"), "").trim();
             if (!summary.isBlank()) info.artistBio = cleanBio(summary);
         }
         // Artistes similaires — présents dans cette même réponse artist.getInfo (aucun appel de plus).
@@ -95,7 +95,7 @@ public class LastFmClient {
             if (sim.isArray()) {
                 List<String> names = new ArrayList<>();
                 for (JsonNode a : sim) {
-                    String n = a.path("name").asText("").trim();
+                    String n = JsonText.of(a.path("name"), "").trim();
                     if (!n.isBlank() && names.size() < 5) names.add(n);
                 }
                 if (!names.isEmpty()) info.lastfmSimilarArtists = String.join("; ", names);
@@ -132,15 +132,15 @@ public class LastFmClient {
         if (root == null) return;
         JsonNode track = root.path("track");
         if (info.lastfmListeners.isBlank()) {
-            String v = track.path("listeners").asText("").trim();
+            String v = JsonText.of(track.path("listeners"), "").trim();
             if (v.matches("\\d+")) info.lastfmListeners = v;
         }
         if (info.lastfmGlobalPlaycount.isBlank()) {
-            String v = track.path("playcount").asText("").trim();
+            String v = JsonText.of(track.path("playcount"), "").trim();
             if (v.matches("\\d+")) info.lastfmGlobalPlaycount = v;
         }
         // L'URL renvoyée par Last.fm (après autocorrection d'orthographe) prime sur celle construite.
-        String url = track.path("url").asText("").trim();
+        String url = JsonText.of(track.path("url"), "").trim();
         if (url.startsWith("http")) info.lastfmUrl = url;
     }
 
@@ -236,7 +236,7 @@ public class LastFmClient {
         if (!tagArray.isArray()) return result;
 
         for (JsonNode tag : tagArray) {
-            String name  = tag.path("name").asText("").trim();
+            String name  = JsonText.of(tag.path("name"), "").trim();
             int    count = tag.path("count").asInt(0);
             if (!name.isBlank() && name.length() > 2)
                 result.add(new GenreFilter.Candidate(name, count));
@@ -331,7 +331,7 @@ public class LastFmClient {
             if (!tracks.isArray() || tracks.isEmpty()) break;
 
             for (JsonNode t : tracks) {
-                String mbid = t.path("mbid").asText("").trim();
+                String mbid = JsonText.of(t.path("mbid"), "").trim();
                 int    n    = t.path("playcount").asInt(0);
                 if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
             }

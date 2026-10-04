@@ -63,7 +63,7 @@ public class LyricsClient {
             HttpResponse<String> resp = http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
                     .orTimeout(8, TimeUnit.SECONDS).join();
             if (resp.statusCode() != 200) return;
-            String lyrics = mapper.readTree(resp.body()).path("lyrics").asText("").trim();
+            String lyrics = JsonText.of(mapper.readTree(resp.body()).path("lyrics"), "").trim();
             if (!lyrics.isBlank()) {
                 info.lyrics    = lyrics;
                 info.lyricsUrl = "https://www.lyrics.ovh/lyrics/"
@@ -91,12 +91,12 @@ public class LyricsClient {
             // Préserver le brut LRC (timestamps compris) séparément — jeté avant ce correctif,
             // voir TagInfo.syncedLyrics pour où il est réellement utilisé (fichier .lrc à côté de
             // l'audio, pas un tag embarqué).
-            String synced = root.path("syncedLyrics").asText("").trim();
+            String synced = JsonText.of(root.path("syncedLyrics"), "").trim();
             if (!synced.isBlank()) info.syncedLyrics = synced;
 
             // Préférer les paroles non-synchronisées (plainLyrics) pour le tag texte, fallback
             // syncedLyrics nettoyé de ses timestamps si aucune version plate n'est fournie.
-            String plain = root.path("plainLyrics").asText("").trim();
+            String plain = JsonText.of(root.path("plainLyrics"), "").trim();
             if (plain.isBlank() && !synced.isBlank())
                 plain = synced.replaceAll("\\[\\d+:\\d{2}\\.\\d+\\]\\s*", "")
                               .replaceAll("\n{3,}", "\n\n")

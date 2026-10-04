@@ -271,37 +271,6 @@ public final class TagEnrichment {
                 } catch (Exception ignored) {}
             }
 
-            // Portrait d'artiste (artist.jpg à côté de cover.jpg dans le dossier album) — opt-in,
-            // voir Config.artistPhotoEnabled(). Par défaut, un fichier déjà présent suffit (évite un
-            // re-téléchargement à chaque piste du même artiste/album) ; artist_photo.overwrite_file
-            // (même esprit que cover.overwrite_file) permet de forcer le remplacement — nécessaire
-            // depuis qu'on sait qu'une mauvaise identification passée (mauvais artistMbid) peut avoir
-            // écrit la photo d'un artiste sans rapport, sans qu'aucun mécanisme ne la corrige ensuite
-            // (voir aussi l'action manuelle "Régénérer le portrait d'artiste").
-            if (Config.get().artistPhotoEnabled() && fanArt != null) {
-                Path artistPhoto = null;
-                try {
-                    artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
-                    // Repli Discogs (nom exact) quand FanArt n'a rien — le cas le plus courant étant
-                    // l'absence d'artistMbid (identification SongRec/texte seule, voir sa javadoc sur
-                    // FanArtClient.downloadArtistPhoto) plutôt qu'un artiste réellement sans photo.
-                    if (artistPhoto == null && discogs != null) {
-                        artistPhoto = discogs.downloadArtistPhotoFallback(ti, cache);
-                    }
-                    if (artistPhoto != null) {
-                        String fname = Config.get().artistPhotoFilename();
-                        String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
-                        Path dest = fichier.toPath().resolveSibling(fname + ext);
-                        if (!java.nio.file.Files.exists(dest) || Config.get().artistPhotoOverwrite())
-                            java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    }
-                } catch (Exception ignored) {
-                } finally {
-                    if (artistPhoto != null) {
-                        try { java.nio.file.Files.deleteIfExists(artistPhoto); } catch (Exception ignored) {}
-                    }
-                }
-            }
         } finally {
             // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
             // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien
@@ -387,6 +356,48 @@ public final class TagEnrichment {
             }
         }
 
+            // Portrait d'artiste (artist.jpg dans le dossier de l'ARTISTE, après le renommage : voir artistPhotoFolder) — opt-in,
+            // voir Config.artistPhotoEnabled(). Par défaut, un fichier déjà présent suffit (évite un
+            // re-téléchargement à chaque piste du même artiste/album) ; artist_photo.overwrite_file
+            // (même esprit que cover.overwrite_file) permet de forcer le remplacement — nécessaire
+            // depuis qu'on sait qu'une mauvaise identification passée (mauvais artistMbid) peut avoir
+            // écrit la photo d'un artiste sans rapport, sans qu'aucun mécanisme ne la corrige ensuite
+            // (voir aussi l'action manuelle "Régénérer le portrait d'artiste").
+            if (Config.get().artistPhotoEnabled() && fanArt != null) {
+                Path artistPhoto = null;
+                try {
+                    // Un portrait déjà présent n'est pas re-téléchargé (sauf « écraser ») : on teste AVANT le réseau.
+                    Path destDir = artistPhotoFolder(finalPath.toAbsolutePath(), ti);
+                    String fname = Config.get().artistPhotoFilename();
+                    boolean haveOne = java.nio.file.Files.exists(destDir.resolve(fname + ".jpg"))
+                            || java.nio.file.Files.exists(destDir.resolve(fname + ".png"));
+                    if (!haveOne || Config.get().artistPhotoOverwrite()) {
+                        artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
+                        // Repli Discogs (nom exact) quand FanArt n'a rien — le cas le plus courant étant
+                        // l'absence d'artistMbid (identification SongRec/texte seule, voir sa javadoc sur
+                        // FanArtClient.downloadArtistPhoto) plutôt qu'un artiste réellement sans photo.
+                        if (artistPhoto == null && discogs != null) {
+                            artistPhoto = discogs.downloadArtistPhotoFallback(ti, cache);
+                        }
+                        // Dernier repli : Deezer, sans clé ni MBID.
+                        if (artistPhoto == null && deezer != null) {
+                            artistPhoto = deezer.downloadArtistPhoto(ti, cache);
+                        }
+                    }
+                    if (artistPhoto != null) {
+                        String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                        Path dest = destDir.resolve(fname + ext);
+                        if (!java.nio.file.Files.exists(dest) || Config.get().artistPhotoOverwrite())
+                            java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (artistPhoto != null) {
+                        try { java.nio.file.Files.deleteIfExists(artistPhoto); } catch (Exception ignored) {}
+                    }
+                }
+            }
+
         // Filet de sécurité APRÈS coup, pas avant : TaggingWorker bloque déjà en SKIPPED tout
         // candidat dont la durée ne correspond pas à MusicBrainz (voir FileEntry.isDurationMismatch)
         // avant même de proposer un taguage automatique — mais un match MANUEL (MatchDialog) passe
@@ -458,6 +469,33 @@ public final class TagEnrichment {
                 log.accept("MB collection : release ajoutée");
             } catch (Exception e) { log.accept("MB collection skip: " + e.getMessage()); }
         }
+    }
+
+    private static String foldName(String s) {
+        return s == null ? "" : s.toLowerCase(java.util.Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]+", "");
+    }
+
+    /**
+     * Dossier où écrire le portrait de l'artiste. Navidrome, Plex et Jellyfin cherchent {@code artist.jpg} dans le
+     * dossier de l'ARTISTE (le parent des dossiers d'albums), pas dans celui d'un album : l'ancien emplacement (à côté
+     * des pistes) n'était vu par aucun d'eux. Si le dossier parent porte le nom de l'artiste (ou de l'artiste de
+     * l'album) — disposition « Artiste/Album/piste » — on l'utilise ; si la piste est directement dans un dossier
+     * « Artiste » aussi ; sinon (vrac, compilation, autre disposition) on garde le dossier de la piste.
+     */
+    public static Path artistPhotoFolder(Path track, TagInfo ti) {
+        Path albumDir = track.getParent();
+        if (albumDir == null) return track.toAbsolutePath().getParent();
+        String a1 = foldName(ti.artist), a2 = foldName(ti.albumArtist);
+        Path parent = albumDir.getParent();
+        if (parent != null && parent.getFileName() != null) {
+            String p = foldName(parent.getFileName().toString());
+            if (!p.isEmpty() && (p.equals(a1) || p.equals(a2))) return parent;
+        }
+        if (albumDir.getFileName() != null) {
+            String d = foldName(albumDir.getFileName().toString());
+            if (!d.isEmpty() && (d.equals(a1) || d.equals(a2))) return albumDir;
+        }
+        return albumDir;
     }
 
     /** Convertit une valeur de rating brute (1-5 ou 1-255) en étoiles 1-5. Retourne 0 si non applicable. */

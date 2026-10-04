@@ -122,6 +122,7 @@ public class HeadphonesClient {
     }
 
     private static List<Row> fetchRowsWithHardTimeout(String path, long timeoutMs) {
+        @SuppressWarnings("unchecked")
         final List<Row>[] result = new List[]{ null };
         // Référence exposée au thread appelant pour pouvoir annuler la requête depuis l'EXTÉRIEUR
         // si le timeout expire (voir plus bas) — trouvé en direct (2026-09-13) via lsof que ce

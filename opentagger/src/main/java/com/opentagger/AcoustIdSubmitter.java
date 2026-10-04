@@ -233,9 +233,9 @@ public class AcoustIdSubmitter {
             return;
         }
 
-        String status = root.path("status").asText("");
+        String status = JsonText.of(root.path("status"), "");
         if (!"ok".equals(status)) {
-            String msg = root.path("error").path("message").asText("Réponse inattendue (HTTP " + resp.statusCode() + ")");
+            String msg = JsonText.of(root.path("error").path("message"), "Réponse inattendue (HTTP " + resp.statusCode() + ")");
             for (PreparedSubmission ps : chunk) results.add(new SubmissionResult(ps.file(), false, msg));
             return;
         }
@@ -249,15 +249,15 @@ public class AcoustIdSubmitter {
                 results.add(new SubmissionResult(file, false, "Pas de résultat retourné pour cet élément"));
                 continue;
             }
-            String subStatus = entry.path("status").asText("");
-            String subId     = entry.path("id").asText("");
+            String subStatus = JsonText.of(entry.path("status"), "");
+            String subId     = JsonText.of(entry.path("id"), "");
             if ("error".equals(subStatus)) {
-                String msg = entry.path("error").path("message").asText("Erreur inconnue");
+                String msg = JsonText.of(entry.path("error").path("message"), "Erreur inconnue");
                 results.add(new SubmissionResult(file, false, msg));
             } else if ("imported".equals(subStatus)) {
                 // Import immédiat : l'AcoustID de cette empreinte est connu (SongKong l'écrit dans le tag
                 // "Acoustid Id" du fichier s'il était vide — ici l'appelant le range dans le TagInfo).
-                String acoustId = entry.path("result").path("id").asText("");
+                String acoustId = JsonText.of(entry.path("result").path("id"), "");
                 results.add(new SubmissionResult(file, true,
                         "Importé" + (acoustId.isBlank() ? "" : " (AcoustID " + acoustId + ")"), false, acoustId));
             } else {

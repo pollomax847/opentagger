@@ -59,8 +59,6 @@ public class RenamePreviewDialog extends JDialog {
     private final long              willRenameCount;
     private final List<Group>       groups       = new ArrayList<>();
     private final List<DisplayRow>  visibleRows  = new ArrayList<>();
-
-    private JTable            table;
     private AbstractTableModel tableModel;
 
     // Composants footer
@@ -347,7 +345,6 @@ public class RenamePreviewDialog extends JDialog {
         };
 
         JTable t = new JTable(tableModel);
-        table = t;
         t.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
         t.getColumnModel().getColumn(0).setPreferredWidth(90);
         t.getColumnModel().getColumn(0).setMaxWidth(110);

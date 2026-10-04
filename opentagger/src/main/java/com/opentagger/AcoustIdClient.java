@@ -98,7 +98,7 @@ public class AcoustIdClient {
         }
         JsonNode root = mapper.readTree(response.body());
         if (!"ok".equals(root.path("status").asText())) {
-            System.out.println("  AcoustID erreur: " + root.path("error").path("message").asText("statut inconnu"));
+            System.out.println("  AcoustID erreur: " + JsonText.of(root.path("error").path("message"), "statut inconnu"));
             return null;
         }
         return root;
@@ -176,15 +176,15 @@ public class AcoustIdClient {
         for (JsonNode result : root.path("results")) {
             double score = result.path("score").asDouble();
             for (JsonNode rec : result.path("recordings")) {
-                String title = rec.path("title").asText("");
+                String title = JsonText.of(rec.path("title"), "");
                 if (title.isBlank()) continue;
                 StringBuilder artists = new StringBuilder();
                 for (JsonNode a : rec.path("artists")) {
                     if (artists.length() > 0) artists.append(" & ");
-                    artists.append(a.path("name").asText(""));
+                    artists.append(JsonText.of(a.path("name"), ""));
                 }
                 out.add(new AudioTagAudit.Candidate(artists.toString(), title, score,
-                        rec.path("duration").asInt(0), rec.path("id").asText("")));
+                        rec.path("duration").asInt(0), JsonText.of(rec.path("id"), "")));
             }
         }
         out.sort((a, b) -> Double.compare(b.score(), a.score()));
@@ -209,7 +209,7 @@ public class AcoustIdClient {
         for (JsonNode result : root.path("results")) {
             if (result.path("score").asDouble() < 0.9) continue;
             for (JsonNode rec : result.path("recordings")) {
-                String id = rec.path("id").asText("").trim().toLowerCase(java.util.Locale.ROOT);
+                String id = JsonText.of(rec.path("id"), "").trim().toLowerCase(java.util.Locale.ROOT);
                 if (!id.isBlank()) known.add(id);
             }
         }
@@ -255,7 +255,7 @@ public class AcoustIdClient {
             double score = result.path("score").asDouble();
             if (score < 0.5) continue;
             for (JsonNode recording : result.path("recordings")) {
-                String mbid = recording.path("id").asText("");
+                String mbid = JsonText.of(recording.path("id"), "");
                 if (mbid.isBlank()) continue;
                 bestScoreByMbid.merge(mbid, score, Math::max);
                 sourcesByMbid.merge(mbid, recording.path("sources").asInt(0), Math::max);
@@ -282,7 +282,7 @@ public class AcoustIdClient {
             double score = result.path("score").asDouble();
             if (score > bestScore) {
                 bestScore    = score;
-                lastAcoustId = result.path("id").asText("");
+                lastAcoustId = JsonText.of(result.path("id"), "");
             }
         }
     }

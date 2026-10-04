@@ -44,9 +44,9 @@ public final class ApiKeyTester {
                     + "&meta=recordings&fingerprint=" + DUMMY_FINGERPRINT + "&duration=1";
             JsonNode root = getJson(url, null);
             if (root == null) return new Result(false, I18n.t("Pas de réponse du serveur"));
-            String status = root.path("status").asText("");
+            String status = JsonText.of(root.path("status"), "");
             if ("error".equals(status)) {
-                String msg = root.path("error").path("message").asText("");
+                String msg = JsonText.of(root.path("error").path("message"), "");
                 if (msg.toLowerCase().contains("invalid api key") || msg.toLowerCase().contains("insufficient"))
                     return new Result(false, msg);
                 return new Result(true, I18n.t("Clé acceptée"));
@@ -87,7 +87,7 @@ public final class ApiKeyTester {
             if (root == null) return new Result(false, I18n.t("Pas de réponse du serveur"));
             if (root.has("error")) {
                 int code = root.path("error").asInt(-1);
-                String msg = root.path("message").asText("");
+                String msg = JsonText.of(root.path("message"), "");
                 if (code == 10) return new Result(false, msg.isBlank() ? I18n.t("Clé API invalide") : msg);
                 return new Result(true, I18n.t("Clé acceptée"));
             }
@@ -110,7 +110,7 @@ public final class ApiKeyTester {
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() == 200) return new Result(true, I18n.t("Clé valide"));
             JsonNode root = mapper.readTree(resp.body());
-            String msg = root.path("error message").asText(root.path("status").asText(""));
+            String msg = JsonText.of(root.path("error message"), JsonText.of(root.path("status"), ""));
             if (resp.statusCode() == 401 || resp.statusCode() == 403 || msg.toLowerCase().contains("api key"))
                 return new Result(false, msg.isBlank() ? ("HTTP " + resp.statusCode()) : msg);
             // 404 sur l'artiste lui-même (improbable pour Queen) mais clé acceptée

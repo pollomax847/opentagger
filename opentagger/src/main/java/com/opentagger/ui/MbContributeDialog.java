@@ -19,8 +19,6 @@ import java.util.List;
  * pour un enregistrement, via l'API MB authentifiée (OAuth2).
  */
 public class MbContributeDialog extends JDialog {
-
-    private final FileEntry       entry;
     private final TagInfo         ti;
 
     private final JLabel          lblConnected;
@@ -36,7 +34,6 @@ public class MbContributeDialog extends JDialog {
 
     public MbContributeDialog(Frame owner, FileEntry entry) {
         super(owner, I18n.t("Contribuer à MusicBrainz"), true);
-        this.entry = entry;
         this.ti    = entry.activeTags();
         setSize(560, 540);
         setMinimumSize(new Dimension(460, 440));

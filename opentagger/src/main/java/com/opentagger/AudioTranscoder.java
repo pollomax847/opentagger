@@ -65,17 +65,52 @@ public class AudioTranscoder {
         for (int i = 1; Files.exists(dest); i++)
             dest = source.getParent().resolve(stem + "_" + i + "." + format.ext);
 
+        // Pochette : conservée (MP3, FLAC, M4A) quand la source en porte une — avant, « -vn » la supprimait toujours
+        // et chaque transcodage faisait perdre la pochette. OGG/OPUS la stockent autrement (bloc METADATA_BLOCK_PICTURE) :
+        // pas gérée ici. Si ffmpeg refuse la pochette, on retente sans elle plutôt que d'échouer.
+        boolean keepCover = (format == Format.MP3 || format == Format.FLAC || format == Format.AAC)
+                && hasAttachedPicture(source);
+        try {
+            return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, keepCover);
+        } catch (IOException e) {
+            if (!keepCover) throw e;
+            Files.deleteIfExists(dest);
+            return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, false);
+        }
+    }
+
+    /** Vrai si la source contient une pochette (flux image marqué « attached_pic »). */
+    private boolean hasAttachedPicture(Path source) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(Config.get().str("audio.ffprobe_path", "ffprobe"), "-v", "error",
+                    "-select_streams", "v", "-show_entries", "stream_disposition=attached_pic", "-of", "csv=p=0",
+                    source.toAbsolutePath().toString());
+            pb.redirectErrorStream(true);
+            String out = ProcessUtils.readStringWithTimeout(pb, 15);
+            return out != null && out.lines().anyMatch(l -> l.trim().equals("1"));
+        } catch (Exception e) { return false; }
+    }
+
+    private Path transcodeOnce(Path source, Format format, int bitrateKbps, boolean deleteSource, Path dest,
+                               boolean keepCover) throws IOException, InterruptedException {
         List<String> cmd = new ArrayList<>();
         cmd.add(ffmpegPath);
         cmd.add("-y");
         cmd.add("-i");  cmd.add(source.toAbsolutePath().toString());
+        if (keepCover) {
+            cmd.add("-map"); cmd.add("0:a:0");
+            cmd.add("-map"); cmd.add("0:v:0");
+            cmd.add("-c:v"); cmd.add("copy");
+            cmd.add("-disposition:v:0"); cmd.add("attached_pic");
+            if (format == Format.MP3) { cmd.add("-id3v2_version"); cmd.add("3"); }
+        }
         cmd.add("-codec:a"); cmd.add(format.codec);
         if (format.hasBitrate && bitrateKbps > 0) {
             cmd.add("-b:a"); cmd.add(bitrateKbps + "k");
             if (format == Format.MP3) { cmd.add("-q:a"); cmd.add("0"); }
         }
         cmd.add("-map_metadata"); cmd.add("0"); // conserver les tags existants
-        cmd.add("-vn");                          // pas de flux vidéo/pochette (évite erreurs AAC)
+        if (!keepCover) cmd.add("-vn");          // sans pochette : pas de flux vidéo (évite erreurs AAC)
         cmd.add(dest.toAbsolutePath().toString());
 
         ProcessBuilder pb = new ProcessBuilder(cmd);

@@ -116,7 +116,7 @@ public class BatchProcessor {
         String cmd = Config.get().postTagCommand();
         if (cmd.isBlank()) return;
         try {
-            new ProcessBuilder("sh", "-c", cmd)
+            PostTagCommands.shell(cmd)
                     .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();

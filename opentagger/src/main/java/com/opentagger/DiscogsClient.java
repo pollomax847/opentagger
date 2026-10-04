@@ -78,26 +78,26 @@ public class DiscogsClient {
         if (info.barcode.isBlank()) {
             JsonNode barcodes = hit.path("barcode");
             if (barcodes.isArray() && !barcodes.isEmpty()) {
-                String bc = barcodes.get(0).asText("").trim().replaceAll("[^0-9]", "");
+                String bc = JsonText.of(barcodes.get(0), "").trim().replaceAll("[^0-9]", "");
                 if (!bc.isBlank()) info.barcode = bc;
             }
         }
 
         // Catalogue number
         if (info.catalogNo.isBlank()) {
-            String catno = hit.path("catno").asText("").trim();
+            String catno = JsonText.of(hit.path("catno"), "").trim();
             if (!catno.isBlank() && !"none".equalsIgnoreCase(catno)) info.catalogNo = catno;
         }
 
         // Pays de sortie
         if (info.country.isBlank()) {
-            String co = hit.path("country").asText("").trim();
+            String co = JsonText.of(hit.path("country"), "").trim();
             if (!co.isBlank()) info.country = co;
         }
 
         // Année (fallback si MB n'a pas fourni l'année)
         if (info.year.isBlank()) {
-            String yr = hit.path("year").asText("").trim();
+            String yr = JsonText.of(hit.path("year"), "").trim();
             if (yr.matches("\\d{4}")) info.year = yr;
         }
 
@@ -119,7 +119,7 @@ public class DiscogsClient {
         if (info.label.isBlank()) {
             JsonNode labels = hit.path("label");
             if (labels.isArray() && !labels.isEmpty()) {
-                String lb = labels.get(0).asText("").trim();
+                String lb = JsonText.of(labels.get(0), "").trim();
                 if (!lb.isBlank() && !"not on label".equalsIgnoreCase(lb) && !lb.toLowerCase().startsWith("not on label"))
                     info.label = lb;
             }
@@ -130,7 +130,7 @@ public class DiscogsClient {
             long id = hit.path("id").asLong(0);
             if (id > 0) {
                 info.discogsId = String.valueOf(id);
-                String uri = hit.path("uri").asText("").trim();
+                String uri = JsonText.of(hit.path("uri"), "").trim();
                 if (!uri.isBlank())
                     info.releaseDiscogsUrl = "https://www.discogs.com" + uri;
             }
@@ -159,15 +159,15 @@ public class DiscogsClient {
 
         if (info.discogsArtistId.isBlank()) info.discogsArtistId = String.valueOf(id);
         if (info.artistDiscogsUrl.isBlank()) {
-            String uri = detail.path("uri").asText("").trim();
+            String uri = JsonText.of(detail.path("uri"), "").trim();
             if (!uri.isBlank()) info.artistDiscogsUrl = uri;
         }
         if (info.artistRealName.isBlank()) {
-            String real = detail.path("realname").asText("").trim();
+            String real = JsonText.of(detail.path("realname"), "").trim();
             if (!real.isBlank()) info.artistRealName = real;
         }
         if (info.artistBio.isBlank()) {
-            String profile = detail.path("profile").asText("").trim();
+            String profile = JsonText.of(detail.path("profile"), "").trim();
             if (!profile.isBlank()) info.artistBio = cleanProfile(profile);
         }
     }
@@ -197,9 +197,9 @@ public class DiscogsClient {
 
         String url = null;
         for (JsonNode img : images) {
-            if ("primary".equals(img.path("type").asText(""))) { url = img.path("uri").asText(null); break; }
+            if ("primary".equals(JsonText.of(img.path("type"), ""))) { url = JsonText.of(img.path("uri"), null); break; }
         }
-        if (url == null) url = images.get(0).path("uri").asText(null);
+        if (url == null) url = JsonText.of(images.get(0).path("uri"), null);
         return url != null ? ImageDownloader.downloadToTempFile(url, cache) : null;
     }
 
@@ -236,7 +236,7 @@ public class DiscogsClient {
         String norm = normalizeArtistName(artist);
         JsonNode match = null;
         for (JsonNode r : results) {
-            if (normalizeArtistName(r.path("title").asText("")).equals(norm)) {
+            if (normalizeArtistName(JsonText.of(r.path("title"), "")).equals(norm)) {
                 if (match != null) return null; // homonyme ambigu -> abstention, pas de choix arbitraire
                 match = r;
             }
@@ -314,22 +314,56 @@ public class DiscogsClient {
      * fournisseur de genre parmi d'autres (repli Last.fm ensuite), pas la source d'identification
      * principale — pas besoin du backoff exponentiel complet de MusicBrainzClient.getWithRetry().
      */
+    // ── Cadence et quota Discogs (60 requêtes/minute pour une clé authentifiée) ──────────────────────────────
+    // Constat (mesuré le 2026-10-04) : sans cadence, 6 fichiers en parallèle épuisaient le quota ; CHAQUE requête
+    // recevait alors un 429, attendait 5 s, était renvoyée, et échouait encore — environ 40 s perdues PAR FICHIER
+    // (les deux tiers du temps total d'un lot), sans jamais obtenir la moindre donnée. Désormais : (1) un intervalle
+    // minimal commun à tous les threads, (2) au premier 429 persistant, Discogs est mis en pause pour la durée
+    // indiquée (Retry-After, 30 s à défaut) et les appels suivants renoncent aussitôt (genre/infos viendront de
+    // Last.fm ou seront complétés plus tard) au lieu d'attendre chacun leur tour.
+    private static final long DISCOGS_MIN_INTERVAL_MS = 1100;
+    private static final java.util.concurrent.atomic.AtomicLong LAST_CALL_MS   = new java.util.concurrent.atomic.AtomicLong(0);
+    private static final java.util.concurrent.atomic.AtomicLong BLOCKED_UNTIL  = new java.util.concurrent.atomic.AtomicLong(0);
+
+    /** Délai à attendre avant le prochain appel (0 si on peut partir) — pur, pour les tests. */
+    static long paceDelay(long now, long lastCall, long minInterval) {
+        return Math.max(0, minInterval - (now - lastCall));
+    }
+
+    private static synchronized void pace() throws InterruptedException {
+        long wait = paceDelay(System.currentTimeMillis(), LAST_CALL_MS.get(), DISCOGS_MIN_INTERVAL_MS);
+        if (wait > 0) Thread.sleep(wait);
+        LAST_CALL_MS.set(System.currentTimeMillis());
+    }
+
+    private static long retryAfterMs(HttpResponse<String> response) {
+        try { return Math.max(1, Long.parseLong(response.headers().firstValue("Retry-After").orElse("30"))) * 1000L; }
+        catch (NumberFormatException e) { return 30_000L; }
+    }
+
+    /** {@code null} si Discogs est en pause (quota épuisé) : les appelants traitent déjà null comme « rien trouvé ». */
     private HttpResponse<String> sendWithThrottleRetry(HttpRequest request) throws Exception {
+        if (System.currentTimeMillis() < BLOCKED_UNTIL.get()) return null;
+        pace();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() == 429) {
-            long waitMs = 5000;
-            try {
-                waitMs = Long.parseLong(response.headers().firstValue("Retry-After").orElse("5")) * 1000L;
-            } catch (NumberFormatException ignored) {}
-            LOG.info("Discogs 429 (quota dépassé) — nouvelle tentative dans " + (waitMs / 1000) + "s");
-            Thread.sleep(waitMs);
-            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            long waitMs = retryAfterMs(response);
+            if (waitMs <= 10_000) {                       // courte attente : une seule nouvelle tentative
+                LOG.info("Discogs 429 — nouvelle tentative dans " + (waitMs / 1000) + "s");
+                Thread.sleep(waitMs);
+                pace();
+                response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            }
+            if (response.statusCode() == 429) {
+                BLOCKED_UNTIL.set(System.currentTimeMillis() + Math.min(waitMs, 120_000L));
+                LOG.warning("Discogs 429 (quota dépassé) — Discogs mis en pause " + (Math.min(waitMs, 120_000L) / 1000) + " s");
+                return null;
+            }
         }
         if (response.statusCode() != 200)
             LOG.warning("Discogs HTTP " + response.statusCode() + " : " + request.uri());
         return response;
     }
-
     private List<String> extraireTableau(JsonNode node) {
         List<String> liste = new ArrayList<>();
         if (node.isArray()) node.forEach(n -> liste.add(n.asText()));

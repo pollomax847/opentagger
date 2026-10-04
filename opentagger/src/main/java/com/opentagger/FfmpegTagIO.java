@@ -137,7 +137,7 @@ public final class FfmpegTagIO {
         var it = tagsNode.fields();
         while (it.hasNext()) {
             var e = it.next();
-            out.put(e.getKey().toUpperCase(), e.getValue().asText(""));
+            out.put(e.getKey().toUpperCase(), JsonText.of(e.getValue(), ""));
         }
     }
 

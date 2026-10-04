@@ -7,7 +7,6 @@ import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 
 import javax.swing.*;
-import java.awt.Desktop;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;

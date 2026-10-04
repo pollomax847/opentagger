@@ -64,7 +64,7 @@ public final class Fingerprinter {
             throw new Exception("fpcalc timeout ou sortie vide pour " + fichier.getName());
 
         JsonNode json = MAPPER.readTree(output);
-        String fingerprint = json.path("fingerprint").asText("");
+        String fingerprint = JsonText.of(json.path("fingerprint"), "");
         int duration = (int) json.path("duration").asDouble(0);
         if (fingerprint.isBlank() || duration == 0)
             throw new Exception("fpcalc : fingerprint ou durée manquant pour " + fichier.getName());

@@ -16,7 +16,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.function.BiConsumer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -55,7 +54,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.function.BiConsumer<Integer, Integer> onFileProgress;
 
     private final MusicBrainzClient        mb               = new MusicBrainzClient();
-    private final AcoustIdClient           acoustId         = new AcoustIdClient();
     private final SongRecClient            songRec          = new SongRecClient();
 
     // Source d'identification du dernier findTags() — utilisée pour enregistrer le niveau de confiance
@@ -65,7 +63,6 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final ThreadLocal<String> lastFindTagsSource =
             ThreadLocal.withInitial(() -> MetadataCache.SOURCE_TEXT);
     private final DiscogsClient      discogs   = new DiscogsClient();
-    private final LastFmClient       lastFm    = new LastFmClient();
     private final LocalCorrector     corrector = new LocalCorrector();
     private final MetadataCache      cache     = new MetadataCache();
     private final BpmDetector        bpmDet    = new BpmDetector();
@@ -340,6 +337,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
 
         WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
+
+        // Passe de cohérence d'ALBUM : les fichiers d'un même dossier se terminent en parallèle et la première piste fixe la release
+        // du groupe ; une piste qui finit avant (ou qu'un doublon de compilation attire) pouvait donc sortir sur une AUTRE release
+        // alors qu'elle figure aussi sur celle de l'album (ex. « Lucky You » sur « Curtain Call 2 » au lieu de « Kamikaze »).
+        try { harmonizeAlbumReleases(queue); }
+        catch (Exception ex) { log(I18n.t("  cohérence d'album : ignorée (%s)", ex.getMessage())); }
 
         // Remettre en attente toute entrée restée bloquée en PROCESSING
         for (FileEntry entry : queue) {
@@ -621,6 +624,24 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
             best = durationOk;
 
+            // Empreinte AcoustID acceptée à confiance élevée (acoustIdResultPlausible() la laisse passer
+            // sans comparaison) mais SANS durée MusicBrainz pour la confirmer, et dont l'artiste ET le titre
+            // n'ont aucun rapport avec le nom de fichier ni les tags : faux positif possible (constaté :
+            // « Drake – Summer Sixteen » (484 s) → « T. Rex – Summer Deep »). Pas rejeté (l'empreinte peut
+            // avoir raison contre un tag faux) mais jamais auto-enregistré : revue manuelle.
+            if (MetadataCache.SOURCE_ACOUSTID.equals(lastFindTagsSource.get()) && best.mbDurationSec <= 0) {
+                String[] fn = parseFilename(fichier);
+                if (contradictsInput(fn[0], fn[1], entry.current.artist, entry.current.title,
+                        best.artist, best.title)) {
+                    skipForManualReview(entry, results, com.opentagger.model.SkipReason.LOW_SCORE,
+                            I18n.t("AcoustID contredit le nom de fichier et les tags (« %s – %s ») — à vérifier",
+                                    best.artist, best.title) + videoHintIfAny(fichier),
+                            I18n.t("  ⚠ AcoustID \"%s – %s\" sans rapport avec le fichier — SKIPPED, revue manuelle",
+                                    best.artist, best.title));
+                    return;
+                }
+            }
+
             // "- Topic" (nom de chaîne YouTube auto-générée) — voir stripYoutubeTopicSuffix() pour
             // le pourquoi. Appliqué ici, au tout dernier moment avant usage, pour couvrir toutes les
             // sources (SongRec, AcoustID, MB, replis) sans dupliquer le nettoyage dans chacune.
@@ -684,7 +705,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 } else if (pinned != null) {
                     int agreement = groupPinAgreement.getOrDefault(groupKey,
                             new java.util.concurrent.atomic.AtomicInteger()).get();
-                    if (shouldSkipForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)) {
+                    if (shouldSkipForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)
+                            && retargetToPinnedRelease(best, pinned, entry.current.durationSec)) {
+                        // Le morceau identifié figure AUSSI sur la release du groupe (même enregistrement, ou même
+                        // titre et durée compatible) : on le rattache à cette release plutôt que de le skipper.
+                        groupPinAgreement.computeIfAbsent(groupKey, k -> new java.util.concurrent.atomic.AtomicInteger())
+                                .incrementAndGet();
+                    } else if (shouldSkipForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)
+                            && ownReleaseIsTrustworthy(best, entry.current.durationSec)) {
+                        // Le morceau n'est PAS sur la release du groupe (recherche ci-dessus sans résultat) : ce n'est
+                        // donc pas une contradiction mais un dossier mélangé (compilations diverses). Sa propre
+                        // identification est certaine (score 100, durée compatible) : on la garde au lieu de skipper.
+                        log(I18n.t("  Cohérence de groupe → absent de la release du groupe, release propre conservée [%s]",
+                                best.album));
+                    } else if (shouldSkipForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)) {
                         String pinnedShort = pinned.substring(0, Math.min(8, pinned.length()));
                         skipForManualReview(entry, results, com.opentagger.model.SkipReason.GROUP_MISMATCH,
                                 I18n.t("Contredit la release du groupe [%s] (%d piste(s) concordantes) — score=%s%%",
@@ -1771,6 +1805,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // Détection hors FR/EN : si les tags contiennent du japonais, coréen, arabe,
         // cyrillique, etc. → inutile de chercher dans MB avec ces termes, SongRec en priorité
         boolean nonLatinInput = TagEnrichment.hasNonLatinChars(artist) || TagEnrichment.hasNonLatinChars(title);
+        // Sans SongRec (jamais disponible sous Windows), « SongRec en priorité » ne menait nulle part : le fichier restait « Non identifié »
+        // SANS qu'aucune recherche MusicBrainz n'ait été tentée (constaté sur des fichiers aux tags japonais, ex. 西野カナ / This Is How We Do It).
+        // MusicBrainz indexe les noms non latins : on lance donc la recherche texte normale avec ces tags.
+        final boolean songRecUsable = songRecUsable();
+        if (nonLatinInput && !songRecUsable) {
+            log(I18n.t("  tags non-Latin, SongRec indisponible → recherche MusicBrainz directe"));
+            nonLatinInput = false;
+        }
         // true si artist/title viennent d'un split brut du nom de fichier sur " - " (voir plus bas)
         // — parseFilename() suppose l'ordre "Artiste - Titre", mais certains rips (constaté en
         // direct, ex. "J en ai mis du temps - Patrick Fiori.mp3") utilisent l'ordre inverse
@@ -1789,7 +1831,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             log(I18n.t("  tags lus: artiste='%s' titre='%s'", artist, title));
             if (artist.isBlank() && title.isBlank()) {
                 String[] fn = parseFilename(fichier);
-                if (TagEnrichment.hasNonLatinChars(fn[0]) || TagEnrichment.hasNonLatinChars(fn[1])) {
+                if (songRecUsable && (TagEnrichment.hasNonLatinChars(fn[0]) || TagEnrichment.hasNonLatinChars(fn[1]))) {
                     nonLatinInput = true;
                     log(I18n.t("  nom de fichier non-Latin → SongRec en priorité"));
                 } else {
@@ -1890,6 +1932,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 log(I18n.t("  MB ordre inversé → %s résultat(s)", results.size()));
                 if (!results.isEmpty()) {
                     cache.putRecordingSearch(hashSwap, mb.lastRawJson());
+                    return results;
+                }
+            }
+        }
+
+        // 5b-ter. Fallback : titre SIMPLIFIÉ (sans « (feat. …) » ni marqueur de copie « (1) »), seulement quand l'ARTISTE est connu — MusicBrainz
+        // stocke « Havana » et non « Havana (Feat. Young Thug) » (l'invité est dans le crédit), et la recherche par expression exacte du titre
+        // complet ne trouvait rien. Jamais sans artiste : une recherche par titre seul ferait trop de faux positifs.
+        if (!nonLatinInput && results.isEmpty() && !artist.isBlank() && !title.isBlank()) {
+            String titleSimple = simplifyTitle(title);
+            if (!titleSimple.equals(title) && !titleSimple.isBlank() && !isGenericTag(titleSimple)) {
+                log(I18n.t("  MB fallback titre simplifié: '%s' / '%s'", artist, titleSimple));
+                results = mb.searchRecording(artist, titleSimple);
+                log(I18n.t("  MB titre simplifié → %s résultat(s)", results.size()));
+                if (!results.isEmpty()) {
+                    cache.putRecordingSearch(MetadataCache.queryHash(artist, title), mb.lastRawJson());
                     return results;
                 }
             }
@@ -2416,6 +2474,26 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * Retient la MEILLEURE similarité des deux signaux disponibles plutôt que d'exiger les deux, pour
      * rester tolérant aux noms de fichiers qui ne suivent pas le format "Artiste - Titre" (beaucoup
      * n'ont qu'un des deux, voir parseFilename()). */
+    /** Vrai si le candidat n'a AUCUN rapport avec l'entrée (nom de fichier et tags) : artiste de
+     *  référence ET titre de référence disponibles (non génériques), et tous deux très éloignés du
+     *  candidat. Sans référence exploitable des deux côtés → faux (rien ne permet de contredire). */
+    static boolean contradictsInput(String fnArtist, String fnTitle, String tagArtist, String tagTitle,
+                                    String candArtist, String candTitle) {
+        java.util.List<String> artists = new java.util.ArrayList<>();
+        java.util.List<String> titles = new java.util.ArrayList<>();
+        for (String a : new String[] { fnArtist, tagArtist })
+            if (a != null && !a.isBlank() && !isGenericTag(a)) artists.add(a);
+        for (String t : new String[] { fnTitle, tagTitle })
+            if (t != null && !t.isBlank() && !isGenericTag(t)) titles.add(t);
+        if (artists.isEmpty() || titles.isEmpty()) return false;
+        double artistSim = 0, titleSim = 0;
+        for (String a : artists) artistSim = Math.max(artistSim,
+                TrackMatcher.titleSimilarity(a.toLowerCase(), String.valueOf(candArtist).toLowerCase()));
+        for (String t : titles) titleSim = Math.max(titleSim,
+                TrackMatcher.titleSimilarity(t.toLowerCase(), String.valueOf(candTitle).toLowerCase()));
+        return artistSim < 0.3 && titleSim < 0.6;
+    }
+
     private boolean songRecResultPlausible(File fichier, TagInfo candidate) {
         String[] fn = parseFilename(fichier);
         String fnArtist = fn[0], fnTitle = fn[1];
@@ -2467,6 +2545,123 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     private static String stripYoutubeTopicSuffix(String artist) {
         return artist == null ? null : YOUTUBE_TOPIC_SUFFIX.matcher(artist).replaceAll("");
+    }
+
+    /** Piste de la release épinglée qui correspond au morceau identifié : d'abord le MÊME enregistrement MusicBrainz,
+     *  sinon un titre quasi identique (≥ 0,85) dont la durée est compatible avec le fichier (≥ 0,95 si une des
+     *  durées est inconnue). {@code null} si rien de sûr — le garde-fou skippe alors le fichier comme avant. */
+    static MusicBrainzClient.ReleaseTrack pickTrackInPinnedRelease(
+            java.util.List<MusicBrainzClient.ReleaseTrack> tracks, String recordingMbid, String title, int fileDurationSec) {
+        if (recordingMbid != null && !recordingMbid.isBlank())
+            for (MusicBrainzClient.ReleaseTrack t : tracks)
+                if (recordingMbid.equalsIgnoreCase(t.recordingMbid())) return t;
+        if (title == null || title.isBlank()) return null;
+        MusicBrainzClient.ReleaseTrack best = null;
+        double bestSim = 0;
+        for (MusicBrainzClient.ReleaseTrack t : tracks) {
+            double sim = TrackMatcher.titleSimilarity(title.toLowerCase(), t.title().toLowerCase());
+            boolean durKnown = fileDurationSec > 0 && t.lengthMs() > 0;
+            if (durKnown && FileEntry.isStrictDurationMismatch(fileDurationSec, t.lengthMs() / 1000)) continue;
+            if (sim >= (durKnown ? 0.85 : 0.95) && sim > bestSim) { best = t; bestSim = sim; }
+        }
+        return best;
+    }
+
+    /** Identification propre au fichier assez sûre pour ignorer le garde-fou de groupe : score maximal ET durée
+     *  MusicBrainz connue et compatible avec celle du fichier (jamais sur une durée inconnue). */
+    static boolean ownReleaseIsTrustworthy(TagInfo best, int fileDurationSec) {
+        return best.score >= 100 && best.mbDurationSec > 0 && fileDurationSec > 0
+                && !FileEntry.isDurationMismatch(fileDurationSec, best.mbDurationSec);
+    }
+
+    /** Rattache {@code best} (morceau déjà identifié) à la release épinglée du groupe quand il y figure aussi.
+     *  @return {@code true} si {@code best} a été réécrit sur cette release. */
+    private boolean retargetToPinnedRelease(TagInfo best, String pinnedMbid, int fileDurationSec) {
+        if (pinnedTracklistFailed.contains(pinnedMbid)) return false;
+        MusicBrainzClient.ReleaseTracklist tl = pinnedTracklistCache.computeIfAbsent(pinnedMbid, mbid -> {
+            try { return mb.lookupRelease(mbid); } catch (Exception e) { return null; }
+        });
+        if (tl == null) { pinnedTracklistFailed.add(pinnedMbid); return false; }
+        MusicBrainzClient.ReleaseTrack myTrack = pickTrackInPinnedRelease(tl.tracks(), best.recordingMbid, best.title, fileDurationSec);
+        if (myTrack == null) return false;
+        applyTrackOfRelease(best, tl, myTrack);
+        log(I18n.t("  Cohérence de groupe → rattaché à la release du groupe [%s] : %s – %s",
+                tl.album(), best.artist, best.title));
+        return true;
+    }
+
+    /** Release dominante d'un dossier : au moins 3 pistes ET au moins 60 % des pistes identifiées ; sinon {@code null}
+     *  (dossier mélangé — compilations diverses — où rien ne doit être uniformisé). */
+    static String dominantRelease(java.util.List<String> releases) {
+        java.util.Map<String, Integer> n = new java.util.HashMap<>();
+        int total = 0;
+        for (String r : releases) { if (r == null || r.isBlank()) continue; n.merge(r, 1, Integer::sum); total++; }
+        String best = null; int bc = 0;
+        for (var e : n.entrySet()) if (e.getValue() > bc) { best = e.getKey(); bc = e.getValue(); }
+        return best != null && bc >= 3 && bc * 10 >= total * 6 ? best : null;
+    }
+
+    /** Rattache à la release dominante de leur dossier les pistes identifiées ailleurs, MAIS seulement si le même morceau
+     *  figure sur cette release (même enregistrement, ou même titre à durée compatible) — jamais d'invention. Les
+     *  identifications prouvées par TOC ou par MBID déjà connu ne sont pas touchées. */
+    private void harmonizeAlbumReleases(List<FileEntry> queue) {
+        java.util.Map<String, List<FileEntry>> byDir = new java.util.LinkedHashMap<>();
+        for (FileEntry e : queue) {
+            if (e.status != FileEntry.Status.IDENTIFIED || e.result == null) continue;
+            File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
+            File dir = f.getParentFile();
+            if (dir == null) continue;
+            if (DISC_FOLDER_PATTERN.matcher(dir.getName()).find() && dir.getParentFile() != null) dir = dir.getParentFile();
+            byDir.computeIfAbsent(dir.getPath(), k -> new java.util.ArrayList<>()).add(e);
+        }
+        for (List<FileEntry> group : byDir.values()) {
+            if (group.size() < 3) continue;
+            String r = dominantRelease(group.stream().map(e -> e.result.releaseMbid).toList());
+            if (r == null) continue;
+            MusicBrainzClient.ReleaseTracklist tl = pinnedTracklistCache.computeIfAbsent(r, mbid -> {
+                try { return mb.lookupRelease(mbid); } catch (Exception ex) { return null; }
+            });
+            if (tl == null) continue;
+            for (FileEntry e : group) {
+                TagInfo t = e.result;
+                if (r.equals(t.releaseMbid)) continue;
+                String src = t.identificationSource;
+                if (MetadataCache.SOURCE_DISCID.equals(src) || MetadataCache.SOURCE_MBID.equals(src)) continue;
+                MusicBrainzClient.ReleaseTrack tr = pickTrackInPinnedRelease(tl.tracks(), t.recordingMbid, t.title,
+                        e.current != null ? e.current.durationSec : 0);
+                if (tr == null) continue;
+                String before = t.album;
+                applyTrackOfRelease(t, tl, tr);
+                log(I18n.t("  Cohérence d'album → %s : « %s » → « %s »", e.filename(), before, tl.album()));
+                publish(e);
+            }
+        }
+    }
+    /** Réécrit les champs de PARUTION de {@code best} d'après la piste {@code myTrack} de la release {@code tl}
+     *  (artiste et titre de la piste identifiée restent ceux de {@code best}). */
+    static void applyTrackOfRelease(TagInfo best, MusicBrainzClient.ReleaseTracklist tl, MusicBrainzClient.ReleaseTrack myTrack) {
+        best.album            = tl.album();
+        best.albumArtist      = tl.albumArtist().isBlank() ? best.artist : tl.albumArtist();
+        best.albumArtistSort  = tl.albumArtistSort();
+        best.year             = tl.year();
+        best.originalYear     = tl.originalYear();
+        best.releaseMbid      = tl.releaseMbid();
+        best.releaseGroupMbid = tl.releaseGroupMbid();
+        best.recordingMbid    = myTrack.recordingMbid();
+        best.releaseTrackMbid = myTrack.trackMbid();
+        best.discSubtitle     = myTrack.discTitle();
+        best.track            = String.valueOf(myTrack.trackNo());
+        best.trackTotal       = String.valueOf(myTrack.trackTotal());
+        best.discNo           = myTrack.disc() > 0 ? String.valueOf(myTrack.disc()) : "";
+        best.country          = tl.country();
+        best.barcode          = tl.barcode();
+        best.releaseStatus    = tl.releaseStatus();
+        best.label            = tl.label();
+        best.catalogNo        = tl.catalogNo();
+        best.script           = tl.script();
+        best.applyReleaseLevelFrom(tl.releaseMeta());
+        best.isCompilation    = tl.isCompilation() ? "1" : "";   // la nouvelle release décide (l'ancienne pouvait être une compilation)
+        if (myTrack.lengthMs() > 0) best.mbDurationSec = myTrack.lengthMs() / 1000;
     }
 
     /** Cœur de décision du garde-fou "une seule release par groupe" (voir son appelant, dans la
@@ -2602,6 +2797,28 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         if (t.year.isBlank())   s += 1;
         if (t.genre.isBlank())  s += 1;
         return s;
+    }
+
+    private static volatile Boolean songRecUsableCache;
+
+    /** SongRec utilisable ? (résultat mémorisé : sous Linux le test lance un processus, inutile de le refaire à chaque fichier). */
+    private static boolean songRecUsable() {
+        Boolean v = songRecUsableCache;
+        if (v == null) { v = com.opentagger.SongRecClient.isAvailable(); songRecUsableCache = v; }
+        return v;
+    }
+
+    /** Titre sans invité « (feat. …) » / « [ft. …] » / « feat. … » final, ni marqueur de copie « (1) ». Ne touche PAS aux autres parenthèses
+     *  (« (Remix) », « (Live) »… qui distinguent vraiment les enregistrements). */
+    static String simplifyTitle(String title) {
+        if (title == null) return "";
+        String s = title
+            .replaceAll("(?i)\\s*[\\(\\[]\\s*(?:feat\\.?|ft\\.?|featuring|avec)\\s[^\\)\\]]*[\\)\\]]", "")
+            .replaceAll("(?i)\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.+$", "")
+            .replaceAll("\\s*\\(\\d{1,2}\\)\\s*$", "")
+            .replaceAll("\\s{2,}", " ")
+            .trim();
+        return s.isBlank() ? title : s;
     }
 
     private String simplifyArtist(String artist) {
@@ -2780,9 +2997,4 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return new String[]{ artist, titlePart };
     }
 
-    private void sleep(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
 }

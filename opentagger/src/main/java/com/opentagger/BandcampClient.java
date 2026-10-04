@@ -67,30 +67,30 @@ public final class BandcampClient {
         return new Extra(
                 nameOf(root.path("publisher")),
                 keywordsOf(root.path("keywords")),
-                firstNonBlank(root.path("copyrightNotice").asText(""), nameOf(root.path("copyrightHolder"))),
+                firstNonBlank(JsonText.of(root.path("copyrightNotice"), ""), nameOf(root.path("copyrightHolder"))),
                 urlOf(root.path("license")),
-                root.path("isrcCode").asText("").trim());
+                JsonText.of(root.path("isrcCode"), "").trim());
     }
 
     private static String nameOf(JsonNode n) {
         if (n == null || n.isMissingNode() || n.isNull()) return "";
-        return (n.isObject() ? n.path("name").asText("") : n.asText("")).trim();
+        return (n.isObject() ? JsonText.of(n.path("name"), "") : JsonText.of(n, "")).trim();
     }
 
     private static String urlOf(JsonNode n) {
         if (n == null || n.isMissingNode() || n.isNull()) return "";
-        if (n.isObject()) return firstNonBlank(n.path("@id").asText(""), n.path("url").asText(""));
-        return n.asText("").trim();
+        if (n.isObject()) return firstNonBlank(JsonText.of(n.path("@id"), ""), JsonText.of(n.path("url"), ""));
+        return JsonText.of(n, "").trim();
     }
 
     private static String keywordsOf(JsonNode n) {
         if (n == null || n.isMissingNode() || n.isNull()) return "";
         if (n.isArray()) {
             List<String> out = new ArrayList<>();
-            for (JsonNode k : n) { String v = k.asText("").trim(); if (!v.isBlank()) out.add(v); }
+            for (JsonNode k : n) { String v = JsonText.of(k, "").trim(); if (!v.isBlank()) out.add(v); }
             return String.join(", ", out);
         }
-        return n.asText("").trim();
+        return JsonText.of(n, "").trim();
     }
 
     private static String firstNonBlank(String a, String b) {
@@ -149,18 +149,18 @@ public final class BandcampClient {
 
         for (Element script : doc.select("script[type=application/ld+json]")) {
             JsonNode root = mapper.readTree(script.html());
-            if ("MusicRecording".equalsIgnoreCase(root.path("@type").asText(""))) {
+            if ("MusicRecording".equalsIgnoreCase(JsonText.of(root.path("@type"), ""))) {
                 JsonNode byArtist = root.path("byArtist");
                 JsonNode inAlbum  = root.path("inAlbum");
                 return new BandcampTrackPage(
-                        root.path("name").asText(""),
-                        byArtist.path("name").asText(""),
-                        byArtist.path("@id").asText(""),
+                        JsonText.of(root.path("name"), ""),
+                        JsonText.of(byArtist.path("name"), ""),
+                        JsonText.of(byArtist.path("@id"), ""),
                         trackUrl,
-                        parseIso8601Duration(root.path("duration").asText("")),
-                        inAlbum.path("name").asText(""),
-                        root.path("image").asText(""),
-                        root.path("datePublished").asText(""),
+                        parseIso8601Duration(JsonText.of(root.path("duration"), "")),
+                        JsonText.of(inAlbum.path("name"), ""),
+                        JsonText.of(root.path("image"), ""),
+                        JsonText.of(root.path("datePublished"), ""),
                         parseExtra(root));
             }
         }
@@ -182,7 +182,7 @@ public final class BandcampClient {
         Elements scripts = doc.select("script[type=application/ld+json]");
         for (Element script : scripts) {
             JsonNode root = mapper.readTree(script.html());
-            if ("MusicAlbum".equalsIgnoreCase(root.path("@type").asText(""))) {
+            if ("MusicAlbum".equalsIgnoreCase(JsonText.of(root.path("@type"), ""))) {
                 return parseAlbum(root, albumUrl);
             }
         }
@@ -197,22 +197,22 @@ public final class BandcampClient {
             JsonNode rec = item.path("item");
             tracks.add(new BandcampTrack(
                     item.path("position").asInt(0),
-                    rec.path("name").asText(""),
-                    parseIso8601Duration(rec.path("duration").asText(""))));
+                    JsonText.of(rec.path("name"), ""),
+                    parseIso8601Duration(JsonText.of(rec.path("duration"), ""))));
         }
 
         // Crédits : "creditText" — vérifié en direct le 2026-08-16 sur un vrai album (Iglooghost,
         // "Clear Tamei") : "Guitar on track 4 by Christy Carey." "description" est en réalité le
         // texte de présentation de l'album (souvent long, narratif), pas les crédits techniques.
         return new BandcampAlbum(
-                root.path("name").asText(""),
-                byArtist.path("name").asText(""),
-                byArtist.path("@id").asText(""),
+                JsonText.of(root.path("name"), ""),
+                JsonText.of(byArtist.path("name"), ""),
+                JsonText.of(byArtist.path("@id"), ""),
                 albumUrl,
-                root.path("image").asText(""),
-                root.path("datePublished").asText(""),
+                JsonText.of(root.path("image"), ""),
+                JsonText.of(root.path("datePublished"), ""),
                 tracks,
-                root.path("creditText").asText(""),
+                JsonText.of(root.path("creditText"), ""),
                 parseExtra(root));
     }
 

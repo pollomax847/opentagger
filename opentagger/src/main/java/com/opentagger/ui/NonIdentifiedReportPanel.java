@@ -30,8 +30,6 @@ import java.util.Map;
 public class NonIdentifiedReportPanel extends JPanel {
 
     private static final String[] COLS = {I18n.t("Cause"), I18n.t("Nombre"), "%"};
-
-    private final MainFrame         owner;
     private final FileTableModel    tableModel;
     private final Runnable          onClose;
     private final JTable            table;
@@ -40,7 +38,6 @@ public class NonIdentifiedReportPanel extends JPanel {
 
     /** Onglet de {@link LibraryReportsDialog} (fusion des rapports, 2026-10-03 : « trop d'options »). */
     public NonIdentifiedReportPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose) {
-        this.owner      = owner;
         this.tableModel = tableModel;
         this.onClose    = onClose;
 

@@ -44,12 +44,10 @@ public class SettingsDialog extends JDialog {
     // tfPreferredCountry supprimé — remplacé par le sélecteur lstCountriesModel/cmbCountryPicker
     private JSpinner   spResultsLimit;
     private JSpinner   spCacheDays;
-    @SuppressWarnings("unchecked")
     private JComboBox<String> cmbDiscogsGenreSource;
     // spDiscogsMaxGenres/spLastfmMaxGenres fusionnés dans spMbMaxGenres (voir Config.genreMaxCount())
 
     // ── Onglet Renommage ─────────────────────────────────────────────────────
-    @SuppressWarnings("unchecked")
     private JComboBox<String> cmbDefaultMask;
     private JCheckBox  chkAutoRename;
     private JCheckBox  chkDeleteEmptyDirs;
@@ -89,7 +87,6 @@ public class SettingsDialog extends JDialog {
     private JTextField tfBeetsMusicDir;
 
     // ── Onglet Tags ───────────────────────────────────────────────────────────
-    @SuppressWarnings("unchecked")
     private JComboBox<String> cmbId3Version;
     private JCheckBox  chkPreserveTimestamps;
     private JCheckBox  chkClearExistingTags;
@@ -144,7 +141,6 @@ public class SettingsDialog extends JDialog {
     private JList<String>            lstPostTagCommands;
 
     // ── Onglet Barre d'outils — actions secondaires personnalisables ────────────────
-    @SuppressWarnings("unchecked")
     private JComboBox<String>        cmbToolbarActionPicker;
     private DefaultListModel<String> lstToolbarActionsModel = new DefaultListModel<>();
     private JList<String>            lstToolbarActions;
@@ -156,7 +152,6 @@ public class SettingsDialog extends JDialog {
 
     // ── Onglet Transcodage ────────────────────────────────────────────────────
     private JCheckBox               chkTranscodeAuto;
-    @SuppressWarnings("unchecked")
     private JComboBox<String>       cmbTranscodeFormat;
     private JSpinner                spTranscodeBitrate;
     private JCheckBox               chkTranscodeDeleteSource;
@@ -171,7 +166,6 @@ public class SettingsDialog extends JDialog {
     // sa cible (confirmé en direct : zéro traduction réussie avec juste "fr" configuré, malgré des
     // dizaines d'artistes non-latins ayant un alias "en" exploitable). Repli automatique sur "en"
     // déjà en place côté MusicBrainzClient si aucune des langues listées ici ne donne de résultat.
-    @SuppressWarnings("unchecked")
     private JComboBox<String>        cmbTranslateLocalePicker;
     private DefaultListModel<String> lstTranslateLocalesModel = new DefaultListModel<>();
     private JList<String>            lstTranslateLocales;
@@ -190,7 +184,6 @@ public class SettingsDialog extends JDialog {
         {"zh", "Chinois"}, {"ar", "Arabe"}, {"tr", "Turc"},
     };
     private JCheckBox  chkPrioritizeIncomplete;
-    @SuppressWarnings("unchecked")
     private JComboBox<String>         cmbCountryPicker;
     private DefaultListModel<String>  lstCountriesModel = new DefaultListModel<>();
     private JList<String>             lstPreferredCountries;
@@ -225,7 +218,7 @@ public class SettingsDialog extends JDialog {
         };
         java.util.Locale display = "en".equals(I18n.lang()) ? java.util.Locale.ENGLISH : java.util.Locale.FRENCH;
         for (String code : codes) {
-            String name = new java.util.Locale("", code).getDisplayCountry(display);
+            String name = java.util.Locale.of("", code).getDisplayCountry(display);
             ISO_COUNTRIES.put(code, name.isBlank() ? code : name);
         }
         ISO_COUNTRIES.put("XW", I18n.t("Monde entier"));
@@ -246,7 +239,6 @@ public class SettingsDialog extends JDialog {
     // ── Onglet MusicBrainz OAuth ──────────────────────────────────────────────
     private JLabel     lblMbAccount;
     private JTextField tfMbCollectionId;
-    @SuppressWarnings("unchecked")
     private JComboBox<String> cmbMbOAuthMode;
     private JTextField     tfMbServer;
     private JTextField     tfMbAuthUser;
@@ -586,7 +578,6 @@ public class SettingsDialog extends JDialog {
             String     label  = I18n.t((String) rows[i][0]);
             JComponent field  = (JComponent) rows[i][1];
             String     url    = (String)     rows[i][2];
-            @SuppressWarnings("unchecked")
             java.util.function.Supplier<ApiKeyTester.Result> testFn =
                     (java.util.function.Supplier<ApiKeyTester.Result>) rows[i][3];
 
@@ -676,7 +667,6 @@ public class SettingsDialog extends JDialog {
         return btn;
     }
 
-    @SuppressWarnings("unchecked")
     private JPanel buildMatchingPanel() {
         spMinScore       = new JSpinner(new SpinnerNumberModel(90, 0, 100, 5));
         spMinScore.setToolTipText(I18n.t(
@@ -1179,7 +1169,6 @@ public class SettingsDialog extends JDialog {
         return wrap;
     }
 
-    @SuppressWarnings("unchecked")
     private JPanel buildTagsPanel() {
         cmbId3Version              = new JComboBox<>(new String[]{I18n.t("Garder version existante"), I18n.t("ID3v2.3 (compatible)"), I18n.t("ID3v2.4 (standard)")});
         cmbId3Version.setToolTipText(I18n.t(
@@ -1363,9 +1352,9 @@ public class SettingsDialog extends JDialog {
         // ── Portrait d'artiste (distinct de la pochette album, via FanArt.tv) ──────
         chkArtistPhoto = new JCheckBox(I18n.t("Sauvegarder un portrait de l'artiste"));
         chkArtistPhoto.setToolTipText(I18n.t(
-            "Désactivé par défaut. Nécessite une clé FanArt.tv (onglet APIs). Écrit un fichier à "
-            + "côté de la pochette, dans le dossier de l'album (pas remonté au dossier artiste, qui "
-            + "dépend du masque de renommage actif)."));
+            "Écrit artist.jpg dans le dossier de l'ARTISTE (là où Navidrome, Plex et Jellyfin le cherchent) quand "
+            + "la disposition est « Artiste/Album/piste » ; sinon dans le dossier de la piste. Sources : FanArt.tv "
+            + "(clé dans l'onglet APIs), Discogs, puis Deezer (sans clé)."));
         chkArtistPhotoOverwrite = new JCheckBox(I18n.t("Écraser le fichier si déjà existant"));
         chkArtistPhotoOverwrite.setToolTipText(I18n.t(
             "Sans cette option, un artist.jpg déjà présent n'est jamais remplacé — y compris s'il a"
@@ -1809,7 +1798,6 @@ public class SettingsDialog extends JDialog {
 
     /** Contenu de l'ancien onglet "Transcodage", maintenant empilé sous celui d'"Audio" (voir
      *  buildAudioPanel()) — plus un onglet séparé, juste une 2e carte dans le même onglet. */
-    @SuppressWarnings("unchecked")
     private JPanel buildTranscodeSection() {
         chkTranscodeAuto = new JCheckBox(I18n.t("Convertir automatiquement le format audio avant le taguage"));
         chkTranscodeAuto.setToolTipText(I18n.t(
@@ -2199,7 +2187,6 @@ public class SettingsDialog extends JDialog {
         for (String id : toolbarActionIds) lstToolbarActionsModel.addElement(labelForToolbarAction(id));
     }
 
-    @SuppressWarnings("unchecked")
     private JPanel buildToolbarPanel() {
         JLabel lblDesc = new JLabel(I18n.t(
             "<html>Boutons secondaires affichés dans la barre principale, en plus des boutons fixes<br>" +
@@ -2279,7 +2266,6 @@ public class SettingsDialog extends JDialog {
         return outer;
     }
 
-    @SuppressWarnings("unchecked")
     private JPanel buildMbOAuthPanel() {
         lblMbAccount     = new JLabel();
         cmbMbOAuthMode   = new JComboBox<>(new String[]{

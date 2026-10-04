@@ -169,6 +169,7 @@ public class FileRenamer {
 
         String chemin = evaluate(maskIndex, info);
         if (chemin.isBlank()) return null;
+        chemin = capPathLength(rootDir.toString(), chemin, ext, IS_WINDOWS);
 
         Path cible = rootDir.resolve(chemin + ext).normalize();
         if (cible.equals(fichier)) return null;
@@ -489,7 +490,49 @@ public class FileRenamer {
         // Second passage en octets UTF-8 : le cap en caractères ci-dessus ne suffit plus dès qu'un
         // segment est riche en caractères accentués (voir MAX_SEGMENT_BYTES) — sans effet sur le
         // cas courant déjà couvert par les 180 caractères.
-        return truncateToUtf8Bytes(cleaned, MAX_SEGMENT_BYTES);
+        return windowsSafeSegment(truncateToUtf8Bytes(cleaned, MAX_SEGMENT_BYTES));
+    }
+
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+
+    /** Windows limite un chemin complet à 260 caractères (MAX_PATH) : au-delà, déplacer/créer le fichier échoue. On
+     *  raccourcit le NOM DU FICHIER (dernier segment) pour rester sous 255, en gardant de la place pour « (nn) » et
+     *  l'extension. Sans effet hors Windows ou si le chemin tient déjà. */
+    static String capPathLength(String rootDir, String chemin, String ext, boolean windows) {
+        if (!windows) return chemin;
+        int budget = 255 - rootDir.length() - 1 - ext.length() - 6;
+        if (chemin.length() <= budget) return chemin;
+        int slash = chemin.lastIndexOf('/');
+        String dir = slash >= 0 ? chemin.substring(0, slash + 1) : "";
+        String file = chemin.substring(slash + 1);
+        int fileBudget = Math.max(12, budget - dir.length());
+        if (file.length() <= fileBudget) return chemin;
+        return dir + file.substring(0, fileBudget).trim();
+    }
+
+    private static final java.util.regex.Pattern WINDOWS_RESERVED =java.util.regex.Pattern.compile(
+            "(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\..*)?$");
+
+    /** Règles NTFS appliquées sur TOUS les systèmes (une bibliothèque se copie souvent vers/depuis Windows) :
+     *  caractères de contrôle supprimés ; point ou espace final retiré (Windows les supprime en silence, d'où des
+     *  dossiers « Album. » introuvables ou en double) ; nom réservé (CON, PRN, AUX, NUL, COM1-9, LPT1-9, avec ou sans
+     *  extension) préfixé d'un « _ ». Reste un nom valide partout. */
+    static String windowsSafeSegment(String s) {
+        // Sous Linux/macOS, comportement INCHANGÉ (un dossier « Dr. » ou « Con » y est valide, et renommer une
+        // bibliothèque existante n'aurait aucune raison d'être). Actif sous Windows, ou si la bibliothèque est
+        // partagée avec Windows et que « rename.windows_safe_names=true » est réglé.
+        if (!IS_WINDOWS && !Config.get().bool("rename.windows_safe_names", false)) return s == null ? "" : s;
+        return windowsSafeSegmentForce(s);
+    }
+
+    /** Applique toujours les règles NTFS (testable sur n'importe quel système). */
+    static String windowsSafeSegmentForce(String s) {
+        if (s == null) return "";
+        String t = s.replaceAll("[\\x00-\\x1F\\x7F]", "");
+        t = t.replaceAll("[. ]+$", "");
+        if (WINDOWS_RESERVED.matcher(t).matches()) t = "_" + t;
+        return t;
     }
 
     private String pad(String track) {
@@ -527,6 +570,12 @@ public class FileRenamer {
         if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
 
         synchronized (lockFor(cible)) {
+            // Fichier IDENTIQUE (même taille, mêmes octets) déjà présent à la destination : le déplacer créerait un
+            // doublon « nom (2) » — on ne touche à rien. L'appelant garde le chemin d'origine (retour null).
+            if (Files.isRegularFile(cible) && Files.isRegularFile(fichier)
+                    && Files.size(cible) == Files.size(fichier) && Files.mismatch(cible, fichier) == -1L) {
+                return null;
+            }
             if (Files.exists(cible)) {
                 int n = 2;
                 do {

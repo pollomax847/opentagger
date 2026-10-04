@@ -158,7 +158,8 @@ public class CdImportDialog extends JDialog {
     private void detect() {
         if (!CdRipper.isAvailable()) {
             JOptionPane.showMessageDialog(this,
-                    I18n.t("cdparanoia introuvable — installez le paquet « cdparanoia » pour lire des CD audio."),
+                    I18n.t("Lecture de CD impossible : PowerShell (Windows) ou Python 3 (Linux) est introuvable. "
+                         + "Sous Linux, installer « python3 » (ou « cdparanoia ») suffit."),
                     I18n.t("Outil manquant"), JOptionPane.ERROR_MESSAGE);
             return;
         }

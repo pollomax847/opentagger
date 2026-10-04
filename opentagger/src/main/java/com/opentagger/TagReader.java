@@ -67,7 +67,7 @@ public final class TagReader {
             ti.genre          = g(tag, FieldKey.GENRE);
             ti.discNo         = g(tag, FieldKey.DISC_NO);
             ti.discTotal      = g(tag, FieldKey.DISC_TOTAL);
-            ti.comment        = g(tag, FieldKey.COMMENT);
+            ti.comment        = comment(tag);
 
             // ── Tri ───────────────────────────────────────────────────────
             ti.titleSort      = g(tag, FieldKey.TITLE_SORT);
@@ -190,6 +190,29 @@ public final class TagReader {
     }
 
     /** getFirst avec protection NPE et chaîne vide par défaut. */
+    /** Commentaire RÉEL d'un fichier. Les MP3 passés par iTunes portent d'abord des cadres COMM techniques
+     *  ({@code iTunNORM} : « 00000000 00000210 0000093C… », {@code iTunSMPB}, {@code iTunPGAP}…) ; {@code getFirst(COMMENT)}
+     *  renvoyait celui-là, d'où un « commentaire » illisible dans l'appli pour tous ces fichiers. On prend le premier
+     *  cadre COMM dont la description n'est pas une valeur technique iTunes. */
+    static String comment(Tag tag) {
+        if (tag instanceof org.jaudiotagger.tag.id3.AbstractID3v2Tag id3) {
+            try {
+                // getFields(COMMENT) et non getFields("COMM") : en ID3v2.2 l'identifiant du cadre est « COM ».
+                for (org.jaudiotagger.tag.TagField f : id3.getFields(FieldKey.COMMENT)) {
+                    if (f instanceof org.jaudiotagger.tag.id3.AbstractID3v2Frame fr
+                            && fr.getBody() instanceof org.jaudiotagger.tag.id3.framebody.FrameBodyCOMM b) {
+                        String desc = b.getDescription() == null ? "" : b.getDescription();
+                        if (desc.regionMatches(true, 0, "iTun", 0, 4)) continue;   // iTunNORM, iTunSMPB, iTunPGAP, iTunes_CDDB_IDs…
+                        String text = b.getText();
+                        if (text != null && !text.isBlank()) return text;
+                    }
+                }
+                return "";
+            } catch (Exception ignored) { /* repli ci-dessous */ }
+        }
+        return g(tag, FieldKey.COMMENT);
+    }
+
     private static String g(Tag tag, FieldKey key) {
         try { String v = tag.getFirst(key); return v != null ? v : ""; }
         catch (Exception e) { return ""; }

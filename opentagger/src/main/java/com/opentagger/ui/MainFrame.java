@@ -25,15 +25,12 @@ import java.awt.datatransfer.DataFlavor;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 public class MainFrame extends JFrame {
 
@@ -853,13 +850,17 @@ public class MainFrame extends JFrame {
                         com.opentagger.model.TagInfo forPhoto = new com.opentagger.model.TagInfo();
                         forPhoto.artistMbid = current.artistMbid;
                         forPhoto.artist     = current.artist;
+                        forPhoto.albumArtist = current.albumArtist;
                         java.nio.file.Path photo = fanArt.downloadArtistPhoto(forPhoto, cache);
                         if (photo == null) photo = discogs.downloadArtistPhotoFallback(forPhoto, cache);
+                        if (photo == null) photo = new com.opentagger.DeezerClient().downloadArtistPhoto(forPhoto, cache);
                         if (photo != null) {
                             try {
                                 String fname = com.opentagger.Config.get().artistPhotoFilename();
                                 String ext = photo.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
-                                java.nio.file.Path dest = e.file.toPath().resolveSibling(fname + ext);
+                                java.nio.file.Path track = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath();
+                                java.nio.file.Path dest = com.opentagger.TagEnrichment.artistPhotoFolder(track, forPhoto)
+                                        .resolve(fname + ext);
                                 java.nio.file.Files.copy(photo, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                             } finally {
                                 try { java.nio.file.Files.deleteIfExists(photo); } catch (Exception ignored) {}
@@ -1291,6 +1292,7 @@ public class MainFrame extends JFrame {
         musicbrainz.add(mitem(I18n.t("Modifier sur MusicBrainz"),null,      e -> openMbEditPage()));
         musicbrainz.add(mitem(I18n.t("Contribuer à MusicBrainz…"), null,   e -> openMbContribute()));
         musicbrainz.add(mitem(I18n.t("Soumettre fingerprint AcoustID"), null, e -> submitAcoustId()));
+        musicbrainz.add(mitem(I18n.t("Miroir MusicBrainz local…"), null, e -> MusicBrainzMirrorDialog.open(this)));
         m.add(musicbrainz);
 
         m.addSeparator();
@@ -1604,7 +1606,6 @@ public class MainFrame extends JFrame {
         secondaryToolbarPanel.repaint();
     }
 
-    private JButton accentBtn(String text, String tip) { return accentBtn(text, tip, null); }
 
     // Icône sombre (même teinte que le texte #1E1F22) : les 4 boutons "header" sont tous sur le
     // fond sombre de la barre d'outils, celui-ci seul est sur fond teal plein — une icône claire y
@@ -1620,7 +1621,6 @@ public class MainFrame extends JFrame {
         return b;
     }
 
-    private JButton headerBtn(String text, String tip) { return headerBtn(text, tip, null); }
 
     private JButton headerBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
@@ -1655,7 +1655,6 @@ public class MainFrame extends JFrame {
      *  distinguer visuellement des 5 actions fixes (Ouvrir/Rafraîchir/Tout tagger/Tagger la
      *  sélection/Annuler), plutôt que d'avoir 8+ boutons de poids visuel identique dans la même
      *  rangée. */
-    private JButton secondaryBtn(String text, String tip) { return secondaryBtn(text, tip, null); }
 
     private JButton secondaryBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
@@ -1696,21 +1695,12 @@ public class MainFrame extends JFrame {
         return b;
     }
 
-    private JButton btn(String text, String tip) {
-        JButton b = new JButton(text);
-        b.setToolTipText(tip);
-        b.setFocusPainted(false);
-        return b;
-    }
-
     private JSeparator vSep() {
         JSeparator s = new JSeparator(JSeparator.VERTICAL);
         s.setPreferredSize(new Dimension(1, 22));
         s.setForeground(new Color(0x3A3B3E));
         return s;
     }
-
-    private Dimension dim(int w) { return new Dimension(w, 0); }
 
     // ── Bande de statistiques live ────────────────────────────────────────────
 
@@ -3482,13 +3472,12 @@ public class MainFrame extends JFrame {
         java.util.List<FileEntry> all = tableModel.allEntries();
         if (all.isEmpty()) return null;
         java.util.Map<String, long[]> byExt = new java.util.HashMap<>();
-        long total = 0;
         for (FileEntry e : all) {
             String n = e.filename();
             int dot = n.lastIndexOf('.');
             String ext = dot >= 0 ? n.substring(dot + 1).toLowerCase(java.util.Locale.ROOT) : "?";
             long[] a = byExt.computeIfAbsent(ext, k -> new long[2]);
-            a[0]++; a[1] += e.sizeBytes; total += e.sizeBytes;
+            a[0]++; a[1] += e.sizeBytes;
         }
         java.util.List<java.util.Map.Entry<String, long[]>> rows = new java.util.ArrayList<>(byExt.entrySet());
         rows.sort((x, y) -> Long.compare(y.getValue()[1], x.getValue()[1]));
@@ -3528,7 +3517,13 @@ public class MainFrame extends JFrame {
      */
     private JPanel buildLogPanel() {
         logModel = new DefaultListModel<>();
-        logList  = new JList<>(logModel);
+        // Hauteur de cellule FIXE + cellule « prototype » : sans elles, la JList remesure TOUTES les lignes (appel du moteur de rendu
+        // pour chacune) à chaque ajout — mesuré sur un journal plein (20 000 lignes) : 3,6 s de thread d'affichage par ligne ajoutée,
+        // contre 0 ms avec hauteur fixe. Recalculé quand le thème ou la police changent (updateUI).
+        logList  = new JList<>(logModel) {
+            @Override public void updateUI() { super.updateUI(); applyLogRowMetrics(this); }
+        };
+        applyLogRowMetrics(logList);
         logList.setVisibleRowCount(6);
         logList.setToolTipText(I18n.t("Double-clic : localiser dans le tableau — Ctrl+C : copier"));
         logList.setCellRenderer(new DefaultListCellRenderer() {
@@ -3540,10 +3535,10 @@ public class MainFrame extends JFrame {
                 c.setText("[" + e.time() + "] " + e.text());
                 if (!sel) {
                     Color fg = switch (e.status()) {
-                        case ERROR      -> new Color(230, 90, 90);
-                        case SKIPPED    -> new Color(210, 160, 40);
-                        case TAGGED     -> new Color(100, 200, 130);
-                        case IDENTIFIED -> new Color(85, 153, 255);
+                        case ERROR      -> LOG_ERROR;
+                        case SKIPPED    -> LOG_WARN;
+                        case TAGGED     -> LOG_OK;
+                        case IDENTIFIED -> LOG_INFO;
                         default         -> UIManager.getColor("List.foreground");
                     };
                     c.setForeground(fg);
@@ -3628,13 +3623,36 @@ public class MainFrame extends JFrame {
         return panel;
     }
 
+    // Couleurs du journal créées UNE fois (le moteur de rendu les réallouait à chaque cellule peinte).
+    private static final Color LOG_ERROR = new Color(230, 90, 90), LOG_WARN = new Color(210, 160, 40),
+                               LOG_OK = new Color(100, 200, 130), LOG_INFO = new Color(85, 153, 255);
+
+    private static void applyLogRowMetrics(JList<LogEntry> l) {
+        if (l.getFont() == null) return;
+        l.setFixedCellHeight(l.getFontMetrics(l.getFont()).getHeight() + 4);
+        l.setPrototypeCellValue(new LogEntry("00:00:00", "W".repeat(220), FileEntry.Status.PENDING, null));
+    }
+
+    /** Vrai si le journal est déjà défilé tout en bas (alors on le laisse suivre les nouvelles lignes). */
+    private boolean journalAtBottom() {
+        if (journalScroll == null) return true;
+        JScrollBar sb = journalScroll.getVerticalScrollBar();
+        return sb.getValue() + sb.getVisibleAmount() >= sb.getMaximum() - 4;
+    }
+
+    private void followJournalIfNeeded(boolean wasAtBottom) {
+        if (wasAtBottom && logModel.size() > 0) logList.ensureIndexIsVisible(logModel.size() - 1);
+    }
+
     /** Ajoute une ligne de séparation au début d'un run (taguage, re-taguage forcé, passe complète). */
     private void logRunStart(String label, int count) {
         LogEntry sep = new LogEntry(nowHms(), I18n.t("── %s : %d fichier(s) ──", label, count),
                 FileEntry.Status.PENDING, null);
+        final boolean follow = journalAtBottom();
         logHistory.add(sep);
-        if (trimLogHistoryIfNeeded()) return;
+        if (trimLogHistoryIfNeeded()) { followJournalIfNeeded(follow); return; }
         logModel.addElement(sep);
+        followJournalIfNeeded(follow);
     }
 
     /** Ajoute le résultat final d'un fichier (ignore les mises à jour PROCESSING transitoires). */
@@ -3699,10 +3717,13 @@ public class MainFrame extends JFrame {
      *  IDENTIFIED/SKIPPED/ERROR de l'identification musicale. */
     private void appendLogLine(String text, FileEntry.Status status, FileEntry entry) {
         LogEntry e = new LogEntry(nowHms(), text, status, entry);
+        final boolean follow = journalAtBottom();
         logHistory.add(e);
-        if (trimLogHistoryIfNeeded()) return;
-        if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
+        if (trimLogHistoryIfNeeded()) { followJournalIfNeeded(follow); return; }
+        if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR) {
             logModel.addElement(e);
+            followJournalIfNeeded(follow);
+        }
     }
 
     /** Ligne libre dans le Journal pour les opérations de fond (analyse, et à terme chaque ajout /
@@ -3714,10 +3735,11 @@ public class MainFrame extends JFrame {
     }
 
     private void rebuildLogModel() {
-        logModel.clear();
+        java.util.List<LogEntry> shown = new java.util.ArrayList<>(logHistory.size());
         for (LogEntry e : logHistory)
-            if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
-                logModel.addElement(e);
+            if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR) shown.add(e);
+        logModel.clear();
+        logModel.addAll(shown);   // un seul événement de modèle, pas un par ligne
     }
 
     /** Purge par lots les plus anciennes entrées au-delà de {@link #MAX_LOG_ENTRIES} (jamais une
@@ -4880,7 +4902,7 @@ public class MainFrame extends JFrame {
         for (String cmd : cmds) {
             if (cmd == null || cmd.isBlank()) continue;
             try {
-                new ProcessBuilder("sh", "-c", cmd)
+                com.opentagger.PostTagCommands.shell(cmd)
                         .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                         .redirectError(ProcessBuilder.Redirect.DISCARD)
                         .start();
@@ -6286,7 +6308,6 @@ public class MainFrame extends JFrame {
         com.opentagger.AudioTranscoder.Format fmt =
                 com.opentagger.AudioTranscoder.Format.fromId(cfg.transcodeFormat());
         int bitrate  = cfg.transcodeBitrate();
-        boolean del  = cfg.transcodeDeleteSource();
 
         String confirm = I18n.t(
             "<html>Transcoder <b>%d fichier(s)</b> → <b>%s</b>%s ?<br><br>" +
@@ -6299,7 +6320,6 @@ public class MainFrame extends JFrame {
                 I18n.t("Transcoder"), JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
         if (r != JOptionPane.OK_OPTION) return;
 
-        int[] done = {0};
         if (btnTranscode != null) btnTranscode.setEnabled(false);
         setStatus("⏳ " + I18n.t("Transcodage… 0 / %d", toTranscode.size()));
         beginProgress(ProgressSlot.TRANSCODE);
@@ -7764,15 +7784,6 @@ public class MainFrame extends JFrame {
                     if (KNOWN_AUDIO.stream().anyMatch(lower::endsWith)) return true;
                 }
                 return false;
-            }
-
-            boolean deleteRecursively(File dir) {
-                File[] children = dir.listFiles();
-                if (children != null) for (File c : children) {
-                    if (c.isDirectory()) { if (!deleteRecursively(c)) return false; }
-                    else if (!c.delete()) return false;
-                }
-                return dir.delete();
             }
         };
         WorkerHub.get().submit(WorkerHub.TaskKind.ORPHAN_CLEANUP,

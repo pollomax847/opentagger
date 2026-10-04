@@ -396,7 +396,7 @@ public class Config {
     // --- Portrait d'artiste --- opt-in, désactivé par défaut (même esprit que cover.save_to_file).
     // Sidecar dans le dossier ALBUM (pas le dossier artiste, qui varie selon le masque de
     // renommage actif — remonter d'un niveau serait fragile) — voir TagEnrichment.saveEntry().
-    public boolean artistPhotoEnabled()   { return bool("artist_photo.enabled",   false); }
+    public boolean artistPhotoEnabled()   { return bool("artist_photo.enabled",   true); }   // défaut activé (2026-10-04) : sans portrait, Navidrome/Plex n'affichent aucune image d'artiste
     public String  artistPhotoFilename()  { return str ("artist_photo.filename", "artist"); }
     // Désactivé par défaut, comme cover.overwrite_file : sans ça, un artist.jpg déjà écrit par une
     // identification erronée d'une piste précédente (mauvais artistMbid → mauvaise photo FanArt.tv)
