@@ -278,6 +278,28 @@ public class CdImportDialog extends JDialog {
      *  une requête base de données, juste un parcours en mémoire (déjà rapide même sur 200k+
      *  entrées, aucune E/S). Suffisant pour avertir "tu as peut-être déjà ça", pas une garantie
      *  absolue — l'utilisateur tranche via la confirmation avant extraction. */
+    /** Fichiers de la bibliothèque qui sont CETTE piste : même titre (et même artiste s'il est connu), ou même album et même
+     *  numéro de piste. Plus strict que {@link #isAlreadyInLibrary} (qui s'arrête à « même album ») : sert à choisir ce qu'on
+     *  remplace, jamais plus que la piste extraite. */
+    private List<FileEntry> libraryMatchesForTrack(String artist, String album, String title, int trackNo) {
+        List<FileEntry> out = new ArrayList<>();
+        for (FileEntry fe : owner.allEntries()) {
+            var t = fe.activeTags();
+            if (t == null) continue;
+            boolean sameTitle = !title.isBlank() && title.equalsIgnoreCase(t.title)
+                    && (artist.isBlank() || artist.equalsIgnoreCase(t.artist));
+            boolean sameSlot = !album.isBlank() && album.equalsIgnoreCase(t.album) && trackNumber(t.track) == trackNo;
+            if (sameTitle || sameSlot) out.add(fe);
+        }
+        return out;
+    }
+
+    private static int trackNumber(String s) {
+        if (s == null) return -1;
+        String digits = s.trim().split("[/\\s]")[0];
+        try { return Integer.parseInt(digits); } catch (NumberFormatException e) { return -1; }
+    }
+
     private boolean isAlreadyInLibrary(String artist, String album, String title) {
         if (album.isBlank() && title.isBlank()) return false;
         for (FileEntry fe : owner.allEntries()) {
@@ -368,28 +390,45 @@ public class CdImportDialog extends JDialog {
             JOptionPane.showMessageDialog(this, I18n.t("Aucune piste cochée."));
             return;
         }
+        // Pistes de la bibliothèque à mettre à la corbeille APRÈS extraction réussie de leur remplaçante (choix « Écraser »).
+        java.util.Map<Integer, List<FileEntry>> toReplace = new java.util.HashMap<>();
         if (!dupTracks.isEmpty()) {
-            // L'extraction va toujours dans un dossier de travail à part : rien de la bibliothèque n'est jamais écrasé. Le choix
-            // porte donc seulement sur les pistes déjà présentes : les ignorer (défaut) ou les extraire quand même.
-            String skip = I18n.t("Ignorer les pistes déjà présentes");
-            String all  = I18n.t("Extraire quand même");
+            // Écraser n'est proposé que si le disque est reconnu EXACTEMENT (Disc ID) : sur un nom approximatif, un mauvais
+            // album pourrait désigner de vrais fichiers. L'ancien fichier part à la corbeille (récupérable), jamais supprimé.
+            String replace = I18n.t("Écraser");
+            String skip = I18n.t("Non, ignorer ces pistes");
+            String both = I18n.t("Garder les deux");
             String cancel = I18n.t("Annuler");
-            int choice = JOptionPane.showOptionDialog(this,
-                    I18n.t("%d piste(s) cochée(s) sur %d semblent déjà présentes dans la bibliothèque.\n"
-                         + "L'extraction se fait dans un dossier à part : aucun fichier existant n'est écrasé.",
-                            dupTracks.size(), selected.size()),
-                    I18n.t("Doublons détectés"), JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null,
-                    new Object[]{skip, all, cancel}, skip);
-            if (choice == 0) {
+            Object[] options = exactMatch ? new Object[]{replace, skip, both, cancel} : new Object[]{skip, both, cancel};
+            int picked = JOptionPane.showOptionDialog(this,
+                    I18n.t("%d piste(s) cochée(s) sur %d sont déjà dans la bibliothèque.\n%s",
+                            dupTracks.size(), selected.size(),
+                            exactMatch
+                                ? I18n.t("Écraser : l'ancien fichier va à la corbeille une fois la piste du CD extraite.")
+                                : I18n.t("Disque reconnu de façon approximative : « Écraser » n'est pas proposé.")),
+                    I18n.t("Déjà dans la bibliothèque"), JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null,
+                    options, options[0]);
+            if (picked < 0) return; // fenêtre fermée
+            String choice = (String) options[picked];
+            if (choice.equals(cancel)) return;
+            if (choice.equals(skip)) {
                 selected.removeAll(dupTracks);
                 if (selected.isEmpty()) {
                     JOptionPane.showMessageDialog(this, I18n.t("Toutes les pistes cochées sont déjà présentes : rien à extraire."));
                     return;
                 }
-            } else if (choice != 1) {
-                return; // Annuler ou fenêtre fermée
+            } else if (choice.equals(replace)) {
+                for (int trackNo : dupTracks) {
+                    String title = String.valueOf(trackTableModel.getValueAt(rowByTrackNo.get(trackNo), 2));
+                    String artist = "";
+                    if (identified != null) for (var rt : identified.tracks()) if (rt.trackNo() == trackNo) { artist = rt.artist(); break; }
+                    List<FileEntry> m = libraryMatchesForTrack(artist, identified == null ? "" : identified.album(), title, trackNo);
+                    if (!m.isEmpty()) toReplace.put(trackNo, m);
+                }
             }
         }
+        final java.util.Set<FileEntry> trashed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        final java.util.concurrent.atomic.AtomicInteger trashFailed = new java.util.concurrent.atomic.AtomicInteger();
 
         AudioTranscoder.Format format = (AudioTranscoder.Format) cbFormat.getSelectedItem();
         int bitrate = Config.get().num("transcode.bitrate_kbps", 320);
@@ -423,6 +462,12 @@ public class CdImportDialog extends JDialog {
                         // la source avant que le fichier produit soit confirmé non vide).
                         try { transcoder.transcode(wav, format, bitrate, true); }
                         catch (Exception ex) { /* garde le WAV si la conversion échoue — jamais rien perdre */ }
+                        // « Écraser » : la nouvelle piste existe (extraction réussie), l'ancienne va maintenant à la corbeille.
+                        // Jamais avant : si l'extraction échoue, la bibliothèque reste intacte.
+                        for (FileEntry old : toReplace.getOrDefault(trackNo, List.of())) {
+                            if (com.opentagger.TrashHelper.moveToTrash(old.file)) trashed.add(old);
+                            else trashFailed.incrementAndGet();
+                        }
                         ok++;
                         doneCount++;
                         publish(new RipProgress(row, I18n.t("✔ Extrait"), doneCount));
@@ -448,6 +493,11 @@ public class CdImportDialog extends JDialog {
                 int[] r;
                 try { r = get(); } catch (Exception ex) { r = new int[]{0, selected.size()}; }
                 lblStatus.setText(I18n.t("%d piste(s) extraite(s), %d échec(s).", r[0], r[1]));
+                if (!trashed.isEmpty()) {
+                    owner.removeFromList(trashed); // retirées de la liste : leurs fichiers sont à la corbeille
+                    lblStatus.setText(lblStatus.getText() + " " + I18n.t("%d ancien(s) fichier(s) mis à la corbeille.", trashed.size())
+                            + (trashFailed.get() > 0 ? " " + I18n.t("%d non remplacé(s) (corbeille impossible).", trashFailed.get()) : ""));
+                }
                 lblProgress.setText(" ");
                 progressBar.setVisible(false);
                 btnExtract.setEnabled(true);

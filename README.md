@@ -169,7 +169,7 @@ cd opentagger
 mvn package -DskipTests
 :: placer opentagger.jar dans un dossier "in", et ffmpeg.exe, ffprobe.exe (+ leurs DLL, build "shared"),
 :: AtomicParsley.exe et fpcalc.exe dans un dossier "tools"
-jpackage --type exe --name OpenTagger --app-version 0.9.29 --input in --main-jar opentagger.jar ^
+jpackage --type exe --name OpenTagger --app-version 0.9.30 --input in --main-jar opentagger.jar ^
   --icon logo.ico --app-content tools\ffmpeg.exe,tools\ffprobe.exe,tools\AtomicParsley.exe,tools\fpcalc.exe,tools\avcodec-63.dll,... ^
   --win-menu --win-menu-group OpenTagger --win-shortcut --win-dir-chooser --win-per-user-install --dest dist
 ```

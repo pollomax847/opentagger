@@ -67,6 +67,9 @@ public class MainFrame extends JFrame {
     /** Accès en lecture seule à la table chargée — utilisé par SettingsDialog pour la détection
      *  automatique de séries de compilations (2026-08-17). */
     public List<FileEntry> allEntries() { return tableModel.allEntries(); }
+
+    /** Retire ces fichiers de la liste affichée (sans toucher au disque) — à appeler sur l'EDT. */
+    public void removeFromList(java.util.Set<FileEntry> toRemove) { tableModel.removeEntries(toRemove); }
     private int                     currentMask = Config.get().defaultRenameMask();
     // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
     // onPreferencesSaved() d'écraser ce choix par le masque par défaut des Préférences.
