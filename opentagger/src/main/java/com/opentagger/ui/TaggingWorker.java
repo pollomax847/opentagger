@@ -2601,6 +2601,86 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return best != null && bc >= 3 && bc * 10 >= total * 6 ? best : null;
     }
 
+    /** Noms d'album qui ne désignent aucun album précis (valeurs de remplissage) : jamais une base de regroupement.
+     *  {@code normalized} est déjà passé par {@link AlbumMatcher#norm}. Un « Album inconnu (date heure) » propre à une session
+     *  d'extraction, lui, est un vrai regroupement : la date l'individualise. */
+    static boolean isGenericAlbumName(String normalized) {
+        return java.util.Set.of("unknown album", "album inconnu", "unbekanntes album", "unbekannter album", "audios", "audio", "sans titre",
+                "untitled", "no album", "none", "singles", "single", "musique", "music", "divers", "various", "compilation",
+                "greatest hits", "best of", "hits").contains(normalized);
+    }
+
+    /** L'ALBUM (la release) de ce fichier est-il déjà prouvé, donc à ne pas changer ? Oui pour une identification par TOC (le disque
+     *  entier), ou si le fichier porte déjà l'identifiant de sa release. Un simple identifiant d'ENREGISTREMENT prouve la chanson, pas
+     *  l'album : elle figure sur des dizaines de parutions, et l'album choisi à partir de lui n'est qu'une préférence. */
+    static boolean releaseIsProven(String identificationSource, TagInfo currentTags) {
+        if (MetadataCache.SOURCE_DISCID.equals(identificationSource)) return true;
+        if (!MetadataCache.SOURCE_MBID.equals(identificationSource)) return false;
+        return currentTags != null && currentTags.releaseMbid != null && !currentTags.releaseMbid.isBlank();
+    }
+
+    /** Valeur la plus fréquente parmi des textes non vides ({@code ""} si aucun). */
+    static String mostCommon(List<String> values) {
+        java.util.Map<String, Integer> n = new java.util.LinkedHashMap<>();
+        for (String v : values) if (v != null && !v.isBlank()) n.merge(v.trim(), 1, Integer::sum);
+        String best = ""; int bc = 0;
+        for (var e : n.entrySet()) if (e.getValue() > bc) { best = e.getKey(); bc = e.getValue(); }
+        return best;
+    }
+
+    private static int intOrZero(String s) {
+        if (s == null) return 0;
+        String d = s.trim().split("[/\\s]")[0];
+        try { return Integer.parseInt(d); } catch (NumberFormatException e) { return 0; }
+    }
+
+    /** Cherche, parmi les releases déjà trouvées pour les fichiers d'un dossier, celle qui explique TOUS les fichiers (copies
+     *  comprises) et y rattache ceux qui sont ailleurs. Les identifications prouvées par TOC ou par MBID déjà connu ne sont pas
+     *  touchées.
+     *  @return {@code true} si une telle release existe (le dossier est traité), {@code false} pour laisser l'ancien vote faire */
+    private boolean harmonizeByFullMatch(List<FileEntry> group) {
+        java.util.Set<String> mbids = new java.util.LinkedHashSet<>();
+        for (FileEntry e : group) if (e.result.releaseMbid != null && !e.result.releaseMbid.isBlank()) mbids.add(e.result.releaseMbid);
+        if (mbids.isEmpty()) return false;
+        List<MusicBrainzClient.ReleaseTracklist> candidates = new java.util.ArrayList<>();
+        for (String id : mbids) {
+            MusicBrainzClient.ReleaseTracklist tl = pinnedTracklistCache.computeIfAbsent(id, mbid -> {
+                try { return mb.lookupRelease(mbid); } catch (Exception ex) { return null; }
+            });
+            if (tl != null) candidates.add(tl);
+        }
+        if (candidates.isEmpty()) return false;
+
+        List<AlbumMatcher.Item> items = new java.util.ArrayList<>();
+        java.util.Map<String, FileEntry> byId = new java.util.HashMap<>();
+        for (FileEntry e : group) {
+            String id = e.file.getPath();
+            TagInfo t = e.result, cur = e.current;
+            items.add(new AlbumMatcher.Item(id, t.title, t.artist, cur != null ? cur.durationSec : 0,
+                    cur != null ? intOrZero(cur.track) : 0, cur != null ? intOrZero(cur.discNo) : 0, t.recordingMbid));
+            byId.put(id, e);
+        }
+        String albumHint = mostCommon(group.stream().map(e -> e.current != null ? e.current.album : "").toList());
+        String yearHint = mostCommon(group.stream().map(e -> e.current != null ? e.current.year : "").toList());
+
+        AlbumMatcher.Match m = AlbumMatcher.best(items, candidates, albumHint, yearHint);
+        if (m == null) return false;
+
+        MusicBrainzClient.ReleaseTracklist tl = m.release();
+        for (var en : m.trackByItemId().entrySet()) {
+            FileEntry e = byId.get(en.getKey());
+            TagInfo t = e.result;
+            if (tl.releaseMbid().equals(t.releaseMbid)) continue;
+            if (releaseIsProven(t.identificationSource, e.current)) continue;
+            String before = t.album;
+            applyTrackOfRelease(t, tl, en.getValue());
+            log(I18n.t("  Album entier → %s : « %s » → « %s » (la release explique les %d morceaux du dossier)",
+                    e.filename(), before, tl.album(), m.slots()));
+            publish(e);
+        }
+        return true;
+    }
+
     /** Rattache à la release dominante de leur dossier les pistes identifiées ailleurs, MAIS seulement si le même morceau
      *  figure sur cette release (même enregistrement, ou même titre à durée compatible) — jamais d'invention. Les
      *  identifications prouvées par TOC ou par MBID déjà connu ne sont pas touchées. */
@@ -2614,8 +2694,24 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (DISC_FOLDER_PATTERN.matcher(dir.getName()).find() && dir.getParentFile() != null) dir = dir.getParentFile();
             byDir.computeIfAbsent(dir.getPath(), k -> new java.util.ArrayList<>()).add(e);
         }
+        // Fichiers qui partagent le MÊME ALBUM dans leurs tags, même rangés dans des dossiers différents (un CD extrait dont chaque
+        // titre est parti dans le dossier de son artiste) : traités plus bas comme un dossier, si une release les explique tous.
+        java.util.Map<String, List<FileEntry>> byAlbumTag = new java.util.LinkedHashMap<>();
+        if (Config.get().bool("matching.album_first", true)) {
+            for (FileEntry e : queue) {
+                if (e.status != FileEntry.Status.IDENTIFIED || e.result == null || e.current == null) continue;
+                String key = AlbumMatcher.norm(e.current.album);
+                if (key.isEmpty() || isGenericAlbumName(key)) continue;
+                byAlbumTag.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(e);
+            }
+        }
+        for (List<FileEntry> group : byAlbumTag.values()) {
+            if (group.size() >= 3) harmonizeByFullMatch(group);
+        }
         for (List<FileEntry> group : byDir.values()) {
             if (group.size() < 3) continue;
+            // Nouveau moteur : la release qui explique TOUS les fichiers du dossier (voir AlbumMatcher). Sans elle, l'ancien vote.
+            if (Config.get().bool("matching.album_first", true) && harmonizeByFullMatch(group)) continue;
             String r = dominantRelease(group.stream().map(e -> e.result.releaseMbid).toList());
             if (r == null) continue;
             MusicBrainzClient.ReleaseTracklist tl = pinnedTracklistCache.computeIfAbsent(r, mbid -> {
