@@ -229,7 +229,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         // ── 2. Pour chaque release (en parallèle), récupérer la tracklist et compléter
         MetadataCache cache = new MetadataCache();
         try {
-            int threads = Math.max(1, com.opentagger.Config.get().num("batch.threads", 3));
+            int threads = Math.max(1, com.opentagger.Config.get().batchThreads());
             pool = Executors.newFixedThreadPool(threads);
             List<Future<?>> futures = new ArrayList<>();
 

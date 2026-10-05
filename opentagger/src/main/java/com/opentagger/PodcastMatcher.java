@@ -28,7 +28,7 @@ public class PodcastMatcher {
         // openPodcastDialog()) réduit déjà l'ensemble, mais un ensemble encore large reste possible
         // (scan en cours sur 2 To) — la parallélisation reste nécessaire dans tous les cas.
         Map<FileEntry, Integer> fileDurations = new java.util.concurrent.ConcurrentHashMap<>();
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().batchThreads());
         java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
         try {
             List<java.util.concurrent.Future<?>> futures = new ArrayList<>();

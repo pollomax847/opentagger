@@ -251,7 +251,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // qui garantit que compilationFolderKeys est visible, déjà rempli, de chaque thread du pool.
         precomputeCompilationFolders(entries);
 
-        int threads = Math.max(1, Config.get().num("batch.threads", 6));
+        int threads = Math.max(1, Config.get().batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
         int startIdx = done.get();

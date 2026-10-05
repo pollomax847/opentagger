@@ -79,7 +79,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
         AtomicInteger done = new AtomicInteger(), skipped = new AtomicInteger(), errors = new AtomicInteger();
         int total = entries.size();
 
-        int threads = Math.max(1, cfg.num("batch.threads", 3));
+        int threads = Math.max(1, cfg.batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 

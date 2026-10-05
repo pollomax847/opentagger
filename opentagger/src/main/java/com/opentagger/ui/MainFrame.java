@@ -485,6 +485,7 @@ public class MainFrame extends JFrame {
             if (!e.getValueIsAdjusting()) refreshDetail();
         });
 
+        autoInstallFpcalcIfMissing();
         // Vue (liste/arborescence/Cover Flow) choisie à la dernière session — après
         // buildMainSplit() (table/coverFlowPanel doivent exister) ; ViewMode.FLAT (déjà la valeur
         // par défaut du champ) si jamais enregistré.
@@ -748,7 +749,7 @@ public class MainFrame extends JFrame {
             final java.util.concurrent.atomic.AtomicInteger done = new java.util.concurrent.atomic.AtomicInteger();
 
             @Override protected Void doInBackground() throws Exception {
-                int threads = Math.max(1, com.opentagger.Config.get().num("batch.threads", 3));
+                int threads = Math.max(1, com.opentagger.Config.get().batchThreads());
                 java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
                 java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
 
@@ -996,6 +997,24 @@ public class MainFrame extends JFrame {
             super.doClick(pressTime);
             MenuSelectionManager.defaultManager().setSelectedPath(path);
         }
+    }
+
+    /** fpcalc (empreinte AudioID pour AcoustID) est livré avec l'installateur ; s'il manque quand même (copie portable, Linux),
+     *  on le télécharge une fois en arrière-plan plutôt que de laisser AcoustID silencieusement inactif. Coupable via
+     *  {@code acoustid.auto_install_fpcalc=false}. */
+    private void autoInstallFpcalcIfMissing() {
+        if (!Config.get().bool("acoustid.auto_install_fpcalc", true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                if (com.opentagger.FpcalcInstaller.isAvailable()) return;
+                String path = com.opentagger.FpcalcInstaller.download(msg -> {});
+                SwingUtilities.invokeLater(() -> setStatus(I18n.t("fpcalc installé automatiquement : %s", path)));
+            } catch (Exception ex) {
+                System.out.println("[OT] fpcalc : installation automatique impossible — " + ex.getMessage());
+            }
+        }, "fpcalc-auto-install");
+        t.setDaemon(true);
+        t.start();
     }
 
     // ── Niveau d'automatisation (Manuel / Assisté / Automatique) ────────────────────────────────────────────────────
@@ -5696,7 +5715,7 @@ public class MainFrame extends JFrame {
         new SwingWorker<Void, FileEntry>() {
             private final java.util.concurrent.atomic.AtomicInteger doneCount = new java.util.concurrent.atomic.AtomicInteger();
             @Override protected Void doInBackground() {
-                int threads = Math.max(1, Config.get().num("batch.threads", 3));
+                int threads = Math.max(1, Config.get().batchThreads());
                 java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
                 java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
                         new java.util.concurrent.LinkedBlockingQueue<>();

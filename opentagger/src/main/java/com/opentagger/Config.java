@@ -355,7 +355,16 @@ public class Config {
     // uniquement quand acoustid.ignore_existing est FAUX (sinon l'empreinte est de toute façon recalculée).
     // Rapide, mais l'audio réel n'est plus re-vérifié : l'identifiant du tag est cru sur parole. Désactivé.
     public boolean acoustidLookupByTrackId()      { return bool("acoustid.lookup_by_track_id", false); }
-    public int     fpcalcThreads()                { return num ("acoustid.fpcalc_threads",    2); }
+    /** Fichiers traités en parallèle. 0 ou absent = automatique (selon les cœurs du processeur, entre 2 et 8). */
+    public int     batchThreads() {
+        int n = num("batch.threads", 0);
+        return n > 0 ? n : Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+    }
+    /** Processus fpcalc simultanés. 0 ou absent = automatique (la moitié des cœurs, entre 1 et 4). */
+    public int     fpcalcThreads() {
+        int n = num("acoustid.fpcalc_threads", 0);
+        return n > 0 ? n : Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
+    }
 
     // --- Métadonnées ---
     public String  vaName()                 { return str("metadata.va_name",              "Various Artists"); }

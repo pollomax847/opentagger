@@ -105,7 +105,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     protected Void doInBackground() throws Exception {
         int total = entries.size();
 
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
 

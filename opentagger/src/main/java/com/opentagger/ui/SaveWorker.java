@@ -102,7 +102,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     @Override
     protected Void doInBackground() throws Exception {
         int total = entries.size();
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 

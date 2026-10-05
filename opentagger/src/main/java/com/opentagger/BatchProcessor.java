@@ -78,7 +78,7 @@ public class BatchProcessor {
         // MusicBrainzClient.getWithRetry()) borne de toute façon le débit réel des requêtes MB
         // quel que soit le nombre de threads ; au-delà de 3, le gain vient surtout des étapes non-MB
         // (BPM, paroles, empreinte, écriture disque) qui peuvent, elles, tourner en parallèle.
-        int threads = Config.get().num("batch.threads", 6);
+        int threads = Config.get().batchThreads();
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 

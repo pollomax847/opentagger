@@ -720,6 +720,10 @@ public class SettingsDialog extends JDialog {
         skipSongRecScorePanel.add(new JLabel(I18n.t("Score MB minimum pour sauter SongRec :")));
         skipSongRecScorePanel.add(spnSkipSongRecMinScore);
         skipSongRecScorePanel.add(new JLabel("%"));
+        // SongRec n'existe pas sous Windows (et peut manquer sous Linux) : sans lui, ces réglages ne servent à rien — masqués.
+        boolean songRecPresent = com.opentagger.SongRecClient.isAvailable();
+        chkSkipSongRecOnConfidentMb.setVisible(songRecPresent);
+        skipSongRecScorePanel.setVisible(songRecPresent);
 
         cmbDiscogsGenreSource = new JComboBox<>(new String[]{
             I18n.t("Style puis Genre"), I18n.t("Genre puis Style"), I18n.t("Genre uniquement")});
@@ -1216,8 +1220,8 @@ public class SettingsDialog extends JDialog {
             + "(lookup par track ID, comme SongKong) au lieu de renoncer — rapide, sans fpcalc. Ne re-vérifie "
             + "PAS l'audio : l'identifiant du tag est cru sur parole. Sans effet si la case ci-dessus "
             + "(toujours recalculer l'empreinte) est cochée."));
-        spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(2, 1, 8, 1));
-        spBatchThreads             = new JSpinner(new SpinnerNumberModel(6, 1, 16, 1));
+        spFpcalcThreads            = new JSpinner(new SpinnerNumberModel(0, 0, 8, 1));
+        spBatchThreads             = new JSpinner(new SpinnerNumberModel(0, 0, 16, 1));
         spBatchThreads.setToolTipText(I18n.t("Fichiers traités en parallèle pendant le taguage (GUI et CLI/--dossier). "
                 + "Le rate-limit MusicBrainz (1 requête/s) reste respecté quel que soit ce réglage — "
                 + "augmenter aide surtout les étapes non-MB (BPM, paroles, écriture disque)."));
@@ -1273,8 +1277,8 @@ public class SettingsDialog extends JDialog {
             { new JLabel(""), chkSaveAcoustidFingerprints },
             { new JLabel(""), chkIgnoreExistingFingerprints },
             { new JLabel(""), chkAcoustidLookupByTrackId },
-            { new JLabel(I18n.t("Threads fpcalc :")), spFpcalcThreads },
-            { new JLabel(I18n.t("Threads de taguage :")), spBatchThreads },
+            { new JLabel(I18n.t("Threads fpcalc (0 = auto) :")), spFpcalcThreads },
+            { new JLabel(I18n.t("Threads de taguage (0 = auto) :")), spBatchThreads },
             { new JLabel(""), batchThreadsHint },
         };
         for (int i = 0; i < fpRows.length; i++) {
@@ -1731,6 +1735,7 @@ public class SettingsDialog extends JDialog {
         GridBagConstraints src = new GridBagConstraints();
         src.gridx = 0; src.gridy = rows.length; src.gridwidth = 3;
         src.anchor = GridBagConstraints.WEST; src.insets = new Insets(4, 8, 2, 8);
+        songrecRow.setVisible(com.opentagger.SongRecClient.isAvailable());
         inner.add(songrecRow, src);
 
         JPanel audioSection = new JPanel(new BorderLayout(0, 4));
@@ -2493,8 +2498,8 @@ public class SettingsDialog extends JDialog {
         chkSaveAcoustidFingerprints.setSelected(cfg.saveAcoustidFingerprints());
         chkIgnoreExistingFingerprints.setSelected(cfg.ignoreExistingFingerprints());
         chkAcoustidLookupByTrackId.setSelected(cfg.acoustidLookupByTrackId());
-        spFpcalcThreads           .setValue(cfg.fpcalcThreads());
-        spBatchThreads            .setValue(cfg.num("batch.threads", 6));
+        spFpcalcThreads           .setValue(cfg.num("acoustid.fpcalc_threads", 0));
+        spBatchThreads            .setValue(cfg.num("batch.threads", 0));
 
         tfMbServer      .setText(cfg.mbServer());
         tfMbAuthUser    .setText(cfg.mbAuthUser());
