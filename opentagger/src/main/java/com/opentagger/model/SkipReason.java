@@ -10,5 +10,7 @@ public enum SkipReason {
     // élevé (92, 100...), le problème n'est pas la confiance de CE match mais son incohérence avec
     // le reste du groupe (2026-09-19, correctif du plafonnage de score qui ne bloquait en réalité
     // rien — voir son commentaire d'appel).
-    GROUP_MISMATCH
+    GROUP_MISMATCH,
+    // Non reconnu comme musique ET ressemble à un épisode de podcast (voir PodcastDetector) : à confirmer dans « Tagger comme podcast… ».
+    PODCAST_PROBABLE
 }

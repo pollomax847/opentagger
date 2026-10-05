@@ -513,6 +513,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 entry.status     = FileEntry.Status.SKIPPED;
                 entry.skipReason = com.opentagger.model.SkipReason.NOT_IDENTIFIED;
                 entry.message = I18n.t("Non identifié") + videoHintIfAny(fichier);
+                // Un épisode de podcast n'a aucune raison d'être reconnu comme musique : on le signale au lieu de le laisser « non identifié ».
+                if (Config.get().bool("podcast.suggest", true)) {
+                    TagInfo cur = entry.current;
+                    java.io.File parent = fichier.getParentFile();
+                    PodcastDetector.Verdict v = PodcastDetector.assess(
+                            cur != null ? cur.genre : "", cur != null ? cur.podcastUrl : "",
+                            cur != null ? cur.podcastSeason : "", cur != null ? cur.podcastEpisode : "",
+                            cur != null ? cur.durationSec : 0, fichier.getName(), parent != null ? parent.getName() : "");
+                    if (v.probable()) {
+                        entry.skipReason = com.opentagger.model.SkipReason.PODCAST_PROBABLE;
+                        entry.message = I18n.t("Podcast probable (%s) — « Tagger comme podcast… »", String.join(", ", v.reasons()));
+                        log(I18n.t("  SKIPPED (podcast probable : %s)", String.join(", ", v.reasons())));
+                        return;
+                    }
+                }
                 log(I18n.t("  SKIPPED (non identifié)"));
                 return;
             }
