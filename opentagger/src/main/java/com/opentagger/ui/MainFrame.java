@@ -1286,7 +1286,6 @@ public class MainFrame extends JFrame {
         retraitement.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
         retraitement.add(mitem(I18n.t("Ré-identifier par empreinte audio (Non identifiés)…"), null, e -> reidentifyUnmatched()));
         retraitement.add(mitem(I18n.t("Essayer Bandcamp (Non identifiés)…"), null, e -> tryBandcampOnUnmatched()));
-        retraitement.add(mitem(I18n.t("Corriger l'encodage des tags…"), null, e -> fixEncoding()));
         retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNames()));
         retraitement.add(mitem(I18n.t("Synchroniser les compteurs d'écoute (ListenBrainz + Last.fm)…"), null, e -> syncPlayCounts()));
         m.add(retraitement);
@@ -5412,88 +5411,6 @@ public class MainFrame extends JFrame {
             tableModel.update(e);
         }
         launchForcedTagging(targets, true, true);
-    }
-
-    /**
-     * Détecte et propose de corriger un encodage cassé (mojibake — voir {@link
-     * com.opentagger.EncodingFixer}) sur titre/artiste/artiste album/album/commentaire — un texte
-     * UTF-8 écrit par un autre outil puis relu en Latin-1 par celui-ci ou un précédent, typique sur
-     * une bibliothèque agrégée de sources hétérogènes. Lit le tag RÉEL sur disque (comme
-     * {@link #forceRetag}), indépendamment du statut/résultat déjà en mémoire — s'applique aussi
-     * bien à des fichiers déjà TAGGED qu'à d'autres. Aucune écriture avant confirmation explicite
-     * dans {@link EncodingFixReviewDialog}.
-     */
-    private void fixEncoding() {
-        if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
-            setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
-            return;
-        }
-        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
-        if (!blockers.isEmpty()) {
-            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de corriger l'encodage.",
-                    String.join(", ", blockers)));
-            return;
-        }
-        int[] sel = table != null ? table.getSelectedRows() : new int[0];
-        List<FileEntry> targets = new ArrayList<>();
-        if (sel.length > 0) {
-            // entriesAtViewRow() — même correctif que forceRetag()/startTagging() (voir leur
-            // commentaire), sinon un en-tête de groupe en vue arborescence casse tout.
-            java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
-            for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
-            targets.addAll(targetSet);
-        } else {
-            targets.addAll(tableModel.allEntries());
-        }
-        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier à analyser.")); return; }
-
-        setStatus(I18n.t("Recherche d'encodage cassé sur %d fichier(s)…", targets.size()));
-        btnTagAll.setEnabled(false);
-        new SwingWorker<List<EncodingFixReviewDialog.Candidate>, Void>() {
-            @Override protected List<EncodingFixReviewDialog.Candidate> doInBackground() {
-                List<EncodingFixReviewDialog.Candidate> found = new ArrayList<>();
-                for (FileEntry e : targets) {
-                    if (isCancelled()) break;
-                    File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    if (!fichier.exists()) continue;
-                    TagInfo before;
-                    try { before = readTags(fichier); } catch (Exception ex) { continue; }
-                    TagInfo after = before.copy();
-                    boolean changed = fixTextField(() -> after.title,       v -> after.title = v);
-                    changed = fixTextField(() -> after.artist,      v -> after.artist = v)      || changed;
-                    changed = fixTextField(() -> after.albumArtist, v -> after.albumArtist = v) || changed;
-                    changed = fixTextField(() -> after.album,       v -> after.album = v)       || changed;
-                    changed = fixTextField(() -> after.comment,     v -> after.comment = v)     || changed;
-                    if (changed) found.add(new EncodingFixReviewDialog.Candidate(fichier, e, before, after));
-                }
-                return found;
-            }
-            @Override protected void done() {
-                btnTagAll.setEnabled(true);
-                List<EncodingFixReviewDialog.Candidate> found;
-                try { found = get(); } catch (Exception ex) { found = List.of(); }
-                if (found.isEmpty()) {
-                    setStatus(I18n.t("Aucun encodage cassé détecté."));
-                    return;
-                }
-                setStatus(I18n.t("%d fichier(s) avec encodage cassé détecté(s).", found.size()));
-                new EncodingFixReviewDialog(MainFrame.this, found, tableModel).setVisible(true);
-            }
-        }.execute();
-    }
-
-    /** Corrige `getter` en place via `setter` si {@link com.opentagger.EncodingFixer#isSuspect}
-     *  détecte un encodage cassé — utilisé par {@link #fixEncoding()} pour chaque champ texte
-     *  candidat, un à la fois (pattern getter/setter plutôt que réflexion : ces champs sont publics
-     *  et peu nombreux, pas besoin de la machinerie de TagWriter.fieldFor()). */
-    private static boolean fixTextField(java.util.function.Supplier<String> getter,
-                                         java.util.function.Consumer<String> setter) {
-        String val = getter.get();
-        if (val != null && com.opentagger.EncodingFixer.isSuspect(val)) {
-            setter.accept(com.opentagger.EncodingFixer.fix(val));
-            return true;
-        }
-        return false;
     }
 
     /** Nettoie le nom RÉEL du fichier sur disque des pistes "Non identifié" (retire un préfixe

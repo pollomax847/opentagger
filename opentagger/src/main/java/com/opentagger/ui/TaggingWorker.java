@@ -520,8 +520,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 }
             }
 
+            // Encodage cassé (UTF-8 relu en Latin-1, « Ã© » au lieu de « é ») : réparé pour la RECHERCHE, sur une copie (entry.current est
+            // l'objet affiché, jamais muté ici). Écrit sur le disque plus bas seulement si le fichier reste non identifié : un fichier
+            // identifié reçoit de toute façon des tags propres à l'enregistrement. La réparation est vérifiée dans les deux sens
+            // (EncodingFixer) : un texte déjà correct n'est jamais touché.
+            TagInfo searchTags = entry.current;
+            boolean encodingRepaired = false;
+            if (Config.get().bool("tagging.fix_encoding", true) && entry.current != null) {
+                TagInfo repairedCopy = entry.current.copy();
+                if (com.opentagger.EncodingFixer.repairFields(repairedCopy)) {
+                    searchTags = repairedCopy;
+                    encodingRepaired = true;
+                    log(I18n.t("  encodage cassé réparé pour la recherche : %s – %s", repairedCopy.artist, repairedCopy.title));
+                }
+            }
+
             log(I18n.t("  findTags..."));
-            List<TagInfo> results = findTags(fichier, entry.current, entry.forceReidentify, entry.bandcampOnly, mb, acoustId, lastFm, cache, groupKey);
+            List<TagInfo> results = findTags(fichier, searchTags, entry.forceReidentify, entry.bandcampOnly, mb, acoustId, lastFm, cache, groupKey);
             entry.forceReidentify = false;
             entry.bandcampOnly    = false;
             mb.setPreferredAlbum(""); // reset après findTags — clusterAlbums ne doit pas en bénéficier
@@ -531,6 +546,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             int seuil = Config.get().minScoreAuto();
 
             if (results.isEmpty()) {
+                // Non identifié mais l'encodage était cassé : on écrit la correction (seule, sans rien inventer) pour que le fichier ne
+                // garde pas « Ã© ». On relit les tags sur le disque (pas la copie en mémoire, possiblement périmée) avant d'écrire.
+                if (encodingRepaired) writeEncodingRepair(entry, fichier);
                 entry.status     = FileEntry.Status.SKIPPED;
                 entry.skipReason = com.opentagger.model.SkipReason.NOT_IDENTIFIED;
                 entry.message = I18n.t("Non identifié") + videoHintIfAny(fichier);
@@ -2644,6 +2662,28 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return java.util.Set.of("unknown album", "album inconnu", "unbekanntes album", "unbekannter album", "audios", "audio", "sans titre",
                 "untitled", "no album", "none", "singles", "single", "musique", "music", "divers", "various", "compilation",
                 "greatest hits", "best of", "hits").contains(normalized);
+    }
+
+    /** Écrit sur le disque la réparation d'encodage d'un fichier resté non identifié, puis met à jour l'affichage (sur l'EDT). */
+    private void writeEncodingRepair(FileEntry entry, File fichier) {
+        try {
+            TagInfo onDisk = com.opentagger.TagReader.read(fichier);
+            if (!com.opentagger.EncodingFixer.repairFields(onDisk)) return;
+            new com.opentagger.TagWriter().write(fichier, onDisk);
+            final TagInfo fixed = onDisk;
+            SwingUtilities.invokeLater(() -> {
+                if (entry.current != null) {
+                    entry.current.title = fixed.title;
+                    entry.current.artist = fixed.artist;
+                    entry.current.albumArtist = fixed.albumArtist;
+                    entry.current.album = fixed.album;
+                    entry.current.comment = fixed.comment;
+                }
+            });
+            log(I18n.t("  encodage cassé corrigé dans le fichier : %s – %s", onDisk.artist, onDisk.title));
+        } catch (Exception ex) {
+            log(I18n.t("  correction d'encodage non écrite : %s", ex.getMessage()));
+        }
     }
 
     /** L'ALBUM (la release) de ce fichier est-il déjà prouvé, donc à ne pas changer ? Oui pour une identification par TOC (le disque

@@ -10,7 +10,7 @@ import java.util.Arrays;
 /**
  * Répare un texte de tag UTF-8 mal réinterprété en Latin-1 lors d'une écriture antérieure par un
  * autre outil ("é" écrit en UTF-8 (0xC3 0xA9) puis relu comme deux caractères Latin-1 "Ã©").
- * Utilisé par MainFrame.fixEncoding() (Outils → Re-traitement).
+ * Intégré à la chaîne de taguage (TaggingWorker) : plus d'action manuelle dans les menus.
  *
  * Approche round-trip (même principe que la bibliothèque Python ftfy) plutôt qu'une liste de motifs
  * connus ("Ã©", "â€™"...) : plus générale, et surtout auto-vérifiante — un texte réellement en
@@ -18,6 +18,23 @@ import java.util.Arrays;
  * donc jamais touché, sans avoir à énumérer tous les cas.
  */
 public class EncodingFixer {
+
+    /** Répare EN PLACE les champs texte courants d'un TagInfo (titre, artiste, artiste de l'album, album, commentaire).
+     *  @return vrai si au moins un champ a été corrigé */
+    public static boolean repairFields(com.opentagger.model.TagInfo t) {
+        if (t == null) return false;
+        boolean changed = false;
+        String v;
+        if ((v = repaired(t.title)) != null)       { t.title = v;       changed = true; }
+        if ((v = repaired(t.artist)) != null)      { t.artist = v;      changed = true; }
+        if ((v = repaired(t.albumArtist)) != null) { t.albumArtist = v; changed = true; }
+        if ((v = repaired(t.album)) != null)       { t.album = v;       changed = true; }
+        if ((v = repaired(t.comment)) != null)     { t.comment = v;     changed = true; }
+        return changed;
+    }
+
+    /** Le texte corrigé, ou {@code null} s'il n'y a rien à corriger. */
+    private static String repaired(String s) { return attemptFix(s); }
 
     public static boolean isSuspect(String s) {
         return attemptFix(s) != null;
