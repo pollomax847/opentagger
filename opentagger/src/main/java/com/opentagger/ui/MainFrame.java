@@ -1296,7 +1296,6 @@ public class MainFrame extends JFrame {
         musicbrainz.add(mitem(I18n.t("Modifier sur MusicBrainz"),null,      e -> openMbEditPage()));
         musicbrainz.add(mitem(I18n.t("Contribuer à MusicBrainz…"), null,   e -> openMbContribute()));
         musicbrainz.add(mitem(I18n.t("Soumettre fingerprint AcoustID"), null, e -> submitAcoustId()));
-        musicbrainz.add(mitem(I18n.t("Miroir MusicBrainz local…"), null, e -> MusicBrainzMirrorDialog.open(this)));
         m.add(musicbrainz);
 
         m.addSeparator();
