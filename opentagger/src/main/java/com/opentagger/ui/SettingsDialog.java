@@ -236,10 +236,7 @@ public class SettingsDialog extends JDialog {
         return code; // locale inconnue de la liste curatée (config éditée à la main) : garder tel quel
     }
 
-    // ── Onglet MusicBrainz OAuth ──────────────────────────────────────────────
-    private JLabel     lblMbAccount;
-    private JTextField tfMbCollectionId;
-    private JComboBox<String> cmbMbOAuthMode;
+    // ── Onglet Serveur MusicBrainz ──────────────────────────────────────────────
     private JTextField     tfMbServer;
     private JTextField     tfMbAuthUser;
     private JPasswordField tfMbAuthPass;
@@ -302,7 +299,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab(I18n.t("Scripts de tags"),  scrollWrap(buildScriptPanel()));
         tabs.addTab(I18n.t("Automatisation"),   scrollWrap(buildAutomationPanel()));
         tabs.addTab(I18n.t("Barre d'outils"), scrollWrap(buildToolbarPanel()));
-        tabs.addTab(I18n.t("MusicBrainz"),  scrollWrap(buildMbOAuthPanel()));
+        tabs.addTab(I18n.t("Serveur MusicBrainz"),  scrollWrap(buildMbServerPanel()));
         buildSearchIndex();
         if (lastTabIndex >= 0 && lastTabIndex < tabs.getTabCount()) tabs.setSelectedIndex(lastTabIndex);
         tabs.addChangeListener(e -> lastTabIndex = tabs.getSelectedIndex());
@@ -2266,117 +2263,13 @@ public class SettingsDialog extends JDialog {
         return outer;
     }
 
-    private JPanel buildMbOAuthPanel() {
-        lblMbAccount     = new JLabel();
-        cmbMbOAuthMode   = new JComboBox<>(new String[]{
-            I18n.t("Automatique (recommandé)"), I18n.t("Automatique via navigateur local"), I18n.t("Manuel (copier-coller le code)")});
-        cmbMbOAuthMode.setToolTipText(I18n.t(
-            "Façon dont OpenTagger récupère l'autorisation après que vous l'ayez donnée dans le "
-            + "navigateur, lors du clic sur \"Se connecter à MusicBrainz\" ci-dessous. \"Automatique\" "
-            + "fonctionne dans la grande majorité des cas — ne changer que si la connexion échoue "
-            + "systématiquement ; \"Manuel\" demande de copier un code affiché par le navigateur."));
-        tfMbCollectionId = tf();
-        tfMbCollectionId.setToolTipText(I18n.t("MBID de votre collection MusicBrainz (visible dans l'URL de la "
-                + "page de la collection sur musicbrainz.org) — les releases taguées y seront ajoutées "
-                + "automatiquement. Laisser vide pour désactiver. La collection doit déjà exister."));
-
-        // Client ID/Secret n'est plus affiché ici : c'est l'identité de l'APPLICATION (embarquée,
-        // partagée par tous les utilisateurs — voir settings.properties), pas une information
-        // propre à chaque utilisateur. Avant ce changement, ces deux champs de texte étaient
-        // visibles et modifiables dans ce panneau alors que 99% des utilisateurs n'ont ni besoin
-        // ni intérêt à les voir/modifier ; seule l'autorisation personnelle (bouton ci-dessous)
-        // les concerne.
-        JButton btnAction = new JButton("🔑  " + I18n.t("Se connecter à MusicBrainz"));
-        btnAction.setToolTipText(I18n.t("Ouvrir le navigateur pour autoriser OpenTagger à accéder à votre compte"));
-        btnAction.putClientProperty("FlatLaf.style", "background: #1a6030");
-        JButton btnLogout = new JButton(I18n.t("Déconnexion"));
-        refreshMbStatus(lblMbAccount, btnAction, btnLogout);
-
-        btnAction.addActionListener(e -> {
-            if (Config.get().mbClientId().isBlank() || Config.get().mbClientSecret().isBlank()) {
-                JOptionPane.showMessageDialog(SettingsDialog.this,
-                    I18n.t("Client ID/Secret MusicBrainz manquants dans la configuration de l'application.\n"
-                    + "Ce n'est pas quelque chose à saisir manuellement — contactez le développeur "
-                    + "ou réinstallez OpenTagger."),
-                    I18n.t("Configuration incomplète"), JOptionPane.ERROR_MESSAGE);
-                return;
-            }
-            btnAction.setEnabled(false);
-            btnAction.setText(I18n.t("Ouverture du navigateur…"));
-            new SwingWorker<String, Void>() {
-                @Override protected String doInBackground() throws Exception { return new MusicBrainzOAuth().authorize(); }
-                @Override protected void done() {
-                    try { get(); } catch (Exception ex) {
-                        JOptionPane.showMessageDialog(SettingsDialog.this,
-                            "<html>" + ex.getMessage().replace("\n","<br>") + "</html>",
-                            I18n.t("Erreur OAuth"), JOptionPane.ERROR_MESSAGE);
-                    }
-                    refreshMbStatus(lblMbAccount, btnAction, btnLogout);
-                }
-            }.execute();
-        });
-        btnLogout.addActionListener(e -> { MusicBrainzOAuth.logout(); refreshMbStatus(lblMbAccount, btnAction, btnLogout); });
-
-        // Si token présent mais username manquant/inconnu → re-fetch automatique
-        if (Config.get().mbConnected()) {
-            String u = Config.get().mbUsername();
-            if (u.isBlank() || u.equals("(inconnu)")) {
-                lblMbAccount.setText(I18n.t("Récupération du compte…"));
-                new SwingWorker<String, Void>() {
-                    @Override protected String doInBackground() throws Exception {
-                        return new MusicBrainzOAuth().fetchUsername(Config.get().mbToken());
-                    }
-                    @Override protected void done() {
-                        try {
-                            String name = get();
-                            Config.get().set("mb.oauth.username", name);
-                            refreshMbStatus(lblMbAccount, btnAction, btnLogout);
-                        } catch (Exception ex) {
-                            lblMbAccount.setText(I18n.t("(token invalide — reconnectez-vous)"));
-                            lblMbAccount.putClientProperty("FlatLaf.style", "foreground: #f44336");
-                        }
-                    }
-                }.execute();
-            }
-        }
-
-        JLabel hint = new JLabel(I18n.t(
-            "<html><i><b>scheme</b> : URL handler système (défaut, Linux/Mac).<br>" +
-            "<b>localhost</b> : serveur local port 8484, redirect_uri = http://localhost:8484.<br>" +
-            "<b>oob</b> : code affiché dans le navigateur, copier-coller ici.</i></html>"));
-        hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
-        hint.setBorder(new EmptyBorder(4, 0, 0, 0));
-
-        JPanel inner = new JPanel(new GridBagLayout());
-        inner.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), I18n.t("Compte MusicBrainz (contribution OAuth2)")));
-        String[] labels = {"Compte connecté :", "Mode OAuth :", "Collection MB (optionnel) :"};
-        JComponent[] fields = {lblMbAccount, cmbMbOAuthMode, tfMbCollectionId};
-        for (int i = 0; i < labels.length; i++) {
-            GridBagConstraints lc = new GridBagConstraints();
-            lc.gridx = 0; lc.gridy = i; lc.anchor = GridBagConstraints.WEST; lc.insets = new Insets(4,10,4,8);
-            inner.add(new JLabel(I18n.t(labels[i])), lc);
-            GridBagConstraints fc = new GridBagConstraints();
-            fc.gridx = 1; fc.gridy = i; fc.fill = GridBagConstraints.HORIZONTAL; fc.weightx = 1; fc.insets = new Insets(4,0,4,10);
-            inner.add(fields[i], fc);
-        }
-        GridBagConstraints bc = new GridBagConstraints();
-        bc.gridx = 1; bc.gridy = labels.length; bc.anchor = GridBagConstraints.WEST; bc.insets = new Insets(6,0,4,10);
-        JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        btnRow.add(btnAction); btnRow.add(btnLogout);
-        inner.add(btnRow, bc);
-
-        // `hint` était en BorderLayout.CENTER, qui s'étire pour occuper TOUT l'espace restant du
-        // panneau — sur cet onglet, ça laissait un grand vide entre le formulaire et la légende
-        // d'aide (visible à l'écran : la légende flottait au milieu d'une zone vide au lieu de
-        // suivre directement le formulaire). `inner` et `hint` regroupés dans une même boîte
-        // verticale collée en NORTH : l'espace restant va sous les deux, pas entre eux.
+    private JPanel buildMbServerPanel() {
         // ── Serveur MusicBrainz (miroir) ────────────────────────────────────────
         // musicbrainz.server existait déjà comme clé de config mais n'était jamais réellement lue
         // par MusicBrainzClient (URL codée en dur) — corrigé pour permettre un vrai miroir tiers
         // (ex. service payant type Headphones Indexer, musicbrainz.codeshy.com avec identifiants
-        // HTTP Basic, qui élimine les 503 de contention en heure de pointe). Volontairement séparé
-        // du compte OAuth ci-dessus : deux mécanismes indépendants (lecture vs contribution).
+        // HTTP Basic, qui élimine les 503 de contention en heure de pointe). Le compte MusicBrainz
+        // (contribution OAuth2) n'est plus ici : voir MbAccountDialog (Outils → MusicBrainz → Compte…).
         tfMbServer   = tf();
         tfMbAuthUser = tf();
         tfMbAuthPass = new JPasswordField();
@@ -2421,33 +2314,13 @@ public class SettingsDialog extends JDialog {
 
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
-        inner.setAlignmentX(Component.LEFT_ALIGNMENT);
-        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
         serverInner.setAlignmentX(Component.LEFT_ALIGNMENT);
-        top.add(inner);
-        top.add(hint);
-        top.add(Box.createVerticalStrut(10));
         top.add(serverInner);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBorder(new EmptyBorder(12, 12, 12, 12));
         wrap.add(top, BorderLayout.NORTH);
         return wrap;
-    }
-
-    private void refreshMbStatus(JLabel lbl, JButton btnAction, JButton btnLogout) {
-        boolean connected = Config.get().mbConnected();
-        String  username  = Config.get().mbUsername();
-        lbl.setText(connected ? username : I18n.t("(non connecté)"));
-        lbl.putClientProperty("FlatLaf.style", connected ? "foreground: #1db954" : "foreground: #888888");
-        btnAction.setEnabled(true);
-        // Après un échec OAuth (identifiants refusés, délai dépassé...), le texte restait bloqué
-        // sur "Ouverture du navigateur…" indéfiniment — parfaitement cliquable à nouveau (ligne du
-        // dessus) mais visuellement figé sur l'état "en cours", jusqu'à fermer/rouvrir les
-        // Préférences. Restauré ici à chaque passage en état non-connecté.
-        if (!connected) btnAction.setText("🔑  " + I18n.t("Se connecter à MusicBrainz"));
-        btnAction.setVisible(!connected);
-        btnLogout.setVisible(connected);
     }
 
     // ── Chargement / sauvegarde ──────────────────────────────────────────────
@@ -2623,10 +2496,6 @@ public class SettingsDialog extends JDialog {
         spFpcalcThreads           .setValue(cfg.fpcalcThreads());
         spBatchThreads            .setValue(cfg.num("batch.threads", 6));
 
-        String mode = cfg.str("mb.oauth.mode", "scheme");
-        cmbMbOAuthMode.setSelectedIndex(
-            "localhost".equals(mode) ? 1 : "oob".equals(mode) ? 2 : 0);
-        tfMbCollectionId.setText(cfg.mbCollectionId());
         tfMbServer      .setText(cfg.mbServer());
         tfMbAuthUser    .setText(cfg.mbAuthUser());
         tfMbAuthPass    .setText(cfg.mbAuthPass());
@@ -2888,15 +2757,14 @@ public class SettingsDialog extends JDialog {
         p.setProperty("transcode.move_unreadable_enabled", String.valueOf(chkMoveUnreadable.isSelected()));
 
         // Conserver le client_id/secret (identité d'application embarquée, plus modifiable
-        // depuis ce dialogue — voir buildMbOAuthPanel), le token, refresh_token et username existants
+        // depuis ce dialogue — voir MbAccountDialog), le token, refresh_token, username, mode et collection existants
         p.setProperty("mb.oauth.client_id",           Config.get().mbClientId());
         p.setProperty("mb.oauth.client_secret",       Config.get().mbClientSecret());
         p.setProperty("mb.oauth.token",               Config.get().mbToken());
         p.setProperty("mb.oauth.refresh_token",       Config.get().str("mb.oauth.refresh_token", ""));
         p.setProperty("mb.oauth.username",            Config.get().mbUsername());
-        String[] oauthModes = {"scheme", "localhost", "oob"};
-        p.setProperty("mb.oauth.mode", oauthModes[cmbMbOAuthMode.getSelectedIndex()]);
-        p.setProperty("mb.oauth.collection_id",       tfMbCollectionId.getText().trim());
+        p.setProperty("mb.oauth.mode",                Config.get().str("mb.oauth.mode", "scheme"));
+        p.setProperty("mb.oauth.collection_id",       Config.get().mbCollectionId());
         p.setProperty("musicbrainz.server",           tfMbServer.getText().trim().isEmpty()
                 ? "https://musicbrainz.org/ws/2" : tfMbServer.getText().trim());
         p.setProperty("musicbrainz.auth_user",        tfMbAuthUser.getText().trim());

@@ -1292,6 +1292,7 @@ public class MainFrame extends JFrame {
         m.add(retraitement);
 
         JMenu musicbrainz = new JMenu("MusicBrainz");
+        musicbrainz.add(mitem(I18n.t("Compte MusicBrainz…"), null,         e -> MbAccountDialog.open(this)));
         musicbrainz.add(mitem(I18n.t("Modifier sur MusicBrainz"),null,      e -> openMbEditPage()));
         musicbrainz.add(mitem(I18n.t("Contribuer à MusicBrainz…"), null,   e -> openMbContribute()));
         musicbrainz.add(mitem(I18n.t("Soumettre fingerprint AcoustID"), null, e -> submitAcoustId()));
