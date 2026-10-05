@@ -138,9 +138,25 @@ public class AudioTranscoder {
             throw new IOException("Transcodage échoué (code " + p.exitValue() + ") — " + tail);
         }
 
-        if (deleteSource) Files.deleteIfExists(source);
+        // ffmpeg peut finir « avec succès » sur une source partiellement illisible : il saute les paquets abîmés et écrit un fichier
+        // plus court. Avant de supprimer la source, on compare les durées ; un écart signale une conversion incomplète, qu'on annule.
+        int srcSec = AudioDuration.probeSeconds(source.toAbsolutePath().toString());
+        int dstSec = AudioDuration.probeSeconds(dest.toAbsolutePath().toString());
+        if (srcSec > 0 && dstSec >= 0 && !durationsMatch(srcSec, dstSec)) {
+            Files.deleteIfExists(dest);
+            throw new IOException("Transcodage incomplet : " + dstSec + " s au lieu de " + srcSec
+                    + " s (flux source abîmé) — source conservée");
+        }
+        // Durée de la source inconnue : on ne peut pas prouver que la conversion est complète, donc on ne supprime rien.
+        if (deleteSource && srcSec > 0) Files.deleteIfExists(source);
 
         return dest;
+    }
+
+    /** Durées compatibles : écart d'au plus 2 s, ou 1 % de la durée de la source pour les longs fichiers. */
+    static boolean durationsMatch(int sourceSec, int convertedSec) {
+        int tolerance = Math.max(2, (int) Math.round(sourceSec * 0.01));
+        return Math.abs(sourceSec - convertedSec) <= tolerance;
     }
 
     /** Signatures ffmpeg typiques d'une source qu'il ne parvient même pas à ouvrir/décoder —

@@ -459,17 +459,38 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 try {
                     com.opentagger.AudioTranscoder.Format fmt =
                         com.opentagger.AudioTranscoder.Format.fromId(Config.get().transcodeFormat());
-                    step.accept(I18n.t("transcodage → %s…", fmt.id.toUpperCase()));
-                    java.nio.file.Path transcoded = new com.opentagger.AudioTranscoder()
-                        .transcode(entry.currentPath != null ? entry.currentPath
-                                   : entry.file.toPath(),
-                                   fmt, Config.get().transcodeBitrate(),
-                                   Config.get().transcodeDeleteSource());
-                    if (transcoded != null) {
-                        entry.currentPath = transcoded;
-                        fichier = transcoded.toFile();
-                        CURRENT_FILE.set(fichier.getName());
-                        log("  transcoded → " + transcoded.getFileName());
+                    java.nio.file.Path srcPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
+                    String srcName = srcPath.getFileName().toString();
+                    String srcExt = srcName.contains(".") ? srcName.substring(srcName.lastIndexOf('.') + 1).toLowerCase() : "";
+                    // Un fichier déjà dans le format cible n'est PAS transcodé : on n'annonce donc rien (le message « transcodage → MP3… »
+                    // s'affichait aussi pour un .mp3 déjà conforme). Un fichier qui a déjà échoué, inchangé depuis, n'est pas retenté.
+                    if (!srcExt.equals(fmt.ext)) {
+                        if (com.opentagger.TranscodeFailureMemory.shared().known(srcPath)) {
+                            log(I18n.t("  transcodage ignoré : ce fichier a déjà échoué (flux abîmé) et n'a pas changé"));
+                        } else {
+                            step.accept(I18n.t("transcodage → %s…", fmt.id.toUpperCase()));
+                            try {
+                                java.nio.file.Path transcoded = new com.opentagger.AudioTranscoder()
+                                    .transcode(srcPath, fmt, Config.get().transcodeBitrate(), Config.get().transcodeDeleteSource());
+                                if (transcoded != null) {
+                                    entry.currentPath = transcoded;
+                                    fichier = transcoded.toFile();
+                                    CURRENT_FILE.set(fichier.getName());
+                                    log("  transcoded → " + transcoded.getFileName());
+                                }
+                            } catch (Exception txEx) {
+                                // Retenu seulement si le fichier lui-même est en cause (flux abîmé), jamais pour un échec passager (disque
+                                // plein, ffmpeg absent, délai dépassé) : une contre-vérification de lecture indépendante tranche, comme
+                                // pour le bouton « Transcoder ».
+                                String m = String.valueOf(txEx.getMessage());
+                                com.opentagger.AudioTranscoder checker = new com.opentagger.AudioTranscoder();
+                                boolean damaged = com.opentagger.AudioTranscoder.isUnreadableSourceError(m)
+                                        || m.contains("Transcodage incomplet")
+                                        || (m.contains("Transcodage échoué") && checker.verifyUnreadable(srcPath));
+                                if (damaged) com.opentagger.TranscodeFailureMemory.shared().remember(srcPath);
+                                throw txEx;
+                            }
+                        }
                     }
                 } catch (Exception txEx) {
                     log(I18n.t("  transcode WARN: %s — poursuite sans transcodage", txEx.getMessage()));
