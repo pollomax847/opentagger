@@ -998,8 +998,84 @@ public class MainFrame extends JFrame {
         }
     }
 
-    private JMenu buildMenuTagger() {
-        JMenu m = new JMenu(I18n.t("Tagger"));
+    // ── Niveau d'automatisation (Manuel / Assisté / Automatique) ────────────────────────────────────────────────────
+    private JCheckBoxMenuItem chkAutoPlayCounts;
+    private JRadioButtonMenuItem[] rbCompletionItems;
+    private final java.util.Map<com.opentagger.AutomationMode, JRadioButtonMenuItem> rbAutomation = new java.util.EnumMap<>(com.opentagger.AutomationMode.class);
+    private JMenuItem miAutomationCustom;
+
+    private static com.opentagger.AutomationMode currentAutomationMode() {
+        Config c = Config.get();
+        c.postTagCompletion(); // migre une fois les anciennes clés avant la lecture brute
+        return com.opentagger.AutomationMode.detect(key ->
+                "tagging.post_tag_completion".equals(key) ? c.postTagCompletion().name() : c.str(key, ""));
+    }
+
+    private void addAutomationModeItems(JMenu options) {
+        com.opentagger.AutomationMode now = currentAutomationMode();
+        ButtonGroup group = new ButtonGroup();
+        String[][] labels = {
+            {"MANUAL",    I18n.t("Manuel"),      I18n.t("Rien ne démarre seul : vous lancez le taguage puis l'enregistrement.")},
+            {"ASSISTED",  I18n.t("Assisté"),     I18n.t("Le taguage démarre seul après un scan et complète les champs manquants ; vous validez l'enregistrement.")},
+            {"AUTOMATIC", I18n.t("Automatique"), I18n.t("Tout s'enchaîne : taguage, enregistrement, albums, compilations, ré-identification, compteurs d'écoute, pochettes et photos manquantes.")}};
+        for (String[] l : labels) {
+            com.opentagger.AutomationMode mode = com.opentagger.AutomationMode.valueOf(l[0]);
+            JRadioButtonMenuItem rb = new JRadioButtonMenuItem(l[1], now == mode);
+            rb.setToolTipText(l[2]);
+            rb.addActionListener(e -> applyAutomationMode(mode));
+            group.add(rb);
+            rbAutomation.put(mode, rb);
+            options.add(rb);
+        }
+        miAutomationCustom = new JMenuItem(I18n.t("Personnalisé (réglages « Avancé »)"));
+        miAutomationCustom.setEnabled(false);
+        miAutomationCustom.setVisible(now == null);
+        options.add(miAutomationCustom);
+        options.addSeparator();
+    }
+
+    private void applyAutomationMode(com.opentagger.AutomationMode mode) {
+        if (mode == com.opentagger.AutomationMode.AUTOMATIC) {
+            int ok = JOptionPane.showConfirmDialog(this,
+                I18n.t("<html>Le mode Automatique enchaîne tout sans rien demander :<br>"
+                     + "taguage après chaque scan, enregistrement, recherche des pistes d'album manquantes,<br>"
+                     + "regroupement par compilations, ré-identification par empreinte audio<br>"
+                     + "(elle efface le cache des fichiers restés « Non identifié »), compteurs d'écoute<br>"
+                     + "et pochettes/photos manquantes.<br><br>Passer en mode Automatique ?</html>"),
+                I18n.t("Mode Automatique"), JOptionPane.YES_NO_OPTION);
+            if (ok != JOptionPane.YES_OPTION) { syncAutomationRadios(); return; }
+        }
+        for (java.util.Map.Entry<String, String> e : mode.settings().entrySet()) Config.get().set(e.getKey(), e.getValue());
+        Config.get().set(com.opentagger.AutomationMode.KEY_MODE, mode.name());
+        Config c = Config.get();
+        chkAutoTagOnScan.setSelected(c.autoTagOnScan());
+        chkAutoSaveEnabled.setSelected(c.autoSaveEnabled());
+        if (btnSaveAll != null) btnSaveAll.setVisible(!c.autoSaveEnabled());
+        chkAutoGroupCompilations.setSelected(c.bool("tagging.auto_group_compilations", false));
+        chkAutoReidentifyUnmatched.setSelected(c.bool("tagging.auto_reidentify_unmatched", false));
+        chkAutoPlayCounts.setSelected(c.autoSyncPlayCounts());
+        Config.PostTagCompletion pc = c.postTagCompletion();
+        for (int i = 0; i < rbCompletionItems.length; i++) rbCompletionItems[i].setSelected(i == pc.ordinal());
+        syncAutomationRadios();
+        setStatus(I18n.t("Niveau d'automatisation : %s", rbAutomation.get(mode).getText()));
+    }
+
+    /** Recale les boutons du niveau sur les réglages réels (un réglage « Avancé » modifié à la main = « Personnalisé »). */
+    private void syncAutomationRadios() {
+        com.opentagger.AutomationMode now = currentAutomationMode();
+        for (java.util.Map.Entry<com.opentagger.AutomationMode, JRadioButtonMenuItem> e : rbAutomation.entrySet())
+            e.getValue().setSelected(e.getKey() == now);
+        if (miAutomationCustom != null) miAutomationCustom.setVisible(now == null);
+        if (now != null) Config.get().set(com.opentagger.AutomationMode.KEY_MODE, now.name());
+    }
+
+    private void watchAdvancedForAutomation(JMenu advanced) {
+        java.awt.event.ActionListener l = e -> SwingUtilities.invokeLater(this::syncAutomationRadios);
+        for (java.awt.Component c : advanced.getMenuComponents()) if (c instanceof AbstractButton b && !(c instanceof JMenu)) b.addActionListener(l);
+        for (JRadioButtonMenuItem rb : rbCompletionItems) rb.addActionListener(l);
+    }
+
+    private JMenu buildMenuTagger() {        JMenu m = new JMenu(I18n.t("Tagger"));
         m.setMnemonic('T');
         m.add(mitem(I18n.t("Tout tagger (cochés)"),    "F6",  e -> startTagging(false)));
         m.add(mitem(I18n.t("Tagger la sélection"),     "F7",  e -> startTagging(true)));
@@ -1010,6 +1086,8 @@ public class MainFrame extends JFrame {
         // Les actions à raccourci clavier (F6/F7/F8, Ctrl+R/G/L/K/T) restent au premier niveau.
         JMenu options = new JMenu(I18n.t("Options de taguage"));
         m.add(options);
+        JMenu advanced = new JMenu(I18n.t("Avancé"));
+        addAutomationModeItems(options);
         chkForceAcoustId = new StayOpenCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
         chkForceAcoustId.setSelected(Config.get().bool("tagging.force_acoustid_ui", false));
         chkForceAcoustId.addActionListener(e -> {
@@ -1053,6 +1131,7 @@ public class MainFrame extends JFrame {
         JMenu completionMenu = new JMenu(I18n.t("Après le taguage"));
         ButtonGroup completionGroup = new ButtonGroup();
         Config.PostTagCompletion current = Config.get().postTagCompletion();
+        rbCompletionItems = new JRadioButtonMenuItem[3];
         JRadioButtonMenuItem rbNone = new JRadioButtonMenuItem(I18n.t("Ne rien compléter automatiquement"));
         JRadioButtonMenuItem rbFields = new JRadioButtonMenuItem(I18n.t("Compléter les champs manquants"));
         JRadioButtonMenuItem rbFieldsAlbums = new JRadioButtonMenuItem(I18n.t("Compléter les champs + rechercher les pistes d'album manquantes"));
@@ -1062,11 +1141,12 @@ public class MainFrame extends JFrame {
         rbNone.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.NONE));
         rbFields.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.FIELDS));
         rbFieldsAlbums.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.FIELDS_AND_ALBUMS));
-        for (JRadioButtonMenuItem rb : new JRadioButtonMenuItem[]{rbNone, rbFields, rbFieldsAlbums}) {
+        rbCompletionItems[0] = rbNone; rbCompletionItems[1] = rbFields; rbCompletionItems[2] = rbFieldsAlbums;
+        for (JRadioButtonMenuItem rb : rbCompletionItems) {
             completionGroup.add(rb);
             completionMenu.add(rb);
         }
-        options.add(completionMenu);
+        advanced.add(completionMenu);
         // Demandé le 2026-07-10, juste après avoir choisi le mode "proactif" (revue manuelle) pour
         // "Grouper par compilations…" plutôt qu'une réécriture automatique — l'utilisateur voulait
         // aussi pouvoir déclencher la RECHERCHE toute seule, sans pour autant perdre la revue avant
@@ -1078,7 +1158,7 @@ public class MainFrame extends JFrame {
         chkAutoGroupCompilations.setSelected(Config.get().bool("tagging.auto_group_compilations", false));
         chkAutoGroupCompilations.addActionListener(e ->
                 Config.get().set("tagging.auto_group_compilations", String.valueOf(chkAutoGroupCompilations.isSelected())));
-        options.add(chkAutoGroupCompilations);
+        advanced.add(chkAutoGroupCompilations);
 
         // Retour utilisateur (2026-08-10) : ne pas être obligé de cliquer sur "Ré-identifier par
         // empreinte audio…" à chaque fois — si activé, se déclenche tout seul juste après CHAQUE
@@ -1112,7 +1192,7 @@ public class MainFrame extends JFrame {
             }
             Config.get().set("tagging.auto_reidentify_unmatched", String.valueOf(chkAutoReidentifyUnmatched.isSelected()));
         });
-        options.add(chkAutoReidentifyUnmatched);
+        advanced.add(chkAutoReidentifyUnmatched);
 
         // Demandé le 2026-08-12 : le taguage ne reprend jamais tout seul après un redémarrage (ou
         // l'ajout d'un dossier), obligeant à recliquer "Tagger"/F6 à chaque fois — uniquement
@@ -1124,7 +1204,7 @@ public class MainFrame extends JFrame {
         chkAutoTagOnScan.setSelected(Config.get().autoTagOnScan());
         chkAutoTagOnScan.addActionListener(e ->
                 Config.get().set("tagging.auto_start_on_scan", String.valueOf(chkAutoTagOnScan.isSelected())));
-        options.add(chkAutoTagOnScan);
+        advanced.add(chkAutoTagOnScan);
 
         // Interrupteur pour scheduleAutoSaveFollowUp() (voir son commentaire) — actif par défaut.
         // Quand actif, le bouton "Enregistrer tout" de l'écran principal est masqué (retour
@@ -1136,16 +1216,18 @@ public class MainFrame extends JFrame {
             Config.get().set("tagging.auto_save_enabled", String.valueOf(chkAutoSaveEnabled.isSelected()));
             if (btnSaveAll != null) btnSaveAll.setVisible(!chkAutoSaveEnabled.isSelected());
         });
-        options.add(chkAutoSaveEnabled);
+        advanced.add(chkAutoSaveEnabled);
 
         // Automatisation de « Outils → Re-traitement → Synchroniser les compteurs d'écoute » (qui reste
         // disponible à la main) : à la fin d'un scan, au plus une fois par 24 h — voir scheduleAutoPlayCountSync().
-        StayOpenCheckBoxMenuItem chkAutoPlayCounts = new StayOpenCheckBoxMenuItem(
+        chkAutoPlayCounts = new StayOpenCheckBoxMenuItem(
                 I18n.t("Synchroniser les compteurs d'écoute automatiquement après un scan (1 fois par jour)"));
         chkAutoPlayCounts.setSelected(Config.get().autoSyncPlayCounts());
         chkAutoPlayCounts.addActionListener(e ->
                 Config.get().set("playcounts.auto_sync", String.valueOf(chkAutoPlayCounts.isSelected())));
-        options.add(chkAutoPlayCounts);
+        advanced.add(chkAutoPlayCounts);
+        options.add(advanced);
+        watchAdvancedForAutomation(advanced);
 
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
