@@ -193,7 +193,7 @@ public class BatchProcessor {
                 try {
                     writer.write(fichier, best, cover);
                 } finally {
-                    if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
+                    TagEnrichment.discardTemporaryCover(cover);
                 }
                 appliques.incrementAndGet();
 

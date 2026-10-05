@@ -141,6 +141,14 @@ public final class TagEnrichment {
             "folder.jpg", "cover.jpg", "front.jpg", "albumart.jpg", "album.jpg",
             "folder.png", "cover.png", "front.png");
 
+    /** Supprime la pochette renvoyée par {@link #resolveCover} quand c'est un téléchargement temporaire. Le fournisseur
+     *  « local » renvoie, lui, le folder.jpg/cover.jpg de l'utilisateur : ce fichier-là n'est JAMAIS supprimé. */
+    public static void discardTemporaryCover(Path cover) {
+        if (cover == null || cover.getFileName() == null) return;
+        if (LOCAL_COVER_FILENAMES.contains(cover.getFileName().toString().toLowerCase(java.util.Locale.ROOT))) return;
+        try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+    }
+
     /** Cherche une pochette dans le dossier : folder.jpg, cover.jpg, front.jpg… */
     public static Path findLocalCover(File dir) {
         if (dir == null || !dir.isDirectory()) return null;
@@ -283,7 +291,7 @@ public final class TagEnrichment {
             // pochette téléchargée restait sur toute écriture en échec, fuite de fichiers temporaires
             // qui s'accumule avec le taux d'échec réel observé sur cette bibliothèque.
             if (cover != null) {
-                try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+                discardTemporaryCover(cover);
             }
         }
 

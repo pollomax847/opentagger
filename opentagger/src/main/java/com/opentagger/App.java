@@ -247,7 +247,7 @@ public class App {
             // Nettoyage dans un finally (voir même correctif dans TagEnrichment.saveEntry) : sinon
             // sauté sur toute exception de write() (M4A/WAV, disque plein...), fuite de fichier
             // temporaire à chaque échec d'écriture.
-            if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
+            TagEnrichment.discardTemporaryCover(cover);
         }
 
         System.out.println();

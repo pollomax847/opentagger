@@ -835,7 +835,7 @@ public class MainFrame extends JFrame {
                                     java.nio.file.Files.copy(img, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                                 }
                             } finally {
-                                try { java.nio.file.Files.deleteIfExists(img); } catch (Exception ignored) {}
+                                com.opentagger.TagEnrichment.discardTemporaryCover(img);
                             }
                         }
                     } catch (Exception ignored) {}
@@ -1287,6 +1287,7 @@ public class MainFrame extends JFrame {
         retraitement.add(mitem(I18n.t("Ré-identifier par empreinte audio (Non identifiés)…"), null, e -> reidentifyUnmatched()));
         retraitement.add(mitem(I18n.t("Essayer Bandcamp (Non identifiés)…"), null, e -> tryBandcampOnUnmatched()));
         retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNames()));
+        retraitement.add(mitem(I18n.t("Compléter les pochettes et photos manquantes"), null, e -> completeArtworkFromMenu()));
         retraitement.add(mitem(I18n.t("Synchroniser les compteurs d'écoute (ListenBrainz + Last.fm)…"), null, e -> syncPlayCounts()));
         m.add(retraitement);
 
@@ -4787,6 +4788,9 @@ public class MainFrame extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     endProgress(ProgressSlot.SAVE);
                     refreshStats();
+                    if (!w.isCancelled() && Config.get().bool("artwork.auto_after_save", false)) {
+                        for (FileEntry fe : toSave) if (fe.status == FileEntry.Status.TAGGED) pendingArtwork.add(fe);
+                    }
                     // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
                     // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
                     // qu'à l'Enregistrement. groupByCompilations() garde ses propres gardes
@@ -4896,6 +4900,70 @@ public class MainFrame extends JFrame {
      * peut très bien ne jamais terminer.
      */
     private void runPostTagCommand() {
+        // Pochettes/portraits manquants des fichiers enregistrés pendant cette chaîne : une seule passe, ICI (vraie fin de
+        // chaîne), car elle écrit dans les fichiers et ne peut pas tourner pendant un taguage ou un enregistrement.
+        List<FileEntry> artwork = new ArrayList<>(pendingArtwork);
+        pendingArtwork.clear();
+        if (!artwork.isEmpty()) {
+            completeArtwork(artwork, true, this::runPostTagCommandNow);
+            return;
+        }
+        runPostTagCommandNow();
+    }
+
+    /** Fichiers enregistrés dont les pochettes/portraits manquants seront complétés à la fin de la chaîne. */
+    private final java.util.Set<FileEntry> pendingArtwork = new java.util.LinkedHashSet<>();
+
+    /**
+     * Complète les pochettes (par album) et portraits (par artiste) manquants des fichiers donnés, en arrière-plan.
+     * Ne touche pas ce qui existe déjà. Appelé après l'enregistrement si {@code artwork.auto_after_save} est actif,
+     * ou à la demande depuis Outils.
+     */
+    private void completeArtwork(List<FileEntry> targets, boolean auto, Runnable onDone) {
+        Runnable done = onDone != null ? onDone : () -> {};
+        if (targets.isEmpty()) { done.run(); return; }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.ARTWORK_COMPLETION);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — pochettes et photos manquantes sautées cette fois-ci.",
+                    String.join(", ", blockers)));
+            done.run();
+            return;
+        }
+        setStatus(I18n.t("Recherche des pochettes et photos manquantes (%d fichier(s))…", targets.size()));
+        ArtworkCompletionWorker w = new ArtworkCompletionWorker(targets,
+                msg -> SwingUtilities.invokeLater(() -> setStatus(msg)));
+        w.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    try {
+                        ArtworkCompletionWorker.Summary s = w.get();
+                        setStatus(s.nothingToDo()
+                                ? I18n.t("Aucune pochette ni photo manquante.")
+                                : I18n.t("Pochettes ajoutées : %d (introuvables : %d) — photos d'artistes ajoutées : %d (introuvables : %d)",
+                                        s.coversAdded(), s.coversNotFound(), s.photosAdded(), s.photosNotFound()));
+                    } catch (Exception ignored) {
+                        // annulée ou en échec : rien à résumer
+                    }
+                    done.run();
+                });
+            }
+        });
+        WorkerHub.get().submit(WorkerHub.TaskKind.ARTWORK_COMPLETION, I18n.t("Pochettes et photos manquantes"), w, w::stopNow);
+    }
+
+    /** Outils → Re-traitement : sur la sélection, ou sur toute la liste s'il n'y en a pas. */
+    private void completeArtworkFromMenu() {
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        java.util.Set<FileEntry> targets = new java.util.LinkedHashSet<>();
+        if (sel.length > 0) { for (int r : sel) targets.addAll(entriesAtViewRow(r)); }
+        else targets.addAll(tableModel.allEntries());
+        targets.removeIf(e -> e.status != FileEntry.Status.TAGGED && e.status != FileEntry.Status.IDENTIFIED);
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier identifié ou tagué à compléter.")); return; }
+        completeArtwork(new ArrayList<>(targets), false, null);
+    }
+
+    private void runPostTagCommandNow() {
         // Toujours appelé exactement à la toute fin réelle de la chaîne Enregistrer (voir les deux
         // points d'appel), jamais entre deux vagues intermédiaires — l'endroit naturel pour afficher
         // la revue de compilations accumulée par groupByCompilations(true), voir son commentaire.

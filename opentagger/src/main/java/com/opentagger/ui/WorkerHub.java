@@ -39,6 +39,8 @@ public final class WorkerHub {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
         COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, PODCAST_TAG,
         DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP,
+        /** Pochettes et portraits manquants (ArtworkCompletionWorker) : écrit dans les fichiers. */
+        ARTWORK_COMPLETION,
         /** Audit audio ↔ tags (AudioTagAuditWorker) : LECTURE SEULE — n'écrit ni fichier ni tag, donc
          *  volontairement absent de LIBRARY_WRITE (il peut tourner pendant un taguage/enregistrement ;
          *  seul un second audit est refusé, via a == b dans conflictsWith()). */
@@ -55,7 +57,8 @@ public final class WorkerHub {
     private static final Set<TaskKind> LIBRARY_WRITE = EnumSet.of(
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
             TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
-            TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP);
+            TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP,
+            TaskKind.ARTWORK_COMPLETION);
 
     public static final class TaskHandle {
         private final TaskKind kind;
