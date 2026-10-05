@@ -220,8 +220,10 @@ public final class TagEnrichment {
     /** Résultat de {@link #saveEntry}. {@code cover} : pochette réellement résolue (ou null si
      *  aucune trouvée) — les appelants qui construisent des suggestions à l'utilisateur (ex.
      *  "Pochette non trouvée") ne peuvent le savoir qu'ICI, pas pendant l'identification. */
+    /** {@code duplicateOf} : non nul si le renommage a trouvé le même morceau déjà présent (fichier laissé en place, voir
+     *  {@link DuplicateFileException}) ; {@code renameError} contient alors le message lisible. */
     public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError,
-                              boolean durationMismatchMoved) {}
+                              boolean durationMismatchMoved, Path duplicateOf) {}
 
     /**
      * Étape "Enregistrer" partagée (façon Picard : le disque n'est touché qu'ici, jamais pendant
@@ -327,6 +329,7 @@ public final class TagEnrichment {
 
         Path finalPath = fichier.toPath();
         String renameError = null;
+        Path duplicateOf = null;
         if (maskIndex >= 0) {
             try {
                 Path curPath   = fichier.toPath();
@@ -351,6 +354,10 @@ public final class TagEnrichment {
                         FileRenamer.deleteEmptyAncestors(oldParent, root);
                     }
                 }
+            } catch (DuplicateFileException ex) {
+                duplicateOf = ex.existing();
+                renameError = ex.getMessage();
+                if (log != null) log.accept(ex.getMessage());
             } catch (Exception ex) {
                 renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             }
@@ -430,7 +437,7 @@ public final class TagEnrichment {
         // première mesure (2026-08-30). OpenTagger n'écrit plus JAMAIS dans Headphones ; sa base n'est plus que
         // LUE (identification locale, HeadphonesClient.lookupTrack).
 
-        return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved);
+        return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved, duplicateOf);
     }
 
     /**

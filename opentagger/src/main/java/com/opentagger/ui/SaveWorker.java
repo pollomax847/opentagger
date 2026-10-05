@@ -171,7 +171,9 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
             boolean alreadyFlagged = sugg.stream().anyMatch(s -> s.contains("Pochette"));
             if (res.cover() == null && !alreadyFlagged) sugg.add(I18n.t("Pochette non trouvée"));
 
-            String message = res.renameError() != null
+            String message = res.duplicateOf() != null
+                    ? I18n.t("Enregistré — doublon de « %s », laissé en place (Outils → Doublons)", res.duplicateOf().getFileName())
+                    : res.renameError() != null
                     ? I18n.t("Enregistré, renommage échoué : %s", res.renameError())
                     : res.durationMismatchMoved()
                         ? I18n.t("Durée incohérente avec MusicBrainz — déplacé pour vérification")

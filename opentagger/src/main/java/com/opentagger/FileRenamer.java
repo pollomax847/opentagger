@@ -161,6 +161,22 @@ public class FileRenamer {
      * Déplace le fichier selon le masque, relatif à rootDir.
      * Gère les collisions avec le suffixe (2), (3)…
      */
+    /** Lève {@link DuplicateFileException} si {@code existant} est le MÊME AUDIO que {@code fichier}. Le nom et les tags ne comptent
+     *  pas (ils peuvent être faux) : copie identique octet pour octet, sinon empreintes Chromaprint comparées. Si l'analyse est
+     *  impossible (fpcalc absent, fichier illisible), on ne conclut rien et l'ancien comportement (numérotation) s'applique. */
+    private static void rejectIfSameSong(Path existant, Path fichier, TagInfo info) throws DuplicateFileException {
+        try {
+            if (!Files.isRegularFile(existant) || !Files.isRegularFile(fichier) || Files.isSameFile(existant, fichier)) return;
+            if (Files.size(existant) == Files.size(fichier) && Files.mismatch(existant, fichier) == -1L)
+                throw new DuplicateFileException(existant, true);
+        } catch (DuplicateFileException e) {
+            throw e;
+        } catch (IOException e) {
+            return; // illisible : numérotation comme avant plutôt que de bloquer
+        }
+        Boolean sameAudio = AudioSimilarity.sameAudio(existant.toFile(), fichier.toFile());
+        if (Boolean.TRUE.equals(sameAudio)) throw new DuplicateFileException(existant, false);
+    }
     public Path rename(Path fichier, TagInfo info, int maskIndex, Path rootDir) throws IOException {
         if (rootDir == null) rootDir = fichier.getParent();
 
@@ -179,9 +195,13 @@ public class FileRenamer {
 
             // Résolution de collision
             if (Files.exists(cible)) {
+                // Le nom visé est pris par le MÊME morceau (copie identique, ou même enregistrement dans un autre fichier) :
+                // inutile de créer « nom (2) », on laisse le fichier où il est et on le signale (Outils → Doublons).
+                rejectIfSameSong(cible, fichier, info);
                 int n = 2;
                 do {
                     cible = rootDir.resolve(chemin + " (" + n++ + ")" + ext).normalize();
+                    if (Files.exists(cible) && !cible.equals(fichier)) rejectIfSameSong(cible, fichier, info);
                     // Le candidat de collision retombe sur le fichier LUI-MÊME (cas fréquent : deux
                     // copies identiques déjà présentes, l'une déjà au nom canonique, l'autre déjà
                     // au premier suffixe "(2)" — exactement le nom que cette boucle vient de

@@ -36,6 +36,36 @@ public final class Fingerprinter {
         return gate;
     }
 
+    /** Empreinte BRUTE (suite d'entiers Chromaprint, ~8 par seconde) et durée du fichier, pour COMPARER deux fichiers entre eux. */
+    public record Raw(int[] ints, double durationSec) {}
+
+    /** Empreinte brute des 2 premières minutes via {@code fpcalc -raw}. Lève une exception si fpcalc est absent ou échoue. */
+    public static Raw computeRaw(File fichier) throws Exception {
+        String fpcalc = FpcalcInstaller.resolve();
+        if (fpcalc == null) throw new Exception("fpcalc introuvable — installez-le via Préférences → Audio");
+        ProcessBuilder pb = new ProcessBuilder(fpcalc, "-raw", "-json", "-length", "120", fichier.getAbsolutePath())
+                .redirectErrorStream(false);
+        String output;
+        Semaphore permit = gate();
+        Semaphore diskGate = DiskIoThrottle.acquireFor(fichier);
+        permit.acquire();
+        try {
+            output = ProcessUtils.readStringWithTimeout(pb, 60);
+        } finally {
+            permit.release();
+            DiskIoThrottle.release(diskGate);
+        }
+        if (output == null || output.isBlank())
+            throw new Exception("fpcalc timeout ou sortie vide pour " + fichier.getName());
+        JsonNode json = MAPPER.readTree(output);
+        JsonNode fp = json.path("fingerprint");
+        if (!fp.isArray() || fp.size() == 0)
+            throw new Exception("fpcalc : empreinte brute manquante pour " + fichier.getName());
+        int[] ints = new int[fp.size()];
+        for (int i = 0; i < ints.length; i++) ints[i] = (int) fp.get(i).asLong();
+        return new Raw(ints, json.path("duration").asDouble(0));
+    }
+
     /** Calcule l'empreinte + durée (secondes) via fpcalc, ou null si indisponible/échec. */
     public static Result compute(File fichier) throws Exception {
         String fpcalc = FpcalcInstaller.resolve();
