@@ -71,8 +71,10 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     private final boolean bpmEnabled      = BpmDetector.isAvailable();
     private final boolean essentiaEnabled = EssentiaClient.isOnPath();
-    private final boolean rgEnabled       = Config.get().replayGainEnabled() && ReplayGainAnalyzer.isAvailable();
-    private final ReplayGainAnalyzer replayGain = rgEnabled ? new ReplayGainAnalyzer() : null;
+    // ReplayGain : disponibilité figée à la construction (coûteux à tester), mais le RÉGLAGE est relu à chaque fichier — le « Mode Express » agit ainsi tout de suite, sans relancer la passe en cours.
+    private final boolean rgAvailable     = ReplayGainAnalyzer.isAvailable();
+    private boolean rgEnabled() { return rgAvailable && Config.get().replayGainEnabled(); }
+    private final ReplayGainAnalyzer replayGain = rgAvailable ? new ReplayGainAnalyzer() : null;
     private final TaggerScript taggerScript = new TaggerScript();
     // Cache alias artiste : artistMbid → nom Latin (évite un appel MB par fichier)
     private final java.util.Map<String, String> aliasCache = new java.util.concurrent.ConcurrentHashMap<>();
@@ -971,7 +973,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             try { lyrics.enrich(best); } catch (Exception ignored) {}
 
             // ── ReplayGain (analyse locale, ne touche pas le fichier) ────────────
-            if (rgEnabled) {
+            if (rgEnabled()) {
                 log(I18n.t("  replaygain..."));
                 try {
                     ReplayGainAnalyzer.RGResult rg = replayGain.analyze(fichier.getAbsolutePath());

@@ -67,7 +67,9 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final com.opentagger.ReplayGainAnalyzer replayGain = new com.opentagger.ReplayGainAnalyzer();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
-    private final boolean rgEnabled    = Config.get().replayGainEnabled() && com.opentagger.ReplayGainAnalyzer.isAvailable();
+    // ReplayGain : disponibilité figée à la construction (coûteux à tester), mais le RÉGLAGE est relu à chaque fichier — le « Mode Express » agit ainsi tout de suite, sans relancer la passe en cours.
+    private final boolean rgAvailable  = com.opentagger.ReplayGainAnalyzer.isAvailable();
+    private boolean rgEnabled() { return rgAvailable && Config.get().replayGainEnabled(); }
 
     private final AtomicInteger doneCount = new AtomicInteger();
 
@@ -343,7 +345,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         // → "Rafraîchir tags..." ; paroles/genre/bio → déjà juste au-dessus/en-dessous dans ce même
         // fichier). Ne fait QUE peupler les champs ici (comme BPM/paroles ci-dessus) — l'écriture
         // réelle sur le fichier attend, comme le reste de cette passe, un futur "Enregistrer tout".
-        if (ti.replayGainTrackGain.isBlank() && rgEnabled) {
+        if (ti.replayGainTrackGain.isBlank() && rgEnabled()) {
             try {
                 com.opentagger.ReplayGainAnalyzer.RGResult rg = replayGain.analyze(fichier.getAbsolutePath());
                 if (rg != null) {

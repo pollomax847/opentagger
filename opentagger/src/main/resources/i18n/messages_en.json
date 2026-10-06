@@ -737,6 +737,7 @@
   "fpcalc installé automatiquement : %s": "fpcalc installed automatically: %s",
   "Vide = <bibliothèque>\\_À vérifier\\Non identifiés": "Empty = <library>\\_À vérifier\\Non identifiés",
   "Vide = <bibliothèque>\\_À vérifier\\Durée incohérente": "Empty = <library>\\_À vérifier\\Durée incohérente",
+  "Même fichier qu'une autre ligne — enregistré une seule fois": "Same file as another row — saved only once",
   "Manuel": "Manual",
   "Assisté": "Assisted",
   "Automatique": "Automatic",

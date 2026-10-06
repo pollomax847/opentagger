@@ -4861,8 +4861,18 @@ public class MainFrame extends JFrame {
         // allEntries() : les fichiers identifiés mais masqués par un filtre actif n'étaient sinon
         // jamais écrits sur le disque, sans le moindre avertissement.
         List<FileEntry> toSave = new ArrayList<>();
+        // Deux lignes sur LE MÊME fichier (chemins identiques à la casse près sous Windows/macOS : rescan, dossier ajouté deux
+        // fois) : une seule est écrite — la seconde trouvait le fichier déjà renommé et finissait en « Fichier introuvable ».
+        // Les autres lignes recopient le résultat de la première quand l'enregistrement est fini (voir le DONE plus bas), donc
+        // aucune ne reste « Identifié » à relancer en boucle.
+        java.util.Map<String, FileEntry> firstByPath = new java.util.HashMap<>();
+        java.util.Map<FileEntry, List<FileEntry>> sameFile = new java.util.LinkedHashMap<>();
         for (FileEntry e : tableModel.allEntries()) {
-            if (e.selected && e.status == FileEntry.Status.IDENTIFIED) toSave.add(e);
+            if (!e.selected || e.status != FileEntry.Status.IDENTIFIED) continue;
+            String key = com.opentagger.PathIdentity.key(e.currentPath != null ? e.currentPath : e.file.toPath());
+            FileEntry first = firstByPath.putIfAbsent(key, e);
+            if (first == null) toSave.add(e);
+            else sameFile.computeIfAbsent(first, k -> new ArrayList<>()).add(e);
         }
         if (toSave.isEmpty()) {
             System.out.println("[OT] Enregistrer : aucun fichier identifié sélectionné à enregistrer.");
@@ -4896,6 +4906,17 @@ public class MainFrame extends JFrame {
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
                     endProgress(ProgressSlot.SAVE);
+                    for (java.util.Map.Entry<FileEntry, List<FileEntry>> same : sameFile.entrySet()) {
+                        FileEntry first = same.getKey();
+                        if (first.status == FileEntry.Status.IDENTIFIED) continue; // pas traité (annulé) : les autres lignes attendent aussi
+                        for (FileEntry twin : same.getValue()) {
+                            twin.status = first.status;
+                            twin.result = first.result;
+                            twin.currentPath = first.currentPath;
+                            twin.message = I18n.t("Même fichier qu'une autre ligne — enregistré une seule fois");
+                            tableModel.update(twin);
+                        }
+                    }
                     refreshStats();
                     if (!w.isCancelled() && Config.get().bool("artwork.auto_after_save", false)) {
                         for (FileEntry fe : toSave) if (fe.status == FileEntry.Status.TAGGED) pendingArtwork.add(fe);

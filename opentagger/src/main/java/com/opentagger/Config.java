@@ -441,7 +441,10 @@ public class Config {
         if (on == expressModeActive()) return;
         if (on) {
             for (String key : EXPRESS_MODE_KEYS) {
-                props.setProperty("express_mode.saved." + key, str(key, "false"));
+                // Valeur de repli = le VRAI défaut de la clé (photo et paroles sont actives par défaut) : avec « false », sortir du
+                // mode Express les laissait coupées pour toujours quand le réglage n'avait jamais été écrit dans le fichier.
+                boolean def = !"replaygain.enabled".equals(key);
+                props.setProperty("express_mode.saved." + key, String.valueOf(bool(key, def)));
                 props.setProperty(key, "false");
             }
         } else {

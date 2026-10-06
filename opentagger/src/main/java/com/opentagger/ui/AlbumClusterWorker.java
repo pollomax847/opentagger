@@ -54,7 +54,9 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
     private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
     private final TagWriter writer = new TagWriter();
-    private final boolean rgEnabled = Config.get().replayGainEnabled() && ReplayGainAnalyzer.isAvailable();
+    // ReplayGain : disponibilité figée à la construction (coûteux à tester), mais le RÉGLAGE est relu à chaque fichier — le « Mode Express » agit ainsi tout de suite, sans relancer la passe en cours.
+    private final boolean rgAvailable = ReplayGainAnalyzer.isAvailable();
+    private boolean rgEnabled() { return rgAvailable && Config.get().replayGainEnabled(); }
 
     private final AtomicInteger albumsProcessed = new AtomicInteger();
     private final AtomicInteger tracksFixed     = new AtomicInteger();
@@ -207,7 +209,7 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
             }
 
             // ── ReplayGain d'album (analyse concaténée sur TOUTES les pistes du groupe) ──
-            if (rgEnabled) {
+            if (rgEnabled()) {
                 List<String> paths = albumFiles.stream()
                     .map(e -> e.currentPath != null ? e.currentPath.toString() : e.file.getAbsolutePath())
                     .collect(java.util.stream.Collectors.toList());
