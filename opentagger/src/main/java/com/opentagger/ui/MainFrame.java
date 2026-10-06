@@ -3017,6 +3017,9 @@ public class MainFrame extends JFrame {
     private static final long FOLLOW_PAUSE_AFTER_CLICK_MS = 60_000;
 
     private void followProcessing(FileEntry entry) {
+        // Case « Garder le panneau Journal synchronisé… » (Préférences → Renommage) : elle était enregistrée mais jamais lue, le suivi
+        // (qui reselectionne la ligne en cours à chaque fichier traité) restait donc imposé.
+        if (!Config.get().bool("rename.follow_log", true)) return;
         if (System.currentTimeMillis() - lastManualTableClickMs < FOLLOW_PAUSE_AFTER_CLICK_MS) return;
         int viewRow;
         if (viewMode == ViewMode.GROUPED) {

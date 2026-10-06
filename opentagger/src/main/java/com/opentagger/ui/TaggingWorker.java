@@ -2934,7 +2934,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      */
     private static List<String> buildSuggestions(TagInfo best, int seuil) {
         List<String> s = new java.util.ArrayList<>();
-        if (best.score > 0 && best.score < seuil + 20)
+        // « Modéré » = au-dessus du seuil mais pas parfait. Plafonné à 100 : avec un seuil ≥ 81, « seuil + 20 » dépassait 100 et TOUTE
+        // identification (même à 100 %) portait « Score modéré (100%) » — 9 145 avertissements dans un seul journal.
+        if (best.score > 0 && best.score < Math.min(seuil + 20, 100))
             s.add(I18n.t("Score modéré (%s%%) — vérifier l'identification", best.score));
         // "Pochette non trouvée" ne peut plus être ajouté ici : la pochette n'est résolue qu'à
         // l'Enregistrement (façon Picard), voir TagEnrichment.saveEntry(). SaveWorker ajoute
