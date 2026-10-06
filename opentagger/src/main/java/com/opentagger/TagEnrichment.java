@@ -266,7 +266,14 @@ public final class TagEnrichment {
         Path cover = resolveCover(ti, fichier, caa, fanArt, deezer, cache);
         TagInfo written;
         try {
-            written = writer.write(fichier, ti, cover);
+            // Écriture des tags (réécrit le fichier) : un accès à la fois par disque mécanique — voir DiskIoThrottle. Le réseau
+            // (pochette, MusicBrainz) reste hors de cette section : le permis ne couvre que le travail de disque.
+            java.util.concurrent.Semaphore diskGate = DiskIoThrottle.acquireFor(fichier);
+            try {
+                written = writer.write(fichier, ti, cover);
+            } finally {
+                DiskIoThrottle.release(diskGate);
+            }
 
             // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
             // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
@@ -346,7 +353,15 @@ public final class TagEnrichment {
                 Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
                         ? java.nio.file.Paths.get(libRoot)
                         : (scanRoot != null ? scanRoot : oldParent);
-                Path newPath = renamer.rename(curPath, written, maskIndex, root);
+                // Déplacement/renommage : permis du disque de DESTINATION (c'est lui qui encaisse les écritures et les créations de
+                // dossiers). Réentrant : la comparaison audio faite dans rename() relit des disques sans se bloquer elle-même.
+                java.util.concurrent.Semaphore moveGate = DiskIoThrottle.acquireFor(root.toFile());
+                Path newPath;
+                try {
+                    newPath = renamer.rename(curPath, written, maskIndex, root);
+                } finally {
+                    DiskIoThrottle.release(moveGate);
+                }
                 if (newPath != null) {
                     finalPath = newPath;
                     // Re-classer l'historique sous le nouveau chemin — sinon le prochain scan/

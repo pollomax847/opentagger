@@ -264,6 +264,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             final int       fileIdx = startIdx + i + 1;
             futures.add(pool.submit(() -> {
                 if (isCancelled()) return;
+                SaveBacklog.awaitRoom(this::isCancelled); // frein : ne pas identifier plus vite que l'enregistrement ne suit
 
                 entry.status = FileEntry.Status.PROCESSING;
                 publish(entry);

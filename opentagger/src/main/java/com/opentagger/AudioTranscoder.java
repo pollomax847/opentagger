@@ -70,12 +70,19 @@ public class AudioTranscoder {
         // pas gérée ici. Si ffmpeg refuse la pochette, on retente sans elle plutôt que d'échouer.
         boolean keepCover = (format == Format.MP3 || format == Format.FLAC || format == Format.AAC)
                 && hasAttachedPicture(source);
+        // ffmpeg lit la source et écrit à côté : un seul à la fois par disque mécanique (voir DiskIoThrottle). Cinq conversions en
+        // parallèle sur le même disque USB le saturaient (file d'attente 4-6, < 1 Mo/s) et affamaient aussi l'enregistrement.
+        java.util.concurrent.Semaphore diskGate = DiskIoThrottle.acquireFor(source.toFile());
         try {
-            return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, keepCover);
-        } catch (IOException e) {
-            if (!keepCover) throw e;
-            Files.deleteIfExists(dest);
-            return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, false);
+            try {
+                return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, keepCover);
+            } catch (IOException e) {
+                if (!keepCover) throw e;
+                Files.deleteIfExists(dest);
+                return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, false);
+            }
+        } finally {
+            DiskIoThrottle.release(diskGate);
         }
     }
 

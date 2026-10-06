@@ -486,6 +486,7 @@ public class MainFrame extends JFrame {
         });
 
         autoInstallFpcalcIfMissing();
+        startSaveBacklogMeter();
         // Vue (liste/arborescence/Cover Flow) choisie à la dernière session — après
         // buildMainSplit() (table/coverFlowPanel doivent exister) ; ViewMode.FLAT (déjà la valeur
         // par défaut du champ) si jamais enregistré.
@@ -997,6 +998,17 @@ public class MainFrame extends JFrame {
             super.doClick(pressTime);
             MenuSelectionManager.defaultManager().setSelectedPath(path);
         }
+    }
+
+    /** Compte toutes les 2 s les fichiers identifiés en attente d'enregistrement, pour le frein de TaggingWorker (voir SaveBacklog). */
+    private void startSaveBacklogMeter() {
+        javax.swing.Timer timer = new javax.swing.Timer(2000, e -> {
+            int n = 0;
+            for (FileEntry fe : tableModel.allEntries()) if (fe.selected && fe.status == FileEntry.Status.IDENTIFIED) n++;
+            SaveBacklog.setUnsaved(n);
+        });
+        timer.setRepeats(true);
+        timer.start();
     }
 
     /** fpcalc (empreinte AudioID pour AcoustID) est livré avec l'installateur ; s'il manque quand même (copie portable, Linux),
