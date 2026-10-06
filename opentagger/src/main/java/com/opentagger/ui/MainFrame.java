@@ -5827,6 +5827,9 @@ public class MainFrame extends JFrame {
         cache.recordFileTagging(fichier.getAbsolutePath(), null);
         // Effacer les MBIDs du fichier audio pour forcer une nouvelle identification
         // (sinon MUSICBRAINZ_TRACK_ID est relu et peut donner un mauvais résultat en cache)
+        // Un accès à la fois par disque mécanique (voir DiskIoThrottle) : sur des dizaines de milliers de fichiers, lecture + réécriture
+        // en parallèle d'un même disque USB le saturaient avant même le début de l'identification.
+        java.util.concurrent.Semaphore diskGate = com.opentagger.DiskIoThrottle.acquireFor(fichier);
         try {
             AudioFile af = AudioFileIO.read(fichier);
             Tag tag = af.getTag();
@@ -5838,7 +5841,10 @@ public class MainFrame extends JFrame {
                 }
                 if (changed) af.commit();
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        } finally {
+            com.opentagger.DiskIoThrottle.release(diskGate);
+        }
     }
 
     /** Tamponne les fichiers sélectionnés comme "déjà taggués" (marqueur OT_TAGGEDDATE + historique
