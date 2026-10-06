@@ -191,6 +191,9 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
                 entry.message          = message;
                 entry.durationMismatch = durationMismatchMoved;
             });
+            // Enregistré : l'identification en attente (voir TaggingWorker) n'a plus lieu d'être — sous l'ancien chemin ET le nouveau.
+            cache.deletePendingIdentified(fichier.getAbsolutePath());
+            if (pathFinal != null) cache.deletePendingIdentified(pathFinal.toAbsolutePath().toString());
             log(I18n.t("  ✔ ENREGISTRÉ %s", fichier.getName()));
             saved.incrementAndGet();
         } catch (Exception ex) {

@@ -4372,7 +4372,12 @@ public class MainFrame extends JFrame {
                         // attente" après réorganisation du dossier.
                         boolean wasPreviouslyTagged = taggedPaths.contains(ff.getAbsolutePath())
                                 || !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
-                        return new Object[]{ entry, ti, wasPreviouslyTagged, size };
+                        // Identification faite lors d'une session précédente mais jamais enregistrée (app fermée ou arrêtée entre-temps) :
+                        // on la retrouve ici, à condition que le fichier soit resté identique. Lue hors EDT.
+                        com.opentagger.model.TagInfo restored = null;
+                        if (!wasPreviouslyTagged && size > 0 && Config.get().bool("tagging.persist_pending", true))
+                            restored = cache.loadPendingIdentified(ff.getAbsolutePath(), size, mtime);
+                        return new Object[]{ entry, ti, wasPreviouslyTagged, size, restored };
                     });
                 }, this::isCancelled);
                 } finally {
@@ -4467,6 +4472,10 @@ public class MainFrame extends JFrame {
                             // Pas besoin de charger un TagInfo depuis l'historique en mémoire
                             entry.status  = com.opentagger.model.FileEntry.Status.TAGGED;
                             entry.message = "";
+                        } else if (chunk.length > 4 && chunk[4] instanceof com.opentagger.model.TagInfo restoredTags) {
+                            entry.result  = restoredTags;
+                            entry.status  = com.opentagger.model.FileEntry.Status.IDENTIFIED;
+                            entry.message = I18n.t("Identification retrouvée (pas encore enregistrée)");
                         }
                         tableModel.update(entry);
                     }

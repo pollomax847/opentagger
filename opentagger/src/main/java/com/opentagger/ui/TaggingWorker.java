@@ -1018,6 +1018,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
             final TagInfo    finalBest = best;
             final List<String> finalSugg = sugg;
+            // Mémorisé tout de suite, hors mémoire vive : une fermeture ou un arrêt de l'app avant l'enregistrement ne perd plus cette
+            // identification (retrouvée au scan suivant tant que le fichier n'a pas changé — voir MetadataCache.pending_identified).
+            if (Config.get().bool("tagging.persist_pending", true)) {
+                try { cache.savePendingIdentified(fichier.getAbsolutePath(), fichier.length(), fichier.lastModified(), finalBest); }
+                catch (Exception ignored) {}
+            }
             // Muter entry SUR l'EDT, pas ici : ce FileEntry est aussi lu par le TableRowSorter
             // en direct depuis l'EDT — même raison que processAlbumFolder (voir son commentaire
             // / SafeTableRowSorter pour le filet de sécurité).
