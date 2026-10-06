@@ -367,7 +367,11 @@ public final class TagEnrichment {
                 renameError = ex.getMessage();
                 if (log != null) log.accept(ex.getMessage());
             } catch (Exception ex) {
-                renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                // FileSystemException sans « reason » renvoie juste « source -> cible » : on ajoute la nature de l'erreur.
+                String m = ex.getMessage();
+                renameError = m == null ? ex.getClass().getSimpleName()
+                        : (ex instanceof java.nio.file.FileSystemException fse && fse.getReason() == null
+                                ? m + " (" + ex.getClass().getSimpleName() + ")" : m);
             }
         }
 
