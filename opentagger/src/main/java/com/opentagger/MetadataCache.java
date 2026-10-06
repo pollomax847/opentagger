@@ -839,6 +839,66 @@ public class MetadataCache implements AutoCloseable {
         catch (Exception e) { LOG.warning("vacuum : " + e.getMessage()); }
     }
 
+    /** Tables purement techniques : recherches réseau, pochettes, lecture des tags au scan. Régénérées toutes seules, sans perte de travail. */
+    public static final List<String> TECHNICAL_TABLES = List.of("lookups", "recordings", "image_cache", "scan_cache");
+    /** Tables PERSONNELLES : ce qui a été tagué, les corrections manuelles, l'annulation. Non régénérables. */
+    public static final List<String> PERSONAL_TABLES = List.of("tagging_history", "file_history", "corrections", "undo_history");
+
+    /** Nombre de lignes de chaque table concernée (pour montrer ce qui va partir avant de confirmer). */
+    public synchronized java.util.Map<String, Long> countRows(boolean includePersonal) {
+        java.util.Map<String, Long> out = new java.util.LinkedHashMap<>();
+        if (conn == null) return out;
+        for (String t : tablesToClear(includePersonal)) {
+            try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT count(*) FROM \"" + t + "\"")) {
+                out.put(t, rs.next() ? rs.getLong(1) : 0L);
+            } catch (Exception e) { out.put(t, -1L); }
+        }
+        return out;
+    }
+
+    static List<String> tablesToClear(boolean includePersonal) {
+        List<String> all = new ArrayList<>(TECHNICAL_TABLES);
+        if (includePersonal) all.addAll(PERSONAL_TABLES);
+        return all;
+    }
+
+    /**
+     * Vide le cache d'un coup (puis récupère l'espace disque). {@code includePersonal=false} : cache technique seulement, l'historique
+     * de taguage reste. {@code true} : TOUTE la base. Ne supprime jamais le fichier : le schéma reste, l'app continue de fonctionner.
+     * À lancer hors EDT et sans aucun taguage/enregistrement en cours (VACUUM exige un accès exclusif).
+     *
+     * @return lignes supprimées par table
+     */
+    public synchronized java.util.Map<String, Integer> clearAll(boolean includePersonal) {
+        if (conn == null) return java.util.Map.of();
+        java.util.Map<String, Integer> removed = clearTables(conn, includePersonal);
+        try (Statement st = conn.createStatement()) {
+            st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        } catch (Exception e) { LOG.warning("clearAll (checkpoint) : " + e.getMessage()); }
+        vacuum();
+        return removed;
+    }
+
+    /** Cœur de {@link #clearAll}, sur une connexion donnée (testable sur une base en mémoire). Liste blanche de tables uniquement. */
+    static java.util.Map<String, Integer> clearTables(Connection c, boolean includePersonal) {
+        java.util.Map<String, Integer> removed = new java.util.LinkedHashMap<>();
+        try {
+            c.setAutoCommit(false);
+            for (String t : tablesToClear(includePersonal)) {
+                try (Statement st = c.createStatement()) {
+                    removed.put(t, st.executeUpdate("DELETE FROM \"" + t + "\""));
+                } catch (Exception e) { removed.put(t, -1); } // table absente : ignorée
+            }
+            c.commit();
+        } catch (Exception e) {
+            LOG.warning("clearTables : " + e.getMessage());
+            try { c.rollback(); } catch (Exception ignored) {}
+        } finally {
+            try { c.setAutoCommit(true); } catch (Exception ignored) {}
+        }
+        return removed;
+    }
+
     /** Supprime tout l'historique personnel (action irréversible, demande confirmation dans l'UI). */
     public void purgeHistory() {
         if (conn == null) return;

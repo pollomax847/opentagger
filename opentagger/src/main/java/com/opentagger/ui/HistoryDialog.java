@@ -150,12 +150,12 @@ public class HistoryDialog extends JDialog {
 
     private JPanel buildFooter() {
         JButton btnClose     = new JButton(I18n.t("Fermer"));
-        JButton btnPurge     = new JButton(I18n.t("Purger l'historique…"));
+        JButton btnPurge     = new JButton(I18n.t("Vider le cache / la base…"));
         JButton btnCleanScan = new JButton(I18n.t("Nettoyer le cache de scan…"));
         JButton btnExport    = new JButton("📤  " + I18n.t("Exporter JSON"));
         JButton btnImport    = new JButton("📥  " + I18n.t("Importer JSON"));
         btnClose    .addActionListener(e -> dispose());
-        btnPurge    .addActionListener(e -> confirmPurge());
+        btnPurge    .addActionListener(e -> confirmClear());
         btnCleanScan.addActionListener(e -> confirmCleanScanCache());
         btnBackfill .addActionListener(e -> confirmBackfillTags());
         btnExport   .addActionListener(e -> exportJson());
@@ -345,6 +345,71 @@ public class HistoryDialog extends JDialog {
                 }
             }
         }.execute();
+    }
+
+    // ── Vider le cache / la base ───────────────────────────────────────────────
+
+    /**
+     * Un seul point d'entrée pour tout vider : cache technique (recherches, pochettes, lecture des tags — régénéré tout seul), historique
+     * personnel seul (ce qui a été tagué + corrections, l'ancien « Purger l'historique »), ou TOUT, avec récupération de l'espace disque
+     * (la base fait plusieurs Go). Refusé tant qu'un taguage ou un enregistrement tourne : la compaction exige un accès exclusif.
+     */
+    private void confirmClear() {
+        boolean busy = WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()
+                || WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isPresent()
+                || !WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING).isEmpty();
+        if (busy) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Un taguage ou un enregistrement est en cours.\nAttendez la fin (ou arrêtez-le) avant de vider le cache."),
+                I18n.t("Vider le cache / la base"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        java.util.Map<String, Long> counts = cache.countRows(true);
+        long technical = 0, personal = 0;
+        for (String t : MetadataCache.TECHNICAL_TABLES) technical += Math.max(0, counts.getOrDefault(t, 0L));
+        for (String t : MetadataCache.PERSONAL_TABLES) personal += Math.max(0, counts.getOrDefault(t, 0L));
+        String[] choices = { I18n.t("Cache technique"), I18n.t("Historique seulement"), I18n.t("Tout"), I18n.t("Annuler") };
+        int pick = JOptionPane.showOptionDialog(this,
+            I18n.t("<html><b>Que voulez-vous vider ?</b><br><br>"
+                 + "<b>Cache technique</b> — %d lignes : recherches réseau, pochettes, lecture des tags au scan.<br>"
+                 + "Régénéré tout seul, aucune perte de travail (le prochain scan sera plus lent).<br><br>"
+                 + "<b>Historique seulement</b> — %d lignes : ce qui a été tagué, corrections, annulations.<br>"
+                 + "Non régénérable.<br><br>"
+                 + "<b>Tout</b> — les deux, puis récupération de l'espace disque.<br><br>"
+                 + "Vos fichiers audio ne sont jamais touchés. Action irréversible.</html>", technical, personal),
+            I18n.t("Vider le cache / la base"), JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null, choices, choices[3]);
+        if (pick < 0 || pick >= 3) return;
+        if (pick >= 1) { // tout ce qui touche à l'historique personnel demande une saisie : pas de clic par réflexe
+            String typed = JOptionPane.showInputDialog(this,
+                I18n.t("Pour confirmer la suppression de l'historique personnel, tapez SUPPRIMER :"),
+                I18n.t("Confirmation"), JOptionPane.WARNING_MESSAGE);
+            if (typed == null || !typed.trim().equals("SUPPRIMER")) return;
+        }
+        if (pick == 1) { confirmPurgeHistoryOnly(); return; }
+        final boolean everything = pick == 2;
+        setTitle(I18n.t("Historique de taguage — OpenTagger (vidage en cours…)"));
+        new SwingWorker<java.util.Map<String, Integer>, Void>() {
+            @Override protected java.util.Map<String, Integer> doInBackground() { return cache.clearAll(everything); }
+            @Override protected void done() {
+                setTitle(I18n.t("Historique de taguage — OpenTagger"));
+                try {
+                    long n = get().values().stream().filter(v -> v > 0).mapToLong(Integer::longValue).sum();
+                    loadAll();
+                    JOptionPane.showMessageDialog(HistoryDialog.this,
+                        I18n.t("%d ligne(s) supprimée(s), espace disque récupéré.", n),
+                        I18n.t("Vidage terminé"), JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(HistoryDialog.this,
+                        I18n.t("Erreur : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
+    }
+
+    private void confirmPurgeHistoryOnly() {
+        cache.purgeHistory();
+        loadAll();
+        setTitle(I18n.t("Historique de taguage — OpenTagger (purgé)"));
     }
 
     // ── Purge ─────────────────────────────────────────────────────────────────
