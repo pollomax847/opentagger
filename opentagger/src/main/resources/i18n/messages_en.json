@@ -747,6 +747,7 @@
   "%d ligne(s) supprimée(s), espace disque récupéré.": "%d row(s) deleted, disk space reclaimed.",
   "Vidage terminé": "Clearing finished",
   "Pour confirmer la suppression de l'historique personnel, tapez SUPPRIMER :": "To confirm deleting the personal history, type SUPPRIMER:",
+  "Entrées obsolètes": "Stale entries",
   "Manuel": "Manual",
   "Assisté": "Assisted",
   "Automatique": "Automatic",

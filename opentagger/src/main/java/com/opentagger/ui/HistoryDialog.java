@@ -151,18 +151,15 @@ public class HistoryDialog extends JDialog {
     private JPanel buildFooter() {
         JButton btnClose     = new JButton(I18n.t("Fermer"));
         JButton btnPurge     = new JButton(I18n.t("Vider le cache / la base…"));
-        JButton btnCleanScan = new JButton(I18n.t("Nettoyer le cache de scan…"));
         JButton btnExport    = new JButton("📤  " + I18n.t("Exporter JSON"));
         JButton btnImport    = new JButton("📥  " + I18n.t("Importer JSON"));
         btnClose    .addActionListener(e -> dispose());
         btnPurge    .addActionListener(e -> confirmClear());
-        btnCleanScan.addActionListener(e -> confirmCleanScanCache());
         btnBackfill .addActionListener(e -> confirmBackfillTags());
         btnExport   .addActionListener(e -> exportJson());
         btnImport   .addActionListener(e -> importJson());
         btnExport.setToolTipText(I18n.t("Sauvegarder l'historique dans un fichier JSON (partage/sauvegarde)"));
         btnImport.setToolTipText(I18n.t("Fusionner un fichier JSON d'historique (les entrées existantes ne sont pas écrasées)"));
-        btnCleanScan.setToolTipText(I18n.t("Supprime du cache de scan les entrées dont le fichier n'existe plus sur disque (déplacé/supprimé) — peut prendre plusieurs minutes sur une grosse bibliothèque"));
         btnBackfill.setToolTipText(I18n.t("Réécrit sur le disque les tags déjà connus dans cet historique, sans ré-identifier"
                 + " (aucun appel réseau) — utile après un correctif qui empêchait certains champs de bien s'enregistrer"));
 
@@ -178,7 +175,6 @@ public class HistoryDialog extends JDialog {
         right.add(btnExport);
         right.add(Box.createHorizontalStrut(8));
         right.add(btnClose);
-        right.add(btnCleanScan);
         right.add(btnBackfill);
         right.add(btnPurge);
         p.add(buildStats(), BorderLayout.WEST);
@@ -368,25 +364,27 @@ public class HistoryDialog extends JDialog {
         long technical = 0, personal = 0;
         for (String t : MetadataCache.TECHNICAL_TABLES) technical += Math.max(0, counts.getOrDefault(t, 0L));
         for (String t : MetadataCache.PERSONAL_TABLES) personal += Math.max(0, counts.getOrDefault(t, 0L));
-        String[] choices = { I18n.t("Cache technique"), I18n.t("Historique seulement"), I18n.t("Tout"), I18n.t("Annuler") };
+        String[] choices = { I18n.t("Entrées obsolètes"), I18n.t("Cache technique"), I18n.t("Historique seulement"), I18n.t("Tout"), I18n.t("Annuler") };
         int pick = JOptionPane.showOptionDialog(this,
             I18n.t("<html><b>Que voulez-vous vider ?</b><br><br>"
+                 + "<b>Entrées obsolètes</b> — retire du cache de scan les fichiers qui n'existent plus sur disque (léger, peut prendre quelques minutes).<br><br>"
                  + "<b>Cache technique</b> — %d lignes : recherches réseau, pochettes, lecture des tags au scan.<br>"
                  + "Régénéré tout seul, aucune perte de travail (le prochain scan sera plus lent).<br><br>"
                  + "<b>Historique seulement</b> — %d lignes : ce qui a été tagué, corrections, annulations.<br>"
                  + "Non régénérable.<br><br>"
                  + "<b>Tout</b> — les deux, puis récupération de l'espace disque.<br><br>"
                  + "Vos fichiers audio ne sont jamais touchés. Action irréversible.</html>", technical, personal),
-            I18n.t("Vider le cache / la base"), JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null, choices, choices[3]);
-        if (pick < 0 || pick >= 3) return;
-        if (pick >= 1) { // tout ce qui touche à l'historique personnel demande une saisie : pas de clic par réflexe
+            I18n.t("Vider le cache / la base"), JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE, null, choices, choices[4]);
+        if (pick < 0 || pick >= 4) return;
+        if (pick == 0) { confirmCleanScanCache(); return; } // a sa propre confirmation ; ne touche ni l'historique ni le cache utile
+        if (pick >= 2) { // tout ce qui touche à l'historique personnel demande une saisie : pas de clic par réflexe
             String typed = JOptionPane.showInputDialog(this,
                 I18n.t("Pour confirmer la suppression de l'historique personnel, tapez SUPPRIMER :"),
                 I18n.t("Confirmation"), JOptionPane.WARNING_MESSAGE);
             if (typed == null || !typed.trim().equals("SUPPRIMER")) return;
         }
-        if (pick == 1) { confirmPurgeHistoryOnly(); return; }
-        final boolean everything = pick == 2;
+        if (pick == 2) { confirmPurgeHistoryOnly(); return; }
+        final boolean everything = pick == 3;
         setTitle(I18n.t("Historique de taguage — OpenTagger (vidage en cours…)"));
         new SwingWorker<java.util.Map<String, Integer>, Void>() {
             @Override protected java.util.Map<String, Integer> doInBackground() { return cache.clearAll(everything); }
