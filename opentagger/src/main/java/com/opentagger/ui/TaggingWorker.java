@@ -1259,7 +1259,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     // Annual 2017", grosse compilation), même pour des fichiers sans AUCUN rapport réel — "Facile.mp3"
     // épinglé sur "Jonas Blue – Perfect Strangers", "download(4).mp3.mp3" sur "James Brown – Mind
     // Power"... Aucun rapport de bon sens entre le nom de fichier et le titre choisi. Gravité : le
-    // résultat part avec score=92 (voir l'appelant), AU-DESSUS de match.min_score_auto (90) — donc
+    // résultat part avec score=92 (voir l'appelant), AU-DESSUS de autocorrector.min_score (90) — donc
     // auto-enregistré sans aucune revue, une vraie corruption de métadonnées à grande échelle sur un
     // dossier de fichiers non identifiés mélangés (pas un vrai album cohérent). 0.4 reste adapté à
     // d'autres usages de trackMatchingThreshold() (filtres plus souples, décisions moins engageantes)
@@ -1609,7 +1609,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // direct 2026-09-05 sur "02 - Dj Kheops-2-I M Still Feel Like Danc.mp3", épinglé
                     // par numéro de piste "2" sur une release totalement sans rapport (même piste
                     // au titre charabia "_ _ _ _..." déjà vue comme faux positif ailleurs cette
-                    // session), auto-enregistrable (score=92 > match.min_score_auto=90). Même
+                    // session), auto-enregistrable (score=92 > autocorrector.min_score=90). Même
                     // garde-fou que findTrackInReleaseByTitle() : si LE FICHIER a un titre
                     // exploitable, il doit rester plausible face au titre de la piste trouvée par
                     // numéro — sinon on retombe sur findTrackInReleaseByTitle() (qui, lui, cherche
@@ -1674,7 +1674,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         if (myTrack.lengthMs() > 0) t.mbDurationSec = myTrack.lengthMs() / 1000;
                         // Score < TOC (95) : matching titre/numéro contre une release VÉRIFIÉE par une
                         // autre piste, pas un checksum sur ce fichier précis — reste au-dessus du seuil
-                        // par défaut (match.min_score_auto=90) et bénéficie en plus du garde-fou durée
+                        // par défaut (autocorrector.min_score=90) et bénéficie en plus du garde-fou durée
                         // ci-dessus (mbDurationSec renseigné, contrairement au TOC).
                         t.score = 92;
                         log(I18n.t("  Cohérence de groupe → %s – %s [%s] (release déjà fixée par une autre piste du groupe)",
@@ -2038,7 +2038,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         // découpage devinable depuis un nom de fichier n'a pas la fiabilité d'une
                         // recherche sur des tags déjà propres — searchRecording() renvoie pourtant
                         // toujours 100 par construction. Sans ce plafond, un résultat par coïncidence
-                        // faux mais plausible franchirait match.min_score_auto (90) et s'enregistrerait
+                        // faux mais plausible franchirait autocorrector.min_score (90) et s'enregistrerait
                         // sans aucune revue humaine — repéré en vérifiant ce correctif (2026-09-13),
                         // jamais vu en conditions réelles mais même risque que le bug TOC du jour même.
                         for (TagInfo r : results) r.score = 50;
@@ -2130,7 +2130,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 // recording:"Yesterday" AND release:"Greatest Hits" renvoie Gheorghe Zamfir, The
                 // Golden Strings et Marianne Faithfull à score=100, LE VRAI Beatles ne scorant que
                 // 95 (donc classé derrière). Sans ce plafond, un résultat coïncidemment faux
-                // franchissait match.min_score_auto (90) et s'enregistrait sans revue humaine.
+                // franchissait autocorrector.min_score (90) et s'enregistrait sans revue humaine.
                 for (TagInfo r : results) r.score = 50;
                 cache.putRecordingSearch(MetadataCache.queryHash(title, existingAlbum), mb.lastRawJson());
                 return results;
