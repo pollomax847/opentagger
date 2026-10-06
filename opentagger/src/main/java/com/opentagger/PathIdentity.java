@@ -15,6 +15,23 @@ public final class PathIdentity {
         return os.contains("win") || os.contains("mac");
     }
 
+    /** Ensemble de chemins (texte) qui respecte la sensibilité à la casse du système : « E:\Musique\A.mp3 » et « e:\musique\a.mp3 » y sont
+     *  le même élément sous Windows/macOS, deux éléments sous Linux. Lecture seule après chargement. */
+    public static java.util.Set<String> newPathSet() { return newPathSet(caseInsensitiveFileSystem()); }
+
+    public static java.util.Set<String> newPathSet(boolean caseInsensitive) {
+        return caseInsensitive ? new java.util.concurrent.ConcurrentSkipListSet<>(String.CASE_INSENSITIVE_ORDER)
+                               : new java.util.HashSet<>(); // comportement historique inchangé hors Windows/macOS
+    }
+
+    /** Idem pour une table chemin → valeur. */
+    public static <V> java.util.Map<String, V> newPathMap() { return newPathMap(caseInsensitiveFileSystem()); }
+
+    public static <V> java.util.Map<String, V> newPathMap(boolean caseInsensitive) {
+        return caseInsensitive ? new java.util.concurrent.ConcurrentSkipListMap<>(String.CASE_INSENSITIVE_ORDER)
+                               : new java.util.HashMap<>(); // comportement historique inchangé hors Windows/macOS
+    }
+
     /** Clé de comparaison de ce chemin sur le système de fichiers courant. */
     public static String key(Path p) { return key(p, caseInsensitiveFileSystem()); }
 

@@ -549,7 +549,9 @@ public class MetadataCache implements AutoCloseable {
      * Version légère pour le scan initial : évite de charger les TagInfo en RAM.
      */
     public synchronized java.util.Set<String> loadTaggedPaths() {
-        java.util.Set<String> set = new java.util.HashSet<>();
+        // Casse ignorée sous Windows : la bibliothèque contient des dossiers qui ne diffèrent que par la casse, et sans cela un fichier
+        // déjà tagué était retrouvé « inconnu » dès que son chemin était écrit autrement que dans l'historique.
+        java.util.Set<String> set = PathIdentity.newPathSet();
         if (conn == null) return set;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -564,7 +566,7 @@ public class MetadataCache implements AutoCloseable {
      * Remplace les N appels unitaires à getFileTagging() pendant le scan initial.
      */
     public synchronized java.util.Map<String, String> loadFileHistoryMap() {
-        java.util.Map<String, String> map = new java.util.HashMap<>();
+        java.util.Map<String, String> map = PathIdentity.newPathMap();
         if (conn == null) return map;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -720,7 +722,7 @@ public class MetadataCache implements AutoCloseable {
      * fichiers — même principe que loadFileHistoryMap()/loadTaggingHistoryMap().
      */
     public synchronized java.util.Map<String, ScanCacheEntry> loadScanCacheMap() {
-        java.util.Map<String, ScanCacheEntry> map = new java.util.HashMap<>();
+        java.util.Map<String, ScanCacheEntry> map = PathIdentity.newPathMap();
         if (conn == null) return map;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT path, mtime, size, json FROM scan_cache")) {
