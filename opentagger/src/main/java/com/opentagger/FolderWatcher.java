@@ -100,9 +100,13 @@ public class FolderWatcher implements Closeable {
                             // Nouveau sous-dossier → l'enregistrer aussi
                             watch(full);
                         } else if (isAudioFile(full)) {
-                            // Petit délai pour laisser le temps à l'OS de finir la copie
-                            try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
-                            onFileAdded.accept(full);
+                            // Un fichier en cours de téléchargement/copie (iTunes Match, navigateur, copie réseau) grossit pendant des
+                            // secondes, voire des minutes : on attend qu'il ne bouge plus AVANT de le proposer au taguage, sinon on
+                            // tague un fichier tronqué (durée 0:01, « No audio header ») que le téléchargement réécrit ensuite. L'attente
+                            // se fait sur un autre thread pour ne pas bloquer la surveillance des autres événements.
+                            WAITERS.execute(() -> {
+                                if (waitUntilStable(full, 4000, 15 * 60_000L)) onFileAdded.accept(full);
+                            });
                         }
                     }
                 }
@@ -111,6 +115,43 @@ public class FolderWatcher implements Closeable {
                 keyToDir.remove(key);
             }
         }
+    }
+
+    private static final java.util.concurrent.ExecutorService WAITERS = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+        Thread th = new Thread(r, "folder-watcher-stable-wait");
+        th.setDaemon(true);
+        return th;
+    });
+
+    /**
+     * Attend que le fichier ne change plus (taille ET date de modification identiques pendant {@code stableMs}, et lisible).
+     * @return vrai s'il est stable ; faux s'il a disparu ou n'est pas stabilisé après {@code maxMs}.
+     */
+    static boolean waitUntilStable(Path file, long stableMs, long maxMs) {
+        long deadline = System.currentTimeMillis() + maxMs;
+        long lastSize = -1, lastMod = -1, since = System.currentTimeMillis();
+        long poll = Math.max(50, Math.min(1000, stableMs / 4));
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                if (!Files.exists(file)) return false;
+                long size = Files.size(file);
+                long mod = Files.getLastModifiedTime(file).toMillis();
+                if (size != lastSize || mod != lastMod) {
+                    lastSize = size; lastMod = mod; since = System.currentTimeMillis();
+                } else if (size > 0 && System.currentTimeMillis() - since >= stableMs) {
+                    try (java.io.InputStream in = Files.newInputStream(file)) { in.read(); } // encore verrouillé par un autre ? alors on attend
+                    return true;
+                }
+                Thread.sleep(poll);
+            } catch (java.io.IOException e) {
+                since = System.currentTimeMillis(); // verrouillé / en cours d'écriture : on recompte
+                try { Thread.sleep(poll); } catch (InterruptedException ie) { return false; }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
     }
 
     private static boolean isAudioFile(Path p) {
