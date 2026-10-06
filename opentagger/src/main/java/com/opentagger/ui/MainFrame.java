@@ -1073,6 +1073,8 @@ public class MainFrame extends JFrame {
         chkAutoGroupCompilations.setSelected(c.bool("tagging.auto_group_compilations", false));
         chkAutoReidentifyUnmatched.setSelected(c.bool("tagging.auto_reidentify_unmatched", false));
         chkAutoPlayCounts.setSelected(c.autoSyncPlayCounts());
+        if (chkMoveSkippedMenu != null) chkMoveSkippedMenu.setSelected(c.skippedMoveEnabled());
+        if (chkMoveDurationMismatchMenu != null) chkMoveDurationMismatchMenu.setSelected(c.durationMismatchMoveEnabled());
         Config.PostTagCompletion pc = c.postTagCompletion();
         for (int i = 0; i < rbCompletionItems.length; i++) rbCompletionItems[i].setSelected(i == pc.ordinal());
         syncAutomationRadios();
@@ -1088,9 +1090,16 @@ public class MainFrame extends JFrame {
         if (now != null) Config.get().set(com.opentagger.AutomationMode.KEY_MODE, now.name());
     }
 
+    private static void watchButtons(JMenu menu, java.awt.event.ActionListener l) {
+        for (java.awt.Component c : menu.getMenuComponents()) {
+            if (c instanceof JMenu sub) watchButtons(sub, l);
+            else if (c instanceof AbstractButton b) b.addActionListener(l);
+        }
+    }
+
     private void watchAdvancedForAutomation(JMenu advanced) {
         java.awt.event.ActionListener l = e -> SwingUtilities.invokeLater(this::syncAutomationRadios);
-        for (java.awt.Component c : advanced.getMenuComponents()) if (c instanceof AbstractButton b && !(c instanceof JMenu)) b.addActionListener(l);
+        watchButtons(advanced, l);
         for (JRadioButtonMenuItem rb : rbCompletionItems) rb.addActionListener(l);
     }
 
@@ -1246,7 +1255,6 @@ public class MainFrame extends JFrame {
                 Config.get().set("playcounts.auto_sync", String.valueOf(chkAutoPlayCounts.isSelected())));
         advanced.add(chkAutoPlayCounts);
         options.add(advanced);
-        watchAdvancedForAutomation(advanced);
 
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
@@ -1270,7 +1278,8 @@ public class MainFrame extends JFrame {
         chkMoveDurationMismatchMenu.addActionListener(e ->
                 Config.get().set("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatchMenu.isSelected())));
         moveMenu.add(chkMoveDurationMismatchMenu);
-        options.add(moveMenu);
+        advanced.add(moveMenu);
+        watchAdvancedForAutomation(advanced);
 
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> stopAll()));

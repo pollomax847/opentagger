@@ -735,6 +735,8 @@
   "Threads fpcalc (0 = auto) :": "fpcalc threads (0 = auto):",
   "Threads de taguage (0 = auto) :": "Tagging threads (0 = auto):",
   "fpcalc installé automatiquement : %s": "fpcalc installed automatically: %s",
+  "Vide = <bibliothèque>\\_À vérifier\\Non identifiés": "Empty = <library>\\_À vérifier\\Non identifiés",
+  "Vide = <bibliothèque>\\_À vérifier\\Durée incohérente": "Empty = <library>\\_À vérifier\\Durée incohérente",
   "Manuel": "Manual",
   "Assisté": "Assisted",
   "Automatique": "Automatic",

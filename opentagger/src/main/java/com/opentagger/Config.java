@@ -191,12 +191,21 @@ public class Config {
     public boolean useLibraryRootEnabled()         { return bool("rename.use_library_root",       true); }
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
-    public String  skippedMoveFolder()             { return str ("skipped.move_folder",              ""); }
+    /** Dossier des fichiers non identifiés. Vide dans les réglages = « <racine de la bibliothèque>\_À vérifier\Non identifiés »
+     *  (vide si aucune racine n'est définie : alors rien n'est déplacé). */
+    public String  skippedMoveFolder()             { return orReviewFolder(str("skipped.move_folder", ""), "Non identifiés"); }
+    private String orReviewFolder(String configured, String sub) {
+        if (configured != null && !configured.isBlank()) return configured;
+        String root = libraryRoot();
+        if (useLibraryRootEnabled() && root != null && !root.isBlank())
+            return java.nio.file.Paths.get(root, "_À vérifier", sub).toString();
+        return "";
+    }
     // Déplacement dédié des fichiers dont la durée ne correspond pas à celle déclarée par
     // MusicBrainz (rip tronqué/mauvais match probable) — indépendant du déplacement générique
     // SKIPPED/ERROR ci-dessus, désactivé par défaut (jamais de déplacement sans action explicite).
     public boolean durationMismatchMoveEnabled()   { return bool("duration_mismatch.move_enabled", false); }
-    public String  durationMismatchMoveFolder()    { return str ("duration_mismatch.move_folder",      ""); }
+    public String  durationMismatchMoveFolder()    { return orReviewFolder(str("duration_mismatch.move_folder", ""), "Durée incohérente"); }
     // Récupération vidéo (voir VideoScanner/VideoRecoveryWorker) automatique à chaque scan de
     // dossier (Ouvrir dossier/Rafraîchir) — activée par défaut à la demande explicite de
     // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop

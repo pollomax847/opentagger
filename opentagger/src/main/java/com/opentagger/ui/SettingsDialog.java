@@ -1570,6 +1570,7 @@ public class SettingsDialog extends JDialog {
         // ── Dossier des fichiers non tagués (SKIPPED/ERROR) ────────────────────
         chkMoveSkipped = new JCheckBox(I18n.t("Déplacer les fichiers non tagués (ignorés/erreurs) vers ce dossier"));
         tfSkippedFolder = tf();
+        tfSkippedFolder.putClientProperty("JTextField.placeholderText", I18n.t("Vide = <bibliothèque>\\_À vérifier\\Non identifiés"));
         tfSkippedFolder.setToolTipText(I18n.t("Dossier où isoler les fichiers non identifiés ou en erreur, hors de la bibliothèque organisée."));
         JButton btnBrowseSkipped = new JButton("…");
         btnBrowseSkipped.addActionListener(e -> {
@@ -1591,6 +1592,7 @@ public class SettingsDialog extends JDialog {
             + "enregistré tel quel (\"Enregistrer tout\" l'ignore). Activer ceci le déplace en plus vers "
             + "ce dossier dédié, séparé des fichiers non tagués ci-dessus. Rien n'est jamais supprimé."));
         tfDurationMismatchFolder = tf();
+        tfDurationMismatchFolder.putClientProperty("JTextField.placeholderText", I18n.t("Vide = <bibliothèque>\\_À vérifier\\Durée incohérente"));
         tfDurationMismatchFolder.setToolTipText(I18n.t("Dossier où isoler les fichiers dont la durée ne correspond pas à MusicBrainz."));
         JButton btnBrowseDurationMismatch = new JButton("…");
         btnBrowseDurationMismatch.addActionListener(e -> {

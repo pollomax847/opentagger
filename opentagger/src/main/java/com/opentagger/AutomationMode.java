@@ -12,18 +12,18 @@ import java.util.function.Function;
  *   <li><b>Manuel</b> : rien ne démarre seul, rien n'est écrit sans geste explicite.</li>
  *   <li><b>Assisté</b> : le taguage démarre seul après un scan et complète les champs manquants ; l'enregistrement reste un geste.</li>
  *   <li><b>Automatique</b> : tout s'enchaîne (taguage, enregistrement, albums, compilations, ré-identification, compteurs d'écoute,
- *       pochettes et photos manquantes).</li>
+ *       pochettes et photos manquantes, fichiers non reconnus rangés dans « _À vérifier » de la bibliothèque).</li>
  * </ul>
  */
 public enum AutomationMode {
-    MANUAL(preset(false, false, "NONE", false, false, false, false)),
-    ASSISTED(preset(true, false, "FIELDS", false, false, false, false)),
-    AUTOMATIC(preset(true, true, "FIELDS_AND_ALBUMS", true, true, true, true));
+    MANUAL(preset(false, false, "NONE", false, false, false, false, false)),
+    ASSISTED(preset(true, false, "FIELDS", false, false, false, false, false)),
+    AUTOMATIC(preset(true, true, "FIELDS_AND_ALBUMS", true, true, true, true, true));
 
     public static final String KEY_MODE = "automation.mode";
 
     /** Valeurs d'un réglage quand la clé est absente — les mêmes défauts que dans {@link Config}. */
-    private static final Map<String, String> DEFAULTS = preset(false, true, "NONE", false, false, false, false);
+    private static final Map<String, String> DEFAULTS = preset(false, true, "NONE", false, false, false, false, false);
 
     private final Map<String, String> values;
 
@@ -33,7 +33,7 @@ public enum AutomationMode {
     public Map<String, String> settings() { return values; }
 
     private static Map<String, String> preset(boolean tagOnScan, boolean autoSave, String completion,
-                                              boolean group, boolean reidentify, boolean playCounts, boolean artwork) {
+                                              boolean group, boolean reidentify, boolean playCounts, boolean artwork, boolean moveToReview) {
         Map<String, String> m = new LinkedHashMap<>();
         m.put("tagging.auto_start_on_scan", String.valueOf(tagOnScan));
         m.put("tagging.auto_save_enabled", String.valueOf(autoSave));
@@ -42,6 +42,8 @@ public enum AutomationMode {
         m.put("tagging.auto_reidentify_unmatched", String.valueOf(reidentify));
         m.put("playcounts.auto_sync", String.valueOf(playCounts));
         m.put("artwork.auto_after_save", String.valueOf(artwork));
+        m.put("skipped.move_enabled", String.valueOf(moveToReview));
+        m.put("duration_mismatch.move_enabled", String.valueOf(moveToReview));
         return m;
     }
 
