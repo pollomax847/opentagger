@@ -3079,8 +3079,12 @@ public class MainFrame extends JFrame {
             loadCoverThumb(f);
         } else {
             // Mode multi-sélection — édition en lot
+            // Au-delà de 2000 fichiers, les valeurs « communes » affichées sont calculées sur un échantillon régulier de 500 : l'affichage
+            // ne sert qu'à montrer ce qui est identique, l'édition en lot n'applique que les champs REMPLIS par l'utilisateur. Calculer
+            // les ~100 champs sur 30 000 fichiers gelait l'interface à chaque rafraîchissement de la sélection.
             List<TagInfo> tags = new ArrayList<>();
-            for (FileEntry e : entries) tags.add(e.activeTags());
+            int step = entries.size() > 2000 ? entries.size() / 500 : 1;
+            for (int i = 0; i < entries.size(); i += step) tags.add(entries.get(i).activeTags());
             lblFilePath.setText(I18n.t("  %d fichiers sélectionnés — les champs vides ne seront pas modifiés", entries.size()));
             detailPanel.populateMulti(tags);
             lblCoverImg.setIcon(null); lblCoverImg.setText(entries.size() + "");
@@ -6943,7 +6947,6 @@ public class MainFrame extends JFrame {
 
     private void selectByStatus(FileEntry.Status... statuses) {
         Set<FileEntry.Status> set = Set.of(statuses);
-        table.clearSelection();
         // entryAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)), même bug de fond
         // qu'applyDetail()/transcodeFiles() en vue arborescence — voir leurs commentaires) : trouvé
         // en direct 2026-09-01. Particulièrement facile à déclencher ici (un simple clic sur un chip
@@ -6951,11 +6954,14 @@ public class MainFrame extends JFrame {
         // (les en-têtes de groupe s'ajoutent), donc modelRow pouvait dépasser tableModel.getRowCount()
         // et lever une exception, ou pire, renvoyer le statut d'un fichier totalement différent.
         // entryAtViewRow() renvoie null pour un en-tête, filtré naturellement par le null-check.
+        // UNE seule mise à jour de la sélection (voir RowSelection) : ligne par ligne, chaque ajout relançait le panneau de détail sur
+        // toute la sélection déjà faite — quadratique, interface gelée pendant des heures sur 50 000 fichiers.
+        List<Integer> matching = new ArrayList<>();
         for (int viewRow = 0; viewRow < table.getRowCount(); viewRow++) {
             FileEntry e = entryAtViewRow(viewRow);
-            if (e != null && set.contains(e.status))
-                table.addRowSelectionInterval(viewRow, viewRow);
+            if (e != null && set.contains(e.status)) matching.add(viewRow);
         }
+        RowSelection.select(table.getSelectionModel(), matching);
         int n = table.getSelectedRowCount();
         String label = switch (statuses[0]) {
             case TAGGED     -> I18n.t("tagué(s)");
