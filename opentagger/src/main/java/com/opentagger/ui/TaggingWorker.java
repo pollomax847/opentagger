@@ -204,6 +204,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         this.onFileProgress = onFileProgress;
     }
 
+    private volatile boolean bypassBacklog;
+
+    /** Pour une passe courte et ciblée (ex. les pistes d'un CD inconnu) qui ne doit pas attendre l'arriéré d'enregistrement du reste de la bibliothèque. */
+    public void setBypassBacklog(boolean bypass) { this.bypassBacklog = bypass; }
+
     /** À appeler à la place de cancel(true) directement (SwingWorker.cancel() est final, donc pas
      *  substituable) — interrompt aussi les tâches déjà en cours dans le pool (voir le commentaire
      *  sur `pool`) : cancel(true) seul ne coupe que la boucle de soumission, pas les fichiers déjà
@@ -264,7 +269,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             final int       fileIdx = startIdx + i + 1;
             futures.add(pool.submit(() -> {
                 if (isCancelled()) return;
-                SaveBacklog.awaitRoom(this::isCancelled); // frein : ne pas identifier plus vite que l'enregistrement ne suit
+                if (!bypassBacklog) SaveBacklog.awaitRoom(this::isCancelled); // frein : ne pas identifier plus vite que l'enregistrement ne suit
 
                 entry.status = FileEntry.Status.PROCESSING;
                 publish(entry);
@@ -575,6 +580,15 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
 
             TagInfo best = results.get(0);
+            // Un résultat dont le titre est lui-même générique (« Track 3 », « Piste 12 ») n'apprend rien : c'est typiquement un faux positif
+            // (livre audio, enregistrement mal nommé) qui ne doit pas être écrit comme identification — vu en direct sur un CD gravé
+            // (« Greg Wise & Saskia Reeves – Track 3 » pour un remix de Fairmont, score 100).
+            if (isGenericTag(best.title)) {
+                skipForManualReview(entry, results, com.opentagger.model.SkipReason.NOT_IDENTIFIED,
+                        I18n.t("Identifié seulement comme « %s » (titre générique) — à vérifier", best.title) + videoHintIfAny(fichier),
+                        I18n.t("  SKIPPED titre générique"));
+                return;
+            }
             // best.durationSec est TOUJOURS 0 par défaut (MusicBrainzClient ne le renseigne jamais
             // — seul mbDurationSec l'est, voir son commentaire) : sans cette ligne, la colonne Durée
             // (qui affiche entry.activeTags().durationSec, donc "result" une fois identifié) retombe
@@ -2923,6 +2937,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // quels comme artiste/titre par le repli SOURCE_UNVERIFIED_TAGS (score=50).
         if (low.matches("unknown artist|unknown|artist|artiste|musique|musiques|music|inconnu|"
                        + "various|various artists|no artist|no album|piste \\d+|track \\d+|"
+                       // « track » / « piste » SEULS : le nom d'un fichier « track12.mp3 » perd ses chiffres à l'analyse et il reste le mot « track »,
+                       // que MusicBrainz trouvait volontiers (« Track Track », score 100). Jamais une vraie information.
+                       + "track|piste|pista|spur|audiotrack|audio track|cdtrack|cd track|trk|"
                        + "titre|title|untitled|inconnu - -.*|artiste inconnu|album inconnu|"
                        + "unknown album")) return true;
         // Patterns "Unknown Artist_NNN", "Unknown_42", "Musique Ii"

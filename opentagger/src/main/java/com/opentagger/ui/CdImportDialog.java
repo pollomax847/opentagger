@@ -946,6 +946,18 @@ public class CdImportDialog extends JDialog {
                         publish(new RipProgress(row, I18n.t("✗ Échec : %s", msg), doneCount));
                     }
                 }
+                // Disque INCONNU (aucune release proposée) : les pistes sont maintenant des fichiers sans nom. On les identifie une par une par
+                // leur empreinte audio (compilation gravée : chaque piste vient d'un album différent) et on range celles qui sont reconnues
+                // sous leur vrai nom ; les autres restent dans « CD à identifier ». Désactivable : cd.identify_unknown_tracks=false.
+                if (!tagFromRelease && !unsortedPaths.isEmpty() && Config.get().bool("cd.identify_unknown_tracks", true)) {
+                    final int dc = doneCount;
+                    try {
+                        identifyUnsortedByAudio(unsortedPaths, savedPaths, destRoot, caa, fanArt, deezer, discogs, writer, renamer, cache, mbOauth,
+                                msg -> publish(new RipProgress(-1, msg, dc)));
+                    } catch (Exception ex) {
+                        System.err.println("[OT] CD : identification des pistes inconnues impossible : " + ex);
+                    }
+                }
                 } finally {
                     try { cache.close(); } catch (Exception ignored) {}
                 }
@@ -1007,6 +1019,47 @@ public class CdImportDialog extends JDialog {
                 }
             }
         }.execute();
+    }
+
+    /**
+     * Identifie par empreinte audio les pistes extraites d'un disque inconnu et range celles qui sont reconnues (tags + pochette +
+     * renommage selon le masque, comme « Enregistrer tout »). Une piste non reconnue, ou reconnue seulement sous un titre générique, reste
+     * dans le dossier daté. Passe ciblée : elle ne passe ni par la file du taguage général ni par son frein d'enregistrement.
+     */
+    private void identifyUnsortedByAudio(List<Path> unsorted, List<Path> saved, Path destRoot,
+                                         com.opentagger.CaaClient caa, com.opentagger.FanArtClient fanArt, com.opentagger.DeezerClient deezer,
+                                         com.opentagger.DiscogsClient discogs, com.opentagger.TagWriter writer, com.opentagger.FileRenamer renamer,
+                                         com.opentagger.MetadataCache cache, com.opentagger.MusicBrainzOAuth mbOauth,
+                                         java.util.function.Consumer<String> status) throws Exception {
+        List<FileEntry> entries = new ArrayList<>();
+        for (Path p : unsorted) {
+            java.io.File f = p.toFile();
+            if (!f.isFile() || f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".wav")) continue;
+            entries.add(new FileEntry(f, com.opentagger.TagReader.read(f)));
+        }
+        if (entries.isEmpty()) return;
+        status.accept(I18n.t("Identification des pistes par l'audio (%d)…", entries.size()));
+        TaggingWorker w = new TaggingWorker(entries, true, s -> {}, e -> {});
+        w.setBypassBacklog(true);
+        w.execute();
+        w.get();
+        SwingUtilities.invokeAndWait(() -> { }); // les résultats sont posés sur l'EDT : on attend que la file soit vidée
+        int placedCount = 0;
+        for (FileEntry e : entries) {
+            if (e.status != FileEntry.Status.IDENTIFIED || e.result == null) continue;
+            try {
+                var res = com.opentagger.TagEnrichment.saveEntry(e.file, e.result, caa, fanArt, deezer, discogs, writer, renamer, cache,
+                        mbOauth, destRoot, Config.get().defaultRenameMask(), null);
+                if (res.finalPath() != null) {
+                    saved.add(res.finalPath());
+                    unsorted.remove(e.file.toPath());
+                    placedCount++;
+                }
+            } catch (Exception ex) {
+                System.err.println("[OT] CD : piste " + e.file.getName() + " reconnue mais non rangée : " + ex.getMessage());
+            }
+        }
+        status.accept(I18n.t("%d piste(s) reconnue(s) par l'audio et rangée(s).", placedCount));
     }
 
     // ── CD de données (copie de fichiers, pas d'extraction audio) ──────────────────────────────
