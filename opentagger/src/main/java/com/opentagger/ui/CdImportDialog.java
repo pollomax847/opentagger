@@ -402,8 +402,11 @@ public class CdImportDialog extends JDialog {
         }
         lblStatus.setText(I18n.t("Recherche de l'album dans la bibliothèque…"));
         final MusicBrainzClient.ReleaseTracklist rt = identified;
+        // Instantané de ce que l'app connaît déjà (liste chargée = sa base) : copié ici, sur l'EDT, sans calcul — le tri se fait ensuite en
+        // arrière-plan. Plus de parcours du dossier racine : sur des milliers de dossiers d'artistes et un disque USB, c'était la lenteur.
+        final List<Known> known = snapshotKnown();
         new SwingWorker<java.util.Map<Integer, List<Path>>, Void>() {
-            @Override protected java.util.Map<Integer, List<Path>> doInBackground() { return findOnDisk(lib, rt); }
+            @Override protected java.util.Map<Integer, List<Path>> doInBackground() { return findExisting(lib, known, rt); }
             @Override protected void done() {
                 if (identified != rt) return; // une autre version a été choisie entre-temps
                 try { diskMatches = get(); } catch (Exception ex) { diskMatches = java.util.Map.of(); }
@@ -455,6 +458,76 @@ public class CdImportDialog extends JDialog {
 
     private static final java.util.Set<String> AUDIO_EXT = java.util.Set.of(
             ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".wma", ".ape", ".wv", ".aiff", ".aif");
+
+    /** Ce que l'app sait d'un fichier déjà dans sa liste (copie légère, sans normalisation). */
+    record Known(Path path, String artist, String albumArtist, String album, String title, int track) {}
+
+    private List<Known> snapshotKnown() {
+        List<FileEntry> all = owner.allEntries();
+        List<Known> out = new ArrayList<>(all.size());
+        for (FileEntry fe : all) {
+            var t = fe.activeTags();
+            if (t == null || t.album == null || t.album.isBlank()) continue;
+            Path p = fe.currentPath != null ? fe.currentPath : fe.file.toPath();
+            out.add(new Known(p, t.artist, t.albumArtist, t.album, t.title, trackNumber(t.track)));
+        }
+        return out;
+    }
+
+    /** Pistes du disque déjà connues de l'app : même album (artiste de l'album ou artiste + titre d'album normalisés), la piste étant
+     *  retrouvée par son titre ou, à défaut, par son numéro. Instantané : aucun accès disque. */
+    static java.util.Map<Integer, List<Path>> findKnown(List<Known> known, MusicBrainzClient.ReleaseTracklist rt) {
+        java.util.Map<Integer, List<Path>> out = new java.util.HashMap<>();
+        if (known == null || rt == null) return out;
+        String artistN = norm(rt.albumArtist()), albumN = norm(rt.album());
+        if (albumN.isBlank()) return out;
+        java.util.Map<String, Integer> byTitle = new java.util.HashMap<>();
+        for (var t : rt.tracks()) byTitle.putIfAbsent(norm(t.title()), t.trackNo());
+        for (Known k : known) {
+            if (!albumN.equals(norm(k.album()))) continue;
+            String ka = norm(!isBlank(k.albumArtist()) ? k.albumArtist() : k.artist());
+            if (!artistN.isBlank() && !ka.isBlank() && !artistN.equals(ka) && !artistN.equals(norm(k.artist()))) continue;
+            Integer no = byTitle.get(norm(k.title()));
+            if (no == null && k.track() > 0) no = k.track();
+            if (no != null) out.computeIfAbsent(no, x -> new ArrayList<>()).add(k.path());
+        }
+        return out;
+    }
+
+    private static boolean isBlank(String s) { return s == null || s.isBlank(); }
+
+    /** Dossier attendu {@code bibliothèque/Artiste/Album} atteint DIRECTEMENT par son nom (sans lister la racine) — complète {@link #findKnown}
+     *  pour un album présent sur le disque mais pas (encore) dans la liste. */
+    static java.util.Map<Integer, List<Path>> findOnDiskDirect(Path library, MusicBrainzClient.ReleaseTracklist rt) {
+        java.util.Map<Integer, List<Path>> out = new java.util.HashMap<>();
+        if (library == null || rt == null || !Files.isDirectory(library)) return out;
+        Path albumDir;
+        try { albumDir = library.resolve(safeName(rt.albumArtist())).resolve(safeName(rt.album())); }
+        catch (java.nio.file.InvalidPathException e) { return out; }
+        if (!Files.isDirectory(albumDir)) return out;
+        try (var files = Files.walk(albumDir, 2)) {
+            for (Path f : (Iterable<Path>) files::iterator) {
+                String name = f.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                if (!Files.isRegularFile(f) || AUDIO_EXT.stream().noneMatch(name::endsWith)) continue;
+                String stem = titleOfFileName(f.getFileName().toString());
+                for (var t : rt.tracks())
+                    if (!stem.isBlank() && stem.equals(norm(t.title()))) out.computeIfAbsent(t.trackNo(), k -> new ArrayList<>()).add(f);
+            }
+        } catch (IOException | java.io.UncheckedIOException ignored) { /* illisible : on ne signale rien */ }
+        return out;
+    }
+
+    private static String safeName(String s) { return s == null ? "" : s.replaceAll("[<>:\"/\\\\|?*]", "_").trim(); }
+
+    /** Tout ce qui existe déjà pour ce disque : la liste de l'app d'abord, puis le dossier attendu. Fusionné sans doublon. */
+    static java.util.Map<Integer, List<Path>> findExisting(Path library, List<Known> known, MusicBrainzClient.ReleaseTracklist rt) {
+        java.util.Map<Integer, List<Path>> out = findKnown(known, rt);
+        for (var e : findOnDiskDirect(library, rt).entrySet()) {
+            List<Path> l = out.computeIfAbsent(e.getKey(), x -> new ArrayList<>());
+            for (Path p : e.getValue()) if (!l.contains(p)) l.add(p);
+        }
+        return out;
+    }
 
     /** Minuscules, sans accents ni ponctuation, espaces réduits : « Christophe Maé », « christophe mae » et « Christophe Mae » se
      *  valent. */
