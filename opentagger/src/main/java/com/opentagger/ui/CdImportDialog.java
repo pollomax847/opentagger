@@ -239,6 +239,10 @@ public class CdImportDialog extends JDialog {
                 }
                 if (!toc.isAudioDisc()) {
                     btnDetect.setEnabled(true);
+                    // Pas de piste audio : c'est peut-être un CD de DONNÉES (souvenirs, photos…). Plutôt que de renvoyer l'utilisateur vers un autre
+                    // bouton, on regarde si un disque de données est lisible et on propose directement de copier ses fichiers.
+                    Path dataRoot = com.opentagger.DataDiscCopier.findDataDiscRoot();
+                    if (dataRoot != null) { offerDataDiscCopy(dataRoot); return; }
                     lblEmptyState.setText(I18n.t(
                             "<html><center>💿<br><br>Aucune piste audio détectée.<br>"
                           + "CD de données ? Utilise le bouton dédié ci-dessus.</center></html>"));
@@ -1064,6 +1068,63 @@ public class CdImportDialog extends JDialog {
 
     // ── CD de données (copie de fichiers, pas d'extraction audio) ──────────────────────────────
 
+    /** Disque de données détecté : montre ce qu'il contient et propose de le copier dans un NOUVEAU dossier de la bibliothèque (jamais en vrac
+     *  dans la racine, jamais en écrasant). */
+    private void offerDataDiscCopy(Path dataRoot) {
+        long[] m = com.opentagger.DataDiscCopier.measure(dataRoot);
+        String label = "";
+        try { label = java.nio.file.Files.getFileStore(dataRoot).name(); } catch (Exception ignored) {}
+        String folderName = (label == null || label.isBlank() ? "CD de données" : "CD " + label.trim()).replaceAll("[<>:\"/\\\\|?*]", "_");
+        Path lib = libraryRoot();
+        Path suggested = (lib != null ? lib : java.nio.file.Paths.get(System.getProperty("user.home"))).resolve("CD de données").resolve(folderName);
+        lblStatus.setText(I18n.t("CD de données détecté : %d fichier(s), %d Mo.", m[0], m[1] / (1024 * 1024)));
+        Object[] opts = {I18n.t("Copier ici"), I18n.t("Choisir un autre dossier…"), I18n.t("Annuler")};
+        int pick = JOptionPane.showOptionDialog(this,
+                I18n.t("<html>Ce disque est un <b>CD de données</b> (%d fichier(s), %d Mo).<br><br>Copier ses fichiers dans :<br><b>%s</b><br><br>"
+                     + "Rien n'est jamais écrasé : un fichier déjà présent et identique est ignoré, un fichier différent du même nom est copié sous « nom (2) ».</html>",
+                        m[0], m[1] / (1024 * 1024), suggested),
+                I18n.t("CD de données"), JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, opts, opts[0]);
+        if (pick == 0) { copyDataDisc(dataRoot, suggested); return; }
+        if (pick == 1) {
+            JFileChooser fc = new JFileChooser();
+            fc.setDialogTitle(I18n.t("Copier vers…"));
+            fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) copyDataDisc(dataRoot, fc.getSelectedFile().toPath());
+        }
+    }
+
+    private void copyDataDisc(Path source, Path dest) {
+        lblStatus.setText(I18n.t("Copie en cours…"));
+        btnDetect.setEnabled(false);
+        btnDataDisc.setEnabled(false);
+        new SwingWorker<com.opentagger.DataDiscCopier.Result, Void>() {
+            @Override protected com.opentagger.DataDiscCopier.Result doInBackground() throws IOException {
+                return com.opentagger.DataDiscCopier.copy(source, dest);
+            }
+            @Override protected void done() {
+                btnDetect.setEnabled(true);
+                btnDataDisc.setEnabled(true);
+                try {
+                    var r = get();
+                    lblStatus.setText(I18n.t("%d fichier(s) copié(s), %d déjà présent(s), %d renommé(s) pour ne rien écraser, %d échec(s).",
+                            r.copied(), r.identical(), r.renamed(), r.failed()));
+                    if (r.failed() == 0 && Config.get().bool("cd.eject_after", true)) {
+                        Thread ej = new Thread(() -> new CdRipper().eject(), "cd-eject");
+                        ej.setDaemon(true);
+                        ej.start();
+                    }
+                    Object[] btns = {I18n.t("Ouvrir le dossier"), I18n.t("OK")};
+                    int pick = JOptionPane.showOptionDialog(CdImportDialog.this,
+                            I18n.t("Copie terminée dans :\n%s", dest), I18n.t("CD de données"),
+                            JOptionPane.DEFAULT_OPTION, JOptionPane.INFORMATION_MESSAGE, null, btns, btns[1]);
+                    if (pick == 0) { try { Desktop.getDesktop().open(dest.toFile()); } catch (Exception ignored) {} }
+                } catch (Exception ex) {
+                    lblStatus.setText(I18n.t("Échec de la copie : %s", ex.getMessage()));
+                }
+            }
+        }.execute();
+    }
+
     private void importDataDisc() {
         JFileChooser fcSrc = new JFileChooser();
         fcSrc.setDialogTitle(I18n.t("Sélectionne le dossier monté du CD de données"));
@@ -1080,7 +1141,8 @@ public class CdImportDialog extends JDialog {
         lblStatus.setText(I18n.t("Copie en cours…"));
         new SwingWorker<Integer, Void>() {
             @Override protected Integer doInBackground() throws IOException {
-                return copyRecursive(source.toPath(), dest.toPath());
+                var r = com.opentagger.DataDiscCopier.copy(source.toPath(), dest.toPath()); // jamais d'écrasement (voir DataDiscCopier)
+                return r.copied() + r.renamed();
             }
             @Override protected void done() {
                 int n;
