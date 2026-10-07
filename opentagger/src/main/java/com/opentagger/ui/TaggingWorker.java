@@ -2210,6 +2210,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // ~461) pour ne jamais épingler un mix DJ continu à UNE piste précise ; manquait
             // seulement à ce dernier recours. Un mix continu reste "Non identifié" plutôt que
             // recevoir un artiste inventé à score=50.
+            // Tags « lisibles » mais en fait recopiés du nom de fichier (« 1-04_Justin_Timberlake_-_What_Goes_Around »), avec le numéro de piste
+            // et l'artiste collés dans le titre : on les nettoie AVANT de les écrire, sinon le fichier garde « 1-04 Justin Timberlake » en
+            // artiste et en titre.
+            String[] cleanedFb = cleanFallbackIdentity(fbArtist, fbTitle);
+            fbArtist = cleanedFb[0];
+            fbTitle  = cleanedFb[1];
             if (!fbArtist.isBlank() && !fbTitle.isBlank() && !isContinuousMixTitle(fbTitle)) {
                 TagInfo fallback = new TagInfo();
                 fallback.artist      = fbArtist;
@@ -2219,6 +2225,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 if (existingTags != null) {
                     if (!existingTags.year.isBlank())  fallback.year  = existingTags.year;
                     if (!existingTags.genre.isBlank()) fallback.genre = existingTags.genre;
+                    // Le numéro de piste (et de disque) déjà présents ne doivent pas être EFFACÉS par ce repli : jusqu'ici « piste : 4 → [effacé] ».
+                    if (!existingTags.track.isBlank())      fallback.track      = existingTags.track;
+                    if (!existingTags.trackTotal.isBlank()) fallback.trackTotal = existingTags.trackTotal;
+                    if (!existingTags.discNo.isBlank())     fallback.discNo     = existingTags.discNo;
+                    if (!existingTags.discTotal.isBlank())  fallback.discTotal  = existingTags.discTotal;
                 }
                 fallback.score = 50;
                 log(I18n.t("  Repli tags existants (aucune méthode confirmée) : %s – %s", fbArtist, fbTitle));
@@ -2227,6 +2238,43 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
         return results;
+    }
+
+    /**
+     * Nettoie artiste et titre issus de tags recopiés d'un nom de fichier : « _ » → espace, numéro de piste/disque en tête retiré
+     * (« 1-04 », « 04 - »), et « Artiste - » retiré du début du titre quand c'est l'artiste lui-même (ou, si l'artiste est vide, pris
+     * dans le titre). Un titre normal reste inchangé.
+     */
+    private static final java.util.regex.Pattern TRACK_PREFIX = java.util.regex.Pattern.compile(
+            "^(?:\\d{1,2}-\\d{1,2}[\\s._-]+|\\d{1,3}\\s*[-._]\\s*(?!\\d))");
+
+    static String stripTrackPrefix(String s) {
+        String out = s.trim();
+        for (int i = 0; i < 2; i++) {                       // « 1-04 04 - » : jusqu'à deux préfixes enchaînés
+            java.util.regex.Matcher m = TRACK_PREFIX.matcher(out);
+            if (!m.find() || m.end() >= out.length()) break;
+            out = out.substring(m.end()).trim();
+        }
+        return out;
+    }
+
+    private static String tidyFilenameLike(String s) { return s.replace('_', ' ').replaceAll("\\s{2,}", " ").trim(); }
+
+    static String[] cleanFallbackIdentity(String artist, String title) {
+        // Le préfixe est retiré AVANT de remplacer les « _ » (un « 04_ » est alors un séparateur explicite), et seulement s'il a la forme d'un
+        // numéro de piste : « 1-04 », « 04 - », « 04. », « 04_ ». Jamais « 50 Cent », « 21 Guns » ou « 1-800-273-8255 » (chiffres suivis d'un simple espace).
+        String a = tidyFilenameLike(stripTrackPrefix(artist == null ? "" : artist));
+        String t = tidyFilenameLike(stripTrackPrefix(title == null ? "" : title));
+        int sep = t.indexOf(" - ");
+        if (sep > 0) {
+            String head = t.substring(0, sep).trim(), rest = t.substring(sep + 3).trim();
+            boolean sameAsArtist = !a.isBlank() && head.equalsIgnoreCase(a);
+            if (!rest.isEmpty() && (sameAsArtist || a.isBlank())) {
+                if (a.isBlank()) a = head;
+                t = rest;
+            }
+        }
+        return new String[]{a, t};
     }
 
     /** Devine puis vérifie une page piste Bandcamp depuis artiste+titre (voir BandcampClient.
