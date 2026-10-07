@@ -240,6 +240,7 @@ public class SettingsDialog extends JDialog {
     private JTextField     tfMbServer;
     private JCheckBox      chkGnuDb;
     private JTextField     tfGnuDbEmail;
+    private JCheckBox      chkCdEject;
     private JTextField     tfMbAuthUser;
     private JPasswordField tfMbAuthPass;
     private JSpinner        spMbRateLimitMs;
@@ -2327,6 +2328,7 @@ public class SettingsDialog extends JDialog {
         top.add(serverInner);
 
         // ── Import de CD : GnuDB ───────────────────────────────────────────────
+        chkCdEject = new JCheckBox(I18n.t("Éjecter le CD une fois l'extraction terminée"));
         chkGnuDb = new JCheckBox(I18n.t("Chercher aussi les CD dans GnuDB (si MusicBrainz ne les connaît pas)"));
         tfGnuDbEmail = tf();
         tfGnuDbEmail.putClientProperty("JTextField.placeholderText", com.opentagger.GnuDbClient.DEFAULT_EMAIL);
@@ -2335,10 +2337,13 @@ public class SettingsDialog extends JDialog {
             + "problème ou de trafic inhabituel). Elle n'est envoyée qu'à GnuDB, à chaque recherche de CD. Vide = adresse par défaut "
             + "de l'application."));
         JPanel gnuInner = new JPanel(new GridBagLayout());
-        gnuInner.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(), I18n.t("Import de CD — GnuDB")));
+        gnuInner.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(), I18n.t("Import de CD")));
         GridBagConstraints g0 = new GridBagConstraints();
         g0.gridx = 0; g0.gridy = 0; g0.gridwidth = 2; g0.anchor = GridBagConstraints.WEST; g0.insets = new Insets(4,10,4,10);
         gnuInner.add(chkGnuDb, g0);
+        GridBagConstraints gE = new GridBagConstraints();
+        gE.gridx = 0; gE.gridy = 2; gE.gridwidth = 2; gE.anchor = GridBagConstraints.WEST; gE.insets = new Insets(4,10,4,10);
+        gnuInner.add(chkCdEject, gE);
         GridBagConstraints g1 = new GridBagConstraints();
         g1.gridx = 0; g1.gridy = 1; g1.anchor = GridBagConstraints.WEST; g1.insets = new Insets(4,10,4,8);
         gnuInner.add(new JLabel(I18n.t("Votre adresse e-mail pour GnuDB :")), g1);
@@ -2530,6 +2535,7 @@ public class SettingsDialog extends JDialog {
 
         tfMbServer      .setText(cfg.mbServer());
         chkGnuDb        .setSelected(cfg.bool("gnudb.enabled", true));
+        chkCdEject      .setSelected(cfg.bool("cd.eject_after", true));
         tfGnuDbEmail    .setText(cfg.str("gnudb.email", ""));
         tfMbAuthUser    .setText(cfg.mbAuthUser());
         tfMbAuthPass    .setText(cfg.mbAuthPass());
@@ -2800,6 +2806,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("mb.oauth.mode",                Config.get().str("mb.oauth.mode", "scheme"));
         p.setProperty("mb.oauth.collection_id",       Config.get().mbCollectionId());
         p.setProperty("gnudb.enabled",                String.valueOf(chkGnuDb.isSelected()));
+        p.setProperty("cd.eject_after",               String.valueOf(chkCdEject.isSelected()));
         p.setProperty("gnudb.email",                  tfGnuDbEmail.getText().trim());
         p.setProperty("musicbrainz.server",           tfMbServer.getText().trim().isEmpty()
                 ? "https://musicbrainz.org/ws/2" : tfMbServer.getText().trim());

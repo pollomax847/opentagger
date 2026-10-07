@@ -97,6 +97,19 @@ public static class Cd {
 function Fail($code, $msg) { "ERR`t$code`t$msg"; exit 0 }
 
 $letter = $Drive.TrimEnd(':', '\')
+if ($Mode -eq 'eject') {
+    # Éjection du disque (sans ouvrir le lecteur en lecture brute) : verbe « Éjecter » de l'Explorateur sur le lecteur concerné.
+    if (-not $letter) {
+        $cd = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'CDRom' })
+        if ($cd.Count -eq 0) { Fail 'NODRIVE' 'aucun lecteur de CD' }
+        $letter = $cd[0].Name.Substring(0, 1)
+    }
+    try {
+        (New-Object -ComObject Shell.Application).NameSpace(17).ParseName("$($letter):").InvokeVerb('Eject')
+        'DONE'
+    } catch { Fail 'EJECT' $_.Exception.Message }
+    exit 0
+}
 if (-not $letter) {
     $cd = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'CDRom' })
     if ($cd.Count -eq 0) { Fail 'NODRIVE' 'aucun lecteur de CD' }

@@ -978,6 +978,14 @@ public class CdImportDialog extends JDialog {
                 btnExtract.setEnabled(true);
                 btnDetect.setEnabled(true);
                 btnDataDisc.setEnabled(true);
+                // Toutes les pistes sont extraites : le disque n'a plus de raison de rester dans le lecteur (réglage cd.eject_after, actif par
+                // défaut). Pas d'éjection s'il y a eu des échecs : on pourrait vouloir relancer l'extraction.
+                if (r[0] > 0 && r[1] == 0 && Config.get().bool("cd.eject_after", true)) {
+                    lblStatus.setText(lblStatus.getText() + "  " + I18n.t("Éjection du disque…"));
+                    Thread ej = new Thread(() -> new CdRipper().eject(), "cd-eject");
+                    ej.setDaemon(true);
+                    ej.start();
+                }
                 if (r[0] > 0) {
                     // Charger dans la liste les dossiers où les pistes ont atterri (le chargement ignore ce qui y est déjà).
                     java.util.Set<Path> folders = new java.util.LinkedHashSet<>();

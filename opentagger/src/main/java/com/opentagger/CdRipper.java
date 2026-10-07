@@ -340,6 +340,27 @@ public class CdRipper {
         throw new IOException(I18n.t("Aucun lecteur de CD utilisable (PowerShell ou Python 3 requis)."));
     }
 
+    /** Éjecte le disque (au mieux : un échec n'est jamais bloquant). Windows : verbe « Éjecter » via le script natif ; Linux : {@code eject}. */
+    public boolean eject() {
+        try {
+            if (isWindows()) {
+                if (!useNative()) return false;
+                List<String> args = new ArrayList<>(List.of("-Mode", "eject"));
+                if (!device().isBlank()) args.addAll(List.of("-Drive", device()));
+                NativeReply r = runNative(args, null, 30);
+                return r.errorCode().isEmpty() && r.done();
+            }
+            List<String> cmd = new ArrayList<>(List.of("eject"));
+            if (!device().isBlank()) cmd.add(device());
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
+            return p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0;
+        } catch (Exception e) {
+            System.err.println("[OT] CD : éjection impossible : " + e.getMessage());
+            return false;
+        }
+    }
+
     /** Extrait UNE piste vers un WAV brut (44,1 kHz / 16 bits / stéréo). */
     public Path ripTrackToWav(int trackNumber, Path destDir) throws IOException, InterruptedException {
         return ripTrackToWav(trackNumber, destDir, null);
