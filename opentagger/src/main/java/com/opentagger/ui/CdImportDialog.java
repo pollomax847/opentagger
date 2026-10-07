@@ -299,6 +299,27 @@ public class CdImportDialog extends JDialog {
                         if (com.opentagger.CdAudioIdentifier.describesDisc(durations, releaseSec)) { out.add(new Proposal(candidate, "approx")); approx++; }
                     }
 
+                    // 2b) GnuDB (CDDB) : base collaborative de CD, utile pour les pressions absentes de MusicBrainz. UNE requête puis au plus
+                    //     MAX lectures, jamais en rafale (règles de GnuDB : un humain qui change de disque, pas un robot) ; seulement si
+                    //     MusicBrainz n'a rien proposé, et coupable avec gnudb.enabled=false.
+                    if (out.isEmpty() && Config.get().bool("gnudb.enabled", true)) {
+                        try {
+                            publish(I18n.t("Recherche du disque dans GnuDB…"));
+                            com.opentagger.GnuDbClient g = new com.opentagger.GnuDbClient();
+                            int n = 0;
+                            for (var m : g.query(toc)) {
+                                if (n >= MAX_PROPOSALS_PER_SOURCE) break;
+                                var rt = com.opentagger.GnuDbClient.toTracklist(g.read(m), toc);
+                                if (rt == null) continue;
+                                StringBuilder key = new StringBuilder("gnudb:").append(norm(rt.albumArtist())).append('|').append(norm(rt.album()));
+                                for (var t : rt.tracks()) key.append('|').append(norm(t.title()));
+                                if (seen.add(key.toString())) { out.add(new Proposal(rt, "gnudb")); n++; }
+                            }
+                        } catch (Exception e) {
+                            System.err.println("[OT] CD : GnuDB indisponible : " + e.getMessage());
+                        }
+                    }
+
                     // 3) Disque inconnu par son sommaire (CD gravé, parution absente de MusicBrainz) : on retrouve son nom par
                     //    l'AUDIO — quelques pistes extraites, identifiées par empreinte, puis la release commune à plusieurs.
                     if (out.isEmpty()) {
@@ -335,6 +356,7 @@ public class CdImportDialog extends JDialog {
             String src = switch (source) {
                 case "exact" -> I18n.t("disque reconnu exactement");
                 case "audio" -> I18n.t("identifié par l'audio");
+                case "gnudb" -> I18n.t("base GnuDB (CDDB)");
                 default -> I18n.t("durées concordantes");
             };
             String extra = (rt.label() != null && !rt.label().isBlank() ? rt.label() + ", " : "")
@@ -345,6 +367,7 @@ public class CdImportDialog extends JDialog {
 
     private static final int MAX_PROPOSALS_PER_SOURCE = 3;
     private volatile List<Proposal> proposals = List.of();
+    private volatile boolean gnudbMatch;
     private final JComboBox<Proposal> cbProposals = new JComboBox<>();
     private final JPanel proposalRow = new JPanel(new BorderLayout(8, 0));
     private boolean fillingProposals;
@@ -367,6 +390,7 @@ public class CdImportDialog extends JDialog {
         identified = p == null ? null : p.rt();
         exactMatch = p != null && "exact".equals(p.source());
         audioMatch = p != null && "audio".equals(p.source());
+        gnudbMatch = p != null && "gnudb".equals(p.source());
         diskMatches = java.util.Map.of();
         btnExtract.setEnabled(false);
         // Pistes déjà présentes SUR LE DISQUE (dossier de bibliothèque) : fait en arrière-plan, la liste peut être longue.
@@ -412,6 +436,8 @@ public class CdImportDialog extends JDialog {
                     ? I18n.t("Identifié (disque exact) : %s – %s", identified.albumArtist(), identified.album())
                     : audioMatch
                         ? I18n.t("Identifié par l'audio : %s – %s", identified.albumArtist(), identified.album())
+                    : gnudbMatch
+                        ? I18n.t("Trouvé dans GnuDB, à vérifier : %s – %s", identified.albumArtist(), identified.album())
                         : I18n.t("Identifié approximativement, à vérifier : %s – %s", identified.albumArtist(), identified.album()))
                 : I18n.t("Non identifié — les pistes seront extraites sans titre, "
                        + "à identifier ensuite normalement.")
@@ -554,6 +580,7 @@ public class CdImportDialog extends JDialog {
         }
         bits.add(exactMatch ? I18n.t("disque reconnu exactement")
                 : audioMatch ? I18n.t("identifié par l'audio")
+                : gnudbMatch ? I18n.t("base GnuDB (CDDB), à vérifier")
                 : I18n.t("identification approximative, à vérifier"));
         lblAlbumSub.setText(String.join("  ·  ", bits));
         loadCover(rt.releaseMbid());

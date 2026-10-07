@@ -69,6 +69,31 @@ public class CdRipper {
             }
         }
 
+        /** Positions de début de chaque piste en secteurs (lead-in de 2 s inclus), comme les attend CDDB. */
+        public int[] cddbOffsets() {
+            int[] o = new int[tracks.size()];
+            int cursor = 150;
+            for (int i = 0; i < tracks.size(); i++) { o[i] = cursor; cursor += tracks.get(i).lengthSectors(); }
+            return o;
+        }
+
+        /** Durée totale du disque en secondes (position du lead-out), comme l'attend CDDB. */
+        public int cddbTotalSeconds() { return totalSectors() / CDDA_SECTORS_PER_SEC; }
+
+        /** Disc ID CDDB/freedb (8 chiffres hexadécimaux) — un calcul DIFFÉRENT du Disc ID MusicBrainz : somme des chiffres de la position
+         *  (en secondes) de chaque piste, durée utile, nombre de pistes. Vide si le disque n'est pas un CD audio. */
+        public String cddbDiscId() {
+            if (tracks.isEmpty() || tracks.size() > 99) return "";
+            int n = 0;
+            for (int o : cddbOffsets()) {
+                int sec = o / CDDA_SECTORS_PER_SEC;
+                while (sec > 0) { n += sec % 10; sec /= 10; }
+            }
+            int t = cddbTotalSeconds() - cddbOffsets()[0] / CDDA_SECTORS_PER_SEC;
+            long id = (((long) (n % 255)) << 24) | ((long) t << 8) | tracks.size();
+            return String.format(Locale.ROOT, "%08x", id);
+        }
+
         /** Somme des secteurs avec le lead-in, telle que la compare MusicBrainz. */
         public int totalSectors() {
             int n = 150;
