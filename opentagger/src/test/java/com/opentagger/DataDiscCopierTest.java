@@ -56,6 +56,32 @@ public class DataDiscCopierTest {
         assertEquals(0, second.copied() + second.renamed());
     }
 
+    @Test public void unixVolumeDescriptionsGiveTheirMountPoint() {
+        assertEquals(java.nio.file.Paths.get("/media/paul/SOUVENIRS"), DataDiscCopier.parseStoreMount("/media/paul/SOUVENIRS (/dev/sr0)"));
+        assertEquals(java.nio.file.Paths.get("/run/media/paul/CD 2006"), DataDiscCopier.parseStoreMount("/run/media/paul/CD 2006 (/dev/sr0)"));
+        assertEquals(null, DataDiscCopier.parseStoreMount("9 sept. 2006 (I:)"));   // Windows : pas un chemin Unix
+        assertEquals(null, DataDiscCopier.parseStoreMount(null));
+    }
+
+    @Test public void copyOneReportsWhatHappened() throws Exception {
+        Path d = disc();
+        Path dest = tmp.newFolder("dest5").toPath();
+        Path f = d.resolve("lisez-moi.txt");
+        assertEquals(DataDiscCopier.Outcome.COPIED, DataDiscCopier.copyOne(d, f, dest).outcome());
+        assertEquals(DataDiscCopier.Outcome.IDENTICAL, DataDiscCopier.copyOne(d, f, dest).outcome());
+        Files.writeString(dest.resolve("lisez-moi.txt"), "autre contenu");
+        DataDiscCopier.One one = DataDiscCopier.copyOne(d, f, dest);
+        assertEquals(DataDiscCopier.Outcome.RENAMED, one.outcome());
+        assertEquals("lisez-moi (2).txt", one.target().getFileName().toString());
+        assertEquals("autre contenu", Files.readString(dest.resolve("lisez-moi.txt")));
+    }
+
+    @Test public void listFilesIsSortedAndCapped() throws Exception {
+        Path d = disc();
+        assertEquals(2, DataDiscCopier.listFiles(d, 100).size());
+        assertEquals(1, DataDiscCopier.listFiles(d, 1).size());
+    }
+
     @Test public void measureCountsFilesAndBytes() throws Exception {
         long[] m = DataDiscCopier.measure(disc());
         assertEquals(2, m[0]);
