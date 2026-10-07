@@ -426,8 +426,7 @@ public class CdImportDialog extends JDialog {
                     if (rt.trackNo() == t.number()) { title = rt.title(); artist = rt.artist(); break; }
                 }
             }
-            boolean dup = identified != null && (diskMatches.containsKey(t.number())
-                    || isAlreadyInLibrary(artist, identified.album(), title));
+            boolean dup = identified != null && diskMatches.containsKey(t.number());
             trackTableModel.addRow(new Object[]{
                     Boolean.TRUE, t.number(), artist, title, formatDuration(t.durationSec()), dup ? I18n.t("oui") : "", ""
             });
@@ -480,21 +479,45 @@ public class CdImportDialog extends JDialog {
         java.util.Map<Integer, List<Path>> out = new java.util.HashMap<>();
         if (known == null || rt == null) return out;
         String artistN = norm(rt.albumArtist()), albumN = norm(rt.album());
-        if (albumN.isBlank()) return out;
-        java.util.Map<String, Integer> byTitle = new java.util.HashMap<>();
-        for (var t : rt.tracks()) byTitle.putIfAbsent(norm(t.title()), t.trackNo());
+        java.util.Map<String, MusicBrainzClient.ReleaseTrack> byTitle = new java.util.HashMap<>();
+        for (var t : rt.tracks()) byTitle.putIfAbsent(norm(t.title()), t);
+        boolean anyArtist = isVariousArtists(artistN) || rt.isCompilation();
+        java.util.Map<String, String> normCache = new java.util.HashMap<>(); // le même album/dossier revient pour toutes ses pistes
+        java.util.function.Function<String, String> n = s -> normCache.computeIfAbsent(s == null ? "" : s, CdImportDialog::norm);
         for (Known k : known) {
-            if (!albumN.equals(norm(k.album()))) continue;
-            String ka = norm(!isBlank(k.albumArtist()) ? k.albumArtist() : k.artist());
-            if (!artistN.isBlank() && !ka.isBlank() && !artistN.equals(ka) && !artistN.equals(norm(k.artist()))) continue;
-            Integer no = byTitle.get(norm(k.title()));
-            if (no == null && k.track() > 0) no = k.track();
+            // Album reconnu par son tag OU par le nom de son dossier : des fichiers sans tag d'album (ou taggés autrement) rangés dans
+            // « Just Hits France » sont bien cet album. Les titres se comparent sans accents ni casse (« Je N'ai Que Mon Âme »).
+            boolean byFolder = !albumN.isBlank() && albumN.equals(n.apply(parentFolderName(k.path())));
+            boolean byAlbum = !albumN.isBlank() && albumN.equals(n.apply(k.album()));
+            String titleN = n.apply(k.title());
+            MusicBrainzClient.ReleaseTrack byName = byTitle.get(titleN);
+            Integer no = null;
+            if (byAlbum || byFolder) {
+                if (!anyArtist && !byFolder) {
+                    String ka = n.apply(!isBlank(k.albumArtist()) ? k.albumArtist() : k.artist());
+                    if (!artistN.isBlank() && !ka.isBlank() && !artistN.equals(ka) && !artistN.equals(n.apply(k.artist()))) continue;
+                }
+                if (byName != null) no = byName.trackNo();
+                if (no == null) { var viaFile = byTitle.get(titleOfFileName(k.path().getFileName().toString())); if (viaFile != null) no = viaFile.trackNo(); }
+                if (no == null && k.track() > 0) no = k.track();
+            } else if (byName != null && sameArtist(byName.artist(), k.artist())) {
+                no = byName.trackNo();       // même titre et même artiste ailleurs dans la bibliothèque (autre album, autre dossier)
+            }
             if (no != null) out.computeIfAbsent(no, x -> new ArrayList<>()).add(k.path());
         }
         return out;
     }
-
     private static boolean isBlank(String s) { return s == null || s.isBlank(); }
+
+    private static String parentFolderName(Path p) {
+        Path par = p == null ? null : p.getParent();
+        return par == null || par.getFileName() == null ? "" : par.getFileName().toString();
+    }
+
+    private static boolean isVariousArtists(String normArtist) {
+        return normArtist.equals("various") || normArtist.equals("various artists") || normArtist.equals("va")
+                || normArtist.equals("divers") || normArtist.equals("artistes varies") || normArtist.equals("compilation");
+    }
 
     /** Dossier attendu {@code bibliothèque/Artiste/Album} atteint DIRECTEMENT par son nom (sans lister la racine) — complète {@link #findKnown}
      *  pour un album présent sur le disque mais pas (encore) dans la liste. */
@@ -584,9 +607,9 @@ public class CdImportDialog extends JDialog {
         for (FileEntry fe : owner.allEntries()) {
             var t = fe.activeTags();
             if (t == null) continue;
-            boolean sameTitle = !title.isBlank() && title.equalsIgnoreCase(t.title)
-                    && (artist.isBlank() || artist.equalsIgnoreCase(t.artist));
-            boolean sameSlot = !album.isBlank() && album.equalsIgnoreCase(t.album) && trackNumber(t.track) == trackNo;
+            boolean sameTitle = !title.isBlank() && norm(title).equals(norm(t.title))
+                    && (artist.isBlank() || sameArtist(artist, t.artist));
+            boolean sameSlot = !album.isBlank() && norm(album).equals(norm(t.album)) && trackNumber(t.track) == trackNo;
             if (sameTitle || sameSlot) out.add(fe);
         }
         return out;
@@ -617,11 +640,17 @@ public class CdImportDialog extends JDialog {
         for (FileEntry fe : owner.allEntries()) {
             var t = fe.activeTags();
             if (t == null) continue;
-            if (!album.isBlank() && album.equalsIgnoreCase(t.album)) return true;
-            if (!title.isBlank() && title.equalsIgnoreCase(t.title)
-                    && (artist.isBlank() || artist.equalsIgnoreCase(t.artist))) return true;
+            if (!album.isBlank() && norm(album).equals(norm(t.album))) return true;
+            if (!title.isBlank() && norm(title).equals(norm(t.title))
+                    && (artist.isBlank() || sameArtist(artist, t.artist))) return true;
         }
         return false;
+    }
+
+    /** Même artiste à la casse, aux accents et à la ponctuation près ; « Various » (compilation) ne contredit personne. */
+    static boolean sameArtist(String a, String b) {
+        String x = norm(a), y = norm(b);
+        return x.equals(y) || isVariousArtists(x) || isVariousArtists(y);
     }
 
     private static String formatDuration(int sec) {

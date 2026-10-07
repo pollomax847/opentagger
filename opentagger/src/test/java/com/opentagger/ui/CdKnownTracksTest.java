@@ -38,6 +38,30 @@ public class CdKnownTracksTest {
         assertEquals(List.of(Path.of("E:/m/a/2.mp3")), found.get(2));
     }
 
+    @Test public void aCompilationIsFoundByItsFolderWhateverTheTagsAndAccents() {
+        // Cas réel : « Just Hits France » (GnuDB : « Various »), fichiers rangés dans ce dossier, titres avec accents et casse différents.
+        List<Known> known = List.of(
+                new Known(Path.of("F:/Music/Compilations/Just Hits France/05 Je N'ai Que Mon Âme.mp3"), "Natasha St-Pier", "", "", "Je N'ai Que Mon Âme", 0),
+                new Known(Path.of("F:/Music/Compilations/Just Hits France/14 1m73, 62kg (Radio Edit).mp3"), "Scottie", "", "Autre nom d'album", "1m73, 62kg (Radio Edit)", 14));
+        var rt = release("Various", "Just Hits France", "a", "b", "c", "d", "Je n'ai que mon ame");
+        Map<Integer, List<Path>> found = CdImportDialog.findKnown(known, rt);
+        assertTrue(found.containsKey(5));          // trouvé par le nom du dossier ET le titre sans accents
+        assertTrue(found.get(5).get(0).toString().endsWith("05 Je N'ai Que Mon Âme.mp3"));
+    }
+
+    @Test public void theSameTitleAndArtistElsewhereCountsAsAlreadyThere() {
+        List<Known> known = List.of(new Known(Path.of("E:/m/Scottie/Single/x.mp3"), "scottie", "", "Single", "1m73, 62kg", 1));
+        List<MusicBrainzClient.ReleaseTrack> tr = List.of(new MusicBrainzClient.ReleaseTrack(1, 15, 15, "1m73, 62kg", "Scottie", "", 0, "", "", ""));
+        var rt = new MusicBrainzClient.ReleaseTracklist("", "Just Hits France", "Various", "", "2002", "", true, tr, "", "", "", "", "", "", "", "", "", null);
+        assertEquals(1, CdImportDialog.findKnown(known, rt).get(15).size());
+    }
+
+    @Test public void sameArtistIgnoresCaseAccentsAndVarious() {
+        assertTrue(CdImportDialog.sameArtist("Christophe Maé", "christophe mae"));
+        assertTrue(CdImportDialog.sameArtist("Various", "Lorie"));
+        assertTrue(!CdImportDialog.sameArtist("Lorie", "Scottie"));
+    }
+
     @Test public void aTrackWithoutTitleMatchFallsBackOnItsNumber() {
         List<Known> known = List.of(new Known(Path.of("x/3.mp3"), "Artiste", "", "Album", "Titre faux", 2));
         Map<Integer, List<Path>> found = CdImportDialog.findKnown(known, release("Artiste", "Album", "A", "B", "C"));
