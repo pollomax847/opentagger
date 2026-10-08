@@ -99,6 +99,28 @@ public final class AutoDedup {
                 && norm(folder).contains(album.substring(0, Math.min(10, album.length())));
     }
 
+    /** Le NOM du fichier annonce-t-il un autre morceau que ses tags (contenu ≠ nom, ex. « 12 - Deorro - Going Up.mp3 » qui
+     *  contient Peter von Poehl) ? Faux si le titre est inconnu : dans le doute, on ne conclut pas à une erreur de nom. */
+    static boolean nameContradictsTags(Path path, TagInfo tags) {
+        if (path == null || tags == null) return false;
+        String title = norm(tags.title);
+        if (title.length() < 3) return false;
+        String file = path.getFileName().toString();
+        int dot = file.lastIndexOf('.');
+        String stem = norm(dot > 0 ? file.substring(0, dot) : file);
+        return !stem.contains(title.substring(0, Math.min(14, title.length())));
+    }
+
+    /** Peut-on jeter ce fichier comme doublon ? Oui s'il est rangé selon ses tags (vraie copie du même album), ou si son nom
+     *  annonce un autre morceau (fichier mal nommé). NON s'il porte le bon titre mais se trouve dans le dossier d'un AUTRE
+     *  album (piste d'une compilation que l'identification a rattachée à une autre parution) : c'est « la même chanson sur un
+     *  autre album », jamais touchée — vu en direct le 2026-10-08 (« Now That's What I Call Running/3-15 Footloose.mp3 »
+     *  jeté au profit de « Grammy's Greatest Moments », « Le Meilleur de Frank Michael/17 T'en vas pas » au profit
+     *  d'« Olympia 99 »…). */
+    static boolean disposable(Path path, TagInfo tags) {
+        return wellPlaced(path, tags) || nameContradictsTags(path, tags);
+    }
+
     /** Durée RÉELLE du fichier (lue au scan), pas celle annoncée par MusicBrainz. */
     static int fileDuration(FileEntry e) {
         if (e.current != null && e.current.durationSec > 0) return e.current.durationSec;
@@ -161,6 +183,11 @@ public final class AutoDedup {
             boolean otherPlaced = wellPlaced(pathOf(other), other.activeTags());
             if (savedPlaced != otherPlaced) best = savedPlaced ? saved : other;
             FileEntry loser = best == saved ? other : saved;
+            if (!disposable(pathOf(loser), loser.activeTags())) {
+                note(journal, I18n.t("Même chanson rangée dans un autre album (%s) — laissée en place",
+                        pathOf(loser).getParent() != null ? pathOf(loser).getParent().getFileName() : pathOf(loser)));
+                return;
+            }
             File keep = pathOf(best).toFile(), drop = pathOf(loser).toFile();
             long dropSize = drop.length();
             if (!TrashHelper.moveToTrash(drop)) {
@@ -202,6 +229,9 @@ public final class AutoDedup {
             if (!fs.isFile() || !fe.isFile()) return new Resolution(false, saved, "");
             int max = Config.get().num("duplicates.auto_trash_max_per_run", 50);
             if (TRASHED.get() >= max) return new Resolution(false, saved, "");
+            // Le fichier qui n'a pas pu être renommé porte-t-il le bon titre mais dans le dossier d'un autre album (piste de
+            // compilation rattachée à une autre parution) ? Alors ce n'est pas un doublon à jeter : laissé en place, comme avant.
+            if (!disposable(saved, tags)) return new Resolution(false, saved, "");
             FileEntry eNew = new FileEntry(fs, tags), eOld = new FileEntry(fe, tags);
             // Ancienne copie d'abord : à qualité égale, c'est elle qui reste (déjà en place, rien à déplacer).
             boolean newIsBetter = DuplicateDetector.bestInGroup(List.of(eOld, eNew)) == eNew

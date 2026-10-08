@@ -33,4 +33,14 @@ public class AutoDedupPlacementTest {
     @Test public void missingTagsAreNeverWellPlaced() {
         assertFalse(AutoDedup.wellPlaced(Paths.get("/x/Album/01 - Titre.mp3"), t("", "Album")));
     }
+
+    @Test public void compilationTrackOfAnotherAlbumIsNeverDisposable() {
+        // Bon titre, mais rangé dans « Hits Total 2013 » alors que les tags disent « Chilled » : même chanson, autre album.
+        TagInfo letHerGo = t("Let Her Go", "Chilled");
+        assertFalse(AutoDedup.disposable(Paths.get("/x/Compilations/Hits Total 2013/2-12 Let Her Go.mp3"), letHerGo));
+        assertTrue("vraie copie du même album", AutoDedup.disposable(Paths.get("/x/Compilations/Chilled/04 - Passenger - Let Her Go.mp3"), letHerGo));
+        assertTrue("nom d'un autre morceau = fichier mal nommé", AutoDedup.disposable(
+                Paths.get("/x/Compilations/NRJ Fresh Hits 2017/12 - Deorro - Going Up.mp3"),
+                t("Going to Where the Tea Trees Are", "Going to Where the Tea-Trees Are")));
+    }
 }
