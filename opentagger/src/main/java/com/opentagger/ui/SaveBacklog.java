@@ -18,6 +18,11 @@ public final class SaveBacklog {
     private static volatile int unsaved;
 
     public static void setUnsaved(int n) { unsaved = n; }
+
+    /** Enregistrement automatique volontairement reporté (scans de démarrage en cours, voir
+     *  MainFrame.scheduleAutoSaveFollowUp) : le frein ne s'applique pas, l'attente ne servirait à rien. */
+    private static volatile boolean savingDeferred;
+    public static void setSavingDeferred(boolean v) { savingDeferred = v; }
     public static int unsaved() { return unsaved; }
 
     /** Vrai s'il faut attendre. */
@@ -29,7 +34,7 @@ public final class SaveBacklog {
      */
     public static void awaitRoom(BooleanSupplier cancelled) {
         Config cfg = Config.get();
-        if (!cfg.autoSaveEnabled()) return;
+        if (!cfg.autoSaveEnabled() || savingDeferred) return;
         int limit = cfg.num("tagging.max_unsaved", 500);
         long deadline = System.currentTimeMillis() + 10 * 60_000L;
         while (mustWait(unsaved, limit) && !cancelled.getAsBoolean() && System.currentTimeMillis() < deadline) {

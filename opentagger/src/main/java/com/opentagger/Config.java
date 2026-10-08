@@ -206,6 +206,17 @@ public class Config {
     // SKIPPED/ERROR ci-dessus, désactivé par défaut (jamais de déplacement sans action explicite).
     public boolean durationMismatchMoveEnabled()   { return bool("duration_mismatch.move_enabled", false); }
     public String  durationMismatchMoveFolder()    { return orReviewFolder(str("duration_mismatch.move_folder", ""), "Durée incohérente"); }
+    /** ESSAI (2026-09-25, demande utilisateur : « les fichiers de 0:40 alors que MusicBrainz dit 3:34, on pourrait les
+     *  supprimer directement ») : envoie à la corbeille (jamais de suppression définitive) un fichier plus court que
+     *  {@link #durationMismatchTrashShortMaxSec()} dont la durée MusicBrainz est d'au moins
+     *  {@link #durationMismatchTrashShortMinGapSec()} secondes plus longue ET au moins double — un rip tronqué. Voir
+     *  TaggingWorker.tryTrashTruncated() pour les garde-fous (identification confirmée, journal d'essai). */
+    public boolean durationMismatchTrashShortEnabled()  { return bool("duration_mismatch.trash_short_enabled", false); }
+    public int     durationMismatchTrashShortMaxSec()   { return num("duration_mismatch.trash_short_max_sec", 60); }
+    public int     durationMismatchTrashShortMinGapSec(){ return num("duration_mismatch.trash_short_min_gap_sec", 60); }
+    /** Plafond de sécurité de l'essai : au-delà, les fichiers suivants retombent sur le comportement habituel (isolés pour
+     *  revue) jusqu'au prochain démarrage — évite une mise à la corbeille massive et silencieuse. */
+    public int     durationMismatchTrashShortMaxPerRun(){ return num("duration_mismatch.trash_short_max_per_run", 50); }
     // Récupération vidéo (voir VideoScanner/VideoRecoveryWorker) automatique à chaque scan de
     // dossier (Ouvrir dossier/Rafraîchir) — activée par défaut à la demande explicite de
     // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop
@@ -650,12 +661,6 @@ public class Config {
 
     public String lastfmUsername()  { return str("lastfm.username", ""); }
 
-    public boolean headphonesDbEnabled() { return bool("headphones.db_enabled", false); }
-    public String  headphonesDbPath()    { return str("headphones.db_path", System.getProperty("user.home") + "/headphones/headphones.db"); }
-
-    public boolean beetsDbEnabled() { return bool("beets.db_enabled", false); }
-    public String  beetsDbPath()    { return str("beets.db_path", System.getProperty("user.home") + "/.config/beets/library.db"); }
-    public String  beetsMusicDir()  { return str("beets.music_dir", ""); }
 
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {

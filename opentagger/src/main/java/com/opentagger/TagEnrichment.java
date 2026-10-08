@@ -461,8 +461,8 @@ public final class TagEnrichment {
         // queueAlbum après CHAQUE enregistrement de score >= 90) : sur un lot complet, des milliers d'appels HTTP
         // (un thread virtuel par fichier, chacun attendant jusqu'à 20 s) vers une instance Python mono-processus
         // qui relaie chaque recherche à MusicBrainz — 360 tentatives sur 389 étaient déjà des timeouts lors de la
-        // première mesure (2026-08-30). OpenTagger n'écrit plus JAMAIS dans Headphones ; sa base n'est plus que
-        // LUE (identification locale, HeadphonesClient.lookupTrack).
+        // première mesure (2026-08-30). OpenTagger n'écrit plus JAMAIS dans Headphones, et ne lit plus sa base
+        // non plus depuis le 2026-09-25 (voir TaggingWorker.findTags(), ex-étape 0.62).
 
         return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved, duplicateOf);
     }

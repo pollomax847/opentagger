@@ -432,19 +432,9 @@ public class MetadataCache implements AutoCloseable {
      *  suivent sans vérification individuelle propre — évite juste que des pistes du même album
      *  divergent vers des éditions MusicBrainz différentes. */
     public static final String SOURCE_GROUP_PIN = "group_pin";
-    /** Piste retrouvée par similarité de texte (artiste+titre) dans la base SQLite locale d'une
-     *  instance Headphones tierce (lecture seule) — voir HeadphonesClient.lookupTrack() et
-     *  TaggingWorker.findTags() étape 0.62. Confiance modérée : texte seul (comme SOURCE_TEXT),
-     *  mais contre un catalogue déjà curé par l'utilisateur (uniquement des pistes qu'il a lui-même
-     *  téléchargées/organisées via Headphones), donc un cran au-dessus d'une recherche MB à
-     *  l'aveugle. Aucun appel réseau (fichier local), placée tôt dans la cascade pour cette raison. */
-    public static final String SOURCE_HEADPHONES = "headphones";
-    /** Piste retrouvée dans la base SQLite locale d'une instance beets tierce (lecture seule) — voir
-     *  BeetsClient et TaggingWorker.findTags() étapes 0.61 (chemin exact, quasi certain) et 0.63
-     *  (repli similarité texte, même confiance que SOURCE_HEADPHONES). Schéma beets bien plus riche
-     *  (ISRC, MBID complets, composer/work classique) que Headphones — voir BeetsClient pour le
-     *  détail des champs importés. */
-    public static final String SOURCE_BEETS = "beets";
+    // "beets" et "headphones" peuvent encore apparaître dans file_history (identifications
+    // antérieures au 2026-09-25) : ces deux bases tierces ont été retirées de l'identification, ces
+    // lignes sont traitées comme toute source non vérifiée par l'audio (étape 0 : SongRec re-vérifie).
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {

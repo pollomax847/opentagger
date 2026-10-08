@@ -48,6 +48,24 @@ public class FileEntry {
      *  SongKong, au lieu de tourner sur tout le lot à chaque taguage. */
     public boolean bandcampOnly = false;
 
+    /** Fichier déjà rangé remis en ré-identification par une demande explicite (voir
+     *  MainFrame.applyReidentifyRequest()) : s'il échoue (SKIPPED/ERROR/durée incohérente), il
+     *  RESTE à sa place avec ses tags actuels — jamais envoyé vers Sans_correspondance ni vers le
+     *  dossier « durée incohérente », ce qui arracherait des pistes déjà classées à leur album. */
+    public boolean keepInPlaceIfSkipped = false;
+
+    /** Ajouté par le parcours d'un scan de dossier (phase 1) mais tags pas encore lus (phase 2) :
+     *  statut encore INCONNU — PENDING par défaut même pour un fichier déjà tagué. Exclu de tout lot
+     *  « Tout tagger » tant que vrai, puis servi au lot en cours dès sa lecture (voir
+     *  MainFrame.loadDirectory() et TaggingWorker.enqueueLate()). Avant ce drapeau (2026-09-25), un
+     *  lot lancé pendant un scan embarquait ces fichiers « PENDING » et ré-identifiait des fichiers
+     *  déjà tagués (301 « cache hit » sur 3 389 fichiers traités, mesuré en direct). */
+    public volatile boolean awaitingScan = false;
+
+    /** Fichier sans aucun son (0 octet, ou < 64 Ko sans flux audio) — jamais tagué, voir
+     *  ui.ShellCleaner. */
+    public boolean emptyShell = false;
+
     /** SKIPPED spécifiquement parce que la durée du fichier ne correspond pas à celle déclarée par
      *  MusicBrainz pour l'enregistrement identifié (voir {@link #isDurationMismatch}) — pas
      *  une simple non-identification. Distingue ce cas pour le déplacement optionnel dédié (voir
@@ -94,6 +112,15 @@ public class FileEntry {
         if (fileSec <= 0 || mbSec <= 0) return false;
         int diff = Math.abs(fileSec - mbSec);
         return diff > 20 && diff > mbSec * 0.20;
+    }
+
+    /** Fichier COURT et manifestement tronqué : moins de {@code maxShortSec}, alors que MusicBrainz annonce au moins
+     *  {@code minGapSec} de plus ET au moins le double (ex. 0:40 vs 3:34). Volontairement plus étroit que
+     *  {@link #isDurationMismatch} — c'est le seul cas que l'utilisateur juge sûr à écarter automatiquement (essai,
+     *  2026-09-25). Durées inconnues (≤ 0) : jamais vrai, même exemption que isDurationMismatch. */
+    public static boolean isShortTruncated(int fileSec, int mbSec, int maxShortSec, int minGapSec) {
+        if (fileSec <= 0 || mbSec <= 0) return false;
+        return fileSec < maxShortSec && mbSec - fileSec >= minGapSec && mbSec >= 2 * fileSec;
     }
 
     public static boolean isDurationMismatch(int fileSec, int mbSec) {
