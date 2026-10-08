@@ -2283,6 +2283,9 @@ public class MainFrame extends JFrame {
     // phase1Semaphore (pas seulement mis en file), DONE dès que sa phase 1 se termine — signalent
     // à process() quand détacher/réattacher le RowSorter, sans compter les scans encore en attente.
     private static final Object PHASE1_START_MARKER = new Object();
+    /** Phase 2 d'un scan : l'entrée à extension audio était en fait un DOSSIER (voir
+     *  AudioScanner.scan(..., trustAudioExtension)) — à retirer du tableau. */
+    private static final Object NOT_A_FILE_MARKER = new Object();
     private static final Object PHASE1_DONE_MARKER  = new Object();
 
     // ── Résolution ligne de vue → FileEntry, indépendante du modèle attaché ───
@@ -4179,6 +4182,21 @@ public class MainFrame extends JFrame {
             // + filet de sécurité dans done()).
             boolean bulkStarted = false;
             boolean bulkEnded   = false;
+            // Fichiers de ce dossier servis au lot « Tout tagger » déjà lancé (voir
+            // TaggingWorker.enqueueLate) — pour le journal.
+            int lateFed = 0;
+            // Entrées reconnues comme dossiers en phase 2 — peuvent arriver AVANT leur ajout en
+            // phase 1 (lots de 200 ms), d'où ce filtre aussi à l'ajout.
+            final java.util.Set<FileEntry> notFiles = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            private void feedLate(List<FileEntry> late) {
+                if (late.isEmpty() || !TaggingWorker.enqueueLate(late)) return;
+                int before = lateFed;
+                lateFed += late.size();
+                if (before / 1000 != lateFed / 1000) {
+                    System.out.println("[OT] Taguage : " + lateFed + " fichier(s) de \"" + dir
+                            + "\" ajoutés au lot en cours au fil du scan.");
+                }
+            }
             private void endBulkOnce() {
                 if (!bulkEnded) { bulkEnded = true; if (bulkStarted) endBulkTableUpdate(); }
             }
@@ -4285,6 +4303,7 @@ public class MainFrame extends JFrame {
                     if (alreadyInTable.contains(f.toPath().toAbsolutePath())) return;
                     FileEntry entry = new FileEntry(f, new com.opentagger.model.TagInfo());
                     entry.scanRoot = root;
+                    entry.awaitingScan = true;
                     batch.add(entry);
                     long now = System.currentTimeMillis();
                     if (batch.size() >= 200 || now - lastBatchMs[0] >= 200) {
@@ -4305,8 +4324,28 @@ public class MainFrame extends JFrame {
                         java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap =
                             (java.util.Map<String, MetadataCache.ScanCacheEntry>) cacheData[1];
                         com.opentagger.model.TagInfo ti;
-                        long mtime = ff.lastModified();
-                        long size  = ff.length();
+                        // Un seul stat() pour mtime+taille (au lieu de lastModified() puis length(),
+                        // deux appels) : sur MyBook (ntfs-3g, USB) un stat coûte ~100 ms sous charge,
+                        // mesuré 2026-09-25 — ×217 000 fichiers. Valeurs identiques vérifiées sur
+                        // les 3 disques (clé de scan_cache inchangée). 0 en cas d'erreur, comme avant.
+                        long mtime;
+                        long size;
+                        try {
+                            java.nio.file.attribute.BasicFileAttributes at = java.nio.file.Files.readAttributes(
+                                    ff.toPath(), java.nio.file.attribute.BasicFileAttributes.class);
+                            if (at.isDirectory()) {
+                                // Nom à extension audio mais c'est un dossier (parcours sans stat,
+                                // voir AudioScanner) : jamais tagué, déplacé ni mis en corbeille.
+                                String[] inside = ff.list();
+                                return new Object[]{ NOT_A_FILE_MARKER, entry, Boolean.FALSE,
+                                        inside != null && inside.length > 0 };
+                            }
+                            mtime = at.lastModifiedTime().toMillis();
+                            size  = at.size();
+                        } catch (java.io.IOException | RuntimeException ex) {
+                            mtime = 0L;
+                            size  = 0L;
+                        }
                         MetadataCache.ScanCacheEntry cached = scanCacheMap.get(ff.getAbsolutePath());
                         if (cached != null && cached.mtime() == mtime && cached.size() == size) {
                             // Inchangé depuis le dernier scan (même mtime + taille) : on réutilise
@@ -4347,9 +4386,9 @@ public class MainFrame extends JFrame {
                         // attente" après réorganisation du dossier.
                         boolean wasPreviouslyTagged = taggedPaths.contains(ff.getAbsolutePath())
                                 || !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
-                        return new Object[]{ entry, ti, wasPreviouslyTagged, size };
+                        return new Object[]{ entry, ti, wasPreviouslyTagged, size, ShellCleaner.isShell(ff, size) };
                     });
-                }, this::isCancelled);
+                }, this::isCancelled, true);
                 } finally {
                     stillScanning.set(false);
                     scanWatchdog.interrupt();
@@ -4397,15 +4436,29 @@ public class MainFrame extends JFrame {
             @Override
             @SuppressWarnings("unchecked")
             protected void process(List<Object[]> chunks) {
+                List<FileEntry> late = new ArrayList<>();
                 for (Object[] chunk : chunks) {
                     if (chunk[0] == PHASE1_START_MARKER) {
                         bulkStarted = true;
                         beginBulkTableUpdate();
                     } else if (chunk[0] == PHASE1_DONE_MARKER) {
                         endBulkOnce();
+                    } else if (chunk[0] == NOT_A_FILE_MARKER) {
+                        FileEntry nf = (FileEntry) chunk[1];
+                        nf.awaitingScan = false;
+                        notFiles.add(nf);
+                        addedByThisScan.remove(nf);
+                        tableModel.removeEntries(java.util.Set.of(nf));
+                        boolean hasContent = Boolean.TRUE.equals(chunk[3]);
+                        System.out.println("[OT] ⚠ Scan : \"" + nf.file + "\" est un DOSSIER malgré son nom de fichier audio"
+                                + (hasContent ? " — son contenu est scanné à part." : " (vide) — ignoré."));
+                        // Rarissime (5 dossiers, tous vides, sur toute la bibliothèque au 2026-09-26) :
+                        // un scan dédié, qui ignore les fichiers déjà dans le tableau.
+                        if (hasContent) loadDirectory(nf.file);
                     } else if (chunk[0] instanceof List) {
                         // Phase 1 : ajouter toutes les entrées vides d'un coup
                         List<FileEntry> batch = (List<FileEntry>) chunk[0];
+                        if (!notFiles.isEmpty()) batch = batch.stream().filter(b -> !notFiles.contains(b)).toList();
                         tableModel.addAll(batch);
                         addedByThisScan.addAll(batch);
                         if (tableModel.getRowCount() > 0 && btnRefresh != null) btnRefresh.setEnabled(true);
@@ -4434,19 +4487,40 @@ public class MainFrame extends JFrame {
                         // Priorité absolue sur wasTagged ci-dessous : un fichier vidé APRÈS avoir été
                         // tagué (incident disque plein...) peut encore matcher le cache chemin→tagué,
                         // mais son contenu réel prime sur ce que dit le cache.
-                        if (size == 0) {
+                        boolean shell = chunk.length > 4 && Boolean.TRUE.equals(chunk[4]);
+                        if (size == 0 || shell) {
                             entry.status  = com.opentagger.model.FileEntry.Status.ERROR;
-                            entry.message = I18n.t("Fichier vide (0 octet) — corrompu, non identifiable.");
+                            entry.emptyShell = true;
+                            entry.message = size == 0
+                                    ? I18n.t("Fichier vide (0 octet) — corrompu, non identifiable.")
+                                    : I18n.t("Coquille vide (%s octets, aucun son) — non identifiable.", size);
+                            ShellCleaner.handle(entry, gone -> {
+                                tableModel.removeEntries(java.util.Set.of(gone));
+                                addedByThisScan.remove(gone);
+                            });
                         } else if (wasTagged) {
                             // Les tags corrects sont DÉJÀ dans le fichier (entry.current)
                             // Pas besoin de charger un TagInfo depuis l'historique en mémoire
                             entry.status  = com.opentagger.model.FileEntry.Status.TAGGED;
                             entry.message = "";
                         }
+                        entry.awaitingScan = false;
                         tableModel.update(entry);
+                        if (entry.selected && entry.status == FileEntry.Status.PENDING) late.add(entry);
                     }
                 }
+                feedLate(late);
                 long now = System.currentTimeMillis();
+                // Demande de ré-identification : ses fichiers de CE dossier sont servis au fil de la
+                // lecture de leurs tags, sans attendre la fin du scan (MyBook : ~7 h mesurées le
+                // 2026-09-25). Une fois par minute au plus (parcours de tout le tableau).
+                if (now - lastReidentifyCheckMs >= 60_000
+                        && WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()
+                        && java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(Config.configDir(), "reidentify_request.txt"))) {
+                    lastReidentifyCheckMs = now;
+                    List<FileEntry> marked = takeReidentifyRequest();
+                    if (!marked.isEmpty()) TaggingWorker.enqueuePriority(marked);
+                }
                 if (now - lastStatsRefreshMs >= 300) { lastStatsRefreshMs = now; refreshStats(); }
             }
 
@@ -4456,6 +4530,7 @@ public class MainFrame extends JFrame {
                 if (btnStop != null) btnStop.setEnabled(false);
                 if (isCancelled()) {
                     // Rollback : retirer toutes les entrées ajoutées par ce scan
+                    TaggingWorker.dropLate(addedByThisScan);
                     tableModel.removeEntries(addedByThisScan);
                     if (tableModel.getRowCount() == 0 && btnRefresh != null) btnRefresh.setEnabled(false);
                     refreshStats();
@@ -4471,6 +4546,25 @@ public class MainFrame extends JFrame {
                     refreshStats();
                     completeScanEntry(scanRow, dirName, r[0], r[1], null);
                     if (Config.get().videoAutoRecover()) autoRecoverVideos(dir);
+                    // Filet : une lecture de tags en échec ne publie rien (voir tagConsumer) — sans
+                    // ça, ces fichiers resteraient « en attente de scan » et hors de tout lot.
+                    List<FileEntry> unsettled = new ArrayList<>();
+                    for (FileEntry fe : addedByThisScan) {
+                        if (!fe.awaitingScan) continue;
+                        fe.awaitingScan = false;
+                        if (fe.selected && fe.status == FileEntry.Status.PENDING) unsettled.add(fe);
+                    }
+                    feedLate(unsettled);
+                    if (lateFed > 0) {
+                        System.out.println("[OT] Taguage : " + lateFed + " fichier(s) de \"" + dir
+                                + "\" ajoutés au lot en cours au fil du scan (total).");
+                    }
+                    // Demande de ré-identification visant des fichiers de CE dossier : un lot déjà
+                    // lancé (instantané figé) ne les contient pas — servis en priorité par ce lot.
+                    if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+                        List<FileEntry> marked = takeReidentifyRequest();
+                        if (!marked.isEmpty()) TaggingWorker.enqueuePriority(marked);
+                    }
                     if (Config.get().autoTagOnScan()) scheduleAutoTaggingFollowUp();
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
@@ -4590,6 +4684,8 @@ public class MainFrame extends JFrame {
                     // remplace son contenu — le retenter en boucle ne ferait que regaspiller des
                     // requêtes MB pour rien à chaque campagne de taguage.
                     if (!e.selected) continue;
+                    if (e.awaitingScan) continue; // statut pas encore connu — servi plus tard, voir loadDirectory()
+                    if (e.emptyShell) continue;   // aucun son à identifier, voir ShellCleaner
                     if (e.status == FileEntry.Status.TAGGED) { skipped++; continue; }
                     if (e.status != FileEntry.Status.IDENTIFIED && e.file.length() > 0) result.add(e);
                 }
@@ -4611,7 +4707,9 @@ public class MainFrame extends JFrame {
 
     /** Suite de startTagging() une fois le lot filtré (toujours sur l'EDT) — voir son commentaire
      *  pour pourquoi ce filtrage est désormais fait en arrière-plan avant d'arriver ici. */
-    private void continueStartTagging(List<FileEntry> toTag, int alreadyTaggedSkipped, boolean selOnly) {
+    private void continueStartTagging(List<FileEntry> requested, int alreadyTaggedSkipped, boolean selOnly) {
+        final List<FileEntry> toTag = selOnly ? requested : applyReidentifyRequest(requested);
+        TaggingWorker.clearPriority();
         if (toTag.isEmpty()) {
             btnTagAll.setEnabled(true);
             if (Config.get().postTagCompletion() != Config.PostTagCompletion.NONE) {
@@ -4665,6 +4763,7 @@ public class MainFrame extends JFrame {
                 bar.setString(doneCount + " / " + total + etaText(doneCount, total));
             })
         );
+        if (!selOnly) w.acceptLateFiles(); // fichiers des dossiers encore en cours de scan, voir TaggingWorker.LATE_INBOX
         w.addPropertyChangeListener(evt -> {
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 onTaggingDone(toTag);
@@ -4691,6 +4790,102 @@ public class MainFrame extends JFrame {
         // n'empêchait déjà techniquement de sauvegarder pendant qu'un taguage tourne encore — seul le
         // point de déclenchement automatique manquait.
         if (!selOnly && !autoSaveWatchPending) scheduleAutoSaveFollowUp();
+    }
+
+    /**
+     * Demande de ré-identification ciblée, sans sélection manuelle : ~/.opentagger/
+     * reidentify_request.txt (un chemin absolu par ligne). Chaque fichier listé et chargé dans le
+     * tableau est remis en PENDING, en ré-identification forcée (audio d'abord : SongRec puis
+     * AcoustID, tags existants ignorés — voir FileEntry.forceReidentify). En cas d'échec il reste à
+     * sa place avec ses tags actuels (FileEntry.keepInPlaceIfSkipped). Contrairement à « Forcer le
+     * re-taguage », les MBID du fichier ne sont pas effacés d'avance : un échec ne retire rien.
+     *
+     * Lue au lancement d'un lot « Tout tagger » (fichiers placés en tête, voir
+     * applyReidentifyRequest) ET à la fin de chaque scan de dossier pendant qu'un lot tourne
+     * (fichiers servis en priorité par le lot en cours, voir TaggingWorker.enqueuePriority) — le lot
+     * automatique démarre dès le premier dossier scanné, bien avant la fin d'un dossier lent
+     * (MyBook : 30 min+). Les chemins pas encore chargés restent dans le fichier tant qu'un scan
+     * tourne ; une fois tous les scans finis, ils partent dans reidentify_request.introuvables-
+     * <horodatage>.txt et la demande est archivée (« .pris-<horodatage> »).
+     *
+     * Ajouté le 2026-09-25 pour re-vérifier les fichiers identifiés autrefois via les bases beets/
+     * Headphones (retirées de l'identification le même jour).
+     */
+    private long lastReidentifyCheckMs = 0;
+
+    private List<FileEntry> takeReidentifyRequest() {
+        java.nio.file.Path req = java.nio.file.Paths.get(Config.configDir(), "reidentify_request.txt");
+        if (!java.nio.file.Files.isRegularFile(req)) return List.of();
+        java.util.Set<String> wanted = new java.util.LinkedHashSet<>();
+        try {
+            for (String line : java.nio.file.Files.readAllLines(req)) {
+                if (!line.isBlank()) wanted.add(line.trim());
+            }
+        } catch (java.io.IOException ex) {
+            System.out.println("[OT] Ré-identification demandée : lecture impossible de " + req + " — " + ex.getMessage());
+            return List.of();
+        }
+        List<FileEntry> marked = new ArrayList<>();
+        java.util.Set<String> matched = new java.util.HashSet<>();
+        for (FileEntry e : tableModel.allEntries()) {
+            String orig = e.file.getAbsolutePath();
+            String cur  = e.currentPath != null ? e.currentPath.toString() : orig;
+            String hit  = wanted.contains(cur) ? cur : wanted.contains(orig) ? orig : null;
+            if (hit == null) continue;
+            // Tags pas encore lus : la phase 2 du scan écraserait le marquage (TAGGED) — repris à
+            // la fin du scan de ce dossier.
+            if (e.awaitingScan) continue;
+            matched.add(hit);
+            // IDENTIFIED : identifié dans CETTE session (donc déjà sans beets/Headphones), en attente
+            // d'enregistrement — rien à refaire.
+            if (e.status == FileEntry.Status.PROCESSING || e.status == FileEntry.Status.IDENTIFIED) continue;
+            e.status               = FileEntry.Status.PENDING;
+            e.message              = "";
+            e.result               = null;
+            e.candidates           = null;
+            e.skipReason           = null;
+            e.forceReidentify      = true;
+            e.keepInPlaceIfSkipped = true;
+            tableModel.update(e);
+            marked.add(e);
+        }
+        wanted.removeAll(matched);
+        boolean scansDone = activeScanWorkers.isEmpty();
+        String ts = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+        try {
+            if (wanted.isEmpty() || scansDone) {
+                java.nio.file.Files.move(req, req.resolveSibling("reidentify_request.txt.pris-" + ts));
+                if (!wanted.isEmpty()) {
+                    java.nio.file.Files.write(req.resolveSibling("reidentify_request.introuvables-" + ts + ".txt"),
+                            new ArrayList<>(wanted));
+                }
+            } else if (!matched.isEmpty()) {
+                java.nio.file.Path tmp = req.resolveSibling("reidentify_request.txt.tmp");
+                java.nio.file.Files.write(tmp, new ArrayList<>(wanted));
+                java.nio.file.Files.move(tmp, req, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            }
+        } catch (java.io.IOException ex) {
+            System.out.println("[OT] Ré-identification demandée : " + req + " non mis à jour — " + ex.getMessage());
+        }
+        if (!matched.isEmpty() || scansDone) {
+            System.out.println("[OT] Ré-identification demandée : " + marked.size()
+                    + " fichier(s) pris en priorité (audio d'abord, laissés en place en cas d'échec), "
+                    + Math.max(0, matched.size() - marked.size()) + " déjà en cours/identifié(s), " + wanted.size()
+                    + (scansDone ? " chemin(s) introuvable(s) (scans terminés)." : " chemin(s) pas encore chargé(s) (scan en cours)."));
+        }
+        return marked;
+    }
+
+    /** Début de lot : fichiers demandés placés en tête (voir takeReidentifyRequest). */
+    private List<FileEntry> applyReidentifyRequest(List<FileEntry> toTag) {
+        List<FileEntry> marked = takeReidentifyRequest();
+        if (marked.isEmpty()) return toTag;
+        java.util.Set<FileEntry> markedSet = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        markedSet.addAll(marked);
+        List<FileEntry> out = new ArrayList<>(marked);
+        for (FileEntry e : toTag) if (!markedSet.contains(e)) out.add(e);
+        return out;
     }
 
     /**
@@ -4744,8 +4939,9 @@ public class MainFrame extends JFrame {
             if (!btnTagAll.isEnabled()) return; // même garde que startTagging() — évite un lancement concurrent
             List<FileEntry> pending = new ArrayList<>();
             for (FileEntry fe : tableModel.allEntries())
-                if (fe.selected && fe.status == FileEntry.Status.PENDING) pending.add(fe);
-            if (!pending.isEmpty()) { continueStartTagging(pending, 0, false); return; }
+                if (fe.selected && fe.status == FileEntry.Status.PENDING && !fe.awaitingScan) pending.add(fe);
+            boolean request = java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(Config.configDir(), "reidentify_request.txt"));
+            if (!pending.isEmpty() || request) { continueStartTagging(pending, 0, false); return; }
             if (!activeScanWorkers.isEmpty()) scheduleAutoTaggingFollowUp(); // rien de neuf pour l'instant — on réessaiera
         });
         t.setRepeats(false);
@@ -4876,6 +5072,10 @@ public class MainFrame extends JFrame {
                 followProcessing(entry);
                 appendLog(entry);
                 refreshStats();
+                // Vrais doublons écartés sans outil manuel (voir AutoDedup, 2026-09-26).
+                AutoDedup.onSaved(entry, tableModel.allEntries(),
+                        loser -> { tableModel.removeEntries(java.util.Set.of(loser)); refreshStats(); },
+                        msg -> appendLogLine(msg, FileEntry.Status.SKIPPED, null));
             }),
             (doneCount, total) -> SwingUtilities.invokeLater(() -> {
                 JProgressBar bar = progressBars.get(ProgressSlot.SAVE);
@@ -4939,6 +5139,8 @@ public class MainFrame extends JFrame {
      * runPostTagCommand() une seule fois, à la toute fin réelle de la chaîne (plus ni scan ni
      * taguage actif), pas à chaque relance intermédiaire.
      */
+    private long autoSaveDeferredSinceMs = 0;
+
     private void scheduleAutoSaveFollowUp() {
         // Interrupteur utilisateur (chkAutoSaveEnabled, Config.autoSaveEnabled()) : un seul point de
         // garde ici plutôt que devant chacun des appelants (onTaggingDone, SaveWorker.done,
@@ -4965,6 +5167,21 @@ public class MainFrame extends JFrame {
                 scheduleAutoSaveFollowUp(); // déjà en cours (ailleurs) — revérifier plus tard
                 return;
             }
+            // Pas d'enregistrement automatique pendant les scans (2026-09-27, demande utilisateur :
+            // « la sauvegarde auto se fait que si le scan est fini ») : chaque enregistrement recopie le
+            // fichier vers la bibliothèque sur MyBook, le même disque lent que le scan parcourt — les
+            // deux ensemble ont fait durer le scan MyBook 16 h 30 (contre 7 h seul). Sans plafond, choix
+            // explicite de l'utilisateur : pendant un long scan, les identifications restent en mémoire
+            // (perdues si l'appli redémarre avant la fin du scan). « Enregistrer tout » reste manuel.
+            if (hasWork && !activeScanWorkers.isEmpty()) {
+                if (autoSaveDeferredSinceMs == 0) {
+                    autoSaveDeferredSinceMs = System.currentTimeMillis();
+                    System.out.println("[OT] Enregistrer : différé jusqu'à la fin des scans.");
+                }
+                scheduleAutoSaveFollowUp();
+                return;
+            }
+            autoSaveDeferredSinceMs = 0;
             if (hasWork) {
                 saveAll();
                 // saveAll() peut refuser en silence (juste un setStatus("Encore en cours…")) si

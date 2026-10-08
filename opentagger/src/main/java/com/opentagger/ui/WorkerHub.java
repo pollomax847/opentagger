@@ -227,6 +227,15 @@ public final class WorkerHub {
         // déplacement effectif en corbeille (voir cleanOrphanFolders(), pas ici).
         if ((a == TaskKind.TAGGING && b == TaskKind.ORPHAN_CLEANUP)
                 || (a == TaskKind.ORPHAN_CLEANUP && b == TaskKind.TAGGING)) return false;
+        // SAVE ∥ INFO_COMPLETER (2026-09-25) : la passe complète n'écrit plus rien sur le disque
+        // (voir InfoCompleterWorker, étape 8) et travaille sur une COPIE du TagInfo, publiée en fin
+        // de traitement — elle ne fait que remettre des fichiers en IDENTIFIED pour l'Enregistrement.
+        // Les bloquer mutuellement empêchait tout Enregistrement pendant toute la passe : vu en
+        // direct, 9 h 30 sans une seule écriture sur disque (21:54→07:26), ~17 000 complétions et
+        // ~1 000 identifications accumulées en mémoire, perdues au moindre redémarrage. Au pire, un
+        // fichier enregistré pendant qu'il est complété repasse en IDENTIFIED et est réenregistré.
+        if ((a == TaskKind.SAVE && b == TaskKind.INFO_COMPLETER)
+                || (a == TaskKind.INFO_COMPLETER && b == TaskKind.SAVE)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction

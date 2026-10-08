@@ -53,7 +53,15 @@ public final class DiskIoThrottle {
             String device = rotationalDeviceOf(fichier);
             if (device == null) return null;
             Semaphore gate = GATES.computeIfAbsent(device, d -> new Semaphore(ROTATIONAL_PERMITS));
-            gate.acquire();
+            // Attente bornée (2026-09-26) : un permis perdu (appelant interrompu entre acquire et
+            // son finally) bloquait jusqu'ici TOUT accès à ce disque pour le reste de la session —
+            // taguage figé 2 h 30 en direct. Au-delà de 10 min, on continue sans permis (au pire un
+            // accès disque concurrent de plus) et on le signale.
+            if (!gate.tryAcquire(10, java.util.concurrent.TimeUnit.MINUTES)) {
+                System.out.println("[OT] ⚠ Permis disque « " + device + " » non rendu depuis 10 min — accès sans "
+                        + "permis pour " + fichier.getName() + " (évite un blocage complet du taguage).");
+                return null;
+            }
             return gate;
         } catch (Exception e) {
             return null; // jamais bloquant : pas de permis à libérer, l'appelant continue tel quel

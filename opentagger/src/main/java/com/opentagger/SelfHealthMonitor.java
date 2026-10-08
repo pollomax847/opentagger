@@ -175,6 +175,11 @@ public final class SelfHealthMonitor {
     private static File nextLogFile() {
         // Nom distinct (horodatage) — ne doit jamais écraser le journal du process qui vient de
         // se terminer, utile pour repérer après coup qu'un redémarrage automatique a eu lieu.
-        return new File("restart-auto-" + System.currentTimeMillis() + ".log");
+        // Dans ~/.opentagger/logs (comme la sortie console du lanceur ~/.local/bin/opentagger), pas
+        // dans le dossier courant : depuis que l'appli est lancée comme une appli normale (plus par
+        // systemd, 2026-09-28), le dossier courant est celui du bureau/menu, souvent $HOME.
+        File dir = new File(Config.configDir(), "logs");
+        dir.mkdirs();
+        return new File(dir, "restart-auto-" + System.currentTimeMillis() + ".log");
     }
 }

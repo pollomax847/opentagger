@@ -227,7 +227,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         List<FileEntry> queue;
         if (Config.get().prioritizeIncomplete()) {
             queue = new java.util.ArrayList<>(entries);
-            queue.sort((a, b) -> incompletenessScore(b.current) - incompletenessScore(a.current));
+            // Ré-identification demandée explicitement (MainFrame.applyReidentifyRequest) : reste en
+            // tête du lot, sinon ces fichiers déjà complets passeraient après tous les incomplets.
+            queue.sort((a, b) -> a.keepInPlaceIfSkipped != b.keepInPlaceIfSkipped
+                    ? (a.keepInPlaceIfSkipped ? -1 : 1)
+                    : incompletenessScore(b.current) - incompletenessScore(a.current));
             long incomplete = queue.stream().filter(e -> incompletenessScore(e.current) >= 4).count();
             if (incomplete > 0)
                 onProgress.accept(I18n.t("Priorité : %s fichier(s) très incomplet(s) traité(s) en premier", incomplete));
@@ -235,8 +239,11 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             queue = entries;
         }
 
-        int total = queue.size();
+        final int total = queue.size();
+        batchTotal = total;
         AtomicInteger done = new AtomicInteger(0);
+        if (acceptLateFiles) lateAccepted = true;
+        try {
         // Chaque fichier part en parallèle (batch.threads, même réglage que BatchProcessor/CLI) —
         // le rate-limit MB reste correct quel que soit le nombre de threads puisqu'il est
         // centralisé dans MusicBrainzClient.getWithRetry(), pas ici.
@@ -268,82 +275,32 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             final FileEntry entry  = toProcess.get(i);
             final int       fileIdx = startIdx + i + 1;
             futures.add(pool.submit(() -> {
-                if (isCancelled()) return;
-
-                entry.status = FileEntry.Status.PROCESSING;
-                publish(entry);
-                final String fname = entry.filename();
-                Consumer<String> step = s -> onProgress.accept(
-                    String.format("[%d/%d] %s — %s", fileIdx, total, fname, s));
-                step.accept(I18n.t("identification…"));
-
-                // Instances fraîches par tâche (voir le commentaire sur processEntry()) : jamais
-                // les champs partagés mb/acoustId/lastFm/cache quand plusieurs fichiers tournent en
-                // même temps. cache ajoutée à cette règle le 2026-07-29 : ses méthodes sont toutes
-                // synchronized sur l'instance (nécessaire pour sa Connection JDBC unique) — la
-                // partager entre threads (comme avant ce correctif, avec le champ `cache` de la
-                // classe) sérialisait tout le monde au moindre accès au cache, réduisant le
-                // parallélisme réel à peu de chose près à du séquentiel sur une grosse bibliothèque
-                // (trouvé en direct via jstack, plusieurs threads BLOCKED sur le même moniteur).
-                try (MetadataCache taskCache = new MetadataCache()) {
-                    processEntry(entry, step, new MusicBrainzClient(), new AcoustIdClient(), new LastFmClient(), taskCache);
-                }
-
-                // Si annulé pendant processEntry, remettre l'entrée en attente
-                if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
-                    entry.status  = FileEntry.Status.PENDING;
-                    entry.message = "";
-                }
-
-                correctionLog.addEntry(entry);
-
-                // Déplacement dédié durée incohérente (voir Config.durationMismatchMoveEnabled(),
-                // désactivé par défaut) — indépendant du déplacement générique SKIPPED/ERROR juste
-                // en dessous, dossier et bascule séparés. Exclu du bloc générique ci-dessous (voir
-                // sa condition "!entry.durationMismatch") pour ne pas tenter un second déplacement
-                // du même fichier vers un autre dossier.
-                if (entry.durationMismatch && Config.get().durationMismatchMoveEnabled()) {
-                    try {
-                        String folder = Config.get().durationMismatchMoveFolder();
-                        java.nio.file.Path curPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
-                        // Fichier déjà signalé "introuvable" juste au-dessus (déjà relocalisé par un
-                        // passage précédent, ou disparu entre le scan et ce traitement) : ne pas
-                        // retenter un déplacement voué à échouer avec NoSuchFileException sur ce
-                        // même chemin déjà connu absent.
-                        if (!folder.isBlank() && java.nio.file.Files.exists(curPath)) {
-                            java.nio.file.Path moved = FileRenamer.moveToFolder(curPath, java.nio.file.Paths.get(folder));
-                            if (moved != null) entry.currentPath = moved;
-                        }
-                    } catch (Exception ex) {
-                        log(I18n.t("  déplacement (durée incohérente) échoué: %s", ex.getMessage()));
+                // Ré-identifications demandées pendant ce lot (voir enqueuePriority) : servies avant
+                // la tâche suivante du lot, sans attendre sa fin.
+                FileEntry prio;
+                while (!isCancelled() && (prio = PRIORITY_INBOX.poll()) != null) {
+                    if (prio.status == FileEntry.Status.PENDING) {
+                        extraTotal.incrementAndGet();
+                        runOne(prio, done.get() + 1, done);
                     }
                 }
-
-                // Déplacer les fichiers non tagués (SKIPPED/ERROR) vers un dossier dédié si
-                // configuré — évite qu'ils restent mélangés dans la bibliothèque organisée par
-                // le renommage auto.
-                if (Config.get().skippedMoveEnabled() && !entry.durationMismatch
-                        && (entry.status == FileEntry.Status.SKIPPED || entry.status == FileEntry.Status.ERROR)) {
-                    try {
-                        String folder = Config.get().skippedMoveFolder();
-                        java.nio.file.Path curPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
-                        if (!folder.isBlank() && java.nio.file.Files.exists(curPath)) {
-                            java.nio.file.Path moved = FileRenamer.moveToFolder(curPath, java.nio.file.Paths.get(folder));
-                            if (moved != null) entry.currentPath = moved;
-                        }
-                    } catch (Exception ex) {
-                        log(I18n.t("  déplacement (non tagué) échoué: %s", ex.getMessage()));
-                    }
+                // Fichiers chargés après le début du lot (voir enqueueLate) : UN par tâche du lot,
+                // entrelacés 1:1 avec lui plutôt que tous devant ou tous après.
+                FileEntry late = LATE_INBOX.poll();
+                if (late != null && !isCancelled() && late.status == FileEntry.Status.PENDING) {
+                    extraTotal.incrementAndGet();
+                    runOne(late, done.get() + 1, done);
                 }
-
-                int doneCount = done.incrementAndGet();
-                setProgress((doneCount * 100) / total);
-                onFileProgress.accept(doneCount, total);
-                publish(entry);
+                runOne(entry, fileIdx, done);
             }));
         }
 
         WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
+        } finally {
+            // Ce qui reste dans LATE_INBOX est encore PENDING : repris par le lot suivant
+            // (MainFrame.scheduleAutoTaggingFollowUp), qui vide la file à son lancement.
+            if (acceptLateFiles) lateAccepted = false;
+        }
 
         // Remettre en attente toute entrée restée bloquée en PROCESSING
         for (FileEntry entry : queue) {
@@ -363,6 +320,167 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         cache.purgeExpired();
         cache.close();
         return null;
+    }
+
+    /** File d'attente prioritaire partagée : fichiers à ré-identifier ajoutés PENDANT un lot déjà
+     *  lancé (ex. demande reidentify_request.txt dont les fichiers n'étaient pas encore chargés au
+     *  démarrage du lot — voir MainFrame.takeReidentifyRequest). Chaque tâche du lot en cours la vide
+     *  avant de traiter son propre fichier. Un lot étant un instantané figé, c'est le seul moyen de
+     *  les traiter sans attendre sa fin (des heures/jours sur une grosse bibliothèque). */
+    private static final java.util.concurrent.ConcurrentLinkedQueue<FileEntry> PRIORITY_INBOX =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    /** Fichiers « Shazam limité » : remis en PENDING à la fin de la pause SongRec et servis au lot
+     *  en cours (LATE_INBOX) s'il y en a un, sinon repris par le prochain lot. 2 essais max. */
+    private static final java.util.Map<FileEntry, Integer> SHAZAM_RETRIES =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    private static final java.util.concurrent.ScheduledExecutorService RETRY_TIMER =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "shazam-retry"); t.setDaemon(true); return t; });
+
+    private static void scheduleShazamRetry(FileEntry entry) {
+        int n = SHAZAM_RETRIES.merge(entry, 1, Integer::sum);
+        if (n > 2) return;
+        long delay = Math.max(60_000L, com.opentagger.SongRecClient.pausedUntil() - System.currentTimeMillis() + 30_000L);
+        RETRY_TIMER.schedule(() -> SwingUtilities.invokeLater(() -> {
+            if (entry.status != FileEntry.Status.SKIPPED
+                    || entry.skipReason != com.opentagger.model.SkipReason.NETWORK_ERROR) return;
+            entry.status = FileEntry.Status.PENDING;
+            entry.message = "";
+            entry.skipReason = null;
+            enqueueLate(java.util.List.of(entry));
+        }), delay, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    public static void enqueuePriority(java.util.Collection<FileEntry> entries) {
+        PRIORITY_INBOX.addAll(entries);
+    }
+
+    /** Fichiers dont le scan (lecture des tags) s'est terminé APRÈS le lancement du lot « Tout
+     *  tagger » en cours (2026-09-25, demande utilisateur). Le lot automatique démarre dès la fin
+     *  du PREMIER dossier scanné ; un lot étant un instantané figé, les fichiers des dossiers plus
+     *  lents (MyBook : 45 min+ de scan) attendaient jusqu'ici la fin de TOUT ce lot — des heures ou
+     *  des jours — d'où des fichiers « jamais traités ». Servis au fil de l'eau, un par tâche du
+     *  lot. Seul un lot « Tout tagger » les accepte (voir acceptLateFiles), pas une sélection ni un
+     *  re-taguage forcé. */
+    private static final java.util.concurrent.ConcurrentLinkedQueue<FileEntry> LATE_INBOX =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static volatile boolean lateAccepted = false;
+
+    /** @return false si aucun lot « Tout tagger » ne tourne (les fichiers restent PENDING et seront
+     *  pris par le prochain lot). */
+    public static boolean enqueueLate(java.util.Collection<FileEntry> entries) {
+        if (!lateAccepted) return false;
+        LATE_INBOX.addAll(entries);
+        return true;
+    }
+
+    /** Scan annulé : ses fichiers sont retirés du tableau, ils ne doivent pas être tagués. */
+    public static void dropLate(java.util.Collection<FileEntry> entries) {
+        LATE_INBOX.removeAll(entries);
+    }
+
+    /** Au lancement d'un nouveau lot : ce qui restait dans les files (lot précédent fini avant de
+     *  les vider) est encore PENDING, donc déjà repris dans le nouveau lot — les vider évite de
+     *  traiter deux fois le même fichier. */
+    public static void clearPriority() {
+        PRIORITY_INBOX.clear();
+        LATE_INBOX.clear();
+    }
+
+    private boolean acceptLateFiles = false;
+    private volatile int batchTotal = 0;
+    private final AtomicInteger extraTotal = new AtomicInteger();
+
+    /** Lot « Tout tagger » : accepte les fichiers chargés après son lancement (voir LATE_INBOX). À
+     *  appeler avant execute(). */
+    public void acceptLateFiles() { this.acceptLateFiles = true; }
+
+    /** Traitement complet d'UN fichier (identification + déplacements éventuels + progression).
+     *  Le total affiché inclut les fichiers ajoutés en cours de lot (PRIORITY_INBOX/LATE_INBOX). */
+    private void runOne(FileEntry entry, int fileIdx, AtomicInteger done) {
+        final int total = batchTotal + extraTotal.get();
+        if (isCancelled()) return;
+
+        entry.status = FileEntry.Status.PROCESSING;
+        publish(entry);
+        final String fname = entry.filename();
+        Consumer<String> step = s -> onProgress.accept(
+            String.format("[%d/%d] %s — %s", fileIdx, total, fname, s));
+        step.accept(I18n.t("identification…"));
+
+        // Instances fraîches par tâche (voir le commentaire sur processEntry()) : jamais
+        // les champs partagés mb/acoustId/lastFm/cache quand plusieurs fichiers tournent en
+        // même temps. cache ajoutée à cette règle le 2026-07-29 : ses méthodes sont toutes
+        // synchronized sur l'instance (nécessaire pour sa Connection JDBC unique) — la
+        // partager entre threads (comme avant ce correctif, avec le champ `cache` de la
+        // classe) sérialisait tout le monde au moindre accès au cache, réduisant le
+        // parallélisme réel à peu de chose près à du séquentiel sur une grosse bibliothèque
+        // (trouvé en direct via jstack, plusieurs threads BLOCKED sur le même moniteur).
+        try (MetadataCache taskCache = new MetadataCache()) {
+            processEntry(entry, step, new MusicBrainzClient(), new AcoustIdClient(), new LastFmClient(), taskCache);
+        }
+
+        // Si annulé pendant processEntry, remettre l'entrée en attente
+        if (isCancelled() && entry.status == FileEntry.Status.PROCESSING) {
+            entry.status  = FileEntry.Status.PENDING;
+            entry.message = "";
+        }
+
+        correctionLog.addEntry(entry);
+
+        // Déplacement dédié durée incohérente (voir Config.durationMismatchMoveEnabled(),
+        // désactivé par défaut) — indépendant du déplacement générique SKIPPED/ERROR juste
+        // en dessous, dossier et bascule séparés. Exclu du bloc générique ci-dessous (voir
+        // sa condition "!entry.durationMismatch") pour ne pas tenter un second déplacement
+        // du même fichier vers un autre dossier.
+        if (entry.durationMismatch && Config.get().durationMismatchMoveEnabled() && !entry.keepInPlaceIfSkipped) {
+            try {
+                String folder = Config.get().durationMismatchMoveFolder();
+                java.nio.file.Path curPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
+                // Fichier déjà signalé "introuvable" juste au-dessus (déjà relocalisé par un
+                // passage précédent, ou disparu entre le scan et ce traitement) : ne pas
+                // retenter un déplacement voué à échouer avec NoSuchFileException sur ce
+                // même chemin déjà connu absent.
+                if (!folder.isBlank() && java.nio.file.Files.exists(curPath)) {
+                    java.nio.file.Path moved = FileRenamer.moveToFolder(curPath, java.nio.file.Paths.get(folder));
+                    if (moved != null) entry.currentPath = moved;
+                }
+            } catch (Exception ex) {
+                log(I18n.t("  déplacement (durée incohérente) échoué: %s", ex.getMessage()));
+            }
+        }
+
+        // Déplacer les fichiers non tagués (SKIPPED/ERROR) vers un dossier dédié si
+        // configuré — évite qu'ils restent mélangés dans la bibliothèque organisée par
+        // le renommage auto.
+        // GROUP_MISMATCH exclu (2026-09-25, demande utilisateur) : ce motif ne dit RIEN sur le fichier, seulement
+        // qu'une AUTRE édition de l'album a été choisie par les pistes voisines (ex. « That's the Way It Is » :
+        // 8 éditions MusicBrainz). Déplacer ces fichiers vers Sans_correspondance arrachait les pistes à leur
+        // dossier d'album — l'inverse exact du but du garde-fou (ne pas éclater un album) : 752 fichiers en une
+        // journée, dossier passé de 718 à 2 003 fichiers, retraités à chaque démarrage. Ils restent en place,
+        // visibles dans le rapport « Non identifiés » (revue manuelle).
+        if (Config.get().skippedMoveEnabled() && !entry.durationMismatch
+                && entry.skipReason != com.opentagger.model.SkipReason.GROUP_MISMATCH
+                && !entry.keepInPlaceIfSkipped
+                && (entry.status == FileEntry.Status.SKIPPED || entry.status == FileEntry.Status.ERROR)) {
+            try {
+                String folder = Config.get().skippedMoveFolder();
+                java.nio.file.Path curPath = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
+                if (!folder.isBlank() && java.nio.file.Files.exists(curPath)) {
+                    java.nio.file.Path moved = FileRenamer.moveToFolder(curPath, java.nio.file.Paths.get(folder));
+                    if (moved != null) entry.currentPath = moved;
+                }
+            } catch (Exception ex) {
+                log(I18n.t("  déplacement (non tagué) échoué: %s", ex.getMessage()));
+            }
+        }
+
+        int doneCount = done.incrementAndGet();
+        int shownTotal = Math.max(doneCount, batchTotal + extraTotal.get());
+        setProgress((int) ((doneCount * 100L) / shownTotal));
+        onFileProgress.accept(doneCount, shownTotal);
+        publish(entry);
     }
 
     @Override
@@ -433,6 +551,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private void processEntry(FileEntry entry, Consumer<String> step,
                                MusicBrainzClient mb, AcoustIdClient acoustId, LastFmClient lastFm,
                                MetadataCache cache) {
+        com.opentagger.SongRecClient.resetThrottled(); // drapeau par thread : jamais hérité du fichier précédent
         try {
             File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
             // Positionné ICI (avant tout log() de ce fichier, y compris le bloc transcodage
@@ -511,6 +630,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             int seuil = Config.get().minScoreAuto();
 
             if (results.isEmpty()) {
+                if (com.opentagger.SongRecClient.wasThrottled()) {
+                    // Shazam n'a pas pu être interrogé (limite 429 / pause) : rien ne dit que le
+                    // fichier est inconnu — laissé en place, retenté après la pause.
+                    entry.status     = FileEntry.Status.SKIPPED;
+                    entry.skipReason = com.opentagger.model.SkipReason.NETWORK_ERROR;
+                    entry.keepInPlaceIfSkipped = true;
+                    entry.message = I18n.t("Pas encore vérifié par Shazam (limite de requêtes) — retenté plus tard");
+                    log(I18n.t("  SKIPPED (Shazam limité, à retenter)"));
+                    scheduleShazamRetry(entry);
+                    return;
+                }
                 entry.status     = FileEntry.Status.SKIPPED;
                 entry.skipReason = com.opentagger.model.SkipReason.NOT_IDENTIFIED;
                 entry.message = I18n.t("Non identifié") + videoHintIfAny(fichier);
@@ -611,6 +741,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
             if (durationOk == null) {
                 TagInfo shown = closestMiss != null ? closestMiss : best;
+                if (closestMiss != null && tryTrashTruncated(entry, fichier, closestMiss)) return;   // essai, voir la méthode
                 entry.candidates = results;
                 entry.status = FileEntry.Status.SKIPPED;
                 entry.durationMismatch = true;
@@ -688,7 +819,25 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 } else if (pinned != null) {
                     int agreement = groupPinAgreement.getOrDefault(groupKey,
                             new java.util.concurrent.atomic.AtomicInteger()).get();
+                    // Résolution automatique (2026-09-26, demande utilisateur : « trouver une
+                    // alternative pour qu'il ne s'affiche plus, détection auto du bon release »).
+                    // L'étape 0.65 a déjà cherché CETTE piste dans la release épinglée (numéro puis
+                    // titre) sans la trouver : on arrive ici seulement si elle n'y est pas.
+                    String pinnedGroup = "";
                     if (shouldSkipForGroupMismatch(agreement, lastFindTagsSource.get(), best.score)) {
+                        MusicBrainzClient.ReleaseTracklist ptl = pinnedTracklistCache.computeIfAbsent(pinned, mbid -> {
+                            try { return mb.lookupRelease(mbid); } catch (Exception e) { return null; }
+                        });
+                        if (ptl != null) pinnedGroup = ptl.releaseGroupMbid();
+                    }
+                    GroupMismatch verdict = resolveGroupMismatch(agreement, lastFindTagsSource.get(), best.score,
+                            pinnedGroup, best.releaseGroupMbid);
+                    if (verdict == GroupMismatch.SIBLING_EDITION) {
+                        log(I18n.t("  ↪ autre édition du même album que le reste du groupe (même groupe de parutions MusicBrainz) → acceptée"));
+                    } else if (verdict == GroupMismatch.CONFIRMED_OTHER_RELEASE) {
+                        log(I18n.t("  ↪ piste d'une autre parution que le reste du groupe (bonus, single…), identification sûre (%s, score=%s) → acceptée",
+                                lastFindTagsSource.get(), best.score));
+                    } else if (verdict == GroupMismatch.SKIP) {
                         String pinnedShort = pinned.substring(0, Math.min(8, pinned.length()));
                         skipForManualReview(entry, results, com.opentagger.model.SkipReason.GROUP_MISMATCH,
                                 I18n.t("Contredit la release du groupe [%s] (%d piste(s) concordantes) — score=%s%%",
@@ -1448,48 +1597,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
-        // 0.61. Base locale beets par CHEMIN EXACT (lecture seule, aucun réseau) — voir BeetsClient.
-        // Placée juste après le TOC : quasi certaine quand elle matche (beets.music_dir + chemin
-        // relatif stocké = chemin absolu réel du fichier), donc un cran de confiance au-dessus même
-        // du repli texte Headphones/beets juste en dessous. Désactivée par défaut (beets.db_enabled).
-        if (Config.get().beetsDbEnabled()) {
-            TagInfo bx = new BeetsClient().lookupByPath(fichier.getAbsolutePath());
-            if (bx != null) {
-                log(I18n.t("  beets (chemin exact) → %s – %s [%s]", bx.artist, bx.title, bx.album));
-                lastFindTagsSource.set(MetadataCache.SOURCE_BEETS);
-                return List.of(bx);
-            }
-        }
-
-        // 0.62. Bases locales Headphones/beets par similarité artiste+titre (lecture seule, aucun
-        // réseau) — voir HeadphonesClient/BeetsClient pour le détail. Placée avant tout ce qui coûte
-        // un appel réseau (AcoustID/SongRec/MB texte) : gratuite et quasi instantanée, donc aussi
-        // bien tentée tôt. Désactivées par défaut (headphones.db_enabled/beets.db_enabled) — ciblent
-        // un usage spécifique (une instance tierce déjà utilisée pour télécharger/organiser une
-        // partie de la bibliothèque), pas pertinentes sans elles. beets d'abord (schéma plus riche,
-        // voir BeetsClient) puis Headphones si beets ne trouve rien.
-        {
-            String hpArtist = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.ARTIST));
-            String hpTitle  = forceReidentify ? "" : cleanSearchTerm(readTag(fichier, FieldKey.TITLE));
-            if (!hpArtist.isBlank() && !hpTitle.isBlank() && !isGenericTag(hpArtist) && !isGenericTag(hpTitle)) {
-                if (Config.get().beetsDbEnabled()) {
-                    TagInfo bx = new BeetsClient().lookupTrack(hpArtist, hpTitle);
-                    if (bx != null) {
-                        log(I18n.t("  beets (similarité locale) → %s – %s [%s]", bx.artist, bx.title, bx.album));
-                        lastFindTagsSource.set(MetadataCache.SOURCE_BEETS);
-                        return List.of(bx);
-                    }
-                }
-                if (Config.get().headphonesDbEnabled()) {
-                    TagInfo hp = new HeadphonesClient().lookupTrack(hpArtist, hpTitle);
-                    if (hp != null) {
-                        log(I18n.t("  Headphones (local) → %s – %s [%s]", hp.artist, hp.title, hp.album));
-                        lastFindTagsSource.set(MetadataCache.SOURCE_HEADPHONES);
-                        return List.of(hp);
-                    }
-                }
-            }
-        }
+        // (Ex-étapes 0.61/0.62 SUPPRIMÉES le 2026-09-25, demande utilisateur : « beets n'a rien à
+        // écrire avec OpenTagger », MusicBrainz/AcoustID doivent passer en premier.) Elles
+        // consultaient les bases locales de beets puis de Headphones par similarité artiste+titre,
+        // AVANT tout appel AcoustID/MusicBrainz, et renvoyaient directement leur ligne (score 88-90)
+        // — une ligne beets importée « as-is » n'étant qu'une copie des tags du fichier, vu en
+        // direct : artiste et titre inversés de « Jean Schultheis – Confidence pour confidence »
+        // ré-écrits tels quels. Ne pas réintroduire de base tierce devant AcoustID/MusicBrainz.
 
         // 0.65. Cohérence de groupe — voir groupPinnedRelease : une AUTRE piste du même groupe (même
         // clé que la vue arborescence — voir AlbumGrouping.key()) a déjà trouvé une release à haute
@@ -2457,6 +2571,69 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         return true;
     }
 
+    /**
+     * ESSAI (2026-09-25, demande utilisateur) — un fichier de moins d'une minute dont MusicBrainz annonce une durée bien
+     * supérieure (ex. 0:40 vs 3:34) est presque toujours un téléchargement/rip tronqué : au lieu de l'isoler pour revue,
+     * on l'envoie à la CORBEILLE (récupérable, jamais de suppression définitive). Désactivé par défaut
+     * ({@code duration_mismatch.trash_short_enabled}).
+     *
+     * <p>Garde-fou contre le vrai risque — un interlude/skit/intro réel de 0:40 apparié à tort à un homonyme de 3:34 :
+     * l'identification doit être CONFIRMÉE, soit par l'AUDIO (empreinte AcoustID ou SongRec : le début d'un fichier tronqué
+     * reste reconnu), soit par le TEXTE de façon très nette (score ≥ 95 ET le titre écrit dans le fichier ressemble à ≥ 85 %
+     * au titre MusicBrainz — le fichier se dit lui-même être ce morceau). Sinon : comportement habituel (isolé pour revue).
+     * Chaque envoi est journalisé dans la console ET dans ~/.opentagger/duration_trial.log (pour revue/restauration).
+     *
+     * @return true si le fichier a été envoyé à la corbeille (l'appelant s'arrête là)
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger TRIAL_TRASHED = new java.util.concurrent.atomic.AtomicInteger();
+
+    private boolean tryTrashTruncated(FileEntry entry, File fichier, TagInfo shown) {
+        Config cfg = Config.get();
+        if (!cfg.durationMismatchTrashShortEnabled()) return false;
+        int fileSec = entry.current.durationSec;
+        if (!FileEntry.isShortTruncated(fileSec, shown.mbDurationSec,
+                cfg.durationMismatchTrashShortMaxSec(), cfg.durationMismatchTrashShortMinGapSec())) return false;
+
+        String src = lastFindTagsSource.get();
+        boolean audioConfirmed = MetadataCache.SOURCE_ACOUSTID.equals(src) || MetadataCache.SOURCE_SONGREC.equals(src);
+        String claimed = entry.current.title == null || entry.current.title.isBlank()
+                ? parseFilename(fichier)[1] : entry.current.title;
+        boolean textConfirmed = shown.score >= 95 && !claimed.isBlank() && !isGenericTag(claimed)
+                && TrackMatcher.titleSimilarity(claimed.toLowerCase(), shown.title.toLowerCase()) >= 0.85;
+        if (!audioConfirmed && !textConfirmed) {
+            log(I18n.t("  essai durée : fichier court (%ds vs %ds) mais identification non confirmée (source=%s, score=%s) → "
+                    + "conservé pour revue", fileSec, shown.mbDurationSec, src, shown.score));
+            return false;
+        }
+        File f = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+        int cap = cfg.durationMismatchTrashShortMaxPerRun();
+        if (TRIAL_TRASHED.get() >= cap) {
+            if (TRIAL_TRASHED.get() == cap) {                       // un seul message par session
+                TRIAL_TRASHED.incrementAndGet();
+                log(I18n.t("  essai durée : plafond de %d fichier(s) à la corbeille atteint pour cette session — les suivants "
+                        + "sont isolés pour revue comme avant (duration_mismatch.trash_short_max_per_run)", cap));
+            }
+            return false;
+        }
+        if (!f.exists() || !com.opentagger.TrashHelper.moveToTrash(f)) return false;
+        TRIAL_TRASHED.incrementAndGet();
+
+        String userMsg = I18n.t("Fichier tronqué (%s vs MusicBrainz %s, « %s ») → corbeille (essai)",
+                FileTableModel.formatDuration(fileSec), FileTableModel.formatDuration(shown.mbDurationSec), shown.title);
+        log(I18n.t("  🗑 essai durée : %s (%ds vs %ds, %s – %s, source=%s, score=%s) → corbeille",
+                f.getName(), fileSec, shown.mbDurationSec, shown.artist, shown.title, src, shown.score));
+        try {
+            java.nio.file.Files.writeString(java.nio.file.Paths.get(Config.configDir(), "duration_trial.log"),
+                    java.time.LocalDateTime.now() + "\t" + f.getAbsolutePath() + "\t" + fileSec + "\t" + shown.mbDurationSec
+                            + "\t" + shown.artist + " – " + shown.title + "\t" + src + "\t" + shown.score + "\n",
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception ignored) { /* journal d'essai best-effort */ }
+        entry.status     = FileEntry.Status.SKIPPED;
+        entry.skipReason = com.opentagger.model.SkipReason.DURATION_MISMATCH;
+        entry.message    = userMsg;
+        return true;
+    }
+
     /** Retourne true si le tag est générique/inutile pour une recherche. */
     private static final java.util.Set<String> GENERIC_TITLES_WITHOUT_ARTIST = java.util.Set.of(
         "intro", "outro", "skit", "interlude", "bonus", "hidden track",
@@ -2496,6 +2673,22 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      *  shouldCapForGroupMismatch (2026-09-19) : son appelant ne "plafonne" plus un score qui
      *  n'était de toute façon jamais revérifié, il SKIPPE réellement le fichier — voir le
      *  commentaire d'appel pour le bug que ça corrige. */
+    enum GroupMismatch { NO_CONFLICT, SIBLING_EDITION, CONFIRMED_OTHER_RELEASE, SKIP }
+
+    /** Piste identifiée sur une AUTRE release que celle corroborée par ≥ 2 pistes du groupe :
+     *  même groupe de parutions (autre édition du même album) → acceptée ; sinon acceptée si
+     *  l'identification est sûre (empreinte audio, ou score ≥ 95) ; seul un match texte moyen
+     *  reste en revue manuelle. */
+    static GroupMismatch resolveGroupMismatch(int agreementOnPinnedRelease, String source, int currentScore,
+                                              String pinnedReleaseGroup, String trackReleaseGroup) {
+        if (!shouldSkipForGroupMismatch(agreementOnPinnedRelease, source, currentScore)) return GroupMismatch.NO_CONFLICT;
+        if (pinnedReleaseGroup != null && !pinnedReleaseGroup.isBlank()
+                && pinnedReleaseGroup.equalsIgnoreCase(trackReleaseGroup)) return GroupMismatch.SIBLING_EDITION;
+        boolean audio = MetadataCache.SOURCE_ACOUSTID.equals(source) || MetadataCache.SOURCE_SONGREC.equals(source);
+        if (audio || currentScore >= 95) return GroupMismatch.CONFIRMED_OTHER_RELEASE;
+        return GroupMismatch.SKIP;
+    }
+
     static boolean shouldSkipForGroupMismatch(int agreementOnPinnedRelease, String source, int currentScore) {
         boolean trustedSource = MetadataCache.SOURCE_DISCID.equals(source)
                 || MetadataCache.SOURCE_MBID.equals(source);

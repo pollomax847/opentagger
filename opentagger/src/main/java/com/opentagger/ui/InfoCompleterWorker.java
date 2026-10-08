@@ -177,7 +177,10 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm,
                                 MetadataCache cache) throws Exception {
         // Lire le TagInfo actuel depuis e.result ou depuis le fichier
-        TagInfo ti = entry.result != null ? entry.result : readTagsFromFile(fichier);
+        // COPIE de entry.result, jamais modifiée sur place : un Enregistrement peut tourner en même
+        // temps (voir WorkerHub.conflictsWith, SAVE ∥ INFO_COMPLETER) et lire ce même TagInfo —
+        // le résultat complété n'est publié qu'en fin de traitement, sur l'EDT (étape 8).
+        TagInfo ti = entry.result != null ? entry.result.copy() : readTagsFromFile(fichier);
         if (ti == null || (ti.artist.isBlank() && ti.title.isBlank())) {
             log(I18n.t("  ignoré (artiste+titre vides)"));
             return;

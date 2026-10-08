@@ -60,6 +60,8 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkMoveSkipped;
     private JTextField tfSkippedFolder;
     private JCheckBox  chkMoveDurationMismatch;
+    private JCheckBox  chkTrashShortDuration;
+    private JCheckBox  chkAutoTrashDuplicates;
     private JTextField tfDurationMismatchFolder;
     private JCheckBox  chkVideoAutoRecover;
     private JCheckBox  chkSkipSongRecOnConfidentMb;
@@ -85,13 +87,6 @@ public class SettingsDialog extends JDialog {
     // ── Onglet APIs (Last.fm, synchro écoutes — distinct de tfLastFmKey ci-dessus) ──────────────
     private JTextField tfLastFmUsername;
     private JSpinner   spLastfmMaxTracks;
-    // ── Onglet APIs (Headphones — intégration tierce, voir HeadphonesClient) ───────────────────
-    private JCheckBox  chkHeadphonesDbEnabled;
-    private JTextField tfHeadphonesDbPath;
-    // ── Onglet APIs (beets — intégration tierce, voir BeetsClient) ─────────────────────────────
-    private JCheckBox  chkBeetsDbEnabled;
-    private JTextField tfBeetsDbPath;
-    private JTextField tfBeetsMusicDir;
 
     // ── Onglet Tags ───────────────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -548,17 +543,6 @@ public class SettingsDialog extends JDialog {
         spLastfmMaxTracks = new JSpinner(new SpinnerNumberModel(1000, 100, 20000, 100));
         spLastfmMaxTracks.setToolTipText(I18n.t("Nombre max de pistes à récupérer dans le classement "
                 + "Last.fm (au-delà, les pistes les moins écoutées ne sont pas synchronisées)."));
-        chkHeadphonesDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base Headphones (identification locale)"));
-        chkHeadphonesDbEnabled.setToolTipText(I18n.t("Cherche une correspondance dans la base SQLite d'une "
-                + "instance Headphones tierce avant tout appel réseau — lecture seule, jamais d'écriture."));
-        tfHeadphonesDbPath = tf();
-        chkBeetsDbEnabled = new JCheckBox(I18n.t("Activer la lecture de la base beets (identification locale)"));
-        chkBeetsDbEnabled.setToolTipText(I18n.t("Cherche une correspondance (chemin exact, puis similarité) dans "
-                + "la base SQLite d'une instance beets tierce avant tout appel réseau — lecture seule."));
-        tfBeetsDbPath   = tf();
-        tfBeetsMusicDir = tf();
-        tfBeetsMusicDir.setToolTipText(I18n.t("Dossier racine de beets (son réglage \"directory\") — vide = "
-                + "utilise le même dossier racine qu'OpenTagger (Renommage → Racine de bibliothèque)."));
         // FanArt.tv (Tags → Fournisseurs de pochette) et Last.fm (Matching → Sources de genres,
         // voir buildMatchingPanel()) sont activés/priorisés là où se trouve le reste de leur
         // comportement — cet onglet ne garde QUE les clés/identifiants (2026-08-16, retour
@@ -593,11 +577,6 @@ public class SettingsDialog extends JDialog {
             { "Nom d'utilisateur Last.fm :", tfLastFmUsername, "https://www.last.fm/",
                 (java.util.function.Supplier<ApiKeyTester.Result>) () -> ApiKeyTester.testLastFmUsername(tfLastFmUsername.getText().trim()) },
             { "Pistes max à synchroniser (Last.fm) :", spLastfmMaxTracks, null, null },
-            { "", chkHeadphonesDbEnabled, null, null },
-            { "Chemin headphones.db :",     tfHeadphonesDbPath,   null, null },
-            { "", chkBeetsDbEnabled, null, null },
-            { "Chemin library.db (beets) :", tfBeetsDbPath, null, null },
-            { "Dossier racine beets :",       tfBeetsMusicDir, null, null },
         };
 
         for (int i = 0; i < rows.length; i++) {
@@ -1618,6 +1597,16 @@ public class SettingsDialog extends JDialog {
             + "MusicBrainz pour ce titre est probablement un rip tronqué ou un mauvais match — jamais "
             + "enregistré tel quel (\"Enregistrer tout\" l'ignore). Activer ceci le déplace en plus vers "
             + "ce dossier dédié, séparé des fichiers non tagués ci-dessus. Rien n'est jamais supprimé."));
+        chkTrashShortDuration = new JCheckBox(I18n.t("ESSAI : envoyer à la corbeille les fichiers de moins d'1 min dont MusicBrainz annonce bien plus long"));
+        chkTrashShortDuration.setToolTipText(I18n.t(
+            "Ex. fichier de 0:40 alors que MusicBrainz dit 3:34 : presque toujours un téléchargement tronqué. Envoyé à la "
+            + "CORBEILLE (récupérable, jamais supprimé définitivement), seulement si l'identification est confirmée (empreinte "
+            + "audio, ou texte très net). Chaque envoi est journalisé dans ~/.opentagger/duration_trial.log."));
+        chkAutoTrashDuplicates = new JCheckBox(I18n.t("ESSAI : écarter automatiquement les vrais doublons (même piste du même album) à l'enregistrement"));
+        chkAutoTrashDuplicates.setToolTipText(I18n.t(
+            "Même enregistrement MusicBrainz, même album, même piste, durées à 3 s près : la meilleure version est gardée, "
+            + "l'autre part dans la CORBEILLE d'OpenTagger (récupérable). La même chanson sur un autre album (compilation, "
+            + "best-of) n'est jamais touchée. 50 par session au plus, journalisé dans ~/.opentagger/doublons.log."));
         tfDurationMismatchFolder = tf();
         tfDurationMismatchFolder.setToolTipText(I18n.t("Dossier où isoler les fichiers dont la durée ne correspond pas à MusicBrainz."));
         JButton btnBrowseDurationMismatch = new JButton("…");
@@ -1642,10 +1631,10 @@ public class SettingsDialog extends JDialog {
 
         JPanel p = form(
             new String[]{"", "Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", ""},
+                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
             new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
                     chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
-                    chkVideoAutoRecover},
+                    chkTrashShortDuration, chkAutoTrashDuplicates, chkVideoAutoRecover},
             "Renommage automatique des fichiers");
 
         // Ajouter l'encart exemples en dessous des cases à cocher
@@ -2580,6 +2569,8 @@ public class SettingsDialog extends JDialog {
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
         tfSkippedFolder   .setText(cfg.str("skipped.move_folder",           ""));
         chkMoveDurationMismatch.setSelected(cfg.bool("duration_mismatch.move_enabled", false));
+        chkTrashShortDuration.setSelected(cfg.durationMismatchTrashShortEnabled());
+        chkAutoTrashDuplicates.setSelected(cfg.bool("duplicates.auto_trash_enabled", false));
         tfDurationMismatchFolder.setText(cfg.str("duration_mismatch.move_folder",          ""));
         chkVideoAutoRecover.setSelected(cfg.videoAutoRecover());
         chkSkipSongRecOnConfidentMb.setSelected(cfg.skipSongRecOnConfidentMb());
@@ -2610,11 +2601,6 @@ public class SettingsDialog extends JDialog {
         spListenBrainzMaxTracks.setValue(cfg.listenbrainzMaxTracks());
         tfLastFmUsername .setText(cfg.lastfmUsername());
         spLastfmMaxTracks.setValue(cfg.lastfmMaxTracks());
-        chkHeadphonesDbEnabled.setSelected(cfg.headphonesDbEnabled());
-        tfHeadphonesDbPath.setText(cfg.headphonesDbPath());
-        chkBeetsDbEnabled.setSelected(cfg.beetsDbEnabled());
-        tfBeetsDbPath.setText(cfg.beetsDbPath());
-        tfBeetsMusicDir.setText(cfg.beetsMusicDir());
 
         chkLastfmEnabled    .setSelected(cfg.bool("lastfm.use_tags",       true));
         chkLastfmArtistUrls .setSelected(cfg.bool("lastfm.fetch_artist_urls", true));
@@ -2830,6 +2816,8 @@ public class SettingsDialog extends JDialog {
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());
         p.setProperty("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatch.isSelected()));
+        p.setProperty("duration_mismatch.trash_short_enabled", String.valueOf(chkTrashShortDuration.isSelected()));
+        p.setProperty("duplicates.auto_trash_enabled", String.valueOf(chkAutoTrashDuplicates.isSelected()));
         p.setProperty("duration_mismatch.move_folder",  tfDurationMismatchFolder.getText().trim());
         p.setProperty("video.auto_recover",            String.valueOf(chkVideoAutoRecover.isSelected()));
         p.setProperty("tagging.skip_songrec_on_confident_mb", String.valueOf(chkSkipSongRecOnConfidentMb.isSelected()));
@@ -2867,11 +2855,6 @@ public class SettingsDialog extends JDialog {
         p.setProperty("listenbrainz.max_tracks", String.valueOf(spListenBrainzMaxTracks.getValue()));
         p.setProperty("lastfm.username",   tfLastFmUsername.getText().trim());
         p.setProperty("lastfm.max_tracks", String.valueOf(spLastfmMaxTracks.getValue()));
-        p.setProperty("headphones.db_enabled", String.valueOf(chkHeadphonesDbEnabled.isSelected()));
-        p.setProperty("headphones.db_path",    tfHeadphonesDbPath.getText().trim());
-        p.setProperty("beets.db_enabled", String.valueOf(chkBeetsDbEnabled.isSelected()));
-        p.setProperty("beets.db_path",    tfBeetsDbPath.getText().trim());
-        p.setProperty("beets.music_dir",  tfBeetsMusicDir.getText().trim());
 
         p.setProperty("lastfm.use_tags",        String.valueOf(chkLastfmEnabled.isSelected()));
         p.setProperty("lastfm.fetch_artist_urls", String.valueOf(chkLastfmArtistUrls.isSelected()));
@@ -3062,8 +3045,6 @@ public class SettingsDialog extends JDialog {
         "discogs.consumer_key", "discogs.consumer_secret",
         "lastfm.api_key", "fanart.api_key", "audd.api_token",
         "listenbrainz.username", "lastfm.username",
-        "headphones.db_path",
-        "beets.db_path", "beets.music_dir",
         "mb.oauth.client_id", "mb.oauth.client_secret", "mb.oauth.token",
         "mb.oauth.refresh_token", "mb.oauth.username", "mb.oauth.collection_id",
     };

@@ -49,8 +49,59 @@ public class SongRecClient {
      *  appel a réussi (ou si recognize() n'a pas encore été appelé sur ce thread). */
     public static String lastFailureReason() { return LAST_FAILURE_REASON.get(); }
 
+    // ── Limite Shazam (429) — 2026-09-26, retour utilisateur « les fichiers non identifiés ne sont
+    // pas reconnus par SongRec » : vérifié en direct, Shazam répondait « 429 Too Many Requests » à
+    // CHAQUE appel depuis ~09 h (même sur un morceau reconnu une heure plus tôt), songrec restait
+    // alors bloqué jusqu'au timeout sans rien imprimer sur stdout, et le fichier finissait « Non
+    // identifié » (puis déplacé vers Sans_correspondance) alors que Shazam n'avait jamais vraiment
+    // répondu. Désormais : 429 (lu sur stderr) ou 3 non-réponses d'affilée → SongRec en PAUSE
+    // (15 min, doublée à chaque récidive jusqu'à 2 h) ; pendant la pause, aucun appel, et le
+    // fichier est marqué « limité » (wasThrottled) pour être retenté plus tard, pas classé.
+    private static volatile long pausedUntilMs = 0;
+    private static volatile long pauseMs = 15 * 60_000L;
+    private static final java.util.concurrent.atomic.AtomicInteger NO_ANSWER_STREAK =
+        new java.util.concurrent.atomic.AtomicInteger();
+    private static final ThreadLocal<Boolean> THROTTLED = new ThreadLocal<>();
+    private static volatile long lastCallMs = 0;
+
+    /** Vrai si le dernier recognize() de CE thread n'a pas pu interroger Shazam (limite 429/pause). */
+    public static boolean wasThrottled() { return Boolean.TRUE.equals(THROTTLED.get()); }
+    public static void resetThrottled() { THROTTLED.remove(); }
+    public static boolean isPaused() { return System.currentTimeMillis() < pausedUntilMs; }
+    public static long pausedUntil() { return pausedUntilMs; }
+
+    private static synchronized void pause(String why) {
+        long now = System.currentTimeMillis();
+        if (now < pausedUntilMs) return; // déjà en pause (autre thread)
+        pausedUntilMs = now + pauseMs;
+        System.out.println("[OT] ⏸ SongRec en pause " + (pauseMs / 60_000) + " min (" + why
+            + ") — fichiers concernés retentés ensuite, pas classés « Non identifié ».");
+        pauseMs = Math.min(pauseMs * 2, 2 * 60 * 60_000L);
+    }
+
+    private static void answered() {
+        NO_ANSWER_STREAK.set(0);
+        pauseMs = 15 * 60_000L;
+    }
+
     public TagInfo recognize(File audioFile) throws Exception {
         LAST_FAILURE_REASON.remove();
+        THROTTLED.remove();
+        // Coquille (ex. « __1-01 05 Cake by the Ocean 3.mp3 », 1 348 octets : un en-tête ID3 et
+        // rien d'autre) : songrec y restait bloqué jusqu'au timeout, comptant à tort comme une
+        // non-réponse de Shazam.
+        long len = audioFile.length();
+        if (len < 64 * 1024) {
+            LAST_FAILURE_REASON.set("fichier trop petit pour contenir de l'audio (" + len + " octets)");
+            return null;
+        }
+        if (isPaused()) {
+            THROTTLED.set(true);
+            LAST_FAILURE_REASON.set("SongRec en pause jusqu'à "
+                + new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date(pausedUntilMs))
+                + " (Shazam limite les requêtes)");
+            return null;
+        }
         // Le permis DiskIoThrottle n'est PLUS pris ici pour tout l'appel : il est acquis/libéré à
         // l'intérieur de recognizeAt(), autour de la seule extraction ffmpeg (vraie E/S disque sur
         // le fichier source). Avant ce correctif, le même permis restait tenu pendant TOUT l'appel
@@ -82,6 +133,7 @@ public class SongRecClient {
         for (int offset : offsets) {
             TagInfo result = recognizeAt(bin, audioFile, offset, duration);
             if (result != null) { first = result; firstOffset = offset; break; }
+            if (wasThrottled()) return null;
         }
         if (first == null) {
             if (LAST_FAILURE_REASON.get() == null)
@@ -186,10 +238,22 @@ public class SongRecClient {
             // acquis ICI, juste avant le seul point de tout recognizeAt() qui parle vraiment au
             // réseau, jamais autour de l'extraction ffmpeg au-dessus (purement locale/disque).
             SHAZAM_GATE.acquire();
+            Path errFile = null;
             try {
+                if (isPaused()) {
+                    THROTTLED.set(true);
+                    LAST_FAILURE_REASON.set("SongRec en pause (Shazam limite les requêtes)");
+                    return null;
+                }
+                // Espacement minimal entre deux appels Shazam (songrec.min_interval_ms).
+                long wait = lastCallMs + Config.get().num("songrec.min_interval_ms", 2500) - System.currentTimeMillis();
+                if (wait > 0) Thread.sleep(wait);
+                lastCallMs = System.currentTimeMillis();
                 ProcessBuilder pb = new ProcessBuilder(bin, "audio-file-to-recognized-song",
                         segment.getAbsolutePath());
                 pb.redirectErrorStream(false);
+                errFile = Files.createTempFile("ot_songrec_err_", ".txt");
+                pb.redirectError(errFile.toFile());
                 // 8s (15s, puis 30s auparavant) : un appel Shazam normal répond en 1-5s, ce plafond
                 // n'est qu'un filet de sécurité contre un vrai blocage, jamais censé être atteint en
                 // usage courant. Recalibré une première fois le même jour que SHAZAM_GATE
@@ -201,11 +265,24 @@ public class SongRecClient {
                 // le plafond à 15s — largement dominée par les tentatives qui n'aboutissent pas et
                 // consomment le plafond en entier plutôt que par de vraies réponses lentes.
                 String json = ProcessUtils.readStringWithTimeout(pb, 8);
-                if (json == null || json.isBlank()) {
+                if (json == null || json.isBlank() || !json.contains("{")) {
+                    String err = "";
+                    try { err = Files.readString(errFile); } catch (Exception ignored) {}
+                    if (err.contains("429") || err.contains("Too Many Requests")) {
+                        THROTTLED.set(true);
+                        pause("Shazam : 429 Too Many Requests");
+                        LAST_FAILURE_REASON.set("Shazam limite les requêtes (429) à " + offsetSec + "s");
+                        return null;
+                    }
+                    if (NO_ANSWER_STREAK.incrementAndGet() >= 3) {
+                        THROTTLED.set(true);
+                        pause("3 appels sans réponse d'affilée");
+                    }
                     LAST_FAILURE_REASON.set("binaire songrec sans réponse à " + offsetSec
                         + "s (timeout 8s ou binaire indisponible)");
                     return null;
                 }
+                answered();
                 if (!json.contains("\"track\"")) {
                     LAST_FAILURE_REASON.set("aucun morceau reconnu par Shazam à " + offsetSec + "s");
                     return null;
@@ -217,6 +294,7 @@ public class SongRecClient {
                 return parsed;
             } finally {
                 SHAZAM_GATE.release();
+                if (errFile != null) { try { Files.deleteIfExists(errFile); } catch (IOException ignored) {} }
             }
         } finally {
             DiskIoThrottle.release(songrecGate);
