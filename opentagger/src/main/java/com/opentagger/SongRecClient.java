@@ -63,6 +63,13 @@ public class SongRecClient {
         new java.util.concurrent.atomic.AtomicInteger();
     private static final ThreadLocal<Boolean> THROTTLED = new ThreadLocal<>();
     private static volatile long lastCallMs = 0;
+    // Ralentissement adaptatif (2026-10-08) : mesuré en direct, 8 pauses « 429 » en 5 h (359 reconnus, 884 reportés) —
+    // chaque pause repartait à 15 min et au même rythme d'appels, donc retombait aussitôt dans la limite. Désormais un
+    // 429 double l'espacement entre deux appels (jusqu'à 30 s) ; il ne redescend que de moitié après 50 réponses
+    // d'affilée, et la durée de pause n'est remise à 15 min qu'après 50 réponses sans limite.
+    private static volatile long extraIntervalMs = 0;
+    private static final java.util.concurrent.atomic.AtomicInteger ANSWERED_STREAK =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     /** Vrai si le dernier recognize() de CE thread n'a pas pu interroger Shazam (limite 429/pause). */
     public static boolean wasThrottled() { return Boolean.TRUE.equals(THROTTLED.get()); }
@@ -74,14 +81,22 @@ public class SongRecClient {
         long now = System.currentTimeMillis();
         if (now < pausedUntilMs) return; // déjà en pause (autre thread)
         pausedUntilMs = now + pauseMs;
-        System.out.println("[OT] ⏸ SongRec en pause " + (pauseMs / 60_000) + " min (" + why
+        long base = Math.max(500, Config.get().num("songrec.min_interval_ms", 2500));
+        extraIntervalMs = Math.min(Math.max(base, (base + extraIntervalMs) * 2) - base, 30_000L - base);
+        ANSWERED_STREAK.set(0);
+        System.out.println("[OT] ⏸ SongRec en pause " + (pauseMs / 60_000) + " min, puis 1 appel toutes les "
+            + (base + extraIntervalMs) / 1000.0 + " s (" + why
             + ") — fichiers concernés retentés ensuite, pas classés « Non identifié ».");
         pauseMs = Math.min(pauseMs * 2, 2 * 60 * 60_000L);
     }
 
     private static void answered() {
         NO_ANSWER_STREAK.set(0);
-        pauseMs = 15 * 60_000L;
+        if (ANSWERED_STREAK.incrementAndGet() >= 50) {
+            ANSWERED_STREAK.set(0);
+            pauseMs = 15 * 60_000L;
+            extraIntervalMs = extraIntervalMs / 2;
+        }
     }
 
     public TagInfo recognize(File audioFile) throws Exception {
@@ -246,7 +261,7 @@ public class SongRecClient {
                     return null;
                 }
                 // Espacement minimal entre deux appels Shazam (songrec.min_interval_ms).
-                long wait = lastCallMs + Config.get().num("songrec.min_interval_ms", 2500) - System.currentTimeMillis();
+                long wait = lastCallMs + Config.get().num("songrec.min_interval_ms", 2500) + extraIntervalMs - System.currentTimeMillis();
                 if (wait > 0) Thread.sleep(wait);
                 lastCallMs = System.currentTimeMillis();
                 ProcessBuilder pb = new ProcessBuilder(bin, "audio-file-to-recognized-song",
