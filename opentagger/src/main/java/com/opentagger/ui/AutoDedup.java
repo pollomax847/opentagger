@@ -103,7 +103,12 @@ public final class AutoDedup {
      *  contient Peter von Poehl) ? Faux si le titre est inconnu : dans le doute, on ne conclut pas à une erreur de nom. */
     static boolean nameContradictsTags(Path path, TagInfo tags) {
         if (path == null || tags == null) return false;
-        String title = norm(tags.title);
+        // Sans les précisions de version (« (radio edit) », « [Remastered] », « - Live ») : « 01 - Yannick - Ces Soirées
+        // Là.mp3 » est bien « Ces Soirées Là (radio Edit) », ce n'est pas un autre morceau.
+        String core = tags.title == null ? "" : tags.title.replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", " ")
+                .replaceAll("\\s+-\\s+.*$", "");
+        String title = norm(core);
+        if (title.length() < 3) title = norm(tags.title);
         if (title.length() < 3) return false;
         String file = path.getFileName().toString();
         int dot = file.lastIndexOf('.');

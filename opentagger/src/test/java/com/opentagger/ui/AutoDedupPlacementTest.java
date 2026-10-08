@@ -43,4 +43,13 @@ public class AutoDedupPlacementTest {
                 Paths.get("/x/Compilations/NRJ Fresh Hits 2017/12 - Deorro - Going Up.mp3"),
                 t("Going to Where the Tea Trees Are", "Going to Where the Tea-Trees Are")));
     }
+
+    @Test public void versionSuffixDoesNotMakeANameContradictory() {
+        assertFalse(AutoDedup.nameContradictsTags(Paths.get("/x/L'Été Des Hits 5/01 - Yannick - Ces Soirées Là.mp3"),
+                t("Ces Soirées Là (radio Edit)", "Ces Soirées Là")));
+        assertFalse(AutoDedup.nameContradictsTags(Paths.get("/x/Bravo Hits 116/1-02 Enemy (from the series Arcane L.mp3"),
+                t("Enemy (from the Animated Series Arcane: League of Legends)", "W9 Hits 2022")));
+        assertTrue(AutoDedup.nameContradictsTags(Paths.get("/x/SABC3 BoOom 9/02 - David Guetta - Memories (extended club version).mp3"),
+                t("Secoues Ton Boule", "California Love 2")));
+    }
 }
