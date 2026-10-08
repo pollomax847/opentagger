@@ -36,6 +36,36 @@ public final class Fingerprinter {
         return gate;
     }
 
+    /** Empreinte BRUTE (suite d'entiers Chromaprint, ~8 par seconde) et durée du fichier, pour COMPARER deux fichiers entre eux. */
+    public record Raw(int[] ints, double durationSec) {}
+
+    /** Empreinte brute des 2 premières minutes via {@code fpcalc -raw}. Lève une exception si fpcalc est absent ou échoue. */
+    public static Raw computeRaw(File fichier) throws Exception {
+        String fpcalc = FpcalcInstaller.resolve();
+        if (fpcalc == null) throw new Exception("fpcalc introuvable — installez-le via Préférences → Audio");
+        ProcessBuilder pb = new ProcessBuilder(fpcalc, "-raw", "-json", "-length", "120", fichier.getAbsolutePath())
+                .redirectErrorStream(false);
+        String output;
+        Semaphore permit = gate();
+        Semaphore diskGate = DiskIoThrottle.acquireFor(fichier);
+        permit.acquire();
+        try {
+            output = ProcessUtils.readStringWithTimeout(pb, 60);
+        } finally {
+            permit.release();
+            DiskIoThrottle.release(diskGate);
+        }
+        if (output == null || output.isBlank())
+            throw new Exception("fpcalc timeout ou sortie vide pour " + fichier.getName());
+        JsonNode json = MAPPER.readTree(output);
+        JsonNode fp = json.path("fingerprint");
+        if (!fp.isArray() || fp.size() == 0)
+            throw new Exception("fpcalc : empreinte brute manquante pour " + fichier.getName());
+        int[] ints = new int[fp.size()];
+        for (int i = 0; i < ints.length; i++) ints[i] = (int) fp.get(i).asLong();
+        return new Raw(ints, json.path("duration").asDouble(0));
+    }
+
     /** Calcule l'empreinte + durée (secondes) via fpcalc, ou null si indisponible/échec. */
     public static Result compute(File fichier) throws Exception {
         String fpcalc = FpcalcInstaller.resolve();
@@ -52,19 +82,26 @@ public final class Fingerprinter {
         // thrasher). Un disque mécanique limite déjà à 1 par lui-même, donc le cas qui compte
         // vraiment ici est plusieurs disques mécaniques DIFFÉRENTS traités en parallèle : chacun
         // garde son propre permis, fpcalcThreads reste la limite globale par-dessus.
+        // permit.acquire() DANS le try (2026-09-26) : avant, une interruption pendant cette attente
+        // (fin de lot : WorkerHub.awaitAll annule les tâches en retard) sortait AVANT le finally en
+        // gardant le permis disque — jamais rendu, tout le taguage des fichiers de ce disque restait
+        // ensuite bloqué indéfiniment (vu en direct : 12 threads figés 2 h 30 sur le permis du disque
+        // /home, aucun détenteur vivant).
         Semaphore diskGate = DiskIoThrottle.acquireFor(fichier);
-        permit.acquire();
+        boolean gotPermit = false;
         try {
+            permit.acquire();
+            gotPermit = true;
             output = ProcessUtils.readStringWithTimeout(pb, 60);
         } finally {
-            permit.release();
+            if (gotPermit) permit.release();
             DiskIoThrottle.release(diskGate);
         }
         if (output == null || output.isBlank())
             throw new Exception("fpcalc timeout ou sortie vide pour " + fichier.getName());
 
         JsonNode json = MAPPER.readTree(output);
-        String fingerprint = json.path("fingerprint").asText("");
+        String fingerprint = JsonText.of(json.path("fingerprint"), "");
         int duration = (int) json.path("duration").asDouble(0);
         if (fingerprint.isBlank() || duration == 0)
             throw new Exception("fpcalc : fingerprint ou durée manquant pour " + fichier.getName());

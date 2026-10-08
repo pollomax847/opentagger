@@ -1,11 +1,9 @@
 package com.opentagger.ui;
 
-import com.formdev.flatlaf.FlatDarkLaf;
 import com.opentagger.AlbumGrouping;
 import com.opentagger.AudioScanner;
 import com.opentagger.Config;
 import com.opentagger.FileRenamer;
-import com.opentagger.HeadphonesClient;
 import com.opentagger.I18n;
 import com.opentagger.MetadataCache;
 import com.opentagger.TagWriter;
@@ -27,16 +25,12 @@ import java.awt.datatransfer.DataFlavor;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 public class MainFrame extends JFrame {
 
@@ -52,7 +46,10 @@ public class MainFrame extends JFrame {
     // — teinte bleue distincte du vert de TAGGED, pour rester visuellement entre "en attente" et
     // "tagué" (même esprit que COL_PROCESSING, mais persistant plutôt que transitoire).
     private static final Color COL_IDENTIFIED = new Color(60,  140, 220, 45);
-    private static final Color ACCENT         = new Color(0x4DB6AC); // teal
+    // Source unique : ThemeManager le réapplique sur CHAQUE thème (Component.accentColor), les
+    // composants dessinés à la main ci-dessous l'utilisent directement — deux constantes séparées
+    // auraient fini par diverger au premier changement de teinte.
+    private static final Color ACCENT         = ThemeManager.ACCENT; // teal
     private static final Color HEADER_BG      = new Color(0x1E1F22);
     // Couleurs des chips de statut (bande de stats cliquable) — mêmes constantes utilisées à la
     // construction (buildStatsStrip()) et à chaque restylage actif/inactif (refreshStats()).
@@ -70,6 +67,9 @@ public class MainFrame extends JFrame {
     /** Accès en lecture seule à la table chargée — utilisé par SettingsDialog pour la détection
      *  automatique de séries de compilations (2026-08-17). */
     public List<FileEntry> allEntries() { return tableModel.allEntries(); }
+
+    /** Retire ces fichiers de la liste affichée (sans toucher au disque) — à appeler sur l'EDT. */
+    public void removeFromList(java.util.Set<FileEntry> toRemove) { tableModel.removeEntries(toRemove); }
     private int                     currentMask = Config.get().defaultRenameMask();
     // true dès que l'utilisateur choisit un masque explicitement via chooseMask() — empêche
     // onPreferencesSaved() d'écraser ce choix par le masque par défaut des Préférences.
@@ -81,7 +81,6 @@ public class MainFrame extends JFrame {
     private JButton    btnTagAll, btnSaveAll, btnCancel, btnTranscode, btnRefresh;
     // Conteneur des boutons secondaires personnalisables — voir populateSecondaryToolbar().
     private JPanel     secondaryToolbarPanel;
-    private JCheckBox  chkAcoustId;
     private JLabel     lblMask;
 
     // ── Stats live (chips cliquables = filtre statut, remplace l'ancien menu déroulant) ───
@@ -95,6 +94,8 @@ public class MainFrame extends JFrame {
     // applyFilter(). Réinitialisé par le bouton "Effacer les filtres" et par tout clic sur un chip.
     private com.opentagger.model.SkipReason activeSkipReasonFilter = null;
     private JLabel lblMemory;
+    // Taille totale des fichiers chargés (barre d'état, à gauche de la RAM) — voir refreshStats().
+    private JLabel lblLibrarySize;
 
     // ── Débit/ETA global (chip informatif, pas un filtre) ────────────────────────────────────
     // Échantillonné dans refreshStats() (déjà appelé partout, déjà throttlé à 300ms) — fenêtre
@@ -298,7 +299,7 @@ public class MainFrame extends JFrame {
     private java.util.Map<String, MetadataCache.ScanCacheEntry> sharedScanCacheMap;
     private int scanCacheMapRefCount = 0;
 
-    /** Public (2026-08-17) pour qu'ITunesImportDialog réutilise ce cache partagé au lieu de
+    /** Public (2026-08-17) pour que les dialogues réutilisent ce cache partagé au lieu de
      *  recharger tout scan_cache (des centaines de milliers de lignes) à chaque tentative d'import
      *  — exactement le motif qui avait déjà causé un OutOfMemoryError par le passé (voir commentaire
      *  ci-dessus) et qui provoquait à nouveau une fuite mémoire native constatée en direct ce
@@ -326,93 +327,20 @@ public class MainFrame extends JFrame {
     // ── Entrée publique ───────────────────────────────────────────────────────
 
     public static void launch(java.io.File[] initialDirs) {
-        FlatDarkLaf.setup();
-        UIManager.put("Table.alternateRowColor", new Color(45, 47, 52));
-        applyModernTheme();
+        // Thème enregistré (ui.theme) + retouches maison — voir ThemeManager, qui remplace le
+        // FlatDarkLaf.setup() codé en dur d'avant le 2026-09-07 (aucun choix possible jusque-là).
+        ThemeManager.applyStartup();
         SwingUtilities.invokeLater(() ->
             SplashScreen.show(() -> SwingUtilities.invokeLater(() -> {
                 MainFrame frame = new MainFrame();
                 frame.setVisible(true);
+                // Premier démarrage : propose de saisir les clés API (modale, une seule fois).
+                FirstRunApiKeysDialog.showIfFirstRun(frame);
                 if (initialDirs != null && initialDirs.length > 0)
                     frame.loadFiles(initialDirs);
                 frame.checkForUpdates(false);
             }))
         );
-    }
-
-    /**
-     * Jusqu'ici, FlatDarkLaf.setup() tournait avec ses réglages par défaut — le look "moderne"
-     * de l'appli venait entièrement de retouches ponctuelles composant par composant (chips de
-     * statut, boutons accentués…), jamais des contrôles Swing standards (JComboBox, JSpinner,
-     * JScrollBar, JTabbedPane, cases à cocher) qui gardaient l'angle droit et l'accent bleu par
-     * défaut de FlatLaf — d'où l'impression d'ensemble "daté" malgré les retouches locales.
-     * Quelques propriétés UIManager globales suffisent à uniformiser TOUT le reste de l'appli
-     * (chaque dialogue, y compris ceux jamais retouchés individuellement) sans toucher un seul
-     * appel de construction de composant.
-     */
-    private static void applyModernTheme() {
-        // Accent unique = le teal déjà utilisé pour les boutons principaux (ACCENT ci-dessous) —
-        // avant ce correctif, coches/radios/curseurs/barres de progression gardaient le bleu par
-        // défaut de FlatLaf, en désaccord avec les boutons "Ouvrir dossier"/"Tout tagger" etc.
-        UIManager.put("Component.accentColor", ACCENT);
-        UIManager.put("Component.focusColor",  new Color(0x4DB6AC, true));
-
-        // FlatLaf mappe par défaut la coche des JCheckBoxMenuItem sur "@buttonArrowColor" — la
-        // même teinte grise très discrète (à peine plus sombre que le texte) utilisée pour les
-        // petites flèches de ComboBox/Spinner/ScrollBar. Adaptée à une flèche décorative, illisible
-        // pour une coche censée dire "activé" au premier coup d'œil (signalé en direct : "impossible
-        // de savoir que c'est des cases à cocher"). Couleur d'accent déjà utilisée partout ailleurs
-        // dans l'appli pour "sélectionné/actif" — cohérent, et bien plus contrasté sur fond sombre.
-        UIManager.put("CheckBoxMenuItem.icon.checkmarkColor", ACCENT);
-        UIManager.put("CheckBoxMenuItem.icon.disabledCheckmarkColor", ACCENT.darker());
-
-        // Angles arrondis uniformes (boutons, champs, combos, spinners) — FlatLaf par défaut est
-        // presque à angle droit (arc=4), ce qui lit "utilitaire des années 2010" plutôt que
-        // "app actuelle" à côté d'un Cover Flow et de chips colorées déjà bien plus travaillés.
-        UIManager.put("Component.arc",       10);
-        UIManager.put("Button.arc",          10);
-        UIManager.put("ProgressBar.arc",     999); // pilule complète, pas juste arrondie
-        UIManager.put("CheckBox.arc",        4);
-
-        // Ascenseurs fins et arrondis façon navigateur moderne — ceux de FlatLaf par défaut sont
-        // larges et carrés, très visibles sur le grand tableau principal (des dizaines de milliers
-        // de lignes chez cet utilisateur, donc un ascenseur omniprésent à l'écran).
-        UIManager.put("ScrollBar.width",       11);
-        UIManager.put("ScrollBar.thumbArc",    999);
-        UIManager.put("ScrollBar.trackArc",    999);
-        UIManager.put("ScrollBar.thumbInsets", new Insets(2, 3, 2, 3));
-        UIManager.put("ScrollBar.showButtons", false);
-
-        // Séparateurs d'onglets nets (Préférences a 9 onglets à plat, l'historique en a 2) —
-        // sans ça, l'onglet actif ne se distingue que par une fine ligne de soulignement,
-        // ambigu dès qu'on a plus de 4-5 onglets côte à côte.
-        UIManager.put("TabbedPane.showTabSeparators",        true);
-        UIManager.put("TabbedPane.tabSeparatorsFullHeight",  true);
-
-        // Un peu plus d'air dans les boutons — le texte touchait presque les bords par défaut,
-        // perceptible sur les gros boutons de la barre d'outils principale (police en gras 12).
-        UIManager.put("Button.margin", new Insets(4, 12, 4, 12));
-
-        // Relief 3D global (retour utilisateur, 2026-08-10) : jusqu'ici seuls headerBtn()/
-        // secondaryBtn()/le bouton "Journal" avaient une bordure/fond explicites — chaque nouveau
-        // bouton découvert ailleurs (accentBtn "Ouvrir dossier", "Appliquer les modifications" du
-        // panneau détail, "Vider" du journal, et tout autre bouton "nu" dans les dialogues restés
-        // sur le fond FlatLaf par défaut) semblait plat, un par un, à chaque fois signalé. Réglé ici
-        // au niveau du LAF entier plutôt qu'en repérant chaque bouton individuellement : tout futur
-        // JButton (y compris dans un dialogue pas encore audité) hérite maintenant du même relief,
-        // sans avoir à toucher son code — un putClientProperty("FlatLaf.style", ...) local (comme
-        // headerBtn/accentBtn) continue de primer sur ces valeurs par défaut là où il existe déjà.
-        UIManager.put("Button.borderWidth",     1);
-        UIManager.put("Button.background",      new Color(0x3A3A3E));
-        UIManager.put("Button.borderColor",     new Color(0x4A4A4E));
-        UIManager.put("Button.hoverBackground", new Color(0x45454A));
-        UIManager.put("Button.pressedBackground", new Color(0x2E2E32));
-        UIManager.put("ToggleButton.borderWidth",     1);
-        UIManager.put("ToggleButton.background",      new Color(0x3A3A3E));
-        UIManager.put("ToggleButton.borderColor",     new Color(0x4A4A4E));
-        UIManager.put("ToggleButton.hoverBackground", new Color(0x45454A));
-        UIManager.put("ToggleButton.pressedBackground", new Color(0x2E2E32));
-        UIManager.put("ToggleButton.selectedBackground", ACCENT);
     }
 
     public MainFrame() {
@@ -557,6 +485,8 @@ public class MainFrame extends JFrame {
             if (!e.getValueIsAdjusting()) refreshDetail();
         });
 
+        autoInstallFpcalcIfMissing();
+        startSaveBacklogMeter();
         // Vue (liste/arborescence/Cover Flow) choisie à la dernière session — après
         // buildMainSplit() (table/coverFlowPanel doivent exister) ; ViewMode.FLAT (déjà la valeur
         // par défaut du champ) si jamais enregistré.
@@ -647,13 +577,6 @@ public class MainFrame extends JFrame {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { openFolder(); }
         });
 
-        // Ctrl+E = export CSV
-        rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_E,
-                java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "exportCsv");
-        actionMap.put("exportCsv", new javax.swing.AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent e) { exportCsv(); }
-        });
-
         // Ctrl+R = renommer
         rootMap.put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_R,
                 java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "rename");
@@ -685,6 +608,12 @@ public class MainFrame extends JFrame {
         mb.add(buildMenuFichier());
         mb.add(buildMenuEdition());
         mb.add(buildMenuTagger());
+        // "Bibliothèque" promue au premier niveau (2026-09-07) : elle contenait à elle seule 3
+        // sous-sous-menus (Nettoyage/Rapports/Import-Export) enterrés sous "Outils", soit deux
+        // clics avant de voir la moindre action — un poids comparable à "Tagger", pas à une
+        // rubrique d'outils divers. Placée entre Tagger et Affichage : les deux menus qui AGISSENT
+        // sur le contenu d'abord, les menus "méta" (vue, outils divers) ensuite.
+        mb.add(buildMenuBibliotheque());
         mb.add(buildMenuAffichage());
         mb.add(buildMenuOutils());
         return mb;
@@ -697,9 +626,11 @@ public class MainFrame extends JFrame {
         m.add(mitem("↺ " + I18n.t("Rafraîchir les dossiers"),"F5",       e -> refreshFolders()));
         m.add(mitem(I18n.t("Vider la liste"),            "Ctrl+W",  e -> clearFileList()));
         m.addSeparator();
-        m.add(mitem(I18n.t("Exporter CSV…"),            "Ctrl+E",  e -> exportCsv()));
-        m.add(mitem(I18n.t("Exporter playlist M3U…"),  null,      e -> exportPlaylist("m3u")));
-        m.add(mitem(I18n.t("Exporter playlist XSPF…"), null,      e -> exportPlaylist("xspf")));
+        // Séparateur volontaire (2026-09-07) : "Vider la liste" (juste la vue en mémoire, sans
+        // conséquence) et "Vider la corbeille" (suppression définitive, irréversible) commencent
+        // par le même mot et n'avaient rien pour les distinguer visuellement malgré des risques
+        // opposés.
+        m.add(mitem(I18n.t("Vider la corbeille de l'application…"), null, e -> emptyApplicationTrash()));
         m.addSeparator();
         m.add(mitem(I18n.t("Quitter"),                 null,      e -> quitApp()));
         return m;
@@ -723,6 +654,46 @@ public class MainFrame extends JFrame {
         if (btnRefresh != null) btnRefresh.setEnabled(false);
         refreshStats();
         setStatus(I18n.t("Liste vidée."));
+    }
+
+    /** Dernier geste, VOLONTAIREMENT manuel (jamais automatique) — voir TrashHelper.
+     *  emptyFallbackTrash() : jusqu'à ce correctif, aucun moyen depuis l'appli de vider
+     *  ~/.opentagger/corbeille/, seulement via le gestionnaire de fichiers du système (retour
+     *  utilisateur direct, 2026-09-07 : "depuis opentagger... a acun moment tu as mis vider la
+     *  corbeille dans fichier"). */
+    private void emptyApplicationTrash() {
+        com.opentagger.TrashHelper.TrashStats stats = com.opentagger.TrashHelper.fallbackTrashStats();
+        if (stats.fileCount() == 0) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("La corbeille de l'application est déjà vide."),
+                I18n.t("Vider la corbeille"), JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        int ok = JOptionPane.showConfirmDialog(this,
+            I18n.t("Supprimer DÉFINITIVEMENT les %d fichier(s) (%.1f Mo) de la corbeille de "
+                 + "l'application ?\n\nAucun moyen de les récupérer après ça.",
+                 stats.fileCount(), stats.totalBytes() / 1_000_000.0),
+            I18n.t("Vider la corbeille"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        setStatus(I18n.t("Suppression définitive de la corbeille de l'application…"));
+        new SwingWorker<Boolean, Void>() {
+            @Override protected Boolean doInBackground() {
+                try { com.opentagger.TrashHelper.emptyFallbackTrash(); return true; }
+                catch (Exception ex) { return false; }
+            }
+            @Override protected void done() {
+                boolean success;
+                try { success = get(); } catch (Exception ex) { success = false; }
+                String msg = success
+                    ? I18n.t("Corbeille de l'application vidée (%d fichier(s), %.1f Mo).",
+                             stats.fileCount(), stats.totalBytes() / 1_000_000.0)
+                    : I18n.t("Erreur pendant le vidage de la corbeille.");
+                setStatus(msg);
+                JOptionPane.showMessageDialog(MainFrame.this, msg,
+                    I18n.t("Résultat"), success ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE);
+            }
+        }.execute();
     }
 
     /**
@@ -769,6 +740,7 @@ public class MainFrame extends JFrame {
             final com.opentagger.CaaClient         caa      = new com.opentagger.CaaClient();
             final com.opentagger.FanArtClient      fanArt   = new com.opentagger.FanArtClient();
             final com.opentagger.DeezerClient      deezer   = new com.opentagger.DeezerClient();
+            final com.opentagger.DiscogsClient     discogs  = new com.opentagger.DiscogsClient();
             final com.opentagger.TagWriter         writer   = new com.opentagger.TagWriter();
             // Partagée entre tous les threads du pool ci-dessous : MetadataCache est déjà
             // synchronized (sauf close()/purgeExpired(), pas appelés ici pendant le traitement),
@@ -778,7 +750,7 @@ public class MainFrame extends JFrame {
             final java.util.concurrent.atomic.AtomicInteger done = new java.util.concurrent.atomic.AtomicInteger();
 
             @Override protected Void doInBackground() throws Exception {
-                int threads = Math.max(1, com.opentagger.Config.get().num("batch.threads", 3));
+                int threads = Math.max(1, com.opentagger.Config.get().batchThreads());
                 java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
                 java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
 
@@ -787,10 +759,10 @@ public class MainFrame extends JFrame {
                     futures.add(pool.submit(() -> processOne(e, new com.opentagger.MusicBrainzClient())));
                 }
 
-                pool.shutdown();
-                for (java.util.concurrent.Future<?> f : futures) {
-                    try { f.get(); } catch (Exception ignored) {}
-                }
+                // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+                // "blocages silencieux") — voir AlbumCompletionWorker pour le même correctif et son
+                // pourquoi complet.
+                WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
                 cache.close();
                 return null;
             }
@@ -851,8 +823,52 @@ public class MainFrame extends JFrame {
                             // sautait ce nettoyage, fuite de fichier temporaire à chaque échec.
                             try {
                                 writer.writeCoverOnly(e.file, img);
+                                // Sidecar cover.jpg — jusqu'à ce correctif, cette action ne mettait à
+                                // jour QUE le tag embarqué, jamais le fichier à côté (voir la même
+                                // logique dans TagEnrichment.saveEntry) : une pochette annexe déjà
+                                // fausse restait fausse même après ce "rafraîchissement". REPLACE_
+                                // EXISTING volontairement inconditionnel ici (contrairement à
+                                // saveEntry, qui ne l'écrit que si absent) — c'est tout le but d'un
+                                // rafraîchissement manuel demandé explicitement par l'utilisateur.
+                                if (com.opentagger.Config.get().coverSaveToFile()) {
+                                    String fname = com.opentagger.Config.get().coverFilename();
+                                    String ext = img.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                                    java.nio.file.Path dest = e.file.toPath().resolveSibling(fname + ext);
+                                    java.nio.file.Files.copy(img, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                                }
                             } finally {
-                                try { java.nio.file.Files.deleteIfExists(img); } catch (Exception ignored) {}
+                                com.opentagger.TagEnrichment.discardTemporaryCover(img);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                // 3. Photo d'artiste fraîche — jamais couverte par cette action avant ce correctif
+                // (2026-09-06), alors que "photo d'artiste erronée qui ne se corrige jamais toute
+                // seule" (fichier déjà présent = jamais retéléchargé, voir TagEnrichment.saveEntry)
+                // est exactement le problème qui a motivé son ajout ce soir (incident réel : Black
+                // Pumas affichant la photo de Robin Williams côté Navidrome). FanArt.tv (MBID précis)
+                // en premier, repli Discogs par nom EXACT (voir DiscogsClient.
+                // downloadArtistPhotoFallback, abstention sur homonymes) si FanArt n'a rien.
+                if (com.opentagger.Config.get().artistPhotoEnabled()) {
+                    try {
+                        com.opentagger.model.TagInfo forPhoto = new com.opentagger.model.TagInfo();
+                        forPhoto.artistMbid = current.artistMbid;
+                        forPhoto.artist     = current.artist;
+                        forPhoto.albumArtist = current.albumArtist;
+                        java.nio.file.Path photo = fanArt.downloadArtistPhoto(forPhoto, cache);
+                        if (photo == null) photo = discogs.downloadArtistPhotoFallback(forPhoto, cache);
+                        if (photo == null) photo = new com.opentagger.DeezerClient().downloadArtistPhoto(forPhoto, cache);
+                        if (photo != null) {
+                            try {
+                                String fname = com.opentagger.Config.get().artistPhotoFilename();
+                                String ext = photo.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                                java.nio.file.Path track = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath();
+                                java.nio.file.Path dest = com.opentagger.TagEnrichment.artistPhotoFolder(track, forPhoto)
+                                        .resolve(fname + ext);
+                                java.nio.file.Files.copy(photo, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            } finally {
+                                try { java.nio.file.Files.deleteIfExists(photo); } catch (Exception ignored) {}
                             }
                         }
                     } catch (Exception ignored) {}
@@ -984,13 +1000,134 @@ public class MainFrame extends JFrame {
         }
     }
 
-    private JMenu buildMenuTagger() {
-        JMenu m = new JMenu(I18n.t("Tagger"));
+    /** Compte toutes les 2 s les fichiers identifiés en attente d'enregistrement, pour le frein de TaggingWorker (voir SaveBacklog). */
+    private void startSaveBacklogMeter() {
+        javax.swing.Timer timer = new javax.swing.Timer(2000, e -> {
+            int n = 0;
+            for (FileEntry fe : tableModel.allEntries()) if (fe.selected && fe.status == FileEntry.Status.IDENTIFIED) n++;
+            SaveBacklog.setUnsaved(n);
+        });
+        timer.setRepeats(true);
+        timer.start();
+    }
+
+    /** fpcalc (empreinte AudioID pour AcoustID) est livré avec l'installateur ; s'il manque quand même (copie portable, Linux),
+     *  on le télécharge une fois en arrière-plan plutôt que de laisser AcoustID silencieusement inactif. Coupable via
+     *  {@code acoustid.auto_install_fpcalc=false}. */
+    private void autoInstallFpcalcIfMissing() {
+        if (!Config.get().bool("acoustid.auto_install_fpcalc", true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                if (com.opentagger.FpcalcInstaller.isAvailable()) return;
+                String path = com.opentagger.FpcalcInstaller.download(msg -> {});
+                SwingUtilities.invokeLater(() -> setStatus(I18n.t("fpcalc installé automatiquement : %s", path)));
+            } catch (Exception ex) {
+                System.out.println("[OT] fpcalc : installation automatique impossible — " + ex.getMessage());
+            }
+        }, "fpcalc-auto-install");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // ── Niveau d'automatisation (Manuel / Assisté / Automatique) ────────────────────────────────────────────────────
+    private JCheckBoxMenuItem chkAutoPlayCounts;
+    private JRadioButtonMenuItem[] rbCompletionItems;
+    private final java.util.Map<com.opentagger.AutomationMode, JRadioButtonMenuItem> rbAutomation = new java.util.EnumMap<>(com.opentagger.AutomationMode.class);
+    private JMenuItem miAutomationCustom;
+
+    private static com.opentagger.AutomationMode currentAutomationMode() {
+        Config c = Config.get();
+        c.postTagCompletion(); // migre une fois les anciennes clés avant la lecture brute
+        return com.opentagger.AutomationMode.detect(key ->
+                "tagging.post_tag_completion".equals(key) ? c.postTagCompletion().name() : c.str(key, ""));
+    }
+
+    private void addAutomationModeItems(JMenu options) {
+        com.opentagger.AutomationMode now = currentAutomationMode();
+        ButtonGroup group = new ButtonGroup();
+        String[][] labels = {
+            {"MANUAL",    I18n.t("Manuel"),      I18n.t("Rien ne démarre seul : vous lancez le taguage puis l'enregistrement.")},
+            {"ASSISTED",  I18n.t("Assisté"),     I18n.t("Le taguage démarre seul après un scan et complète les champs manquants ; vous validez l'enregistrement.")},
+            {"AUTOMATIC", I18n.t("Automatique"), I18n.t("Tout s'enchaîne : taguage, enregistrement, albums, compilations, ré-identification, compteurs d'écoute, pochettes et photos manquantes.")}};
+        for (String[] l : labels) {
+            com.opentagger.AutomationMode mode = com.opentagger.AutomationMode.valueOf(l[0]);
+            JRadioButtonMenuItem rb = new JRadioButtonMenuItem(l[1], now == mode);
+            rb.setToolTipText(l[2]);
+            rb.addActionListener(e -> applyAutomationMode(mode));
+            group.add(rb);
+            rbAutomation.put(mode, rb);
+            options.add(rb);
+        }
+        miAutomationCustom = new JMenuItem(I18n.t("Personnalisé (réglages « Avancé »)"));
+        miAutomationCustom.setEnabled(false);
+        miAutomationCustom.setVisible(now == null);
+        options.add(miAutomationCustom);
+        options.addSeparator();
+    }
+
+    private void applyAutomationMode(com.opentagger.AutomationMode mode) {
+        if (mode == com.opentagger.AutomationMode.AUTOMATIC) {
+            int ok = JOptionPane.showConfirmDialog(this,
+                I18n.t("<html>Le mode Automatique enchaîne tout sans rien demander :<br>"
+                     + "taguage après chaque scan, enregistrement, recherche des pistes d'album manquantes,<br>"
+                     + "regroupement par compilations, ré-identification par empreinte audio<br>"
+                     + "(elle efface le cache des fichiers restés « Non identifié »), compteurs d'écoute<br>"
+                     + "et pochettes/photos manquantes.<br><br>Passer en mode Automatique ?</html>"),
+                I18n.t("Mode Automatique"), JOptionPane.YES_NO_OPTION);
+            if (ok != JOptionPane.YES_OPTION) { syncAutomationRadios(); return; }
+        }
+        for (java.util.Map.Entry<String, String> e : mode.settings().entrySet()) Config.get().set(e.getKey(), e.getValue());
+        Config.get().set(com.opentagger.AutomationMode.KEY_MODE, mode.name());
+        Config c = Config.get();
+        chkAutoTagOnScan.setSelected(c.autoTagOnScan());
+        chkAutoSaveEnabled.setSelected(c.autoSaveEnabled());
+        if (btnSaveAll != null) btnSaveAll.setVisible(!c.autoSaveEnabled());
+        chkAutoGroupCompilations.setSelected(c.bool("tagging.auto_group_compilations", false));
+        chkAutoReidentifyUnmatched.setSelected(c.bool("tagging.auto_reidentify_unmatched", false));
+        chkAutoPlayCounts.setSelected(c.autoSyncPlayCounts());
+        if (chkMoveSkippedMenu != null) chkMoveSkippedMenu.setSelected(c.skippedMoveEnabled());
+        if (chkMoveDurationMismatchMenu != null) chkMoveDurationMismatchMenu.setSelected(c.durationMismatchMoveEnabled());
+        Config.PostTagCompletion pc = c.postTagCompletion();
+        for (int i = 0; i < rbCompletionItems.length; i++) rbCompletionItems[i].setSelected(i == pc.ordinal());
+        syncAutomationRadios();
+        setStatus(I18n.t("Niveau d'automatisation : %s", rbAutomation.get(mode).getText()));
+    }
+
+    /** Recale les boutons du niveau sur les réglages réels (un réglage « Avancé » modifié à la main = « Personnalisé »). */
+    private void syncAutomationRadios() {
+        com.opentagger.AutomationMode now = currentAutomationMode();
+        for (java.util.Map.Entry<com.opentagger.AutomationMode, JRadioButtonMenuItem> e : rbAutomation.entrySet())
+            e.getValue().setSelected(e.getKey() == now);
+        if (miAutomationCustom != null) miAutomationCustom.setVisible(now == null);
+        if (now != null) Config.get().set(com.opentagger.AutomationMode.KEY_MODE, now.name());
+    }
+
+    private static void watchButtons(JMenu menu, java.awt.event.ActionListener l) {
+        for (java.awt.Component c : menu.getMenuComponents()) {
+            if (c instanceof JMenu sub) watchButtons(sub, l);
+            else if (c instanceof AbstractButton b) b.addActionListener(l);
+        }
+    }
+
+    private void watchAdvancedForAutomation(JMenu advanced) {
+        java.awt.event.ActionListener l = e -> SwingUtilities.invokeLater(this::syncAutomationRadios);
+        watchButtons(advanced, l);
+        for (JRadioButtonMenuItem rb : rbCompletionItems) rb.addActionListener(l);
+    }
+
+    private JMenu buildMenuTagger() {        JMenu m = new JMenu(I18n.t("Tagger"));
         m.setMnemonic('T');
         m.add(mitem(I18n.t("Tout tagger (cochés)"),    "F6",  e -> startTagging(false)));
         m.add(mitem(I18n.t("Tagger la sélection"),     "F7",  e -> startTagging(true)));
         m.add(mitem(I18n.t("Enregistrer tout (cochés)"), "F8", e -> saveAll()));
         m.addSeparator();
+        // Les 8 réglages (cases à cocher et sous-menus) étaient mélangés aux actions du menu Tagger :
+        // regroupés ici dans UN sous-menu (2026-10-03, « trop d'options gâchent l'application »).
+        // Les actions à raccourci clavier (F6/F7/F8, Ctrl+R/G/L/K/T) restent au premier niveau.
+        JMenu options = new JMenu(I18n.t("Options de taguage"));
+        m.add(options);
+        JMenu advanced = new JMenu(I18n.t("Avancé"));
+        addAutomationModeItems(options);
         chkForceAcoustId = new StayOpenCheckBoxMenuItem(I18n.t("Forcer AcoustID pour les non identifiés"));
         chkForceAcoustId.setSelected(Config.get().bool("tagging.force_acoustid_ui", false));
         chkForceAcoustId.addActionListener(e -> {
@@ -1005,7 +1142,26 @@ public class MainFrame extends JFrame {
                     I18n.t("Configuration requise"), JOptionPane.WARNING_MESSAGE);
             }
         });
-        m.add(chkForceAcoustId);
+        options.add(chkForceAcoustId);
+
+        // Basculement rapide avant un gros rattrapage de bibliothèque — voir Config.setExpressMode()
+        // pour le détail de ce qui est coupé/restauré et pourquoi.
+        StayOpenCheckBoxMenuItem chkExpressMode = new StayOpenCheckBoxMenuItem(
+            I18n.t("Mode Express (coupe photo d'artiste / paroles / ReplayGain)"));
+        chkExpressMode.setSelected(Config.get().expressModeActive());
+        chkExpressMode.setToolTipText(I18n.t(
+            "Désactive temporairement les 3 étapes les plus lentes par fichier, pour parcourir vite "
+            + "un gros arriéré. L'état précédent de chaque réglage est restauré en repassant en mode "
+            + "Complet. Genre/bio/identification ne sont pas affectés."));
+        chkExpressMode.addActionListener(e -> {
+            boolean on = chkExpressMode.isSelected();
+            Config.get().setExpressMode(on);
+            setStatus(on
+                ? I18n.t("Mode Express activé — photo d'artiste, paroles et ReplayGain désactivés.")
+                : I18n.t("Mode Complet restauré — réglages précédents rétablis."));
+        });
+        options.add(chkExpressMode);
+
         // Fusion 2026-07-16 des anciennes cases "Compléter aussi les fichiers tagués mais
         // incomplets" et "Compléter les albums automatiquement après le taguage" — elles
         // s'enchaînaient déjà l'une après l'autre (voir onTaggingDone()), mais deux cases séparées
@@ -1015,6 +1171,7 @@ public class MainFrame extends JFrame {
         JMenu completionMenu = new JMenu(I18n.t("Après le taguage"));
         ButtonGroup completionGroup = new ButtonGroup();
         Config.PostTagCompletion current = Config.get().postTagCompletion();
+        rbCompletionItems = new JRadioButtonMenuItem[3];
         JRadioButtonMenuItem rbNone = new JRadioButtonMenuItem(I18n.t("Ne rien compléter automatiquement"));
         JRadioButtonMenuItem rbFields = new JRadioButtonMenuItem(I18n.t("Compléter les champs manquants"));
         JRadioButtonMenuItem rbFieldsAlbums = new JRadioButtonMenuItem(I18n.t("Compléter les champs + rechercher les pistes d'album manquantes"));
@@ -1024,11 +1181,12 @@ public class MainFrame extends JFrame {
         rbNone.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.NONE));
         rbFields.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.FIELDS));
         rbFieldsAlbums.addActionListener(e -> Config.get().setPostTagCompletion(Config.PostTagCompletion.FIELDS_AND_ALBUMS));
-        for (JRadioButtonMenuItem rb : new JRadioButtonMenuItem[]{rbNone, rbFields, rbFieldsAlbums}) {
+        rbCompletionItems[0] = rbNone; rbCompletionItems[1] = rbFields; rbCompletionItems[2] = rbFieldsAlbums;
+        for (JRadioButtonMenuItem rb : rbCompletionItems) {
             completionGroup.add(rb);
             completionMenu.add(rb);
         }
-        m.add(completionMenu);
+        advanced.add(completionMenu);
         // Demandé le 2026-07-10, juste après avoir choisi le mode "proactif" (revue manuelle) pour
         // "Grouper par compilations…" plutôt qu'une réécriture automatique — l'utilisateur voulait
         // aussi pouvoir déclencher la RECHERCHE toute seule, sans pour autant perdre la revue avant
@@ -1040,7 +1198,7 @@ public class MainFrame extends JFrame {
         chkAutoGroupCompilations.setSelected(Config.get().bool("tagging.auto_group_compilations", false));
         chkAutoGroupCompilations.addActionListener(e ->
                 Config.get().set("tagging.auto_group_compilations", String.valueOf(chkAutoGroupCompilations.isSelected())));
-        m.add(chkAutoGroupCompilations);
+        advanced.add(chkAutoGroupCompilations);
 
         // Retour utilisateur (2026-08-10) : ne pas être obligé de cliquer sur "Ré-identifier par
         // empreinte audio…" à chaque fois — si activé, se déclenche tout seul juste après CHAQUE
@@ -1074,7 +1232,7 @@ public class MainFrame extends JFrame {
             }
             Config.get().set("tagging.auto_reidentify_unmatched", String.valueOf(chkAutoReidentifyUnmatched.isSelected()));
         });
-        m.add(chkAutoReidentifyUnmatched);
+        advanced.add(chkAutoReidentifyUnmatched);
 
         // Demandé le 2026-08-12 : le taguage ne reprend jamais tout seul après un redémarrage (ou
         // l'ajout d'un dossier), obligeant à recliquer "Tagger"/F6 à chaque fois — uniquement
@@ -1086,7 +1244,7 @@ public class MainFrame extends JFrame {
         chkAutoTagOnScan.setSelected(Config.get().autoTagOnScan());
         chkAutoTagOnScan.addActionListener(e ->
                 Config.get().set("tagging.auto_start_on_scan", String.valueOf(chkAutoTagOnScan.isSelected())));
-        m.add(chkAutoTagOnScan);
+        advanced.add(chkAutoTagOnScan);
 
         // Interrupteur pour scheduleAutoSaveFollowUp() (voir son commentaire) — actif par défaut.
         // Quand actif, le bouton "Enregistrer tout" de l'écran principal est masqué (retour
@@ -1098,7 +1256,17 @@ public class MainFrame extends JFrame {
             Config.get().set("tagging.auto_save_enabled", String.valueOf(chkAutoSaveEnabled.isSelected()));
             if (btnSaveAll != null) btnSaveAll.setVisible(!chkAutoSaveEnabled.isSelected());
         });
-        m.add(chkAutoSaveEnabled);
+        advanced.add(chkAutoSaveEnabled);
+
+        // Automatisation de « Outils → Re-traitement → Synchroniser les compteurs d'écoute » (qui reste
+        // disponible à la main) : à la fin d'un scan, au plus une fois par 24 h — voir scheduleAutoPlayCountSync().
+        chkAutoPlayCounts = new StayOpenCheckBoxMenuItem(
+                I18n.t("Synchroniser les compteurs d'écoute automatiquement après un scan (1 fois par jour)"));
+        chkAutoPlayCounts.setSelected(Config.get().autoSyncPlayCounts());
+        chkAutoPlayCounts.addActionListener(e ->
+                Config.get().set("playcounts.auto_sync", String.valueOf(chkAutoPlayCounts.isSelected())));
+        advanced.add(chkAutoPlayCounts);
+        options.add(advanced);
 
         // Accès rapide aux cases de déplacement (voir aussi Préférences → Renommage) — mêmes
         // clés Config des deux côtés, donc toujours synchronisées peu importe où on les bascule ;
@@ -1122,7 +1290,8 @@ public class MainFrame extends JFrame {
         chkMoveDurationMismatchMenu.addActionListener(e ->
                 Config.get().set("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatchMenu.isSelected())));
         moveMenu.add(chkMoveDurationMismatchMenu);
-        m.add(moveMenu);
+        advanced.add(moveMenu);
+        watchAdvancedForAutomation(advanced);
 
         m.addSeparator();
         m.add(mitem(I18n.t("Arrêter"),                 null,  e -> stopAll()));
@@ -1184,6 +1353,10 @@ public class MainFrame extends JFrame {
         chkShowJournal = new JCheckBoxMenuItem(I18n.t("Afficher le journal"), PREFS.getBoolean("journal.visible", true));
         chkShowJournal.addActionListener(e -> applyJournalVisibility(chkShowJournal.isSelected()));
         m.add(chkShowJournal);
+
+        // Thème : appliqué à chaud, retenu d'une session à l'autre (ui.theme) — voir ThemeManager.
+        m.addSeparator();
+        m.add(ThemeManager.buildMenu());
         return m;
     }
 
@@ -1221,60 +1394,27 @@ public class MainFrame extends JFrame {
         JMenu m = new JMenu(I18n.t("Outils"));
         m.setMnemonic('O');
 
-        JMenu correction = new JMenu(I18n.t("Correction manuelle"));
-        correction.add(mitem(I18n.t("Correspondance manuelle…"),"Ctrl+M",  e -> openMatchDialog()));
-        correction.add(mitem(I18n.t("Gérer la pochette…"),      null,      e -> openCoverDialog()));
-        m.add(correction);
+        // Correction manuelle : aplati directement dans Outils (2026-09-07, retour utilisateur
+        // "trop d'options") — un sous-menu à seulement 2 entrées coûtait un clic sans rien cacher
+        // de plus. "Marquer comme déjà taggée" rejoint ce groupe, sorti de "Re-traitement" : seule
+        // action de ce sous-menu qui ne corrige RIEN (bookkeeping sur un fichier déjà bon), elle
+        // n'avait rien à faire à côté des 4 autres qui réparent une identification cassée.
+        m.add(mitem(I18n.t("Correspondance manuelle…"),"Ctrl+M",  e -> openMatchDialog()));
+        m.add(mitem(I18n.t("Gérer la pochette…"),      null,      e -> openCoverDialog()));
+        m.add(mitem(I18n.t("Marquer la sélection comme déjà taggée…"), null, e -> markAsAlreadyTagged()));
+        m.addSeparator();
 
         JMenu retraitement = new JMenu(I18n.t("Re-traitement"));
         retraitement.add(mitem(I18n.t("Forcer le re-taguage…"),    null,      e -> forceRetag()));
         retraitement.add(mitem(I18n.t("Ré-identifier par empreinte audio (Non identifiés)…"), null, e -> reidentifyUnmatched()));
-        retraitement.add(mitem(I18n.t("Corriger l'encodage des tags…"), null, e -> fixEncoding()));
-        retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNamesOnly()));
-        retraitement.add(mitem(I18n.t("Nettoyer les noms + Ré-identifier (Non identifiés)…"), null, e -> cleanNamesAndReidentifyUnmatched()));
-        retraitement.add(mitem(I18n.t("Marquer la sélection comme déjà taggée…"), null, e -> markAsAlreadyTagged()));
+        retraitement.add(mitem(I18n.t("Essayer Bandcamp (Non identifiés)…"), null, e -> tryBandcampOnUnmatched()));
+        retraitement.add(mitem(I18n.t("Nettoyer les noms (Non identifiés)…"), null, e -> cleanNames()));
+        retraitement.add(mitem(I18n.t("Compléter les pochettes et photos manquantes"), null, e -> completeArtworkFromMenu()));
         retraitement.add(mitem(I18n.t("Synchroniser les compteurs d'écoute (ListenBrainz + Last.fm)…"), null, e -> syncPlayCounts()));
         m.add(retraitement);
 
-        // Découpé en 4 sous-menus (2026-09-02, retour utilisateur "c'est le bordel") — même motif
-        // déjà validé ailleurs dans ce menu (voir buildSubmenuSelection() : "7 items à plat, trop
-        // d'un coup") : 16 items à plat dans un seul "Bibliothèque" avait largement dépassé ce
-        // seuil au fil des fonctionnalités ajoutées cette session.
-        JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
-
-        JMenu nettoyage = new JMenu(I18n.t("Nettoyage"));
-        nettoyage.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
-        nettoyage.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
-        nettoyage.add(mitem(I18n.t("Réparer les fichiers audio mal nommés…"), null, e -> repairMisnamedFiles()));
-        nettoyage.add(mitem(I18n.t("Nettoyer les dossiers orphelins…"), null, e -> cleanOrphanFolders()));
-        nettoyage.add(mitem(I18n.t("Revue des durées incohérentes…"), null,
-            e -> new DurationMismatchReviewDialog(this, tableModel).setVisible(true)));
-        nettoyage.add(mitem(I18n.t("Supprimer la sélection (corbeille)…"), null, e -> deleteSelectedFiles()));
-        bibliotheque.add(nettoyage);
-
-        JMenu rapports = new JMenu(I18n.t("Rapports"));
-        rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
-        rapports.add(mitem(I18n.t("Rapport Non identifiés…"), null,
-            e -> new NonIdentifiedReportDialog(this, tableModel).setVisible(true)));
-        rapports.add(mitem(I18n.t("Rapport Compilations restaurées…"), null,
-            e -> new CompilationRestoreReportDialog(this).setVisible(true)));
-        bibliotheque.add(rapports);
-
-        JMenu importExport = new JMenu(I18n.t("Import / Export"));
-        importExport.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
-        importExport.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
-        importExport.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
-        importExport.add(mitem(I18n.t("Importer XML iTunes…"), null,
-            e -> new ITunesImportDialog(this, tableModel).setVisible(true)));
-        importExport.add(mitem(I18n.t("Écrire les corrections dans le XML iTunes…"), null,
-            e -> writeItunesXmlCorrections()));
-        importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
-        bibliotheque.add(importExport);
-
-        bibliotheque.add(mitem(I18n.t("Envoyer vers Headphones (album manquant)…"), null, e -> sendToHeadphones()));
-        m.add(bibliotheque);
-
         JMenu musicbrainz = new JMenu("MusicBrainz");
+        musicbrainz.add(mitem(I18n.t("Compte MusicBrainz…"), null,         e -> MbAccountDialog.open(this)));
         musicbrainz.add(mitem(I18n.t("Modifier sur MusicBrainz"),null,      e -> openMbEditPage()));
         musicbrainz.add(mitem(I18n.t("Contribuer à MusicBrainz…"), null,   e -> openMbContribute()));
         musicbrainz.add(mitem(I18n.t("Soumettre fingerprint AcoustID"), null, e -> submitAcoustId()));
@@ -1284,6 +1424,59 @@ public class MainFrame extends JFrame {
         m.add(mitem(I18n.t("Vérifier les mises à jour…"), null,   e -> checkForUpdates(true)));
         m.add(mitem(I18n.t("À propos d'OpenTagger…"),     null,   e -> showAboutDialog()));
         return m;
+    }
+
+    /**
+     * Menu "Bibliothèque" — promu au premier niveau (2026-09-07, voir buildMenuBar()) après avoir
+     * vécu comme sous-menu d'"Outils". Découpé lui-même en sous-menus (2026-09-02, retour
+     * utilisateur "c'est le bordel", réorganisé 2026-09-07) — même motif déjà validé ailleurs (voir
+     * buildSubmenuSelection() : "7 items à plat, trop d'un coup") : 16 items à plat avait largement
+     * dépassé ce seuil au fil des fonctionnalités ajoutées.
+     */
+    private JMenu buildMenuBibliotheque() {
+        JMenu bibliotheque = new JMenu(I18n.t("Bibliothèque"));
+        bibliotheque.setMnemonic('B');
+
+        // "Nettoyage" : uniquement des actions DIRECTES (pas de fenêtre de revue) — voir "Rapports"
+        // juste en dessous pour les 5 fenêtres "filtrer une pile à problèmes puis agir dessus", qui
+        // vivaient ici de façon incohérente pour 2 d'entre elles avant ce correctif (2026-09-07).
+        JMenu nettoyage = new JMenu(I18n.t("Nettoyage"));
+        nettoyage.add(mitem(I18n.t("Supprimer les fichiers illisibles…"), null, e -> deleteErrorFiles()));
+        nettoyage.add(mitem(I18n.t("Réparer les fichiers audio mal nommés…"), null, e -> repairMisnamedFiles()));
+        nettoyage.add(mitem(I18n.t("Nettoyer les dossiers orphelins…"), null, e -> cleanOrphanFolders()));
+        nettoyage.add(mitem(I18n.t("Supprimer la sélection (corbeille)…"), null, e -> deleteSelectedFiles()));
+        bibliotheque.add(nettoyage);
+
+        // Les 5 fenêtres "filtrer une pile de fichiers à problèmes, agir dessus" regroupées ici
+        // (2026-09-07 — Détecter les doublons/Revue des durées incohérentes vivaient jusqu'ici dans
+        // "Nettoyage" sans lien avec les 3 autres, malgré la même forme). Le seul item du sous-menu
+        // qui n'ouvre PAS de fenêtre — juste un export JSON silencieux — est séparé et renommé pour
+        // ne plus se lire à tort comme une 6e fenêtre de revue.
+        JMenu rapports = new JMenu(I18n.t("Rapports"));
+        rapports.add(mitem(I18n.t("Détecter les doublons…"),  null,      e -> detectDuplicates()));
+        rapports.add(mitem(I18n.t("Revue rapide (notation)…"), "ctrl R", e -> openQuickReview()));
+        // Une seule entrée, deux onglets (durées incohérentes + audio ↔ tags) : « trop d'outils dans l'appli »
+        // (retour utilisateur, 2026-09-20) — voir SuspectFilesReviewDialog.
+        rapports.add(mitem(I18n.t("Revue des fichiers suspects…"), null,
+            e -> SuspectFilesReviewDialog.show(this, tableModel)));
+        rapports.add(mitem(I18n.t("Historique de taguage…"),  null,      e -> new HistoryDialog(this).setVisible(true)));
+        // Une seule entrée pour tous les rapports chiffrés (Non identifiés, Complétude, Compilations
+        // restaurées) — voir LibraryReportsDialog (2026-10-03, « trop d'options »).
+        rapports.add(mitem(I18n.t("Rapports de la bibliothèque…"), null,
+            e -> LibraryReportsDialog.open(this, tableModel)));
+        rapports.addSeparator();
+        rapports.add(mitem(I18n.t("Exporter un rapport JSON (diagnostic)…"), null,
+            e -> exportDiagnosticReport()));
+        bibliotheque.add(rapports);
+
+        JMenu importExport = new JMenu(I18n.t("Import / Export"));
+        importExport.add(mitem(I18n.t("Tagger comme podcast…"),    null,      e -> openPodcastDialog()));
+        importExport.add(mitem(I18n.t("Récupérer l'audio des vidéos non reconnues…"), null, e -> openVideoRecoveryDialog()));
+        importExport.add(mitem(I18n.t("Importer un CD…"), null, e -> new CdImportDialog(this).setVisible(true)));
+        importExport.add(mitem(I18n.t("Coller une URL Bandcamp…"), null, e -> openBandcampDialog()));
+        bibliotheque.add(importExport);
+
+        return bibliotheque;
     }
 
     private JMenuItem mitem(String label, String shortcut, java.awt.event.ActionListener al) {
@@ -1304,21 +1497,15 @@ public class MainFrame extends JFrame {
         bar.setBorder(new EmptyBorder(0, 0, 0, 0));
 
         // ── Branding gauche ──────────────────────────────────────────────────
-        JLabel logo = new JLabel() {
-            @Override protected void paintComponent(Graphics g) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2.setColor(ACCENT);
-                g2.fillRoundRect(6, 6, 32, 32, 8, 8);
-                g2.setColor(HEADER_BG);
-                g2.setFont(new Font("SansSerif", Font.BOLD, 14));
-                FontMetrics fm = g2.getFontMetrics();
-                String s = "OT";
-                g2.drawString(s, 6 + (32 - fm.stringWidth(s))/2, 6 + (32 + fm.getAscent() - fm.getDescent())/2);
-                g2.dispose();
-            }
-            @Override public Dimension getPreferredSize() { return new Dimension(44, 44); }
-        };
+        // Le VRAI logo (AppIcon : étiquette + double croche), pas un monogramme dessiné à la main —
+        // jusqu'au 2026-09-08 l'en-tête peignait un carré teal avec "OT" dedans pendant qu'AppIcon,
+        // déjà utilisée pour l'icône de fenêtre/barre des tâches, existait à côté sans être
+        // affichée nulle part dans l'interface. Deux identités visuelles pour la même appli, dont
+        // une qui ressemblait à un placeholder (retour utilisateur : "le logo est pas beau").
+        // glyph() et non at() : la variante sans carré de fond — dans une barre d'outils, le carré
+        // arrondi plein de l'icône de fenêtre se lit comme un autocollant posé par-dessus.
+        JLabel logo = new JLabel(new ImageIcon(AppIcon.glyph(30, ACCENT)));
+        logo.setBorder(new EmptyBorder(6, 8, 6, 2));
         JLabel appName = new JLabel("OpenTagger");
         appName.setForeground(new Color(0xE0E0E0));
         appName.putClientProperty("FlatLaf.style", "font: bold 15 $defaultFont");
@@ -1412,10 +1599,10 @@ public class MainFrame extends JFrame {
     public static final java.util.List<String[]> TOOLBAR_ACTION_INFOS = java.util.List.of(
         new String[]{"refreshFolders",     I18n.t("Rafraîchir")},
         new String[]{"transcode",          I18n.t("Transcoder")},
-        new String[]{"submitAcoustId",     I18n.t("Soumettre AcoustID")},
+        new String[]{"submitAcoustId",     I18n.t("Soumettre fingerprint AcoustID")},
         new String[]{"matchDialog",        I18n.t("Correspondance manuelle")},
         new String[]{"coverDialog",        I18n.t("Gérer la pochette")},
-        new String[]{"refreshMeta",        I18n.t("Rafraîchir tags + pochette")},
+        new String[]{"refreshMeta",        I18n.t("Rafraîchir tags + pochette + photo d'artiste")},
         new String[]{"forceRetag",         I18n.t("Forcer le re-taguage")},
         new String[]{"syncListenBrainz",   I18n.t("Synchroniser ListenBrainz")},
         new String[]{"syncLastFm",         I18n.t("Synchroniser Last.fm")},
@@ -1441,16 +1628,17 @@ public class MainFrame extends JFrame {
         list.add(new ToolbarAction("transcode", I18n.t("Transcoder"),
                 I18n.t("Transcoder la sélection, ou toute la bibliothèque si rien n'est sélectionné (Ctrl+T)"),
                 () -> transcodeFiles()));
-        list.add(new ToolbarAction("submitAcoustId", I18n.t("Soumettre AcoustID"),
+        list.add(new ToolbarAction("submitAcoustId", I18n.t("Soumettre fingerprint AcoustID"),
                 I18n.t("Envoyer les empreintes AcoustID de la sélection, ou de toute la bibliothèque si rien n'est sélectionné"),
                 this::submitAcoustId));
         list.add(new ToolbarAction("matchDialog", I18n.t("Correspondance manuelle"),
                 I18n.t("Rechercher/choisir manuellement une correspondance MusicBrainz"), this::openMatchDialog));
         list.add(new ToolbarAction("coverDialog", I18n.t("Gérer la pochette"),
                 I18n.t("Gérer la pochette du fichier sélectionné"), this::openCoverDialog));
-        list.add(new ToolbarAction("refreshMeta", I18n.t("Rafraîchir tags + pochette"),
-                I18n.t("Rafraîchir les tags et la pochette de la sélection depuis MusicBrainz (utile pour "
-                + "corriger tout un album sélectionné d'un coup)"), this::refreshSelectedMeta));
+        list.add(new ToolbarAction("refreshMeta", I18n.t("Rafraîchir tags + pochette + photo d'artiste"),
+                I18n.t("Rafraîchir les tags, la pochette et la photo d'artiste de la sélection depuis "
+                + "MusicBrainz/Discogs (utile pour corriger tout un album sélectionné d'un coup, ou une "
+                + "image erronée)"), this::refreshSelectedMeta));
         list.add(new ToolbarAction("forceRetag", I18n.t("Forcer le re-taguage"),
                 I18n.t("Remettre en PENDING et re-taguer"), this::forceRetag));
         list.add(new ToolbarAction("syncListenBrainz", I18n.t("Synchroniser ListenBrainz"),
@@ -1543,7 +1731,6 @@ public class MainFrame extends JFrame {
         secondaryToolbarPanel.repaint();
     }
 
-    private JButton accentBtn(String text, String tip) { return accentBtn(text, tip, null); }
 
     // Icône sombre (même teinte que le texte #1E1F22) : les 4 boutons "header" sont tous sur le
     // fond sombre de la barre d'outils, celui-ci seul est sur fond teal plein — une icône claire y
@@ -1559,7 +1746,6 @@ public class MainFrame extends JFrame {
         return b;
     }
 
-    private JButton headerBtn(String text, String tip) { return headerBtn(text, tip, null); }
 
     private JButton headerBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
@@ -1568,11 +1754,25 @@ public class MainFrame extends JFrame {
         // Relief 3D plus marqué (retour utilisateur, 2026-08-10) : le rendu FlatLaf par défaut
         // (bordure/dégradé très subtils) ne se voyait pas assez à son goût — bordure explicite +
         // fond légèrement plus clair que l'arrière-plan pour un bouton net, nettement "en relief".
+        // Teintes dérivées du THÈME (2026-09-08) et non plus des hex figés d'un thème sombre :
+        // depuis l'ajout du sélecteur de thèmes (ThemeManager), un "#3A3A3E" en dur donnait des
+        // boutons anthracite sur fond blanc dès qu'on passait sur un thème clair. autoInverse fait
+        // éclaircir sur fond sombre et assombrir sur fond clair, avec le même écart relatif.
         b.putClientProperty("FlatLaf.style",
-            "foreground: #CFD8DC; borderWidth: 1; borderColor: #4A4A4E; background: #3A3A3E; "
-            + "hoverBackground: #45454A; pressedBackground: #2E2E32; arc: 6");
-        if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0xCFD8DC))); b.setIconTextGap(7); }
+            "foreground: $Label.foreground; borderWidth: 1; borderColor: $Component.borderColor; "
+            + "background: lighten($Panel.background,7%,autoInverse); "
+            + "hoverBackground: lighten($Panel.background,12%,autoInverse); "
+            + "pressedBackground: darken($Panel.background,4%,autoInverse); arc: 6");
+        if (icon != null) { b.setIcon(new ToolbarIcon(icon, iconColor())); b.setIconTextGap(7); }
         return b;
+    }
+
+    /** Couleur d'icône de barre d'outils, prise sur le thème courant — les icônes sont peintes une
+     *  fois à la construction, donc un changement de thème à chaud les laisse à leur teinte
+     *  d'origine jusqu'au prochain démarrage (le reste de l'interface, lui, suit immédiatement). */
+    private static Color iconColor() {
+        Color c = UIManager.getColor("Label.foreground");
+        return c != null ? c : new Color(0xCFD8DC);
     }
 
     /** Même rôle que headerBtn() mais plus discret (police plus petite, gris atténué) — utilisé
@@ -1580,7 +1780,6 @@ public class MainFrame extends JFrame {
      *  distinguer visuellement des 5 actions fixes (Ouvrir/Rafraîchir/Tout tagger/Tagger la
      *  sélection/Annuler), plutôt que d'avoir 8+ boutons de poids visuel identique dans la même
      *  rangée. */
-    private JButton secondaryBtn(String text, String tip) { return secondaryBtn(text, tip, null); }
 
     private JButton secondaryBtn(String text, String tip, ToolbarIcon.Kind icon) {
         JButton b = new JButton(text);
@@ -1588,10 +1787,15 @@ public class MainFrame extends JFrame {
         b.setFocusPainted(false);
         // Même relief 3D explicite que headerBtn() (voir son commentaire), en plus discret —
         // cohérent avec le rôle "action secondaire" de ce bouton (police déjà plus petite/atténuée).
+        // Mêmes teintes dérivées du thème que headerBtn() (voir son commentaire), un cran plus
+        // discret : texte atténué et fond à peine détaché du panneau.
         b.putClientProperty("FlatLaf.style",
-            "foreground: #90A4AE; font: 11 $defaultFont; borderWidth: 1; borderColor: #424246; "
-            + "background: #333336; hoverBackground: #3D3D41; pressedBackground: #29292C; arc: 6");
-        if (icon != null) { b.setIcon(new ToolbarIcon(icon, new Color(0x90A4AE), 14)); b.setIconTextGap(6); }
+            "foreground: fade($Label.foreground,70%); font: 11 $defaultFont; borderWidth: 1; "
+            + "borderColor: fade($Component.borderColor,70%); "
+            + "background: lighten($Panel.background,4%,autoInverse); "
+            + "hoverBackground: lighten($Panel.background,9%,autoInverse); "
+            + "pressedBackground: darken($Panel.background,5%,autoInverse); arc: 6");
+        if (icon != null) { b.setIcon(new ToolbarIcon(icon, iconColor(), 14)); b.setIconTextGap(6); }
         return b;
     }
 
@@ -1616,21 +1820,12 @@ public class MainFrame extends JFrame {
         return b;
     }
 
-    private JButton btn(String text, String tip) {
-        JButton b = new JButton(text);
-        b.setToolTipText(tip);
-        b.setFocusPainted(false);
-        return b;
-    }
-
     private JSeparator vSep() {
         JSeparator s = new JSeparator(JSeparator.VERTICAL);
         s.setPreferredSize(new Dimension(1, 22));
         s.setForeground(new Color(0x3A3B3E));
         return s;
     }
-
-    private Dimension dim(int w) { return new Dimension(w, 0); }
 
     // ── Bande de statistiques live ────────────────────────────────────────────
 
@@ -1723,7 +1918,7 @@ public class MainFrame extends JFrame {
                 applyFilter();
             }
         });
-        styleChip(l, color, false);
+        styleChip(l, color, false, false);
         return l;
     }
 
@@ -1735,24 +1930,48 @@ public class MainFrame extends JFrame {
         l.putClientProperty("FlatLaf.style", "font: bold 11 $defaultFont");
         l.setOpaque(true);
         l.setToolTipText(I18n.t("Débit et temps restant estimé, sur les ~12 dernières minutes"));
-        styleChip(l, color, false);
+        styleChip(l, color, false, false);
         return l;
     }
 
-    /** Applique l'apparence active/inactive d'un chip (fond teinté + bordure épaisse si actif). */
-    private void styleChip(JLabel chip, Color color, boolean active) {
-        Color translucent = new Color(color.getRed(), color.getGreen(), color.getBlue(), 90);
-        chip.setForeground(active ? Color.WHITE : color);
-        chip.setBackground(active ? blend(new Color(0x252527), translucent) : new Color(0x252527));
-        // Relief 3D (retour utilisateur, 2026-08-10) : la LineBorder colorée seule restait plate,
-        // aucun jeu d'ombre/lumière — un BevelBorder (clair en haut/gauche, foncé en bas/droite,
-        // dérivé de la couleur du chip) ajoute un vrai relief sans changer la couleur ni la logique
-        // active/inactive existantes, juste enveloppé autour d'elles.
+    /**
+     * Apparence d'un chip — trois états seulement, volontairement :
+     * <ul>
+     *   <li><b>normal</b> : chrome entièrement neutre, aucune couleur de catégorie ;</li>
+     *   <li><b>alerte</b> : compteur non nul sur Erreurs / Non identifiés → texte coloré, la
+     *       couleur redevient un signal qu'on remarque ;</li>
+     *   <li><b>actif</b> : filtre appliqué → fond accent plein, une seule teinte dans toute l'appli.</li>
+     * </ul>
+     *
+     * <p>Avant ce correctif (2026-09-08), chaque chip portait SA propre bordure néon plus un relief
+     * 3D : sept couleurs saturées de poids identique alignées en haut de l'écran, plus le bouton
+     * Journal vert et l'accent teal — l'œil n'avait nulle part où se poser et la couleur ne
+     * signalait plus rien puisque tout était coloré. Diagnostic posé en regardant une capture de
+     * l'appli après un retour utilisateur qu'il ne parvenait pas à formuler ("le logo est pas beau,
+     * qqch me saoule, impossible à t'expliquer").
+     *
+     * <p>Les teintes viennent du THÈME courant (UIManager) et non plus de gris sombres codés en
+     * dur : depuis l'ajout du sélecteur de thèmes (voir ThemeManager), un 0x252527 en dur donnait
+     * des pastilles anthracite sur fond blanc en thème clair.
+     */
+    private void styleChip(JLabel chip, Color color, boolean active, boolean alert) {
+        Color panelBg = UIManager.getColor("Panel.background");
+        Color borderC = UIManager.getColor("Component.borderColor");
+        Color textC   = UIManager.getColor("Label.foreground");
+        if (panelBg == null) panelBg = new Color(0x252527);
+        if (borderC == null) borderC = new Color(0x3A3A3E);
+        if (textC   == null) textC   = Color.LIGHT_GRAY;
+
+        // Fond légèrement détaché du panneau (plus clair en thème sombre, plus foncé en clair) —
+        // suffisant pour lire "pastille" sans avoir besoin d'une bordure colorée pour la délimiter.
+        boolean dark = com.formdev.flatlaf.FlatLaf.isLafDark();
+        Color chipBg = blend(panelBg, new Color(dark ? 255 : 0, dark ? 255 : 0, dark ? 255 : 0, 18));
+
+        chip.setBackground(active ? ACCENT : chipBg);
+        chip.setForeground(active ? Color.WHITE : (alert ? color : textC));
         chip.setBorder(new CompoundBorder(
-            new LineBorder(color.darker(), active ? 2 : 1, true),
-            new CompoundBorder(
-                new BevelBorder(BevelBorder.RAISED, color.brighter(), color.darker()),
-                new EmptyBorder(1, 5, 1, 5))));
+            new LineBorder(active ? ACCENT : borderC, 1, true),
+            new EmptyBorder(2, 8, 2, 8)));
     }
 
     private JLabel sep3() {
@@ -1790,6 +2009,7 @@ public class MainFrame extends JFrame {
             restoreTableSelection(sel);
         }
         int tagged = 0, identified = 0, skipped = 0, error = 0, pending = 0;
+        long libraryBytes = 0;
         // Chips de statut (hors "Total") : TOUJOURS le vrai compte global par statut, sur
         // tableModel.allEntries() (jamais affecté par le filtre, contrairement à getRowCount()/
         // get() qui portent sur la vue déjà filtrée) — sinon activer un filtre sur UN statut fait
@@ -1801,12 +2021,25 @@ public class MainFrame extends JFrame {
         // contrairement à l'ancien commentaire sur la vue arborescence. Seuls le TABLEAU et le
         // second nombre du chip "Total" ci-dessous continuent de refléter le filtre actif.
         for (FileEntry e : tableModel.allEntries()) {
+            libraryBytes += e.sizeBytes;
             switch (e.status) {
                 case TAGGED     -> tagged++;
                 case IDENTIFIED -> identified++;
                 case SKIPPED    -> skipped++;
                 case ERROR      -> error++;
                 default         -> pending++;
+            }
+        }
+        // Taille totale de la bibliothèque chargée (tout ce qui est en mémoire, indépendamment du
+        // filtre actif — comme les chips de statut ci-dessus).
+        if (lblLibrarySize != null) {
+            int loaded = tableModel.allEntries().size();
+            if (loaded == 0) {
+                lblLibrarySize.setVisible(false);
+            } else {
+                lblLibrarySize.setText(I18n.t("Bibliothèque : %s (%d fichiers)",
+                        com.opentagger.ByteFormat.format(libraryBytes), loaded));
+                lblLibrarySize.setVisible(true);
             }
         }
         // "Total" reste lié au filtre actif (lignes visibles / total réel) — c'est le seul chip
@@ -1830,13 +2063,16 @@ public class MainFrame extends JFrame {
             pendingHistory.removeFirst();
         lblThroughput.setText(throughputText(pending));
 
-        // Chip actif = celui qui correspond au filtre statut actuellement appliqué.
-        styleChip(lblStatTotal,      CHIP_TOTAL,      activeStatusFilter == FILTER_ALL);
-        styleChip(lblStatIdentified, CHIP_IDENTIFIED, activeStatusFilter == FILTER_IDENTIFIED);
-        styleChip(lblStatTagged,     CHIP_TAGGED,     activeStatusFilter == FILTER_TAGGED);
-        styleChip(lblStatSkipped,    CHIP_SKIPPED,    activeStatusFilter == FILTER_SKIPPED);
-        styleChip(lblStatError,      CHIP_ERROR,      activeStatusFilter == FILTER_ERROR);
-        styleChip(lblStatPending,    CHIP_PENDING,    activeStatusFilter == FILTER_PENDING);
+        // Chip actif = celui qui correspond au filtre statut actuellement appliqué. L'état "alerte"
+        // (texte coloré) est réservé aux DEUX compteurs qui appellent vraiment une action, et
+        // seulement s'ils sont non nuls : une pastille "Erreurs 0" en rouge permanent était du bruit,
+        // pas une information.
+        styleChip(lblStatTotal,      CHIP_TOTAL,      activeStatusFilter == FILTER_ALL,        false);
+        styleChip(lblStatIdentified, CHIP_IDENTIFIED, activeStatusFilter == FILTER_IDENTIFIED, false);
+        styleChip(lblStatTagged,     CHIP_TAGGED,     activeStatusFilter == FILTER_TAGGED,     false);
+        styleChip(lblStatSkipped,    CHIP_SKIPPED,    activeStatusFilter == FILTER_SKIPPED,    skipped > 0);
+        styleChip(lblStatError,      CHIP_ERROR,      activeStatusFilter == FILTER_ERROR,      error > 0);
+        styleChip(lblStatPending,    CHIP_PENDING,    activeStatusFilter == FILTER_PENDING,    false);
     }
 
     // ── Split pane table / détail ─────────────────────────────────────────────
@@ -2186,6 +2422,9 @@ public class MainFrame extends JFrame {
     // phase1Semaphore (pas seulement mis en file), DONE dès que sa phase 1 se termine — signalent
     // à process() quand détacher/réattacher le RowSorter, sans compter les scans encore en attente.
     private static final Object PHASE1_START_MARKER = new Object();
+    /** Phase 2 d'un scan : l'entrée à extension audio était en fait un DOSSIER (voir
+     *  AudioScanner.scan(..., trustAudioExtension)) — à retirer du tableau. */
+    private static final Object NOT_A_FILE_MARKER = new Object();
     private static final Object PHASE1_DONE_MARKER  = new Object();
 
     // ── Résolution ligne de vue → FileEntry, indépendante du modèle attaché ───
@@ -2238,8 +2477,25 @@ public class MainFrame extends JFrame {
             if (vr >= 0) viewRows.add(vr);
         }
         if (viewRows.isEmpty()) return;
-        table.clearSelection();
-        for (int vr : viewRows) table.addRowSelectionInterval(vr, vr);
+        // setValueIsAdjusting(true) autour de TOUTE la boucle (2026-09-03, gel EDT trouvé en
+        // direct pendant un "Forcer le re-taguage" sur toute la bibliothèque avec une grosse
+        // sélection active) : sans ça, chaque addRowSelectionInterval() déclenche SON PROPRE
+        // ListSelectionEvent avec getValueIsAdjusting()=false, donc le listener de la ligne 557
+        // (qui saute volontairement le travail tant que isAdjusting()) fait le plein
+        // refreshDetail()/populateMulti() à CHAQUE ligne réajoutée au lieu d'une seule fois à la
+        // fin — et comme restoreTableSelection() est rappelée à chaque tick de refreshStats()
+        // pendant un gros lot, ce O(N) par appel devenait O(N²) répété des centaines de fois :
+        // deux prises jstack à 5s d'écart montraient l'EDT coincé dans exactement cette pile
+        // (DetailPanel.setM ← populateMulti ← refreshDetail ← restoreTableSelection ←
+        // refreshStats), CPU EDT toujours RUNNABLE mais l'app entièrement figée pour l'utilisateur.
+        javax.swing.ListSelectionModel sm = table.getSelectionModel();
+        sm.setValueIsAdjusting(true);
+        try {
+            table.clearSelection();
+            for (int vr : viewRows) table.addRowSelectionInterval(vr, vr);
+        } finally {
+            sm.setValueIsAdjusting(false); // déclenche l'unique refreshDetail() différé
+        }
     }
 
     /**
@@ -2451,7 +2707,18 @@ public class MainFrame extends JFrame {
                 else                           pb = new ProcessBuilder("xdg-open", dir.getAbsolutePath());
                 pb.start();
             } catch (Exception ex) {
-                showError(I18n.t("Impossible d'ouvrir le dossier : %s", ex.getMessage()));
+                // showError() (JOptionPane modal) remplacé ici après un vrai blocage en direct
+                // (2026-09-22) : le dialogue s'est ouvert avec une géométrie dégénérée (1x1 px,
+                // invisible — xwininfo l'a confirmé), tout en restant modal, gelant l'EDT (donc toute
+                // l'appli) sans qu'aucun bouton visible ne permette de le fermer ; même une fois sa
+                // fenêtre X11 détruite depuis l'extérieur, le thread EDT est resté bloqué dans
+                // Dialog.show() — seul un redémarrage a débloqué l'appli. Cause X11/Swing exacte non
+                // confirmée (peut-être liée au multi-écran de cette machine), mais l'échec réel ici
+                // ("xdg-open" indisponible/erreur) est mineur — jamais la peine de risquer de geler
+                // toute l'appli pour ça. setStatus() (nombreux précédents dans ce fichier) ne peut
+                // pas produire ce blocage : pas de fenêtre modale, juste une ligne dans la barre d'état.
+                System.out.println("[OT] Révéler dans le gestionnaire de fichiers : échec — " + ex.getMessage());
+                setStatus(I18n.t("Impossible d'ouvrir le dossier : %s", ex.getMessage()));
             }
         });
         miRemove.addActionListener(e -> {
@@ -2475,8 +2742,10 @@ public class MainFrame extends JFrame {
         JMenuItem miCover = new JMenuItem("🖼  " + I18n.t("Gérer la pochette…"));
         miCover.addActionListener(e -> openCoverDialog());
 
-        JMenuItem miRefreshMeta = new JMenuItem("↺  " + I18n.t("Rafraîchir tags + pochette (sélection)"));
+        JMenuItem miRefreshMeta = new JMenuItem("↺  " + I18n.t("Rafraîchir tags + pochette + photo d'artiste (sélection)"));
         miRefreshMeta.addActionListener(e -> refreshSelectedMeta());
+        miRefreshMeta.setToolTipText(I18n.t("Force une nouvelle recherche même si une pochette/photo existe déjà"
+                + " (sur le fichier ET dans le tag) — utile pour corriger une image erronée"));
 
         JMenuItem miMbEdit = new JMenuItem("✏  " + I18n.t("Modifier sur MusicBrainz"));
         miMbEdit.addActionListener(e -> openMbEditPage());
@@ -2505,7 +2774,7 @@ public class MainFrame extends JFrame {
         headerMenu.add(miTagAlbum); headerMenu.add(miRevealAlbum);
 
         table.addMouseListener(new MouseAdapter() {
-            @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
+            @Override public void mousePressed(MouseEvent e)  { lastManualTableClickMs = System.currentTimeMillis(); maybeShow(e); }
             @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
 
             // Plier/déplier CE groupe précis en cliquant dessus — pas seulement via "Tout
@@ -2656,11 +2925,20 @@ public class MainFrame extends JFrame {
         accentLine.setMaximumSize(new Dimension(Integer.MAX_VALUE, 2));
 
         // ── Titre section "MÉTADONNÉES" ───────────────────────────────────────
+        // Bandeau pleine largeur, aligné à gauche. Avant ce correctif (2026-09-08) il n'avait ni
+        // alignmentX ni maximumSize : java.awt.Component.getAlignmentX() vaut CENTER_ALIGNMENT par
+        // défaut, donc BoxLayout.Y_AXIS le CENTRAIT et le réduisait à la largeur du texte — un petit
+        // rectangle opaque flottant au milieu, au-dessus des onglets, qu'on lisait comme un artefact
+        // détaché plutôt que comme un titre de section (repéré à l'écran sur capture).
         JLabel metaTitle = new JLabel(I18n.t("  MÉTADONNÉES"));
         metaTitle.putClientProperty("FlatLaf.style",
-            "foreground: #546E7A; font: bold 10 $defaultFont; background: #252527");
+            "foreground: fade($Label.foreground,55%); font: bold 10 $defaultFont; "
+            + "background: lighten($Panel.background,4%,autoInverse)");
         metaTitle.setOpaque(true);
         metaTitle.setBorder(new EmptyBorder(5, 0, 5, 0));
+        metaTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+        metaTitle.setHorizontalAlignment(SwingConstants.LEFT); // pas seulement le composant : le TEXTE dedans
+        metaTitle.setMaximumSize(new Dimension(Integer.MAX_VALUE, metaTitle.getPreferredSize().height + 10));
 
         // ── DetailPanel (champs de tags) ─────────────────────────────────────
         detailPanel = new DetailPanel();
@@ -2681,6 +2959,20 @@ public class MainFrame extends JFrame {
         // JTabbedPane, dont chaque onglet gère déjà son propre scroll.
         JPanel header = new JPanel();
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
+        // Axe d'alignement UNIFORME (2026-09-08). BoxLayout.Y_AXIS aligne ses enfants les uns par
+        // rapport aux autres selon leur alignmentX ; par défaut Component.getAlignmentX() vaut
+        // CENTER_ALIGNMENT, donc mélanger un enfant à 0.0 avec des enfants restés à 0.5 place l'axe
+        // ailleurs qu'au bord gauche du panneau — le bandeau "MÉTADONNÉES" se retrouvait décalé vers
+        // la droite, texte compris, malgré une largeur maximale déjà à MAX_VALUE. Tous les enfants
+        // passent donc à LEFT_ALIGNMENT + largeur maximale illimitée : chacun occupe toute la
+        // largeur, et ceux qui doivent PARAÎTRE centrés (pochette, message d'accueil) le restent via
+        // leur propre centrage interne.
+        for (JComponent c : new JComponent[]{coverSection, lblFilePath, accentLine, metaTitle}) {
+            c.setAlignmentX(Component.LEFT_ALIGNMENT);
+        }
+        coverSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        lblFilePath.setMaximumSize(new Dimension(Integer.MAX_VALUE, lblFilePath.getPreferredSize().height));
+        lblFilePath.setHorizontalAlignment(SwingConstants.CENTER);
         header.add(coverSection);
         header.add(lblFilePath);
         header.add(Box.createVerticalStrut(6));
@@ -2715,7 +3007,23 @@ public class MainFrame extends JFrame {
      * automatiquement, mais un appel explicite ici documente l'intention et reste sans risque
      * (idempotent).
      */
+    // Horodatage du dernier clic MANUEL de l'utilisateur dans le tableau — voir son usage dans
+    // followProcessing() juste en dessous. Mis à jour par un mousePressed dédié (jamais déclenché
+    // par un setRowSelectionInterval() programmatique, qui ne génère aucun événement souris réel).
+    private volatile long lastManualTableClickMs = 0;
+    // Fenêtre pendant laquelle le suivi automatique se met en pause après un clic manuel — retour
+    // utilisateur (2026-09-13) : suivre parcourait/resélectionnait sans arrêt PENDANT qu'il essayait
+    // de cliquer une ligne précise en direct (un run de 40000+ fichiers en cours), rendant impossible
+    // toute navigation manuelle dans le tableau tant qu'un taguage tournait. Le suivi reste utile
+    // pour la surveillance sans surveillance active (retour visuel qu'on avance) — seul le CONFLIT
+    // avec une interaction manuelle récente est corrigé ici, pas le mécanisme lui-même.
+    private static final long FOLLOW_PAUSE_AFTER_CLICK_MS = 60_000;
+
     private void followProcessing(FileEntry entry) {
+        // Case « Garder le panneau Journal synchronisé… » (Préférences → Renommage) : elle était enregistrée mais jamais lue, le suivi
+        // (qui reselectionne la ligne en cours à chaque fichier traité) restait donc imposé.
+        if (!Config.get().bool("rename.follow_log", true)) return;
+        if (System.currentTimeMillis() - lastManualTableClickMs < FOLLOW_PAUSE_AFTER_CLICK_MS) return;
         int viewRow;
         if (viewMode == ViewMode.GROUPED) {
             // Ligne de son groupe si déplié, sinon la ligne d'en-tête du groupe — jamais forcé
@@ -2777,8 +3085,12 @@ public class MainFrame extends JFrame {
             loadCoverThumb(f);
         } else {
             // Mode multi-sélection — édition en lot
+            // Au-delà de 2000 fichiers, les valeurs « communes » affichées sont calculées sur un échantillon régulier de 500 : l'affichage
+            // ne sert qu'à montrer ce qui est identique, l'édition en lot n'applique que les champs REMPLIS par l'utilisateur. Calculer
+            // les ~100 champs sur 30 000 fichiers gelait l'interface à chaque rafraîchissement de la sélection.
             List<TagInfo> tags = new ArrayList<>();
-            for (FileEntry e : entries) tags.add(e.activeTags());
+            int step = entries.size() > 2000 ? entries.size() / 500 : 1;
+            for (int i = 0; i < entries.size(); i += step) tags.add(entries.get(i).activeTags());
             lblFilePath.setText(I18n.t("  %d fichiers sélectionnés — les champs vides ne seront pas modifiés", entries.size()));
             detailPanel.populateMulti(tags);
             lblCoverImg.setIcon(null); lblCoverImg.setText(entries.size() + "");
@@ -2829,34 +3141,6 @@ public class MainFrame extends JFrame {
     }
 
     /**
-     * Applique une note importée (voir ITunesImportDialog) à chaque entrée du tableau
-     * actuellement chargée — même chemin que applyDetail() (snapshot avant/après, undo persistant,
-     * écriture sécurisée) pour qu'une note importée par erreur reste annulable exactement comme
-     * une édition manuelle, y compris après redémarrage (voir UndoManager). Ne touche jamais un
-     * fichier qui n'est pas actuellement dans ce tableau — voir ITunesImportDialog pour le
-     * pourquoi (ne jamais écrire sur un fichier que l'utilisateur n'a pas chargé/vu cette
-     * session).
-     */
-    /** Répercute une note éditée manuellement vers la file XML iTunes (voir ITunesXmlSyncQueue) —
-     *  UNIQUEMENT si ce fichier a déjà un Track ID connu (établi par un import XML antérieur, voir
-     *  ITunesImportDialog) ; no-op silencieux sinon (immense majorité des fichiers). Ne pousse
-     *  jamais rien depuis applyRatingImport() elle-même : la note vient déjà de ce même Track ID,
-     *  la repousser serait un aller-retour sans effet. */
-    private void queueRatingBackToItunes(FileEntry e, String newRating) {
-        if (e.itunesTrackId == null || newRating == null || newRating.isBlank()) return;
-        try {
-            int stars = Integer.parseInt(newRating.trim());
-            if (stars >= 1 && stars <= 5) {
-                com.opentagger.ITunesXmlSyncQueue.queueRatingChange(e.itunesTrackId, stars);
-            }
-        } catch (NumberFormatException ignored) {
-            // Valeur brute ID3 (0-255) plutôt que 1-5 étoiles — voir TagEnrichment.parseStars()
-            // pour la même ambiguïté ; pas assez fiable pour repousser vers iTunes sans risquer un
-            // mauvais nombre d'étoiles, on préfère s'abstenir.
-        }
-    }
-
-    /**
      * Applique un album Bandcamp (voir BandcampMatchDialog) — position N de l'album → N-ième
      * fichier de {@code selection} (ordre déjà fixé par le tableau au moment de l'appel). Même
      * circuit que les autres écritures manuelles (snapshot/undo persistant/écriture sécurisée).
@@ -2883,6 +3167,14 @@ public class MainFrame extends JFrame {
                 java.util.regex.Matcher ym = java.util.regex.Pattern.compile("\\b(\\d{4})\\b")
                         .matcher(album.releaseDate());
                 if (ym.find()) ti.year = ym.group(1);
+                // Autres champs de la page Bandcamp (2026-09-20) — sans écraser une valeur déjà présente.
+                ti.bandcampUrl = album.albumUrl();
+                if (album.extra() != null) {
+                    if (ti.label.isBlank())     ti.label     = album.extra().label();
+                    if (ti.tags.isBlank())      ti.tags      = album.extra().keywords();
+                    if (ti.copyright.isBlank()) ti.copyright = album.extra().copyright();
+                    if (ti.license.isBlank())   ti.license   = album.extra().license();
+                }
                 int mr = tableModel.indexOf(e);
                 if (mr >= 0) refreshTableRow(mr, ti);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
@@ -2896,198 +3188,8 @@ public class MainFrame extends JFrame {
         }
     }
 
-    /** @return succès d'écriture RÉEL par fichier (pas juste "traité") — retour utilisateur
-     *  (2026-08-24) : ITunesImportDialog n'avait aucun moyen de savoir si l'écriture sur disque
-     *  avait vraiment réussi pour chaque fichier, seulement un compte global optimiste. */
-    public java.util.Map<FileEntry, Boolean> applyRatingImport(java.util.Map<FileEntry, String> newRatings) {
-        java.util.Map<FileEntry, Boolean> results = new java.util.LinkedHashMap<>();
-        if (newRatings.isEmpty()) return results;
-        MetadataCache correctionsCache = new MetadataCache();
-        try {
-            for (var entry : newRatings.entrySet()) {
-                FileEntry e    = entry.getKey();
-                TagInfo   snap = com.opentagger.UndoManager.snapshot(e.activeTags());
-                TagInfo   ti   = e.activeTags();
-                ti.rating = entry.getValue();
-                int mr = tableModel.indexOf(e);
-                if (mr >= 0) refreshTableRow(mr, ti);
-                undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti),
-                        I18n.t("Import note iTunes %s", e.filename()));
-                recordFieldCorrections(correctionsCache, e, snap, ti);
-                boolean written = writeTagsSafe(e, ti);
-                if (written) markManuallyTagged(e, ti, mr);
-                results.put(e, written);
-            }
-            long okCount = results.values().stream().filter(Boolean::booleanValue).count();
-            setStatus(I18n.t("Notes iTunes appliquées — %d/%d fichier(s) écrit(s)", okCount, newRatings.size()));
-        } finally {
-            correctionsCache.close();
-        }
-        return results;
-    }
-
-    /**
-     * Applique la file d'attente (voir ITunesXmlSyncQueue) au VRAI fichier XML iTunes — action
-     * manuelle explicite uniquement, jamais déclenchée automatiquement (voir ITunesXmlWriter pour
-     * les garanties : sauvegarde horodatée systématique, réécriture chirurgicale ligne par ligne,
-     * jamais un DOM complet). Demande utilisateur (2026-08-16) après mise en garde sur le risque
-     * réel de désynchronisation avec la vraie base iTunes (.itl).
-     */
-    private void writeItunesXmlCorrections() {
-        int pending = com.opentagger.ITunesXmlSyncQueue.pendingCount();
-        if (pending == 0) {
-            JOptionPane.showMessageDialog(this,
-                    I18n.t("Aucune correction en attente (renommage ou note sur un fichier importé depuis iTunes)."),
-                    I18n.t("XML iTunes"), JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        JFileChooser fc = new JFileChooser();
-        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("iTunes Music Library.xml", "xml"));
-        fc.setDialogTitle(I18n.t("Fichier XML iTunes à corriger"));
-        // Chemin mémorisé (Préférences > iTunes) — voir Config.itunesXmlFilePath().
-        String remembered = Config.get().itunesXmlFilePath();
-        if (!remembered.isBlank()) fc.setSelectedFile(new java.io.File(remembered));
-        if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        java.io.File xml = fc.getSelectedFile();
-
-        // Même garde que ITunesImportDialog (voir son commentaire, 2026-08-17) : un dossier validé
-        // par erreur au lieu du fichier XML lui-même.
-        if (xml.isDirectory()) {
-            java.io.File candidate = new java.io.File(xml, "iTunes Music Library.xml");
-            if (candidate.isFile()) {
-                xml = candidate;
-            } else {
-                JOptionPane.showMessageDialog(this, I18n.t(
-                        "\"%s\" est un dossier, pas le fichier XML lui-même — et aucun "
-                      + "\"iTunes Music Library.xml\" n'a été trouvé dedans.", xml.getName()),
-                        I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
-                return;
-            }
-        }
-        if (!xml.isFile()) {
-            JOptionPane.showMessageDialog(this,
-                    I18n.t("Fichier introuvable : %s", xml.getAbsolutePath()),
-                    I18n.t("Sélection invalide"), JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        Config.get().set("itunes.xml_file_path", xml.getAbsolutePath());
-
-        int ok = JOptionPane.showConfirmDialog(this, I18n.t(
-                "%d correction(s) en attente vont être écrites dans :\n%s\n\n"
-              + "Une sauvegarde horodatée sera créée AVANT toute modification "
-              + "(fichier.backup_AAAAMMJJ_HHMMSS, dans le même dossier).\n\n"
-              + "Continuer ?", pending, xml.getAbsolutePath()),
-                I18n.t("Confirmer l'écriture"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-        if (ok != JOptionPane.YES_OPTION) return;
-
-        setStatus(I18n.t("Écriture des corrections dans le XML iTunes…"));
-        final java.io.File xmlFinal = xml;
-        new SwingWorker<com.opentagger.ITunesXmlWriter.Result, Void>() {
-            @Override protected com.opentagger.ITunesXmlWriter.Result doInBackground() throws Exception {
-                var changes = com.opentagger.ITunesXmlSyncQueue.snapshotAndClear();
-                return com.opentagger.ITunesXmlWriter.apply(xmlFinal, changes);
-            }
-            @Override protected void done() {
-                try {
-                    var r = get();
-                    JOptionPane.showMessageDialog(MainFrame.this, I18n.t(
-                            "%d chemin(s) corrigé(s), %d note(s) mise(s) à jour, %d ignoré(s) "
-                          + "(vérification aller-retour échouée ou préfixe non configuré).\n\n"
-                          + "Sauvegarde : %s",
-                            r.locationChanges(), r.ratingChanges(), r.skippedUnverified(),
-                            r.backupFile() != null ? r.backupFile().getAbsolutePath() : "—"),
-                            I18n.t("XML iTunes mis à jour"), JOptionPane.INFORMATION_MESSAGE);
-                    setStatus(I18n.t("XML iTunes mis à jour"));
-                } catch (Exception ex) {
-                    showError(I18n.t("Échec de l'écriture du XML iTunes : %s", ex.getMessage()));
-                }
-            }
-        }.execute();
-    }
-
     /** Sélection actuelle, DANS L'ORDRE du tableau (pas l'ordre de clic) — voir BandcampMatchDialog,
      *  qui applique la piste N de Bandcamp au N-ième élément de cette liste. */
-    /**
-     * Signale à une instance Headphones tierce (API HTTP, voir HeadphonesClient) qu'un album trouvé
-     * ici mérite d'être mis en recherche/téléchargement de son côté — pour le fichier actuellement
-     * sélectionné. Toujours une confirmation explicite (JOptionPane) avant queueAlbum() : findAlbum()
-     * est une recherche texte MusicBrainz, jamais assez fiable pour agir silencieusement sur un
-     * service externe. Demande utilisateur (2026-08-29), API vérifiée en direct avant implémentation.
-     */
-    private void sendToHeadphones() {
-        FileEntry entry = entryAtViewRow(table.getSelectedRow());
-        if (entry == null) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Sélectionne d'abord un fichier (pas un en-tête de groupe)."),
-                "Headphones", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        TagInfo ti = entry.activeTags();
-        String artist = ti != null ? ti.artist : "";
-        String album  = ti != null ? ti.album  : "";
-        if (artist.isBlank() || album.isBlank()) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Ce fichier n'a pas encore d'artiste/album identifié."),
-                "Headphones", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        HeadphonesClient client = new HeadphonesClient();
-        if (!client.isConfigured()) {
-            JOptionPane.showMessageDialog(this,
-                I18n.t("Configure d'abord l'URL et la clé API Headphones dans Préférences → APIs."),
-                "Headphones", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-
-        setStatus(I18n.t("Recherche \"%s – %s\" sur Headphones…", artist, album));
-        final String query = artist + " " + album;
-        new SwingWorker<List<HeadphonesClient.AlbumCandidate>, Void>() {
-            @Override protected List<HeadphonesClient.AlbumCandidate> doInBackground() throws Exception {
-                return client.findAlbum(query);
-            }
-            @Override protected void done() {
-                List<HeadphonesClient.AlbumCandidate> candidates;
-                try { candidates = get(); }
-                catch (Exception ex) {
-                    setStatus(I18n.t("Erreur Headphones : %s", ex.getMessage()));
-                    return;
-                }
-                if (candidates.isEmpty()) {
-                    setStatus(I18n.t("Aucun résultat Headphones pour \"%s\".", query));
-                    return;
-                }
-                String[] options = new String[candidates.size()];
-                for (int i = 0; i < candidates.size(); i++) {
-                    HeadphonesClient.AlbumCandidate c = candidates.get(i);
-                    options[i] = c.artistName() + " — " + c.albumTitle() + I18n.t(" (score %d)", c.score());
-                }
-                String chosen = (String) JOptionPane.showInputDialog(MainFrame.this,
-                        I18n.t("Quel album mettre en recherche sur Headphones ?"), "Headphones",
-                        JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
-                if (chosen == null) { setStatus(I18n.t("Envoi vers Headphones annulé.")); return; }
-                int idx = java.util.Arrays.asList(options).indexOf(chosen);
-                HeadphonesClient.AlbumCandidate pick = candidates.get(idx);
-
-                setStatus(I18n.t("Envoi vers Headphones : %s – %s…", pick.artistName(), pick.albumTitle()));
-                new SwingWorker<Boolean, Void>() {
-                    @Override protected Boolean doInBackground() throws Exception {
-                        return client.queueAlbum(pick.artistId(), pick.releaseId());
-                    }
-                    @Override protected void done() {
-                        try {
-                            boolean ok = get();
-                            setStatus(ok
-                                ? I18n.t("Envoyé à Headphones : %s – %s.", pick.artistName(), pick.albumTitle())
-                                : I18n.t("Échec de l'envoi à Headphones."));
-                        } catch (Exception ex) {
-                            setStatus(I18n.t("Erreur Headphones : %s", ex.getMessage()));
-                        }
-                    }
-                }.execute();
-            }
-        }.execute();
-    }
-
     private void openBandcampDialog() {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) {
@@ -3138,7 +3240,6 @@ public class MainFrame extends JFrame {
                 refreshTableRow(mr, ti);
                 undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Modifier %s", e.filename()));
                 recordFieldCorrections(correctionsCache, e, snap, ti);
-                if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
                 // Ne marquer TAGGED qu'APRÈS confirmation d'écriture réussie — sinon un échec
                 // d'écriture (permissions, fichier verrouillé...) laissait quand même le statut à
                 // TAGGED, jamais annulé (même défaut déjà corrigé dans les autres pipelines).
@@ -3164,7 +3265,6 @@ public class MainFrame extends JFrame {
                     detailPanel.collect(ti);
                     refreshTableRow(mr, ti);
                     undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Lot %s", e.filename()));
-                    if (!ti.rating.equals(snap.rating)) queueRatingBackToItunes(e, ti.rating);
                     pending.add(new PendingWrite(e, mr, snap, ti));
                 }
                 setStatus(I18n.t("Sauvegarde de %d fichier(s)…", pending.size()));
@@ -3207,6 +3307,43 @@ public class MainFrame extends JFrame {
         } finally {
             if (rows.length == 1) correctionsCache.close();
         }
+    }
+
+    /** Fenêtre de sélection courante (≥1 ligne), ou message de statut si vide — point d'entrée du
+     *  menu "Revue rapide (notation)…". Même garde que applyDetail() (rows.length==0 → rien à
+     *  faire) : la revue rapide agit sur la sélection, pas sur toute la bibliothèque, pour laisser
+     *  l'utilisateur cibler (ex. "Sélectionner les tagués" avant de lancer la revue). */
+    private void openQuickReview() {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) {
+            setStatus(I18n.t("Sélectionne d'abord les fichiers à noter (aucune sélection)."));
+            return;
+        }
+        List<FileEntry> selected = new ArrayList<>();
+        for (int row : rows) {
+            FileEntry e = entryAtViewRow(row);
+            if (e != null) selected.add(e); // null = ligne d'en-tête de groupe, ignorée
+        }
+        if (selected.isEmpty()) return;
+        new QuickReviewDialog(this, selected).setVisible(true);
+    }
+
+    /** Appelé par {@link QuickReviewDialog} à chaque note posée — même séquence que la branche
+     *  fichier unique de {@link #applyDetail()} (snapshot undo, écriture immédiate, 
+     *  traçabilité des corrections), juste sans passer par DetailPanel puisque la revue rapide ne
+     *  touche que le champ note. {@code cache} reste ouvert par l'appelant pour toute la durée de
+     *  la session de revue (potentiellement des dizaines de notes en rafale) plutôt que rouvert à
+     *  chaque frappe. */
+    void quickReviewSave(MetadataCache cache, FileEntry e, String newRating) {
+        int mr = tableModel.indexOf(e);
+        if (mr < 0) return;
+        TagInfo snap = com.opentagger.UndoManager.snapshot(e.activeTags());
+        TagInfo ti   = e.activeTags();
+        ti.rating = newRating;
+        refreshTableRow(mr, ti);
+        undoManager.push(e, snap, com.opentagger.UndoManager.snapshot(ti), I18n.t("Note rapide %s", e.filename()));
+        recordFieldCorrections(cache, e, snap, ti);
+        if (writeTagsSafe(e, ti)) markManuallyTagged(e, ti, mr);
     }
 
     /**
@@ -3437,8 +3574,20 @@ public class MainFrame extends JFrame {
         // indépendant de tout worker garantit que l'écart ne dépasse jamais quelques secondes.
         new javax.swing.Timer(3000, e -> refreshStats()).start();
 
+        // Taille réelle (somme des tailles de fichiers) de la bibliothèque chargée, en Go/To. Masqué
+        // tant que rien n'est chargé. L'infobulle (détail par format + espace libre du disque) n'est
+        // calculée qu'au survol — jamais en tâche de fond.
+        lblLibrarySize = new JLabel() {
+            @Override public String getToolTipText() { return librarySizeTooltip(); }
+        };
+        lblLibrarySize.setForeground(new Color(0x90A4AE));
+        lblLibrarySize.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
+        lblLibrarySize.setToolTipText("");   // active le mécanisme d'infobulle de Swing
+        lblLibrarySize.setVisible(false);
+
         JPanel eastPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         eastPanel.setOpaque(false);
+        eastPanel.add(lblLibrarySize);
         eastPanel.add(lblMemory);
         eastPanel.add(progressPanel);
 
@@ -3449,6 +3598,41 @@ public class MainFrame extends JFrame {
         bar.add(lblStatus,  BorderLayout.WEST);
         bar.add(eastPanel,  BorderLayout.EAST);
         return bar;
+    }
+
+    /** Infobulle du total « bibliothèque » : détail par format (extension) puis espace libre du
+     *  disque du premier fichier chargé. Calculée à la demande sur l'EDT (O(n) sur les entrées déjà
+     *  en mémoire, aucun accès disque sauf l'espace libre, protégé par try/catch). */
+    private String librarySizeTooltip() {
+        java.util.List<FileEntry> all = tableModel.allEntries();
+        if (all.isEmpty()) return null;
+        java.util.Map<String, long[]> byExt = new java.util.HashMap<>();
+        for (FileEntry e : all) {
+            String n = e.filename();
+            int dot = n.lastIndexOf('.');
+            String ext = dot >= 0 ? n.substring(dot + 1).toLowerCase(java.util.Locale.ROOT) : "?";
+            long[] a = byExt.computeIfAbsent(ext, k -> new long[2]);
+            a[0]++; a[1] += e.sizeBytes;
+        }
+        java.util.List<java.util.Map.Entry<String, long[]>> rows = new java.util.ArrayList<>(byExt.entrySet());
+        rows.sort((x, y) -> Long.compare(y.getValue()[1], x.getValue()[1]));
+        StringBuilder sb = new StringBuilder("<html><b>")
+            .append(I18n.t("Taille des fichiers chargés dans OpenTagger")).append("</b><br>");
+        int shown = 0;
+        for (java.util.Map.Entry<String, long[]> r : rows) {
+            if (++shown > 8) break;
+            sb.append(r.getKey().toUpperCase(java.util.Locale.ROOT)).append(" : ")
+              .append(com.opentagger.ByteFormat.format(r.getValue()[1]))
+              .append(" (").append(r.getValue()[0]).append(")<br>");
+        }
+        if (rows.size() > 8) sb.append("…<br>");
+        try {
+            java.nio.file.Path p = all.get(0).currentPath != null ? all.get(0).currentPath : all.get(0).file.toPath();
+            java.nio.file.FileStore fs = java.nio.file.Files.getFileStore(p);
+            sb.append("<br>").append(I18n.t("Espace libre sur le disque : %s",
+                com.opentagger.ByteFormat.format(fs.getUsableSpace())));
+        } catch (Exception ignored) { /* disque réseau injoignable, chemin disparu… : on n'affiche rien */ }
+        return sb.append("</html>").toString();
     }
 
     /** Mémoire JVM réellement utilisée / plafond -Xmx — rafraîchi périodiquement (Timer EDT). */
@@ -3468,7 +3652,13 @@ public class MainFrame extends JFrame {
      */
     private JPanel buildLogPanel() {
         logModel = new DefaultListModel<>();
-        logList  = new JList<>(logModel);
+        // Hauteur de cellule FIXE + cellule « prototype » : sans elles, la JList remesure TOUTES les lignes (appel du moteur de rendu
+        // pour chacune) à chaque ajout — mesuré sur un journal plein (20 000 lignes) : 3,6 s de thread d'affichage par ligne ajoutée,
+        // contre 0 ms avec hauteur fixe. Recalculé quand le thème ou la police changent (updateUI).
+        logList  = new JList<>(logModel) {
+            @Override public void updateUI() { super.updateUI(); applyLogRowMetrics(this); }
+        };
+        applyLogRowMetrics(logList);
         logList.setVisibleRowCount(6);
         logList.setToolTipText(I18n.t("Double-clic : localiser dans le tableau — Ctrl+C : copier"));
         logList.setCellRenderer(new DefaultListCellRenderer() {
@@ -3480,10 +3670,10 @@ public class MainFrame extends JFrame {
                 c.setText("[" + e.time() + "] " + e.text());
                 if (!sel) {
                     Color fg = switch (e.status()) {
-                        case ERROR      -> new Color(230, 90, 90);
-                        case SKIPPED    -> new Color(210, 160, 40);
-                        case TAGGED     -> new Color(100, 200, 130);
-                        case IDENTIFIED -> new Color(85, 153, 255);
+                        case ERROR      -> LOG_ERROR;
+                        case SKIPPED    -> LOG_WARN;
+                        case TAGGED     -> LOG_OK;
+                        case IDENTIFIED -> LOG_INFO;
                         default         -> UIManager.getColor("List.foreground");
                     };
                     c.setForeground(fg);
@@ -3537,8 +3727,13 @@ public class MainFrame extends JFrame {
         // (journal visible), pour le changement de couleur demandé.
         btnToggleJournal = new JToggleButton(I18n.t("▾ Journal"), true);
         btnToggleJournal.setFocusPainted(false);
+        // Accent maison quand déplié, pas un vert vif à part (2026-09-08) : une fois les pastilles
+        // de statut repassées en neutre, ce bouton restait la SEULE tache saturée de l'écran, et
+        // d'une teinte qui n'existait nulle part ailleurs dans l'appli. $-références FlatLaf plutôt
+        // que des hex en dur — le sélecteur de thèmes (ThemeManager) rend tout hex figé faux sur la
+        // moitié des thèmes.
         btnToggleJournal.putClientProperty("FlatLaf.style",
-            "font: bold $defaultFont; arc: 6; selectedBackground: #1a6030; selectedForeground: #ffffff");
+            "font: bold $defaultFont; arc: 6; selectedBackground: #4DB6AC; selectedForeground: #1E1F22");
         btnToggleJournal.setToolTipText(I18n.t("Afficher/masquer le journal"));
         btnToggleJournal.addActionListener(e -> {
             btnToggleJournal.setText(btnToggleJournal.isSelected() ? I18n.t("▾ Journal") : I18n.t("▸ Journal"));
@@ -3563,13 +3758,36 @@ public class MainFrame extends JFrame {
         return panel;
     }
 
+    // Couleurs du journal créées UNE fois (le moteur de rendu les réallouait à chaque cellule peinte).
+    private static final Color LOG_ERROR = new Color(230, 90, 90), LOG_WARN = new Color(210, 160, 40),
+                               LOG_OK = new Color(100, 200, 130), LOG_INFO = new Color(85, 153, 255);
+
+    private static void applyLogRowMetrics(JList<LogEntry> l) {
+        if (l.getFont() == null) return;
+        l.setFixedCellHeight(l.getFontMetrics(l.getFont()).getHeight() + 4);
+        l.setPrototypeCellValue(new LogEntry("00:00:00", "W".repeat(220), FileEntry.Status.PENDING, null));
+    }
+
+    /** Vrai si le journal est déjà défilé tout en bas (alors on le laisse suivre les nouvelles lignes). */
+    private boolean journalAtBottom() {
+        if (journalScroll == null) return true;
+        JScrollBar sb = journalScroll.getVerticalScrollBar();
+        return sb.getValue() + sb.getVisibleAmount() >= sb.getMaximum() - 4;
+    }
+
+    private void followJournalIfNeeded(boolean wasAtBottom) {
+        if (wasAtBottom && logModel.size() > 0) logList.ensureIndexIsVisible(logModel.size() - 1);
+    }
+
     /** Ajoute une ligne de séparation au début d'un run (taguage, re-taguage forcé, passe complète). */
     private void logRunStart(String label, int count) {
         LogEntry sep = new LogEntry(nowHms(), I18n.t("── %s : %d fichier(s) ──", label, count),
                 FileEntry.Status.PENDING, null);
+        final boolean follow = journalAtBottom();
         logHistory.add(sep);
-        if (trimLogHistoryIfNeeded()) return;
+        if (trimLogHistoryIfNeeded()) { followJournalIfNeeded(follow); return; }
         logModel.addElement(sep);
+        followJournalIfNeeded(follow);
     }
 
     /** Ajoute le résultat final d'un fichier (ignore les mises à jour PROCESSING transitoires). */
@@ -3634,17 +3852,29 @@ public class MainFrame extends JFrame {
      *  IDENTIFIED/SKIPPED/ERROR de l'identification musicale. */
     private void appendLogLine(String text, FileEntry.Status status, FileEntry entry) {
         LogEntry e = new LogEntry(nowHms(), text, status, entry);
+        final boolean follow = journalAtBottom();
         logHistory.add(e);
-        if (trimLogHistoryIfNeeded()) return;
-        if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
+        if (trimLogHistoryIfNeeded()) { followJournalIfNeeded(follow); return; }
+        if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR) {
             logModel.addElement(e);
+            followJournalIfNeeded(follow);
+        }
+    }
+
+    /** Ligne libre dans le Journal pour les opérations de fond (analyse, et à terme chaque ajout /
+     *  modification / suppression) — couleur selon {@code status} : PENDING = titre de section,
+     *  IDENTIFIED = information (bleu), SKIPPED = avertissement (orange), TAGGED = réussite (vert),
+     *  ERROR = échec (rouge). À appeler depuis le thread Swing. */
+    void journalLine(String text, FileEntry.Status status) {
+        appendLogLine(text, status, null);
     }
 
     private void rebuildLogModel() {
-        logModel.clear();
+        java.util.List<LogEntry> shown = new java.util.ArrayList<>(logHistory.size());
         for (LogEntry e : logHistory)
-            if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR)
-                logModel.addElement(e);
+            if (!chkLogErrorsOnly.isSelected() || e.status() == FileEntry.Status.ERROR) shown.add(e);
+        logModel.clear();
+        logModel.addAll(shown);   // un seul événement de modèle, pas un par ligne
     }
 
     /** Purge par lots les plus anciennes entrées au-delà de {@link #MAX_LOG_ENTRIES} (jamais une
@@ -3977,6 +4207,21 @@ public class MainFrame extends JFrame {
             // + filet de sécurité dans done()).
             boolean bulkStarted = false;
             boolean bulkEnded   = false;
+            // Fichiers de ce dossier servis au lot « Tout tagger » déjà lancé (voir
+            // TaggingWorker.enqueueLate) — pour le journal.
+            int lateFed = 0;
+            // Entrées reconnues comme dossiers en phase 2 — peuvent arriver AVANT leur ajout en
+            // phase 1 (lots de 200 ms), d'où ce filtre aussi à l'ajout.
+            final java.util.Set<FileEntry> notFiles = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            private void feedLate(List<FileEntry> late) {
+                if (late.isEmpty() || !TaggingWorker.enqueueLate(late)) return;
+                int before = lateFed;
+                lateFed += late.size();
+                if (before / 1000 != lateFed / 1000) {
+                    System.out.println("[OT] Taguage : " + lateFed + " fichier(s) de \"" + dir
+                            + "\" ajoutés au lot en cours au fil du scan.");
+                }
+            }
             private void endBulkOnce() {
                 if (!bulkEnded) { bulkEnded = true; if (bulkStarted) endBulkTableUpdate(); }
             }
@@ -4057,12 +4302,33 @@ public class MainFrame extends JFrame {
                 // pas pendant qu'il patientait en file, ce qui aurait inutilement prolongé la
                 // période où le filtre est indisponible pour les autres scans déjà en cours.
                 publish(new Object[]{ PHASE1_START_MARKER });
+                // Watchdog de visibilité (2026-09-19, audit dédié "blocages silencieux", même
+                // signature que le cas déjà corrigé sur FileRenamer.moveFile) : dossier.listFiles()
+                // dans AudioScanner.scanRecursif() est un appel natif SANS AUCUN timeout possible
+                // côté Java — un montage USB/réseau qui décroche EN PLEIN milieu du parcours
+                // bloquerait ce thread pour toujours, sans la moindre ligne de log, et avec
+                // seulement 2 permis sur phase1Semaphore, les AUTRES dossiers de démarrage ne
+                // commenceraient jamais à scanner non plus. Ne peut pas annuler le blocage
+                // (même limite que le cas FileRenamer), juste le rendre visible.
+                final java.util.concurrent.atomic.AtomicBoolean stillScanning =
+                        new java.util.concurrent.atomic.AtomicBoolean(true);
+                Thread scanWatchdog = new Thread(() -> {
+                    try { Thread.sleep(120_000); } catch (InterruptedException ignored) { return; }
+                    if (stillScanning.get()) {
+                        System.out.println("[OT] ⚠ Scan de \"" + dir + "\" bloqué depuis plus de 120s — "
+                                + "probable montage lent/déconnecté (dossier de démarrage) ; les autres "
+                                + "dossiers de démarrage peuvent aussi attendre derrière (2 permis max).");
+                    }
+                }, "scan-watchdog");
+                scanWatchdog.setDaemon(true);
+                scanWatchdog.start();
                 try {
                 new AudioScanner().scan(dir, f -> {
                     if (isCancelled()) return;
                     if (alreadyInTable.contains(f.toPath().toAbsolutePath())) return;
                     FileEntry entry = new FileEntry(f, new com.opentagger.model.TagInfo());
                     entry.scanRoot = root;
+                    entry.awaitingScan = true;
                     batch.add(entry);
                     long now = System.currentTimeMillis();
                     if (batch.size() >= 200 || now - lastBatchMs[0] >= 200) {
@@ -4083,8 +4349,28 @@ public class MainFrame extends JFrame {
                         java.util.Map<String, MetadataCache.ScanCacheEntry> scanCacheMap =
                             (java.util.Map<String, MetadataCache.ScanCacheEntry>) cacheData[1];
                         com.opentagger.model.TagInfo ti;
-                        long mtime = ff.lastModified();
-                        long size  = ff.length();
+                        // Un seul stat() pour mtime+taille (au lieu de lastModified() puis length(),
+                        // deux appels) : sur MyBook (ntfs-3g, USB) un stat coûte ~100 ms sous charge,
+                        // mesuré 2026-09-25 — ×217 000 fichiers. Valeurs identiques vérifiées sur
+                        // les 3 disques (clé de scan_cache inchangée). 0 en cas d'erreur, comme avant.
+                        long mtime;
+                        long size;
+                        try {
+                            java.nio.file.attribute.BasicFileAttributes at = java.nio.file.Files.readAttributes(
+                                    ff.toPath(), java.nio.file.attribute.BasicFileAttributes.class);
+                            if (at.isDirectory()) {
+                                // Nom à extension audio mais c'est un dossier (parcours sans stat,
+                                // voir AudioScanner) : jamais tagué, déplacé ni mis en corbeille.
+                                String[] inside = ff.list();
+                                return new Object[]{ NOT_A_FILE_MARKER, entry, Boolean.FALSE,
+                                        inside != null && inside.length > 0 };
+                            }
+                            mtime = at.lastModifiedTime().toMillis();
+                            size  = at.size();
+                        } catch (java.io.IOException | RuntimeException ex) {
+                            mtime = 0L;
+                            size  = 0L;
+                        }
                         MetadataCache.ScanCacheEntry cached = scanCacheMap.get(ff.getAbsolutePath());
                         if (cached != null && cached.mtime() == mtime && cached.size() == size) {
                             // Inchangé depuis le dernier scan (même mtime + taille) : on réutilise
@@ -4125,10 +4411,18 @@ public class MainFrame extends JFrame {
                         // attente" après réorganisation du dossier.
                         boolean wasPreviouslyTagged = taggedPaths.contains(ff.getAbsolutePath())
                                 || !ti.taggedDate.isBlank() || !ti.recordingMbid.isBlank();
-                        return new Object[]{ entry, ti, wasPreviouslyTagged, size };
+                        // Identification faite lors d'une session précédente mais jamais enregistrée (app fermée ou arrêtée entre-temps) :
+                        // on la retrouve ici, à condition que le fichier soit resté identique. Lue hors EDT.
+                        com.opentagger.model.TagInfo restored = null;
+                        if (!wasPreviouslyTagged && size > 0 && Config.get().bool("tagging.persist_pending", true))
+                            restored = cache.loadPendingIdentified(ff.getAbsolutePath(), size, mtime);
+                        // [5] : coquille vide (aucun son) — voir ShellCleaner.
+                        return new Object[]{ entry, ti, wasPreviouslyTagged, size, restored, ShellCleaner.isShell(ff, size) };
                     });
-                }, this::isCancelled);
+                }, this::isCancelled, true);
                 } finally {
+                    stillScanning.set(false);
+                    scanWatchdog.interrupt();
                     phase1Semaphore.release();
                 }
                 if (!batch.isEmpty()) publish(new Object[]{ new ArrayList<>(batch) });
@@ -4173,15 +4467,29 @@ public class MainFrame extends JFrame {
             @Override
             @SuppressWarnings("unchecked")
             protected void process(List<Object[]> chunks) {
+                List<FileEntry> late = new ArrayList<>();
                 for (Object[] chunk : chunks) {
                     if (chunk[0] == PHASE1_START_MARKER) {
                         bulkStarted = true;
                         beginBulkTableUpdate();
                     } else if (chunk[0] == PHASE1_DONE_MARKER) {
                         endBulkOnce();
+                    } else if (chunk[0] == NOT_A_FILE_MARKER) {
+                        FileEntry nf = (FileEntry) chunk[1];
+                        nf.awaitingScan = false;
+                        notFiles.add(nf);
+                        addedByThisScan.remove(nf);
+                        tableModel.removeEntries(java.util.Set.of(nf));
+                        boolean hasContent = Boolean.TRUE.equals(chunk[3]);
+                        System.out.println("[OT] ⚠ Scan : \"" + nf.file + "\" est un DOSSIER malgré son nom de fichier audio"
+                                + (hasContent ? " — son contenu est scanné à part." : " (vide) — ignoré."));
+                        // Rarissime (5 dossiers, tous vides, sur toute la bibliothèque au 2026-09-26) :
+                        // un scan dédié, qui ignore les fichiers déjà dans le tableau.
+                        if (hasContent) loadDirectory(nf.file);
                     } else if (chunk[0] instanceof List) {
                         // Phase 1 : ajouter toutes les entrées vides d'un coup
                         List<FileEntry> batch = (List<FileEntry>) chunk[0];
+                        if (!notFiles.isEmpty()) batch = batch.stream().filter(b -> !notFiles.contains(b)).toList();
                         tableModel.addAll(batch);
                         addedByThisScan.addAll(batch);
                         if (tableModel.getRowCount() > 0 && btnRefresh != null) btnRefresh.setEnabled(true);
@@ -4210,19 +4518,44 @@ public class MainFrame extends JFrame {
                         // Priorité absolue sur wasTagged ci-dessous : un fichier vidé APRÈS avoir été
                         // tagué (incident disque plein...) peut encore matcher le cache chemin→tagué,
                         // mais son contenu réel prime sur ce que dit le cache.
-                        if (size == 0) {
+                        boolean shell = chunk.length > 5 && Boolean.TRUE.equals(chunk[5]);
+                        if (size == 0 || shell) {
                             entry.status  = com.opentagger.model.FileEntry.Status.ERROR;
-                            entry.message = I18n.t("Fichier vide (0 octet) — corrompu, non identifiable.");
+                            entry.emptyShell = true;
+                            entry.message = size == 0
+                                    ? I18n.t("Fichier vide (0 octet) — corrompu, non identifiable.")
+                                    : I18n.t("Coquille vide (%s octets, aucun son) — non identifiable.", size);
+                            ShellCleaner.handle(entry, gone -> {
+                                tableModel.removeEntries(java.util.Set.of(gone));
+                                addedByThisScan.remove(gone);
+                            });
                         } else if (wasTagged) {
                             // Les tags corrects sont DÉJÀ dans le fichier (entry.current)
                             // Pas besoin de charger un TagInfo depuis l'historique en mémoire
                             entry.status  = com.opentagger.model.FileEntry.Status.TAGGED;
                             entry.message = "";
+                        } else if (chunk.length > 4 && chunk[4] instanceof com.opentagger.model.TagInfo restoredTags) {
+                            entry.result  = restoredTags;
+                            entry.status  = com.opentagger.model.FileEntry.Status.IDENTIFIED;
+                            entry.message = I18n.t("Identification retrouvée (pas encore enregistrée)");
                         }
+                        entry.awaitingScan = false;
                         tableModel.update(entry);
+                        if (entry.selected && entry.status == FileEntry.Status.PENDING) late.add(entry);
                     }
                 }
+                feedLate(late);
                 long now = System.currentTimeMillis();
+                // Demande de ré-identification : ses fichiers de CE dossier sont servis au fil de la
+                // lecture de leurs tags, sans attendre la fin du scan (MyBook : ~7 h mesurées le
+                // 2026-09-25). Une fois par minute au plus (parcours de tout le tableau).
+                if (now - lastReidentifyCheckMs >= 60_000
+                        && WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()
+                        && java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(Config.configDir(), "reidentify_request.txt"))) {
+                    lastReidentifyCheckMs = now;
+                    List<FileEntry> marked = takeReidentifyRequest();
+                    if (!marked.isEmpty()) TaggingWorker.enqueuePriority(marked);
+                }
                 if (now - lastStatsRefreshMs >= 300) { lastStatsRefreshMs = now; refreshStats(); }
             }
 
@@ -4232,6 +4565,7 @@ public class MainFrame extends JFrame {
                 if (btnStop != null) btnStop.setEnabled(false);
                 if (isCancelled()) {
                     // Rollback : retirer toutes les entrées ajoutées par ce scan
+                    TaggingWorker.dropLate(addedByThisScan);
                     tableModel.removeEntries(addedByThisScan);
                     if (tableModel.getRowCount() == 0 && btnRefresh != null) btnRefresh.setEnabled(false);
                     refreshStats();
@@ -4247,7 +4581,28 @@ public class MainFrame extends JFrame {
                     refreshStats();
                     completeScanEntry(scanRow, dirName, r[0], r[1], null);
                     if (Config.get().videoAutoRecover()) autoRecoverVideos(dir);
+                    // Filet : une lecture de tags en échec ne publie rien (voir tagConsumer) — sans
+                    // ça, ces fichiers resteraient « en attente de scan » et hors de tout lot.
+                    List<FileEntry> unsettled = new ArrayList<>();
+                    for (FileEntry fe : addedByThisScan) {
+                        if (!fe.awaitingScan) continue;
+                        fe.awaitingScan = false;
+                        if (fe.selected && fe.status == FileEntry.Status.PENDING) unsettled.add(fe);
+                    }
+                    feedLate(unsettled);
+                    if (lateFed > 0) {
+                        System.out.println("[OT] Taguage : " + lateFed + " fichier(s) de \"" + dir
+                                + "\" ajoutés au lot en cours au fil du scan (total).");
+                    }
+                    // Demande de ré-identification visant des fichiers de CE dossier : un lot déjà
+                    // lancé (instantané figé) ne les contient pas — servis en priorité par ce lot.
+                    if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
+                        List<FileEntry> marked = takeReidentifyRequest();
+                        if (!marked.isEmpty()) TaggingWorker.enqueuePriority(marked);
+                    }
                     if (Config.get().autoTagOnScan()) scheduleAutoTaggingFollowUp();
+                    // Tags des fichiers lus : synchroniser les compteurs d'écoute (au plus 1 fois / 24 h).
+                    if (Config.get().autoSyncPlayCounts()) scheduleAutoPlayCountSync();
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
@@ -4366,6 +4721,8 @@ public class MainFrame extends JFrame {
                     // remplace son contenu — le retenter en boucle ne ferait que regaspiller des
                     // requêtes MB pour rien à chaque campagne de taguage.
                     if (!e.selected) continue;
+                    if (e.awaitingScan) continue; // statut pas encore connu — servi plus tard, voir loadDirectory()
+                    if (e.emptyShell) continue;   // aucun son à identifier, voir ShellCleaner
                     if (e.status == FileEntry.Status.TAGGED) { skipped++; continue; }
                     if (e.status != FileEntry.Status.IDENTIFIED && e.file.length() > 0) result.add(e);
                 }
@@ -4387,7 +4744,9 @@ public class MainFrame extends JFrame {
 
     /** Suite de startTagging() une fois le lot filtré (toujours sur l'EDT) — voir son commentaire
      *  pour pourquoi ce filtrage est désormais fait en arrière-plan avant d'arriver ici. */
-    private void continueStartTagging(List<FileEntry> toTag, int alreadyTaggedSkipped, boolean selOnly) {
+    private void continueStartTagging(List<FileEntry> requested, int alreadyTaggedSkipped, boolean selOnly) {
+        final List<FileEntry> toTag = selOnly ? requested : applyReidentifyRequest(requested);
+        TaggingWorker.clearPriority();
         if (toTag.isEmpty()) {
             btnTagAll.setEnabled(true);
             if (Config.get().postTagCompletion() != Config.PostTagCompletion.NONE) {
@@ -4441,6 +4800,7 @@ public class MainFrame extends JFrame {
                 bar.setString(doneCount + " / " + total + etaText(doneCount, total));
             })
         );
+        if (!selOnly) w.acceptLateFiles(); // fichiers des dossiers encore en cours de scan, voir TaggingWorker.LATE_INBOX
         w.addPropertyChangeListener(evt -> {
             if (SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 onTaggingDone(toTag);
@@ -4467,6 +4827,102 @@ public class MainFrame extends JFrame {
         // n'empêchait déjà techniquement de sauvegarder pendant qu'un taguage tourne encore — seul le
         // point de déclenchement automatique manquait.
         if (!selOnly && !autoSaveWatchPending) scheduleAutoSaveFollowUp();
+    }
+
+    /**
+     * Demande de ré-identification ciblée, sans sélection manuelle : ~/.opentagger/
+     * reidentify_request.txt (un chemin absolu par ligne). Chaque fichier listé et chargé dans le
+     * tableau est remis en PENDING, en ré-identification forcée (audio d'abord : SongRec puis
+     * AcoustID, tags existants ignorés — voir FileEntry.forceReidentify). En cas d'échec il reste à
+     * sa place avec ses tags actuels (FileEntry.keepInPlaceIfSkipped). Contrairement à « Forcer le
+     * re-taguage », les MBID du fichier ne sont pas effacés d'avance : un échec ne retire rien.
+     *
+     * Lue au lancement d'un lot « Tout tagger » (fichiers placés en tête, voir
+     * applyReidentifyRequest) ET à la fin de chaque scan de dossier pendant qu'un lot tourne
+     * (fichiers servis en priorité par le lot en cours, voir TaggingWorker.enqueuePriority) — le lot
+     * automatique démarre dès le premier dossier scanné, bien avant la fin d'un dossier lent
+     * (MyBook : 30 min+). Les chemins pas encore chargés restent dans le fichier tant qu'un scan
+     * tourne ; une fois tous les scans finis, ils partent dans reidentify_request.introuvables-
+     * <horodatage>.txt et la demande est archivée (« .pris-<horodatage> »).
+     *
+     * Ajouté le 2026-09-25 pour re-vérifier les fichiers identifiés autrefois via les bases beets/
+     * Headphones (retirées de l'identification le même jour).
+     */
+    private long lastReidentifyCheckMs = 0;
+
+    private List<FileEntry> takeReidentifyRequest() {
+        java.nio.file.Path req = java.nio.file.Paths.get(Config.configDir(), "reidentify_request.txt");
+        if (!java.nio.file.Files.isRegularFile(req)) return List.of();
+        java.util.Set<String> wanted = new java.util.LinkedHashSet<>();
+        try {
+            for (String line : java.nio.file.Files.readAllLines(req)) {
+                if (!line.isBlank()) wanted.add(line.trim());
+            }
+        } catch (java.io.IOException ex) {
+            System.out.println("[OT] Ré-identification demandée : lecture impossible de " + req + " — " + ex.getMessage());
+            return List.of();
+        }
+        List<FileEntry> marked = new ArrayList<>();
+        java.util.Set<String> matched = new java.util.HashSet<>();
+        for (FileEntry e : tableModel.allEntries()) {
+            String orig = e.file.getAbsolutePath();
+            String cur  = e.currentPath != null ? e.currentPath.toString() : orig;
+            String hit  = wanted.contains(cur) ? cur : wanted.contains(orig) ? orig : null;
+            if (hit == null) continue;
+            // Tags pas encore lus : la phase 2 du scan écraserait le marquage (TAGGED) — repris à
+            // la fin du scan de ce dossier.
+            if (e.awaitingScan) continue;
+            matched.add(hit);
+            // IDENTIFIED : identifié dans CETTE session (donc déjà sans beets/Headphones), en attente
+            // d'enregistrement — rien à refaire.
+            if (e.status == FileEntry.Status.PROCESSING || e.status == FileEntry.Status.IDENTIFIED) continue;
+            e.status               = FileEntry.Status.PENDING;
+            e.message              = "";
+            e.result               = null;
+            e.candidates           = null;
+            e.skipReason           = null;
+            e.forceReidentify      = true;
+            e.keepInPlaceIfSkipped = true;
+            tableModel.update(e);
+            marked.add(e);
+        }
+        wanted.removeAll(matched);
+        boolean scansDone = activeScanWorkers.isEmpty();
+        String ts = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+        try {
+            if (wanted.isEmpty() || scansDone) {
+                java.nio.file.Files.move(req, req.resolveSibling("reidentify_request.txt.pris-" + ts));
+                if (!wanted.isEmpty()) {
+                    java.nio.file.Files.write(req.resolveSibling("reidentify_request.introuvables-" + ts + ".txt"),
+                            new ArrayList<>(wanted));
+                }
+            } else if (!matched.isEmpty()) {
+                java.nio.file.Path tmp = req.resolveSibling("reidentify_request.txt.tmp");
+                java.nio.file.Files.write(tmp, new ArrayList<>(wanted));
+                java.nio.file.Files.move(tmp, req, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            }
+        } catch (java.io.IOException ex) {
+            System.out.println("[OT] Ré-identification demandée : " + req + " non mis à jour — " + ex.getMessage());
+        }
+        if (!matched.isEmpty() || scansDone) {
+            System.out.println("[OT] Ré-identification demandée : " + marked.size()
+                    + " fichier(s) pris en priorité (audio d'abord, laissés en place en cas d'échec), "
+                    + Math.max(0, matched.size() - marked.size()) + " déjà en cours/identifié(s), " + wanted.size()
+                    + (scansDone ? " chemin(s) introuvable(s) (scans terminés)." : " chemin(s) pas encore chargé(s) (scan en cours)."));
+        }
+        return marked;
+    }
+
+    /** Début de lot : fichiers demandés placés en tête (voir takeReidentifyRequest). */
+    private List<FileEntry> applyReidentifyRequest(List<FileEntry> toTag) {
+        List<FileEntry> marked = takeReidentifyRequest();
+        if (marked.isEmpty()) return toTag;
+        java.util.Set<FileEntry> markedSet = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        markedSet.addAll(marked);
+        List<FileEntry> out = new ArrayList<>(marked);
+        for (FileEntry e : toTag) if (!markedSet.contains(e)) out.add(e);
+        return out;
     }
 
     /**
@@ -4520,8 +4976,9 @@ public class MainFrame extends JFrame {
             if (!btnTagAll.isEnabled()) return; // même garde que startTagging() — évite un lancement concurrent
             List<FileEntry> pending = new ArrayList<>();
             for (FileEntry fe : tableModel.allEntries())
-                if (fe.selected && fe.status == FileEntry.Status.PENDING) pending.add(fe);
-            if (!pending.isEmpty()) { continueStartTagging(pending, 0, false); return; }
+                if (fe.selected && fe.status == FileEntry.Status.PENDING && !fe.awaitingScan) pending.add(fe);
+            boolean request = java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(Config.configDir(), "reidentify_request.txt"));
+            if (!pending.isEmpty() || request) { continueStartTagging(pending, 0, false); return; }
             if (!activeScanWorkers.isEmpty()) scheduleAutoTaggingFollowUp(); // rien de neuf pour l'instant — on réessaiera
         });
         t.setRepeats(false);
@@ -4629,8 +5086,18 @@ public class MainFrame extends JFrame {
         // allEntries() : les fichiers identifiés mais masqués par un filtre actif n'étaient sinon
         // jamais écrits sur le disque, sans le moindre avertissement.
         List<FileEntry> toSave = new ArrayList<>();
+        // Deux lignes sur LE MÊME fichier (chemins identiques à la casse près sous Windows/macOS : rescan, dossier ajouté deux
+        // fois) : une seule est écrite — la seconde trouvait le fichier déjà renommé et finissait en « Fichier introuvable ».
+        // Les autres lignes recopient le résultat de la première quand l'enregistrement est fini (voir le DONE plus bas), donc
+        // aucune ne reste « Identifié » à relancer en boucle.
+        java.util.Map<String, FileEntry> firstByPath = new java.util.HashMap<>();
+        java.util.Map<FileEntry, List<FileEntry>> sameFile = new java.util.LinkedHashMap<>();
         for (FileEntry e : tableModel.allEntries()) {
-            if (e.selected && e.status == FileEntry.Status.IDENTIFIED) toSave.add(e);
+            if (!e.selected || e.status != FileEntry.Status.IDENTIFIED) continue;
+            String key = com.opentagger.PathIdentity.key(e.currentPath != null ? e.currentPath : e.file.toPath());
+            FileEntry first = firstByPath.putIfAbsent(key, e);
+            if (first == null) toSave.add(e);
+            else sameFile.computeIfAbsent(first, k -> new ArrayList<>()).add(e);
         }
         if (toSave.isEmpty()) {
             System.out.println("[OT] Enregistrer : aucun fichier identifié sélectionné à enregistrer.");
@@ -4652,6 +5119,10 @@ public class MainFrame extends JFrame {
                 followProcessing(entry);
                 appendLog(entry);
                 refreshStats();
+                // Vrais doublons écartés sans outil manuel (voir AutoDedup, 2026-09-26).
+                AutoDedup.onSaved(entry, tableModel.allEntries(),
+                        loser -> { tableModel.removeEntries(java.util.Set.of(loser)); refreshStats(); },
+                        msg -> appendLogLine(msg, FileEntry.Status.SKIPPED, null));
             }),
             (doneCount, total) -> SwingUtilities.invokeLater(() -> {
                 JProgressBar bar = progressBars.get(ProgressSlot.SAVE);
@@ -4664,7 +5135,21 @@ public class MainFrame extends JFrame {
                     && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
                 SwingUtilities.invokeLater(() -> {
                     endProgress(ProgressSlot.SAVE);
+                    for (java.util.Map.Entry<FileEntry, List<FileEntry>> same : sameFile.entrySet()) {
+                        FileEntry first = same.getKey();
+                        if (first.status == FileEntry.Status.IDENTIFIED) continue; // pas traité (annulé) : les autres lignes attendent aussi
+                        for (FileEntry twin : same.getValue()) {
+                            twin.status = first.status;
+                            twin.result = first.result;
+                            twin.currentPath = first.currentPath;
+                            twin.message = I18n.t("Même fichier qu'une autre ligne — enregistré une seule fois");
+                            tableModel.update(twin);
+                        }
+                    }
                     refreshStats();
+                    if (!w.isCancelled() && Config.get().bool("artwork.auto_after_save", false)) {
+                        for (FileEntry fe : toSave) if (fe.status == FileEntry.Status.TAGGED) pendingArtwork.add(fe);
+                    }
                     // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
                     // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
                     // qu'à l'Enregistrement. groupByCompilations() garde ses propres gardes
@@ -4715,6 +5200,8 @@ public class MainFrame extends JFrame {
      * runPostTagCommand() une seule fois, à la toute fin réelle de la chaîne (plus ni scan ni
      * taguage actif), pas à chaque relance intermédiaire.
      */
+    private long autoSaveDeferredSinceMs = 0;
+
     private void scheduleAutoSaveFollowUp() {
         // Interrupteur utilisateur (chkAutoSaveEnabled, Config.autoSaveEnabled()) : un seul point de
         // garde ici plutôt que devant chacun des appelants (onTaggingDone, SaveWorker.done,
@@ -4741,6 +5228,25 @@ public class MainFrame extends JFrame {
                 scheduleAutoSaveFollowUp(); // déjà en cours (ailleurs) — revérifier plus tard
                 return;
             }
+            // Pas d'enregistrement automatique pendant les scans (2026-09-27, demande utilisateur :
+            // « la sauvegarde auto se fait que si le scan est fini ») : chaque enregistrement recopie le
+            // fichier vers la bibliothèque sur MyBook, le même disque lent que le scan parcourt — les
+            // deux ensemble ont fait durer le scan MyBook 16 h 30 (contre 7 h seul). Sans plafond, choix
+            // explicite de l'utilisateur : pendant un long scan, les identifications attendent (elles
+            // survivent à une fermeture de l'appli, voir tagging.persist_pending). « Enregistrer tout »
+            // reste manuel. SaveBacklog.setSavingDeferred : le frein « pas plus de N non enregistrés »
+            // ne doit pas bloquer le taguage pendant ce report voulu (sinon 10 min d'attente par fichier).
+            if (hasWork && !activeScanWorkers.isEmpty()) {
+                SaveBacklog.setSavingDeferred(true);
+                if (autoSaveDeferredSinceMs == 0) {
+                    autoSaveDeferredSinceMs = System.currentTimeMillis();
+                    System.out.println("[OT] Enregistrer : différé jusqu'à la fin des scans.");
+                }
+                scheduleAutoSaveFollowUp();
+                return;
+            }
+            autoSaveDeferredSinceMs = 0;
+            SaveBacklog.setSavingDeferred(false);
             if (hasWork) {
                 saveAll();
                 // saveAll() peut refuser en silence (juste un setStatus("Encore en cours…")) si
@@ -4774,6 +5280,70 @@ public class MainFrame extends JFrame {
      * peut très bien ne jamais terminer.
      */
     private void runPostTagCommand() {
+        // Pochettes/portraits manquants des fichiers enregistrés pendant cette chaîne : une seule passe, ICI (vraie fin de
+        // chaîne), car elle écrit dans les fichiers et ne peut pas tourner pendant un taguage ou un enregistrement.
+        List<FileEntry> artwork = new ArrayList<>(pendingArtwork);
+        pendingArtwork.clear();
+        if (!artwork.isEmpty()) {
+            completeArtwork(artwork, true, this::runPostTagCommandNow);
+            return;
+        }
+        runPostTagCommandNow();
+    }
+
+    /** Fichiers enregistrés dont les pochettes/portraits manquants seront complétés à la fin de la chaîne. */
+    private final java.util.Set<FileEntry> pendingArtwork = new java.util.LinkedHashSet<>();
+
+    /**
+     * Complète les pochettes (par album) et portraits (par artiste) manquants des fichiers donnés, en arrière-plan.
+     * Ne touche pas ce qui existe déjà. Appelé après l'enregistrement si {@code artwork.auto_after_save} est actif,
+     * ou à la demande depuis Outils.
+     */
+    private void completeArtwork(List<FileEntry> targets, boolean auto, Runnable onDone) {
+        Runnable done = onDone != null ? onDone : () -> {};
+        if (targets.isEmpty()) { done.run(); return; }
+        List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.ARTWORK_COMPLETION);
+        if (!blockers.isEmpty()) {
+            setStatus(I18n.t("Encore en cours : %s — pochettes et photos manquantes sautées cette fois-ci.",
+                    String.join(", ", blockers)));
+            done.run();
+            return;
+        }
+        setStatus(I18n.t("Recherche des pochettes et photos manquantes (%d fichier(s))…", targets.size()));
+        ArtworkCompletionWorker w = new ArtworkCompletionWorker(targets,
+                msg -> SwingUtilities.invokeLater(() -> setStatus(msg)));
+        w.addPropertyChangeListener(evt -> {
+            if ("state".equals(evt.getPropertyName())
+                    && SwingWorker.StateValue.DONE.equals(evt.getNewValue())) {
+                SwingUtilities.invokeLater(() -> {
+                    try {
+                        ArtworkCompletionWorker.Summary s = w.get();
+                        setStatus(s.nothingToDo()
+                                ? I18n.t("Aucune pochette ni photo manquante.")
+                                : I18n.t("Pochettes ajoutées : %d (introuvables : %d) — photos d'artistes ajoutées : %d (introuvables : %d)",
+                                        s.coversAdded(), s.coversNotFound(), s.photosAdded(), s.photosNotFound()));
+                    } catch (Exception ignored) {
+                        // annulée ou en échec : rien à résumer
+                    }
+                    done.run();
+                });
+            }
+        });
+        WorkerHub.get().submit(WorkerHub.TaskKind.ARTWORK_COMPLETION, I18n.t("Pochettes et photos manquantes"), w, w::stopNow);
+    }
+
+    /** Outils → Re-traitement : sur la sélection, ou sur toute la liste s'il n'y en a pas. */
+    private void completeArtworkFromMenu() {
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        java.util.Set<FileEntry> targets = new java.util.LinkedHashSet<>();
+        if (sel.length > 0) { for (int r : sel) targets.addAll(entriesAtViewRow(r)); }
+        else targets.addAll(tableModel.allEntries());
+        targets.removeIf(e -> e.status != FileEntry.Status.TAGGED && e.status != FileEntry.Status.IDENTIFIED);
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier identifié ou tagué à compléter.")); return; }
+        completeArtwork(new ArrayList<>(targets), false, null);
+    }
+
+    private void runPostTagCommandNow() {
         // Toujours appelé exactement à la toute fin réelle de la chaîne Enregistrer (voir les deux
         // points d'appel), jamais entre deux vagues intermédiaires — l'endroit naturel pour afficher
         // la revue de compilations accumulée par groupByCompilations(true), voir son commentaire.
@@ -4783,7 +5353,7 @@ public class MainFrame extends JFrame {
         for (String cmd : cmds) {
             if (cmd == null || cmd.isBlank()) continue;
             try {
-                new ProcessBuilder("sh", "-c", cmd)
+                com.opentagger.PostTagCommands.shell(cmd)
                         .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                         .redirectError(ProcessBuilder.Redirect.DISCARD)
                         .start();
@@ -5049,6 +5619,48 @@ public class MainFrame extends JFrame {
      *  chacune leur propre WorkerHub.TaskKind et leur propre worker — seul le point d'entrée visible
      *  a été fusionné, pas le mécanisme interne (services et API réellement distincts).
      */
+    /**
+     * Synchronisation AUTOMATIQUE des compteurs d'écoute, déclenchée à la fin d'un scan de dossier
+     * (donc une fois les tags des fichiers audio lus) si la case « Options de taguage » est cochée.
+     * Au plus une fois par 24 h (PlayCounts.dueForAutoSync) : le classement en ligne est récupéré en
+     * UNE requête par service, mais le refaire à chaque dossier ouvert serait inutile. Silencieuse :
+     * aucune fenêtre, rien si aucun service n'est configuré, taguage en cours ou scan encore actif
+     * (elle sera retentée au prochain scan). ListenBrainz puis Last.fm s'exécutent l'un APRÈS l'autre :
+     * les deux réécrivent les mêmes fichiers, les lancer ensemble risquerait de perdre une mise à jour.
+     */
+    private void scheduleAutoPlayCountSync() {
+        if (!activeScanWorkers.isEmpty()) return;   // attendre la fin de TOUS les scans en cours
+        long now = System.currentTimeMillis();
+        if (!com.opentagger.PlayCounts.dueForAutoSync(Config.get().lastAutoPlayCountSyncMs(), now)) return;
+        boolean hasLb = !Config.get().listenbrainzUsername().isBlank();
+        // Last.fm exige en plus une clé API (voir LastFmClient) : sans elle, rien à tenter.
+        boolean hasLf = !Config.get().lastfmUsername().isBlank() && !Config.get().lastfmKey().isBlank();
+        if (!hasLb && !hasLf) return;
+        if (WorkerHub.get().current(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isPresent()
+                || WorkerHub.get().current(WorkerHub.TaskKind.LASTFM_SYNC).isPresent()) return;
+        if (!WorkerHub.get().blockers(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isEmpty()) return; // taguage en cours
+        Config.get().setLastAutoPlayCountSyncMs(now);
+        System.out.println("[OT] Synchronisation automatique des compteurs d'écoute (fin de scan).");
+        if (hasLb) {
+            syncListenBrainz();
+            if (hasLf) startLastFmAfterListenBrainz();
+        } else {
+            syncLastFm();
+        }
+    }
+
+
+    /** Attend la fin de la synchronisation ListenBrainz puis lance celle de Last.fm (jamais en parallèle). */
+    private void startLastFmAfterListenBrainz() {
+        javax.swing.Timer t = new javax.swing.Timer(2000, null);
+        t.addActionListener(e -> {
+            if (WorkerHub.get().current(WorkerHub.TaskKind.LISTENBRAINZ_SYNC).isPresent()) return; // encore en cours
+            t.stop();
+            if (WorkerHub.get().blockers(WorkerHub.TaskKind.LASTFM_SYNC).isEmpty()) syncLastFm();
+        });
+        t.start();
+    }
+
     private void syncPlayCounts() {
         boolean hasLb = !Config.get().listenbrainzUsername().isBlank();
         boolean hasLf = !Config.get().lastfmUsername().isBlank();
@@ -5083,10 +5695,19 @@ public class MainFrame extends JFrame {
         forceRetagOn(targets);
     }
 
+    /** Entrées sélectionnées dans le tableau, vue liste OU arborescente (même résolution que forceRetag()).
+     *  Package-privé : AudioTagAuditPanel, qui audite "la sélection" sans dépendre de la JTable. */
+    List<FileEntry> selectedEntries() {
+        int[] sel = table != null ? table.getSelectedRows() : new int[0];
+        java.util.Set<FileEntry> set = new java.util.LinkedHashSet<>();
+        for (int r : sel) set.addAll(entriesAtViewRow(r));
+        return new ArrayList<>(set);
+    }
+
     /**
      * Confirme puis lance "Forcer le re-taguage" sur une liste explicite de fichiers — factorisé
      * hors de forceRetag() (2026-09-02) pour que d'autres fenêtres de revue (ex.
-     * DurationMismatchReviewDialog, dont le lot "à revérifier"/"probablement cassé" ne proposait
+     * DurationMismatchReviewPanel, dont le lot "à revérifier"/"probablement cassé" ne proposait
      * jusqu'ici qu'une correspondance manuelle fichier par fichier — impraticable sur plusieurs
      * centaines d'entrées) puissent déclencher le même re-taguage ciblé sans dépendre de la
      * sélection de la fenêtre principale. Package-privé : appelé depuis ui/*.
@@ -5188,107 +5809,74 @@ public class MainFrame extends JFrame {
         resetForReidentification(targets, () -> launchForcedTagging(targets, true, true));
     }
 
-    /**
-     * Détecte et propose de corriger un encodage cassé (mojibake — voir {@link
-     * com.opentagger.EncodingFixer}) sur titre/artiste/artiste album/album/commentaire — un texte
-     * UTF-8 écrit par un autre outil puis relu en Latin-1 par celui-ci ou un précédent, typique sur
-     * une bibliothèque agrégée de sources hétérogènes. Lit le tag RÉEL sur disque (comme
-     * {@link #forceRetag}), indépendamment du statut/résultat déjà en mémoire — s'applique aussi
-     * bien à des fichiers déjà TAGGED qu'à d'autres. Aucune écriture avant confirmation explicite
-     * dans {@link EncodingFixReviewDialog}.
-     */
-    private void fixEncoding() {
+    /** Devinette Bandcamp à la demande (FileEntry.bandcampOnly, voir TaggingWorker.
+     *  tryBandcampGuess()) — sortie de la cascade automatique le 2026-09-19 (rendement mesuré en
+     *  prod : ~0,4%, 4 succès / 919 essais) pour devenir une action ciblée façon MetaGrater de
+     *  SongKong : appliquée seulement à la sélection (ou à tous les "Non identifiés" si rien n'est
+     *  sélectionné), pas à tout le lot à chaque taguage. Contrairement à reidentifyUnmatched(), pas
+     *  de resetForReidentification() : ce mode ne touche ni le cache ni les MBID du fichier (rien à
+     *  effacer sur un fichier déjà SKIPPED), juste ses champs en mémoire. */
+    private void tryBandcampOnUnmatched() {
         if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
         }
         List<String> blockers = WorkerHub.get().blockerLabels(WorkerHub.TaskKind.TAGGING);
         if (!blockers.isEmpty()) {
-            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant de corriger l'encodage.",
+            setStatus(I18n.t("Encore en cours : %s — attendez la fin avant d'essayer Bandcamp.",
                     String.join(", ", blockers)));
             return;
         }
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         List<FileEntry> targets = new ArrayList<>();
         if (sel.length > 0) {
-            // entriesAtViewRow() — même correctif que forceRetag()/startTagging() (voir leur
-            // commentaire), sinon un en-tête de groupe en vue arborescence casse tout.
             java.util.Set<FileEntry> targetSet = new java.util.LinkedHashSet<>();
             for (int r : sel) targetSet.addAll(entriesAtViewRow(r));
-            targets.addAll(targetSet);
+            for (FileEntry e : targetSet) {
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
+            }
         } else {
-            targets.addAll(tableModel.allEntries());
-        }
-        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier à analyser.")); return; }
-
-        setStatus(I18n.t("Recherche d'encodage cassé sur %d fichier(s)…", targets.size()));
-        btnTagAll.setEnabled(false);
-        new SwingWorker<List<EncodingFixReviewDialog.Candidate>, Void>() {
-            @Override protected List<EncodingFixReviewDialog.Candidate> doInBackground() {
-                List<EncodingFixReviewDialog.Candidate> found = new ArrayList<>();
-                for (FileEntry e : targets) {
-                    if (isCancelled()) break;
-                    File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    if (!fichier.exists()) continue;
-                    TagInfo before;
-                    try { before = readTags(fichier); } catch (Exception ex) { continue; }
-                    TagInfo after = before.copy();
-                    boolean changed = fixTextField(() -> after.title,       v -> after.title = v);
-                    changed = fixTextField(() -> after.artist,      v -> after.artist = v)      || changed;
-                    changed = fixTextField(() -> after.albumArtist, v -> after.albumArtist = v) || changed;
-                    changed = fixTextField(() -> after.album,       v -> after.album = v)       || changed;
-                    changed = fixTextField(() -> after.comment,     v -> after.comment = v)     || changed;
-                    if (changed) found.add(new EncodingFixReviewDialog.Candidate(fichier, e, before, after));
-                }
-                return found;
+            for (FileEntry e : tableModel.allEntries()) {
+                if (e.status == FileEntry.Status.SKIPPED) targets.add(e);
             }
-            @Override protected void done() {
-                btnTagAll.setEnabled(true);
-                List<EncodingFixReviewDialog.Candidate> found;
-                try { found = get(); } catch (Exception ex) { found = List.of(); }
-                if (found.isEmpty()) {
-                    setStatus(I18n.t("Aucun encodage cassé détecté."));
-                    return;
-                }
-                setStatus(I18n.t("%d fichier(s) avec encodage cassé détecté(s).", found.size()));
-                new EncodingFixReviewDialog(MainFrame.this, found, tableModel).setVisible(true);
-            }
-        }.execute();
-    }
-
-    /** Corrige `getter` en place via `setter` si {@link com.opentagger.EncodingFixer#isSuspect}
-     *  détecte un encodage cassé — utilisé par {@link #fixEncoding()} pour chaque champ texte
-     *  candidat, un à la fois (pattern getter/setter plutôt que réflexion : ces champs sont publics
-     *  et peu nombreux, pas besoin de la machinerie de TagWriter.fieldFor()). */
-    private static boolean fixTextField(java.util.function.Supplier<String> getter,
-                                         java.util.function.Consumer<String> setter) {
-        String val = getter.get();
-        if (val != null && com.opentagger.EncodingFixer.isSuspect(val)) {
-            setter.accept(com.opentagger.EncodingFixer.fix(val));
-            return true;
         }
-        return false;
+        if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier \"Non identifié\" à essayer sur Bandcamp.")); return; }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            I18n.t("<html>Deviner une page Bandcamp pour %d fichier(s) \"Non identifié\" à partir de<br>"
+                 + "leurs tags artiste/titre actuels — rendement mesuré faible en pratique (~0,4%%).<br><br>"
+                 + "Une fenêtre de revue s'ouvrira ensuite pour confirmer les résultats trouvés,<br>"
+                 + "rien n'est appliqué automatiquement.</html>", targets.size()),
+            I18n.t("Essayer Bandcamp"), JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) return;
+
+        for (FileEntry e : targets) {
+            e.status      = FileEntry.Status.PENDING;
+            e.message     = "";
+            e.result      = null;
+            e.candidates  = null;
+            e.bandcampOnly = true;
+            tableModel.update(e);
+        }
+        launchForcedTagging(targets, true, true);
     }
 
     /** Nettoie le nom RÉEL du fichier sur disque des pistes "Non identifié" (retire un préfixe
      *  d'identifiant de catalogue/téléchargement — voir {@link TaggingWorker#stripLeadingNumericPrefix},
      *  la même règle qui corrige déjà l'analyse interne du nom de fichier dans
      *  TaggingWorker.parseFilename() — et un suffixe "-temp-NNNNN" résiduel d'un outil externe,
-     *  voir {@link TaggingWorker#stripTrailingTempSuffix}), SANS retenter l'identification.
-     *  Séparée de {@link #cleanNamesAndReidentifyUnmatched()} car demandé explicitement le
-     *  2026-08-11 : nettoyer le nom seul reste utile même quand on ne veut pas relancer tout de
-     *  suite une identification (comparer d'abord le résultat, ou laisser la ré-identification
-     *  automatique s'en charger plus tard via chkAutoReidentifyUnmatched). */
-    private void cleanNamesOnly() { cleanNames(false); }
-
-    /** Variante qui, une fois le nettoyage terminé, retente aussi l'identification par empreinte
-     *  audio (même flux que {@link #reidentifyUnmatched()}) sur les fichiers renommés. Demandé le
-     *  2026-08-11 après avoir trouvé qu'un grand nombre de pistes "Non identifié" portent un
-     *  identifiant à 4-5 chiffres en tête ("16741 - Dr. Dre - What's The Difference.mp3") qui
-     *  pollue déjà l'analyse interne. */
-    private void cleanNamesAndReidentifyUnmatched() { cleanNames(true); }
-
-    private void cleanNames(boolean reidentifyAfter) {
+     *  voir {@link TaggingWorker#stripTrailingTempSuffix}), avec ou sans retenter l'identification
+     *  ensuite (choix fait dans la boîte de dialogue elle-même, voir juste en dessous) — les deux
+     *  restent utiles séparément : comparer d'abord le résultat du nettoyage seul, ou laisser la
+     *  ré-identification automatique s'en charger plus tard via chkAutoReidentifyUnmatched.
+     *  Fusionné (2026-09-07, retour utilisateur "trop d'options") : "Nettoyer les noms" et "Nettoyer
+     *  les noms + Ré-identifier" étaient deux items de menu pour la même méthode {@code cleanNames}
+     *  (ci-dessous), juste un booléen différent — le choix se fait maintenant dans LA boîte de
+     *  dialogue elle-même plutôt que d'exiger deux entrées de menu séparées pour la même action.
+     *  Le "+ Ré-identifier" existe depuis le 2026-08-11, après avoir trouvé qu'un grand nombre de
+     *  pistes "Non identifié" portent un identifiant à 4-5 chiffres en tête ("16741 - Dr. Dre -
+     *  What's The Difference.mp3") qui pollue déjà l'analyse interne. */
+    private void cleanNames() {
         if (WorkerHub.get().current(WorkerHub.TaskKind.TAGGING).isPresent()) {
             setStatus(I18n.t("Taguage en cours — attendez la fin ou cliquez sur Annuler."));
             return;
@@ -5315,31 +5903,26 @@ public class MainFrame extends JFrame {
         }
         if (targets.isEmpty()) { setStatus(I18n.t("Aucun fichier \"Non identifié\" à nettoyer.")); return; }
 
-        String msg = reidentifyAfter
-            ? I18n.t("<html>Nettoyer le nom de fichier de %d piste(s) \"Non identifié\"<br>"
-                 + "(retire un préfixe d'identifiant de catalogue/téléchargement, ex. \"16741 - \")<br>"
-                 + "puis retenter l'identification par empreinte audio.<br><br>"
-                 + "Renommage sur disque (jamais d'écrasement d'un fichier existant).<br>"
-                 + "Une fenêtre de revue s'ouvrira ensuite pour confirmer les résultats trouvés,<br>"
-                 + "rien n'est appliqué automatiquement.</html>", targets.size())
-            : I18n.t("<html>Nettoyer le nom de fichier de %d piste(s) \"Non identifié\"<br>"
-                 + "(retire un préfixe d'identifiant de catalogue/téléchargement, ex. \"16741 - \")<br>"
-                 + "sans retenter l'identification.<br><br>"
-                 + "Renommage sur disque uniquement (jamais d'écrasement d'un fichier existant).</html>", targets.size());
-        int confirm = JOptionPane.showConfirmDialog(this, msg,
-            I18n.t(reidentifyAfter ? "Nettoyer les noms + Ré-identifier" : "Nettoyer les noms"),
-            JOptionPane.OK_CANCEL_OPTION);
-        if (confirm != JOptionPane.OK_OPTION) return;
+        Object[] options = { I18n.t("Nettoyer seulement"), I18n.t("Nettoyer + Ré-identifier"), I18n.t("Annuler") };
+        int choice = JOptionPane.showOptionDialog(this,
+            I18n.t("<html>Nettoyer le nom de fichier de %d piste(s) \"Non identifié\"<br>"
+                 + "(retire un préfixe d'identifiant de catalogue/téléchargement, ex. \"16741 - \").<br><br>"
+                 + "Renommage sur disque uniquement (jamais d'écrasement d'un fichier existant).<br><br>"
+                 + "\"Nettoyer + Ré-identifier\" retente ensuite l'identification par empreinte audio<br>"
+                 + "sur les fichiers renommés — une fenêtre de revue s'ouvrira pour confirmer les<br>"
+                 + "résultats trouvés, rien n'est appliqué automatiquement.</html>", targets.size()),
+            I18n.t("Nettoyer les noms"), JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE,
+            null, options, options[0]);
 
-        if (reidentifyAfter) {
-            cleanFilenames(targets, () -> reidentifyUnmatched(targets));
-        } else {
+        if (choice == 0) {
             cleanFilenames(targets, () -> {}); // cleanFilenames.done() affiche déjà le compte renommé
+        } else if (choice == 1) {
+            cleanFilenames(targets, () -> reidentifyUnmatched(targets));
         }
     }
 
     /** Renomme sur disque (sans déplacer) chaque fichier de {@code targets} dont le nom nettoyé
-     *  diffère du nom actuel — voir {@link #cleanNamesAndReidentifyUnmatched()}. En arrière-plan
+     *  diffère du nom actuel — voir {@link #cleanNames()}. En arrière-plan
      *  (SwingWorker) : renommage = I/O disque par fichier, même raison que
      *  {@link #resetForReidentification} juste en dessous. */
     private void cleanFilenames(List<FileEntry> targets, Runnable onDone) {
@@ -5401,30 +5984,51 @@ public class MainFrame extends JFrame {
     private void resetForReidentification(List<FileEntry> targets, Runnable onDone) {
         setStatus(I18n.t("Réinitialisation de %d fichier(s)…", targets.size()));
         btnTagAll.setEnabled(false);
+        // Parallélisé + log de progression (2026-09-04, trouvé en direct : sur un lot de 149562
+        // fichiers, cette passe restait bloquée en SILENCE (aucun log ici, contrairement à tout le
+        // reste du pipeline) sur UN SEUL thread pendant 4h+ sans qu'aucune identification réelle
+        // n'ait commencé — confirmé via jstack (aucun thread de taguage actif) et file_history
+        // (aucune écriture depuis des heures). Même pool "batch.threads" + même motif "cachePool"
+        // que InfoCompleterWorker/TaggingWorker, jusqu'ici la seule passe en lot à tourner sur un
+        // thread unique sans jamais logguer sa progression.
+        System.out.println("[OT] Réinitialisation : démarrage — " + targets.size() + " fichier(s).");
         new SwingWorker<Void, FileEntry>() {
+            private final java.util.concurrent.atomic.AtomicInteger doneCount = new java.util.concurrent.atomic.AtomicInteger();
             @Override protected Void doInBackground() {
-                MetadataCache cache = new MetadataCache();
+                int threads = Math.max(1, Config.get().batchThreads());
+                java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+                java.util.concurrent.BlockingQueue<MetadataCache> cachePool =
+                        new java.util.concurrent.LinkedBlockingQueue<>();
+                for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
+                List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
                 try {
                     for (FileEntry e : targets) {
-                        java.io.File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                        // Effacer le cache pour ce fichier
-                        cache.recordFileTagging(fichier.getAbsolutePath(), null);
-                        // Effacer les MBIDs du fichier audio pour forcer une nouvelle identification
-                        // (sinon MUSICBRAINZ_TRACK_ID est relu et peut donner un mauvais résultat en cache)
-                        try {
-                            org.jaudiotagger.audio.AudioFile af = org.jaudiotagger.audio.AudioFileIO.read(fichier);
-                            org.jaudiotagger.tag.Tag tag = af.getTag();
-                            if (tag != null) {
-                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_TRACK_ID);
-                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_ARTISTID);
-                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASEID);
-                                tag.deleteField(org.jaudiotagger.tag.FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
-                                af.commit();
+                        futures.add(pool.submit(() -> {
+                            MetadataCache cache = cachePool.poll();
+                            if (cache == null) cache = new MetadataCache();
+                            try {
+                                resetOneForReidentification(e, cache);
+                            } finally {
+                                cachePool.offer(cache);
+                                publish(e);
+                                int n = doneCount.incrementAndGet();
+                                if (n % 500 == 0 || n == targets.size()) {
+                                    System.out.println("[OT] Réinitialisation : " + n + " / " + targets.size());
+                                }
                             }
-                        } catch (Exception ignored) {}
-                        publish(e);
+                        }));
                     }
-                } finally { cache.close(); }
+                    // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit
+                    // dédié "blocages silencieux") : le correctif du 2026-09-04 juste au-dessus a
+                    // ajouté la parallélisation ET le log de progression, mais pas de VRAI timeout
+                    // sur cette boucle — un seul item bloqué pouvait donc reproduire exactement le
+                    // même blocage silencieux de 4h+ qu'à l'origine, juste sans le symptôme
+                    // "aucune activité" (le log de progression aurait quand même stagné au dernier
+                    // multiple de 500, mais rien ne l'aurait signalé comme anormal).
+                    WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
+                } finally {
+                    for (MetadataCache c : cachePool) c.close();
+                }
                 return null;
             }
             @Override protected void process(List<FileEntry> chunk) {
@@ -5440,10 +6044,41 @@ public class MainFrame extends JFrame {
                 }
             }
             @Override protected void done() {
+                System.out.println("[OT] Réinitialisation : terminée — " + targets.size() + " fichier(s).");
                 refreshStats();
                 onDone.run();
             }
         }.execute();
+    }
+
+    /** Un fichier de resetForReidentification() — extrait pour tourner en parallèle (voir son
+     *  commentaire). N'écrit sur le disque QUE si un champ MusicBrainz était vraiment présent à
+     *  effacer — avant ce correctif, af.commit() tournait pour CHAQUE fichier sans condition, donc
+     *  une lecture+réécriture complète même sur les fichiers sans aucun MBID à retirer. */
+    private void resetOneForReidentification(FileEntry e, MetadataCache cache) {
+        File fichier = e.currentPath != null ? e.currentPath.toFile() : e.file;
+        // Effacer le cache pour ce fichier
+        cache.recordFileTagging(fichier.getAbsolutePath(), null);
+        // Effacer les MBIDs du fichier audio pour forcer une nouvelle identification
+        // (sinon MUSICBRAINZ_TRACK_ID est relu et peut donner un mauvais résultat en cache)
+        // Un accès à la fois par disque mécanique (voir DiskIoThrottle) : sur des dizaines de milliers de fichiers, lecture + réécriture
+        // en parallèle d'un même disque USB le saturaient avant même le début de l'identification.
+        java.util.concurrent.Semaphore diskGate = com.opentagger.DiskIoThrottle.acquireFor(fichier);
+        try {
+            AudioFile af = AudioFileIO.read(fichier);
+            Tag tag = af.getTag();
+            if (tag != null) {
+                boolean changed = false;
+                for (FieldKey fk : new FieldKey[]{FieldKey.MUSICBRAINZ_TRACK_ID, FieldKey.MUSICBRAINZ_ARTISTID,
+                        FieldKey.MUSICBRAINZ_RELEASEID, FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID}) {
+                    if (!tag.getFirst(fk).isBlank()) { tag.deleteField(fk); changed = true; }
+                }
+                if (changed) af.commit();
+            }
+        } catch (Exception ignored) {
+        } finally {
+            com.opentagger.DiskIoThrottle.release(diskGate);
+        }
     }
 
     /** Tamponne les fichiers sélectionnés comme "déjà taggués" (marqueur OT_TAGGEDDATE + historique
@@ -6048,7 +6683,6 @@ public class MainFrame extends JFrame {
         com.opentagger.AudioTranscoder.Format fmt =
                 com.opentagger.AudioTranscoder.Format.fromId(cfg.transcodeFormat());
         int bitrate  = cfg.transcodeBitrate();
-        boolean del  = cfg.transcodeDeleteSource();
 
         String confirm = I18n.t(
             "<html>Transcoder <b>%d fichier(s)</b> → <b>%s</b>%s ?<br><br>" +
@@ -6061,7 +6695,6 @@ public class MainFrame extends JFrame {
                 I18n.t("Transcoder"), JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
         if (r != JOptionPane.OK_OPTION) return;
 
-        int[] done = {0};
         if (btnTranscode != null) btnTranscode.setEnabled(false);
         setStatus("⏳ " + I18n.t("Transcodage… 0 / %d", toTranscode.size()));
         beginProgress(ProgressSlot.TRANSCODE);
@@ -6458,168 +7091,9 @@ public class MainFrame extends JFrame {
     // Utilitaires
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /** Lit les 90+ champs d'un fichier audio — même couverture que TagWriter. */
+    /** Lit les champs d'un fichier audio — voir {@link com.opentagger.TagReader} (extrait le 2026-09-20). */
     TagInfo readTags(File f) {
-        // Opus/AAC/WV/APE : jaudiotagger ne sait pas les lire du tout (voir FfmpegTagIO) — inutile
-        // de tenter AudioFileIO.read() en sachant qu'il va échouer.
-        if (com.opentagger.FfmpegTagIO.handles(f)) return com.opentagger.FfmpegTagIO.read(f);
-        TagInfo ti = new TagInfo();
-        AudioFile af = null;
-        try {
-            af = AudioFileIO.read(f);
-        } catch (Exception ignored) {}
-        // En-tête audio (durée, débit...) indépendant du tag lui-même, un fichier sans AUCUN tag a
-        // quand même une durée — et un fichier dont AudioFileIO.read() plante entièrement (en-tête
-        // ID3/atom abîmé mais fichier par ailleurs parfaitement lisible/jouable) mérite quand même
-        // qu'on essaie de lui trouver une durée : avant ce correctif, un AudioFileIO.read() en échec
-        // sautait purement et simplement la sonde ffprobe ci-dessous, laissant durationSec à 0.
-        if (af != null) {
-            try {
-                if (af.getAudioHeader() != null) ti.durationSec = af.getAudioHeader().getTrackLength();
-            } catch (Exception ignored) {}
-        }
-        // jaudiotagger renvoie parfois 0 pour un .m4a/AAC structurellement valide (constaté en
-        // direct : un fichier de 7,8 Mo, flux AAC de 3:56 confirmé par ffprobe, mais
-        // getTrackLength()==0 — probablement un souci de parsing des atomes mvhd/mdhd/stts pour
-        // certains encodeurs). Grave : durationSec==0 est LE signal utilisé ailleurs pour repérer
-        // les fichiers vides/corrompus (voir le commentaire sur ce champ dans TagInfo.java) — un
-        // faux 0 fait donc passer un fichier parfaitement bon pour cassé. Contre-vérification via
-        // ffprobe (lecture des métadonnées du conteneur seulement, pas un décodage complet — coût
-        // négligeable), déclenchée dès que durationSec est encore à 0 à ce stade — que ce soit parce
-        // que getTrackLength() a renvoyé 0, ou parce qu'AudioFileIO.read() a échoué plus haut.
-        if (ti.durationSec <= 0) {
-            int probed = com.opentagger.AudioDuration.probeSeconds(f.getAbsolutePath());
-            if (probed > 0) ti.durationSec = probed;
-        }
-        if (af == null) return ti;
-        try {
-            Tag tag = af.getTag();
-            if (tag == null) return ti;
-
-            // ── Standard ──────────────────────────────────────────────────
-            ti.title          = g(tag, FieldKey.TITLE);
-            ti.artist         = g(tag, FieldKey.ARTIST);
-            ti.albumArtist    = g(tag, FieldKey.ALBUM_ARTIST);
-            ti.album          = g(tag, FieldKey.ALBUM);
-            ti.year           = g(tag, FieldKey.YEAR);
-            ti.track          = g(tag, FieldKey.TRACK);
-            ti.trackTotal     = g(tag, FieldKey.TRACK_TOTAL);
-            ti.genre          = g(tag, FieldKey.GENRE);
-            ti.discNo         = g(tag, FieldKey.DISC_NO);
-            ti.discTotal      = g(tag, FieldKey.DISC_TOTAL);
-            ti.comment        = g(tag, FieldKey.COMMENT);
-
-            // ── Tri ───────────────────────────────────────────────────────
-            ti.titleSort      = g(tag, FieldKey.TITLE_SORT);
-            ti.artistSort     = g(tag, FieldKey.ARTIST_SORT);
-            ti.albumSort      = g(tag, FieldKey.ALBUM_SORT);
-            ti.albumArtistSort= g(tag, FieldKey.ALBUM_ARTIST_SORT);
-            ti.composerSort   = g(tag, FieldKey.COMPOSER_SORT);
-            ti.conductorSort  = g(tag, FieldKey.CONDUCTOR_SORT);
-            ti.orchestraSort  = g(tag, FieldKey.ORCHESTRA_SORT);
-            ti.ensembleSort   = g(tag, FieldKey.ENSEMBLE_SORT);
-            ti.choirSort      = g(tag, FieldKey.CHOIR_SORT);
-            ti.lyricistSort   = g(tag, FieldKey.LYRICIST_SORT);
-            ti.producerSort   = g(tag, FieldKey.PRODUCER_SORT);
-            ti.arrangerSort   = g(tag, FieldKey.ARRANGER_SORT);
-
-            // ── Contributeurs ─────────────────────────────────────────────
-            ti.composer       = g(tag, FieldKey.COMPOSER);
-            ti.conductor      = g(tag, FieldKey.CONDUCTOR);
-            ti.orchestra      = g(tag, FieldKey.ORCHESTRA);
-            ti.ensemble       = g(tag, FieldKey.ENSEMBLE);
-            ti.choir          = g(tag, FieldKey.CHOIR);
-            ti.lyricist       = g(tag, FieldKey.LYRICIST);
-            ti.producer       = g(tag, FieldKey.PRODUCER);
-            ti.arranger       = g(tag, FieldKey.ARRANGER);
-            ti.engineer       = g(tag, FieldKey.ENGINEER);
-            ti.mixer          = g(tag, FieldKey.MIXER);
-            ti.djMixer        = g(tag, FieldKey.DJMIXER);
-
-            // ── Classique ─────────────────────────────────────────────────
-            ti.work           = g(tag, FieldKey.WORK);
-            ti.workMbid       = g(tag, FieldKey.MUSICBRAINZ_WORK_ID);
-            ti.movement       = g(tag, FieldKey.MOVEMENT);
-            ti.movementNo     = g(tag, FieldKey.MOVEMENT_NO);
-            ti.movementTotal  = g(tag, FieldKey.MOVEMENT_TOTAL);
-            ti.titleMovement  = g(tag, FieldKey.TITLE_MOVEMENT);
-            ti.part           = g(tag, FieldKey.PART);
-            ti.partType       = g(tag, FieldKey.PART_TYPE);
-            ti.partNo         = g(tag, FieldKey.PART_NUMBER);
-            ti.period         = g(tag, FieldKey.PERIOD);
-            ti.opus           = g(tag, FieldKey.OPUS);
-            ti.classicalCatalog   = g(tag, FieldKey.CLASSICAL_CATALOG);
-            ti.classicalNickname  = g(tag, FieldKey.CLASSICAL_NICKNAME);
-            ti.section        = g(tag, FieldKey.SECTION);
-            ti.overallWork    = g(tag, FieldKey.OVERALL_WORK);
-            ti.grouping       = g(tag, FieldKey.GROUPING);
-
-            // ── Flags ─────────────────────────────────────────────────────
-            String isCl = g(tag, FieldKey.IS_CLASSICAL);
-            if ("1".equals(isCl) || "true".equalsIgnoreCase(isCl)) ti.isClassical = "1";
-            String isCo = g(tag, FieldKey.IS_COMPILATION);
-            if ("1".equals(isCo) || "true".equalsIgnoreCase(isCo)) ti.isCompilation = "1";
-
-            // ── Audio ─────────────────────────────────────────────────────
-            ti.bpm            = g(tag, FieldKey.BPM);
-            ti.initialKey     = g(tag, FieldKey.KEY);
-            ti.language       = g(tag, FieldKey.LANGUAGE);
-
-            // ── Paroles ───────────────────────────────────────────────────
-            ti.lyrics         = g(tag, FieldKey.LYRICS);
-            ti.lyricsUrl      = g(tag, FieldKey.URL_LYRICS_SITE);
-
-            // ── Rating / Tags ─────────────────────────────────────────────
-            ti.rating         = g(tag, FieldKey.RATING);
-            ti.tags           = g(tag, FieldKey.TAGS);
-
-            // ── Mood ──────────────────────────────────────────────────────
-            ti.mood               = g(tag, FieldKey.MOOD);
-            ti.moodAggressive     = g(tag, FieldKey.MOOD_AGGRESSIVE);
-            ti.moodAcoustic       = g(tag, FieldKey.MOOD_ACOUSTIC);
-            ti.moodElectronic     = g(tag, FieldKey.MOOD_ELECTRONIC);
-            ti.moodHappy          = g(tag, FieldKey.MOOD_HAPPY);
-            ti.moodParty          = g(tag, FieldKey.MOOD_PARTY);
-            ti.moodRelaxed        = g(tag, FieldKey.MOOD_RELAXED);
-            ti.moodSad            = g(tag, FieldKey.MOOD_SAD);
-            ti.moodValence        = g(tag, FieldKey.MOOD_VALENCE);
-            ti.moodArousal        = g(tag, FieldKey.MOOD_AROUSAL);
-            ti.moodDanceability   = g(tag, FieldKey.MOOD_DANCEABILITY);
-            ti.moodInstrumental   = g(tag, FieldKey.MOOD_INSTRUMENTAL);
-
-            // ── URLs ──────────────────────────────────────────────────────
-            ti.artistOfficialUrl  = g(tag, FieldKey.URL_OFFICIAL_ARTIST_SITE);
-            ti.artistWikipediaUrl = g(tag, FieldKey.URL_WIKIPEDIA_ARTIST_SITE);
-            ti.artistDiscogsUrl   = g(tag, FieldKey.URL_DISCOGS_ARTIST_SITE);
-            ti.releaseOfficialUrl = g(tag, FieldKey.URL_OFFICIAL_RELEASE_SITE);
-            ti.releaseWikipediaUrl= g(tag, FieldKey.URL_WIKIPEDIA_RELEASE_SITE);
-            ti.releaseDiscogsUrl  = g(tag, FieldKey.URL_DISCOGS_RELEASE_SITE);
-
-            // ── IDs ───────────────────────────────────────────────────────
-            ti.isrc               = g(tag, FieldKey.ISRC);
-            ti.amazonId           = g(tag, FieldKey.AMAZON_ID);
-            ti.roonAlbumTag       = g(tag, FieldKey.ROONALBUMTAG);
-            ti.roonTrackTag       = g(tag, FieldKey.ROONTRACKTAG);
-            ti.acoustidId         = g(tag, FieldKey.ACOUSTID_ID);
-            ti.acoustidFingerprint= g(tag, FieldKey.ACOUSTID_FINGERPRINT);
-
-            // ── IDs MusicBrainz ───────────────────────────────────────────
-            ti.artistMbid         = g(tag, FieldKey.MUSICBRAINZ_ARTISTID);
-            ti.releaseMbid        = g(tag, FieldKey.MUSICBRAINZ_RELEASEID);
-            ti.recordingMbid      = g(tag, FieldKey.MUSICBRAINZ_TRACK_ID);
-            ti.releaseGroupMbid   = g(tag, FieldKey.MUSICBRAINZ_RELEASE_GROUP_ID);
-
-            // ── Marqueur de taguage (portable, indépendant du cache SQLite) ──
-            ti.taggedDate         = TagWriter.getCustomField(tag, "OT_TAGGEDDATE");
-
-        } catch (Exception ignored) {}
-        return ti;
-    }
-
-    /** getFirst avec protection NPE et chaîne vide par défaut. */
-    private String g(Tag tag, FieldKey key) {
-        try { String v = tag.getFirst(key); return v != null ? v : ""; }
-        catch (Exception e) { return ""; }
+        return com.opentagger.TagReader.read(f);
     }
 
     // ── Filtrage rapide (recherche + chips de statut cliquables dans buildStatsStrip()) ──────
@@ -6713,7 +7187,6 @@ public class MainFrame extends JFrame {
 
     private void selectByStatus(FileEntry.Status... statuses) {
         Set<FileEntry.Status> set = Set.of(statuses);
-        table.clearSelection();
         // entryAtViewRow() (pas tableModel.get(table.convertRowIndexToModel(r)), même bug de fond
         // qu'applyDetail()/transcodeFiles() en vue arborescence — voir leurs commentaires) : trouvé
         // en direct 2026-09-01. Particulièrement facile à déclencher ici (un simple clic sur un chip
@@ -6721,11 +7194,14 @@ public class MainFrame extends JFrame {
         // (les en-têtes de groupe s'ajoutent), donc modelRow pouvait dépasser tableModel.getRowCount()
         // et lever une exception, ou pire, renvoyer le statut d'un fichier totalement différent.
         // entryAtViewRow() renvoie null pour un en-tête, filtré naturellement par le null-check.
+        // UNE seule mise à jour de la sélection (voir RowSelection) : ligne par ligne, chaque ajout relançait le panneau de détail sur
+        // toute la sélection déjà faite — quadratique, interface gelée pendant des heures sur 50 000 fichiers.
+        List<Integer> matching = new ArrayList<>();
         for (int viewRow = 0; viewRow < table.getRowCount(); viewRow++) {
             FileEntry e = entryAtViewRow(viewRow);
-            if (e != null && set.contains(e.status))
-                table.addRowSelectionInterval(viewRow, viewRow);
+            if (e != null && set.contains(e.status)) matching.add(viewRow);
         }
+        RowSelection.select(table.getSelectionModel(), matching);
         int n = table.getSelectedRowCount();
         String label = switch (statuses[0]) {
             case TAGGED     -> I18n.t("tagué(s)");
@@ -6751,94 +7227,141 @@ public class MainFrame extends JFrame {
 
     // ── Export CSV ───────────────────────────────────────────��────────────────
 
-    private void exportCsv() {
-        // allEntries() : un export "CSV" incomplet si un filtre reste actif au moment du clic
-        // (sinon getRowCount()/get(i), qui portent sur la vue déjà filtrée) — le nom de l'action
-        // ne suggère aucune restriction à la vue courante.
+    /**
+     * Rapport agrégé/compact pour diagnostic externe — voir échange du 2026-09-07 : l'utilisateur
+     * proposait un enregistreur d'activité exhaustif (tout scan/requête réseau/décision) à me
+     * transmettre entre deux sessions plutôt que de coller des extraits de journal à la main.
+     * Écarté : un tel enregistrement, sur plusieurs jours, coûterait probablement PLUS cher à relire
+     * en totalité qu'il ne ferait gagner, et n'aurait de toute façon pas révélé la plupart des vrais
+     * bugs trouvés cette nuit-là (contention de sémaphore, triple exécution concurrente...), qui
+     * n'existent QUE dans l'état d'un processus vivant (jstack, requêtes SQL live), jamais dans un
+     * journal passif. À la place : UN fichier JSON compact combinant plusieurs vues déjà existantes
+     * (rapport Non identifiés, revue durées incohérentes) + quelques agrégats nouveaux (sources
+     * d'identification, échantillon d'erreurs réelles) — pensé pour être transmis tel quel.
+     */
+    private void exportDiagnosticReport() {
         if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Aucun fichier à exporter.")); return; }
-        JFileChooser fc = new JFileChooser();
-        fc.setSelectedFile(new File("opentagger_export.csv"));
-        fc.setDialogTitle(I18n.t("Exporter en CSV"));
-        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        File out = fc.getSelectedFile();
-        setStatus(I18n.t("Export CSV en cours…"));
-        // Copie de la liste sur l'EDT AVANT de passer en arrière-plan : doInBackground() itérait
-        // avant un correctif précédent directement sur tableModel (getRowCount()/get(i)) depuis un
-        // thread de fond pendant que l'EDT peut concurremment ajouter/retirer des lignes (scan en
-        // cours, filtre) — allEntries() est elle-même une vue live (non copiée) sur la liste
-        // mutable sous-jacente, donc toujours recopiée ici dans un ArrayList frais pour figer la
-        // structure itérée.
-        List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
-        new SwingWorker<Void, Void>() {
-            @Override protected Void doInBackground() throws Exception {
-                try (PrintWriter pw = new PrintWriter(
-                        new OutputStreamWriter(new FileOutputStream(out), StandardCharsets.UTF_8))) {
-                    // En-tête BOM pour Excel
-                    pw.print('﻿');
-                    pw.println(I18n.t("Fichier,Artiste,Artiste Album,Titre,Album,Année,Genre,Piste,Disque,Compositeur,Chef,MBID,Statut"));
-                    for (FileEntry e : snapshot) {
-                        TagInfo  ti = e.activeTags();
-                        pw.println(csv(e.filename()) + "," + csv(ti.artist) + "," + csv(ti.albumArtist)
-                            + "," + csv(ti.title) + "," + csv(ti.album) + "," + csv(ti.year)
-                            + "," + csv(ti.genre) + "," + csv(ti.track) + "," + csv(ti.discNo)
-                            + "," + csv(ti.composer) + "," + csv(ti.conductor)
-                            + "," + csv(ti.recordingMbid) + "," + csv(e.status.name()));
-                    }
-                }
-                return null;
-            }
-            @Override protected void done() {
-                try { get(); setStatus(I18n.t("CSV exporté → %s", out.getName())); }
-                catch (Exception ex) { showError(I18n.t("Export CSV : %s", ex.getMessage())); }
-            }
-        }.execute();
-    }
-
-    private static String csv(String s) {
-        if (s == null) return "";
-        s = s.replace("\"", "\"\"");
-        return (s.contains(",") || s.contains("\"") || s.contains("\n")) ? "\"" + s + "\"" : s;
-    }
-
-    // ── Export playlist ───────────────────────────────────────────────────────
-
-    private void exportPlaylist(String format) {
-        // allEntries() (compte ET liste réelle juste en dessous) : sinon un fichier tagué masqué
-        // par un filtre actif est silencieusement absent de la playlist exportée.
-        long tagged = 0;
-        for (FileEntry e : tableModel.allEntries())
-            if (e.status == FileEntry.Status.TAGGED) tagged++;
-        if (tagged == 0) { setStatus(I18n.t("Aucun fichier tagué à exporter.")); return; }
 
         JFileChooser fc = new JFileChooser();
-        String ext = format.equalsIgnoreCase("xspf") ? ".xspf" : ".m3u";
-        fc.setSelectedFile(new File("playlist" + ext));
-        fc.setDialogTitle(I18n.t("Exporter playlist %s", format.toUpperCase()));
+        fc.setDialogTitle(I18n.t("Exporter le rapport de session"));
+        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("JSON (*.json)", "json"));
+        fc.setSelectedFile(new File("opentagger-rapport-session.json"));
         if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File dest = fc.getSelectedFile();
+        if (!dest.getName().endsWith(".json")) dest = new File(dest.getAbsolutePath() + ".json");
 
-        File out = fc.getSelectedFile();
-        if (!out.getName().toLowerCase().endsWith(ext))
-            out = new File(out.getAbsolutePath() + ext);
+        try {
+            java.util.List<com.opentagger.model.FileEntry> all = new java.util.ArrayList<>(tableModel.allEntries());
 
-        List<FileEntry> all = new ArrayList<>(tableModel.allEntries());
-
-        final File outFinal = out;
-        setStatus(I18n.t("Export %s en cours…", format.toUpperCase()));
-        new SwingWorker<Integer, Void>() {
-            @Override protected Integer doInBackground() throws Exception {
-                return format.equalsIgnoreCase("xspf")
-                    ? com.opentagger.PlaylistExporter.exportXspf(all, outFinal)
-                    : com.opentagger.PlaylistExporter.exportM3u(all, outFinal);
-            }
-            @Override protected void done() {
-                try {
-                    int n = get();
-                    setStatus(I18n.t("%s exporté — %d piste(s) → %s", format.toUpperCase(), n, outFinal.getName()));
-                } catch (Exception ex) {
-                    showError(I18n.t("Export %s : %s", format.toUpperCase(), ex.getMessage()));
+            // ── Totaux (mêmes catégories que la barre de stats) ──────────────────
+            java.util.Map<String, Integer> totals = new java.util.LinkedHashMap<>();
+            int identified = 0, tagged = 0, notIdentified = 0, errors = 0, pending = 0;
+            for (com.opentagger.model.FileEntry e : all) {
+                switch (e.status) {
+                    case IDENTIFIED -> identified++;
+                    case TAGGED     -> tagged++;
+                    case ERROR      -> errors++;
+                    case SKIPPED    -> notIdentified++;
+                    default         -> pending++;
                 }
             }
-        }.execute();
+            totals.put("total", all.size());
+            totals.put("identified", identified);
+            totals.put("tagged", tagged);
+            totals.put("not_identified_or_skipped", notIdentified);
+            totals.put("errors", errors);
+            totals.put("pending", pending);
+
+            // ── Causes de SKIPPED/ERROR (même regroupement que NonIdentifiedReportDialog) ───────
+            java.util.Map<com.opentagger.model.SkipReason, Integer> reasonCounts =
+                    new java.util.EnumMap<>(com.opentagger.model.SkipReason.class);
+            int reasonUnknown = 0;
+            for (com.opentagger.model.FileEntry e : all) {
+                if (e.status != com.opentagger.model.FileEntry.Status.SKIPPED
+                        && e.status != com.opentagger.model.FileEntry.Status.ERROR) continue;
+                if (e.skipReason == null) { reasonUnknown++; continue; }
+                reasonCounts.merge(e.skipReason, 1, Integer::sum);
+            }
+            java.util.Map<String, Object> skipReasons = new java.util.LinkedHashMap<>();
+            reasonCounts.entrySet().stream()
+                .sorted((a, b) -> b.getValue() - a.getValue())
+                .forEach(en -> skipReasons.put(en.getKey().name(), en.getValue()));
+            if (reasonUnknown > 0) skipReasons.put("UNKNOWN_LEGACY_SESSION", reasonUnknown);
+
+            // ── Durée incohérente : même seuil que DurationMismatchReviewPanel (90s), mais un
+            // ÉCHANTILLON des plus gros écarts relatifs plutôt que la liste complète (potentiellement
+            // des milliers d'entrées — voir la même discussion sur le coût de relecture). ──────────
+            record MismatchRow(String file, int fileSec, int mbSec, double ratio, String title) {}
+            java.util.List<MismatchRow> mismatches = new java.util.ArrayList<>();
+            int mismatchBroken = 0, mismatchReview = 0;
+            for (com.opentagger.model.FileEntry e : all) {
+                if (!e.durationMismatch) continue;
+                int fileSec = e.current != null ? e.current.durationSec : 0;
+                int mbSec = (e.candidates != null && !e.candidates.isEmpty())
+                        ? e.candidates.get(0).mbDurationSec : 0;
+                boolean broken = fileSec > 0 && fileSec < 90;
+                if (broken) mismatchBroken++; else mismatchReview++;
+                double ratio = (fileSec > 0 && mbSec > 0)
+                        ? Math.max(fileSec, mbSec) / (double) Math.min(fileSec, mbSec) : 0;
+                mismatches.add(new MismatchRow(e.filename(), fileSec, mbSec, ratio,
+                        e.current != null ? e.current.title : ""));
+            }
+            mismatches.sort((a, b) -> Double.compare(b.ratio(), a.ratio()));
+            java.util.List<Object> mismatchSample = new java.util.ArrayList<>();
+            for (MismatchRow m : mismatches.subList(0, Math.min(30, mismatches.size()))) {
+                java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
+                row.put("file", m.file());
+                row.put("file_sec", m.fileSec());
+                row.put("mb_sec", m.mbSec());
+                row.put("title", m.title());
+                mismatchSample.add(row);
+            }
+            java.util.Map<String, Object> durationMismatch = new java.util.LinkedHashMap<>();
+            durationMismatch.put("probably_broken_short", mismatchBroken);
+            durationMismatch.put("to_review_manually", mismatchReview);
+            durationMismatch.put("worst_gaps_sample", mismatchSample);
+
+            // ── Sources d'identification (fichiers déjà identifiés/tagués) ──────────────────────
+            java.util.Map<String, Integer> sources = new java.util.LinkedHashMap<>();
+            for (com.opentagger.model.FileEntry e : all) {
+                if (e.status != com.opentagger.model.FileEntry.Status.IDENTIFIED
+                        && e.status != com.opentagger.model.FileEntry.Status.TAGGED) continue;
+                String src = e.activeTags().identificationSource;
+                sources.merge(src == null || src.isBlank() ? "unknown" : src, 1, Integer::sum);
+            }
+
+            // ── Échantillon des dernières erreurs (message réel, pas juste un compteur) ─────────
+            java.util.List<Object> errorSample = new java.util.ArrayList<>();
+            for (com.opentagger.model.FileEntry e : all) {
+                if (e.status != com.opentagger.model.FileEntry.Status.ERROR) continue;
+                if (errorSample.size() >= 20) break;
+                java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
+                row.put("file", e.filename());
+                row.put("message", e.message);
+                errorSample.add(row);
+            }
+
+            java.util.Map<String, Object> wrapper = new java.util.LinkedHashMap<>();
+            wrapper.put("version", 1);
+            wrapper.put("exported", java.time.Instant.now().toString());
+            wrapper.put("app_version", com.opentagger.Config.get().appVersion());
+            wrapper.put("totals", totals);
+            wrapper.put("skip_reasons", skipReasons);
+            wrapper.put("duration_mismatch", durationMismatch);
+            wrapper.put("identification_sources", sources);
+            wrapper.put("error_sample", errorSample);
+
+            com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .enable(com.fasterxml.jackson.databind.SerializationFeature.INDENT_OUTPUT);
+            java.nio.file.Files.writeString(dest.toPath(), om.writeValueAsString(wrapper));
+            setStatus(I18n.t("Rapport de session exporté : %s", dest.getName()));
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Rapport exporté vers\n%s", dest.getAbsolutePath()),
+                I18n.t("Export réussi"), JOptionPane.INFORMATION_MESSAGE);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this,
+                I18n.t("Erreur export : %s", ex.getMessage()), I18n.t("Erreur"), JOptionPane.ERROR_MESSAGE);
+        }
     }
 
     // ── Podcast ───────────────────────────────────────────────────────────────
@@ -7121,7 +7644,6 @@ public class MainFrame extends JFrame {
                     try {
                         java.nio.file.Files.move(f.toPath(), dest);
                         com.opentagger.PlaylistSync.onFileMoved(f.toPath(), dest);
-                        com.opentagger.ITunesXmlSyncQueue.onFileMoved(f.toPath(), dest);
                         e.currentPath = dest;
                         // result (tags déjà identifiés) survit à l'échec d'écriture d'origine — pas
                         // besoin de tout ré-identifier, juste retenter l'enregistrement sur le
@@ -7181,15 +7703,17 @@ public class MainFrame extends JFrame {
         setStatus(I18n.t("Suppression de %d fichier(s) illisible(s)…", corrupt.size()));
         new SwingWorker<int[], FileEntry>() {
             @Override protected int[] doInBackground() {
-                java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-                boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05) : Desktop.moveToTrash()
+                // n'est PAS supporté sur cette machine, l'ancien code ici tombait donc dans un
+                // f.delete() en silence (suppression définitive malgré le message affiché à
+                // l'utilisateur). Point de passage unique qui ne supprime jamais définitivement.
                 int deleted = 0, failDel = 0;
                 for (FileEntry e : corrupt) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    boolean moved = com.opentagger.TrashHelper.moveToTrash(f);
                     if (moved) { deleted++; publish(e); } else { failDel++; }
                 }
-                return new int[]{ deleted, failDel, trashSupported ? 1 : 0 };
+                return new int[]{ deleted, failDel };
             }
             @Override protected void process(List<FileEntry> chunks) {
                 for (FileEntry e : chunks) {
@@ -7200,8 +7724,7 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 int[] r;
                 try { r = get(); } catch (Exception ex) { return; }
-                String where = r[2] == 1 ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-                String msg = I18n.t("%d fichier(s) illisible(s) %s", r[0], where);
+                String msg = I18n.t("%d fichier(s) illisible(s) déplacé(s) dans la corbeille", r[0]);
                 if (r[1] > 0) msg += I18n.t(", %d échec(s) (permission refusée ?)", r[1]);
                 setStatus(msg);
                 JOptionPane.showMessageDialog(MainFrame.this, msg, I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
@@ -7362,15 +7885,15 @@ public class MainFrame extends JFrame {
                     int delOk = JOptionPane.showConfirmDialog(MainFrame.this, sb.toString(),
                         I18n.t("Fichiers vides ou illisibles"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
                     if (delOk == JOptionPane.YES_OPTION) {
-                        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-                        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                        // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05) : Desktop.
+                        // moveToTrash() n'est PAS supporté sur cette machine, l'ancien code ici
+                        // tombait donc dans un f.delete() en silence.
                         int deleted = 0, failDel = 0;
                         for (File f : emptyOrBroken) {
-                            boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                            boolean moved = com.opentagger.TrashHelper.moveToTrash(f);
                             if (moved) deleted++; else failDel++;
                         }
-                        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-                        setStatus(I18n.t("%d fichier(s) illisible(s) %s%s", deleted, where,
+                        setStatus(I18n.t("%d fichier(s) illisible(s) déplacé(s) dans la corbeille%s", deleted,
                                 failDel > 0 ? I18n.t(", %d échec(s)", failDel) : ""));
                     }
                 }
@@ -7467,6 +7990,10 @@ public class MainFrame extends JFrame {
              *  l'audio ailleurs, ou jusqu'à la racine du scan si aucun n'en a. */
             boolean scanDir(File dir) {
                 if (isCancelled()) return true; // ne rien signaler en cas d'annulation
+                // Config.excludedFolders() (2026-09-18) : jamais parcouru ni signalé, comme le
+                // scan de démarrage (AudioScanner.isExcluded()) — traité comme "a de l'audio" pour
+                // ne jamais remonter comme candidat orphelin, sans même lister son contenu.
+                if (isExcludedPath(dir)) return true;
                 File[] children = dir.listFiles();
                 if (children == null) return true; // inaccessible : ne jamais y toucher
                 scanned++;
@@ -7575,16 +8102,33 @@ public class MainFrame extends JFrame {
                     int ok = JOptionPane.showConfirmDialog(MainFrame.this, sb.toString(),
                         I18n.t("Dossiers orphelins"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
                     if (ok == JOptionPane.YES_OPTION) {
-                        java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-                        boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
-                        int deleted = 0, failDel = 0;
+                        // TrashHelper.moveDirToTrash() — voir sa Javadoc (2026-09-05) : Desktop.
+                        // moveToTrash() n'est PAS supporté sur cette machine, l'ancien code ici
+                        // tombait donc dans deleteRecursively() — suppression DÉFINITIVE d'un
+                        // dossier entier, en silence, malgré le message affiché à l'utilisateur.
+                        // RE-vérification juste avant le déplacement (2026-09-18) : depuis que ce
+                        // scan peut tourner PENDANT un lot de taguage (voir WorkerHub.conflictsWith,
+                        // exception TAGGING/ORPHAN_CLEANUP), un dossier vu "sans audio" au moment du
+                        // scan a pu légitimement en recevoir un entre-temps — surtout ici, où
+                        // l'utilisateur a pu laisser la boîte de confirmation ouverte un moment.
+                        int deleted = 0, failDel = 0, skippedNowNotEmpty = 0;
                         for (OrphanDir od : trashCandidates) {
-                            boolean moved = trashSupported ? desktop.moveToTrash(od.dir()) : deleteRecursively(od.dir());
+                            if (hasAnyAudioNow(od.dir())) { skippedNowNotEmpty++; continue; }
+                            boolean moved = com.opentagger.TrashHelper.moveDirToTrash(od.dir());
                             if (moved) deleted++; else failDel++;
                         }
-                        String where = trashSupported ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-                        setStatus(I18n.t("%d dossier(s) orphelin(s) %s%s", deleted, where,
-                                failDel > 0 ? I18n.t(", %d échec(s)", failDel) : ""));
+                        String msg = I18n.t("%d dossier(s) orphelin(s) déplacé(s) dans la corbeille%s%s", deleted,
+                                failDel > 0 ? I18n.t(", %d échec(s)", failDel) : "",
+                                skippedNowNotEmpty > 0
+                                    ? I18n.t(", %d ignoré(s) (a reçu de l'audio entre-temps)", skippedNowNotEmpty)
+                                    : "");
+                        setStatus(msg);
+                        // Pop-up de résultat manquante jusqu'à ce correctif (2026-09-06) — seul le
+                        // texte de la barre de statut changeait, facilement manqué (retour direct de
+                        // l'utilisateur : "pas de pop up pour orphelins... il apparait jamais").
+                        // Même idiome que deleteSelectedFiles()/confirmBackfillTags() juste au-dessus.
+                        JOptionPane.showMessageDialog(MainFrame.this, msg,
+                                I18n.t("Résultat"), JOptionPane.INFORMATION_MESSAGE);
                     }
                 } else {
                     setStatus(I18n.t("%d dossier(s) examiné(s), aucun candidat corbeille — %d dossier(s) sans "
@@ -7593,13 +8137,30 @@ public class MainFrame extends JFrame {
                 }
             }
 
-            boolean deleteRecursively(File dir) {
-                File[] children = dir.listFiles();
-                if (children != null) for (File c : children) {
-                    if (c.isDirectory()) { if (!deleteRecursively(c)) return false; }
-                    else if (!c.delete()) return false;
+            boolean isExcludedPath(File dir) {
+                String[] excluded = com.opentagger.Config.get().excludedFolders();
+                if (excluded.length == 0) return false;
+                String path = dir.getAbsolutePath();
+                for (String prefix : excluded) {
+                    if (!prefix.isBlank() && (path.equals(prefix) || path.startsWith(prefix + File.separator))) return true;
                 }
-                return dir.delete();
+                return false;
+            }
+
+            /** Re-scan minimal (juste KNOWN_AUDIO, aucune sonde ffprobe) juste avant de déplacer un
+             *  dossier candidat vers la corbeille — voir le commentaire d'appel. Volontairement plus
+             *  strict/simple que scanDir() (pas de repli AudioFormatCheck sur extension inconnue) :
+             *  ici on cherche juste "un fichier audio a-t-il été déposé depuis le scan", pas à
+             *  reclasser finement un résidu ambigu. */
+            boolean hasAnyAudioNow(File dir) {
+                File[] children = dir.listFiles();
+                if (children == null) return false;
+                for (File f : children) {
+                    if (f.isDirectory()) { if (hasAnyAudioNow(f)) return true; continue; }
+                    String lower = f.getName().toLowerCase();
+                    if (KNOWN_AUDIO.stream().anyMatch(lower::endsWith)) return true;
+                }
+                return false;
             }
         };
         WorkerHub.get().submit(WorkerHub.TaskKind.ORPHAN_CLEANUP,
@@ -7630,7 +8191,12 @@ public class MainFrame extends JFrame {
             sb.append("&nbsp;• ").append(f.getName()).append("<br>");
         }
         if (targets.size() > shown) sb.append(I18n.t("&nbsp;… et %d autre(s)<br>", targets.size() - shown));
-        sb.append(I18n.t("<br><i>Envoyé à la corbeille système — récupérable, pas une suppression définitive.</i></html>"));
+        // Dit où les fichiers vont RÉELLEMENT (voir TrashHelper.destinationDescription()) — "corbeille
+        // système" inconditionnel avait fait croire à l'utilisateur que ses fichiers avaient disparu
+        // sans trace après une suppression pourtant réussie (2026-09-07, cette machine ne supporte
+        // pas la corbeille système).
+        sb.append(I18n.t("<br><i>Envoyé dans %s — récupérable, pas une suppression définitive.</i></html>",
+                com.opentagger.TrashHelper.destinationDescription()));
 
         int ok = JOptionPane.showConfirmDialog(this, sb.toString(),
                 I18n.t("Supprimer les fichiers sélectionnés"), JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
@@ -7639,15 +8205,20 @@ public class MainFrame extends JFrame {
         setStatus(I18n.t("Suppression de %d fichier(s)…", targets.size()));
         new SwingWorker<int[], FileEntry>() {
             @Override protected int[] doInBackground() {
-                java.awt.Desktop desktop = java.awt.Desktop.getDesktop();
-                boolean trashSupported = desktop.isSupported(java.awt.Desktop.Action.MOVE_TO_TRASH);
+                // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05, CRITIQUE : retour
+                // utilisateur en direct, 175 fichiers "supprimés" via ce site précis introuvables
+                // ensuite dans AUCUNE corbeille réelle). Desktop.moveToTrash() n'est PAS supporté
+                // sur cette machine, et ce site précis promettait pourtant explicitement à
+                // l'utilisateur "récupérable, pas une suppression définitive" (voir le texte de la
+                // boîte de confirmation juste au-dessus) — l'ancien code tombait dans f.delete() en
+                // silence, contredisant directement cette promesse.
                 int deleted = 0, failDel = 0;
                 for (FileEntry e : targets) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    boolean moved = trashSupported ? desktop.moveToTrash(f) : f.delete();
+                    boolean moved = com.opentagger.TrashHelper.moveToTrash(f);
                     if (moved) { deleted++; publish(e); } else { failDel++; }
                 }
-                return new int[]{ deleted, failDel, trashSupported ? 1 : 0 };
+                return new int[]{ deleted, failDel };
             }
             @Override protected void process(List<FileEntry> chunks) {
                 for (FileEntry e : chunks) {
@@ -7658,8 +8229,7 @@ public class MainFrame extends JFrame {
             @Override protected void done() {
                 int[] r;
                 try { r = get(); } catch (Exception ex) { return; }
-                String where = r[2] == 1 ? I18n.t("déplacé(s) dans la corbeille") : I18n.t("supprimé(s)");
-                String msg = I18n.t("%d fichier(s) %s", r[0], where);
+                String msg = I18n.t("%d fichier(s) déplacé(s) dans la corbeille", r[0]);
                 if (r[1] > 0) msg += I18n.t(", %d échec(s) (permission refusée ?)", r[1]);
                 setStatus(msg);
                 refreshStats();
@@ -7738,9 +8308,11 @@ public class MainFrame extends JFrame {
                 // Une seule requête HTTP pour tout le lot (format batch AcoustID), au lieu
                 // d'une requête par fichier — voir AcoustIdSubmitter.submitBatch.
                 results = sub.submitBatch(files, tagsList, this::publish);
-                long ok = results.stream().filter(com.opentagger.AcoustIdSubmitter.SubmissionResult::accepted).count();
-                long ko = results.size() - ok;
-                return I18n.t("Soumission AcoustID — ✔ %d accepté(s)", ok) +
+                long skipped = results.stream().filter(com.opentagger.AcoustIdSubmitter.SubmissionResult::skipped).count();
+                long ok = results.stream().filter(r -> r.accepted() && !r.skipped()).count();
+                long ko = results.size() - ok - skipped;
+                return I18n.t("Soumission AcoustID — ✔ %d soumis", ok) +
+                       (skipped > 0 ? I18n.t("  ⏭ %d déjà connu(s) d'AcoustID (non soumis)", skipped) : "") +
                        (ko > 0 ? I18n.t("  ✗ %d erreur(s)", ko) : "");
             }
             @Override protected void process(List<String> chunks) {
@@ -7751,8 +8323,22 @@ public class MainFrame extends JFrame {
                     setStatus(get());
                     List<String> errors = new ArrayList<>();
                     if (results != null) {
-                        for (var r : results)
+                        // AcoustID renvoie l'identifiant quand l'import est immédiat (statut "imported") :
+                        // le ranger dans le TagInfo si le fichier n'en avait pas (SongKong le range dans le tag
+                        // "Acoustid Id") — écrit sur disque au prochain enregistrement du fichier.
+                        java.util.Map<String, FileEntry> byPath = new java.util.HashMap<>();
+                        for (FileEntry e : toSubmit)
+                            byPath.put((e.currentPath != null ? e.currentPath.toFile() : e.file).getAbsolutePath(), e);
+                        for (var r : results) {
                             if (!r.accepted()) errors.add(r.file().getName() + " : " + r.message());
+                            if (!r.acoustId().isBlank()) {
+                                FileEntry e = byPath.get(r.file().getAbsolutePath());
+                                if (e != null && e.activeTags() != null && e.activeTags().acoustidId.isBlank()) {
+                                    e.activeTags().acoustidId = r.acoustId();
+                                    tableModel.update(e);
+                                }
+                            }
+                        }
                     }
                     if (!errors.isEmpty()) {
                         // Largeur fixée — même correctif que deleteErrorFiles() (voir son
@@ -7884,7 +8470,13 @@ public class MainFrame extends JFrame {
      *  dans cette classe (voir startTagging()/completeAlbums()/transcodeFiles()) — les mêmes
      *  champs, donc aucun risque de diverger de ce que ces gardes considèrent déjà "en cours". */
     private java.util.List<String> activeOperations() {
-        java.util.List<String> ops = new java.util.ArrayList<>(WorkerHub.get().activeLabels());
+        java.util.List<String> ops = new java.util.ArrayList<>();
+        for (WorkerHub.TaskHandle h : WorkerHub.get().active()) {
+            // L'audit audio ↔ tags (AudioTagAuditWorker) est en LECTURE SEULE, ne tient que sa propre liste de
+            // chemins et reprend là où il s'est arrêté : il ne doit ni bloquer "Vider la liste"/"Organiser"/
+            // "Grouper" pendant des heures, ni faire demander une confirmation à la fermeture.
+            if (h.kind() != WorkerHub.TaskKind.AUDIO_AUDIT) ops.add(h.label());
+        }
         if (!activeScanWorkers.isEmpty()) ops.add(I18n.t("Scan de dossier"));
         return ops;
     }

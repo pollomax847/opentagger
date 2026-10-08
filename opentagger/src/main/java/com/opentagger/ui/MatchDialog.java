@@ -222,6 +222,7 @@ public class MatchDialog extends JDialog {
                 try {
                     TagEnrichment.enrichGenre(chosen, discogs, lastFm, cache);
                     TagEnrichment.enrichClassicalWork(chosen, mb, cache);
+                    TagEnrichment.enrichArtistInfo(chosen, discogs, lastFm, cache);
 
                     // Empreinte AcoustID : calculée systématiquement après toute identification réussie
                     // (TaggingWorker/BatchProcessor/App le font déjà, comme Picard) — une correspondance

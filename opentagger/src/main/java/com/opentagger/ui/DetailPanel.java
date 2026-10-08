@@ -72,6 +72,8 @@ public class DetailPanel extends JPanel {
     private final JTextField tfEngineer    = tf(24);
     private final JTextField tfMixer       = tf(24);
     private final JTextField tfDjMixer     = tf(24);
+    private final JTextField tfPerformers  = tf(24);
+    private final JTextField tfRemixer     = tf(24);
     private final JTextField tfTitleSort       = tf(24);
     private final JTextField tfArtistSort      = tf(24);
     private final JTextField tfAlbumSort       = tf(24);
@@ -121,6 +123,11 @@ public class DetailPanel extends JPanel {
     private final JTextField tfArtistOfficialUrl   = tf(36);
     private final JTextField tfArtistWikipediaUrl  = tf(36);
     private final JTextField tfArtistDiscogsUrl    = tf(36);
+    private final JTextField tfArtistRealName      = tf(36);
+    // Biographie (Discogs profil → Last.fm bio.summary en repli, voir TagEnrichment.
+    // enrichArtistInfo()) — texte potentiellement long, JTextArea comme taLyrics plutôt qu'un
+    // JTextField à une ligne.
+    private final JTextArea  taArtistBio           = new JTextArea(4, 36);
     private final JTextField tfReleaseOfficialUrl  = tf(36);
     private final JTextField tfReleaseWikipediaUrl = tf(36);
     private final JTextField tfReleaseDiscogsUrl   = tf(36);
@@ -148,6 +155,17 @@ public class DetailPanel extends JPanel {
     private final JTextField tfMedia               = tf(20);
     private final JTextField tfReleaseType         = tf(20);
     private final JTextField tfOriginalYear        = tf(10);
+    private final JTextField tfDate                = tf(12);
+    // Champs générés depuis com.opentagger.TagFieldRegistry (tags Picard / Discogs / Last.fm / Bandcamp,
+    // 2026-09-20) : un JTextField par entrée écrite par la table et dotée d'un libellé, clé = nom du
+    // champ TagInfo. Évite d'ajouter à la main 18 champs × 7 emplacements ; sans eux, un TagInfo
+    // reconstruit depuis le panneau (édition manuelle) perdrait ces valeurs à l'enregistrement.
+    private final java.util.Map<String, JTextField> extraTf = new java.util.LinkedHashMap<>();
+    {
+        for (com.opentagger.TagFieldRegistry.Entry e : com.opentagger.TagFieldRegistry.ALL)
+            if (e.writeHere() && e.label() != null) extraTf.put(e.prop(), tf(24));
+    }
+    private final JTextField tfOriginalDate        = tf(12);
     private final JTextField tfCountry             = tf(10);
     private final JTextField tfScript              = tf(10);
 
@@ -258,6 +276,8 @@ public class DetailPanel extends JPanel {
         set(tfEngineer,       t.engineer);
         set(tfMixer,          t.mixer);
         set(tfDjMixer,        t.djMixer);
+        set(tfPerformers,     t.performers);
+        set(tfRemixer,        t.remixer);
         set(tfTitleSort,      t.titleSort);
         set(tfArtistSort,     t.artistSort);
         set(tfAlbumSort,      t.albumSort);
@@ -298,6 +318,9 @@ public class DetailPanel extends JPanel {
         set(tfArtistOfficialUrl,   t.artistOfficialUrl);
         set(tfArtistWikipediaUrl,  t.artistWikipediaUrl);
         set(tfArtistDiscogsUrl,    t.artistDiscogsUrl);
+        set(tfArtistRealName,      t.artistRealName);
+        taArtistBio.setText(t.artistBio);
+        taArtistBio.setCaretPosition(0);
         set(tfReleaseOfficialUrl,  t.releaseOfficialUrl);
         set(tfReleaseWikipediaUrl, t.releaseWikipediaUrl);
         set(tfReleaseDiscogsUrl,   t.releaseDiscogsUrl);
@@ -319,6 +342,9 @@ public class DetailPanel extends JPanel {
         set(tfMedia,               t.media);
         set(tfReleaseType,         t.releaseType);
         set(tfOriginalYear,        t.originalYear);
+        set(tfDate,                t.date);
+        for (var en : extraTf.entrySet()) set(en.getValue(), com.opentagger.TagFieldRegistry.get(t, en.getKey()));
+        set(tfOriginalDate,        t.originalDate);
         set(tfCountry,             t.country);
         set(tfScript,              t.script);
     }
@@ -372,6 +398,8 @@ public class DetailPanel extends JPanel {
         setM(tfEngineer,       tags, t -> t.engineer);
         setM(tfMixer,          tags, t -> t.mixer);
         setM(tfDjMixer,        tags, t -> t.djMixer);
+        setM(tfPerformers,     tags, t -> t.performers);
+        setM(tfRemixer,        tags, t -> t.remixer);
         setM(tfTitleSort,      tags, t -> t.titleSort);
         setM(tfArtistSort,     tags, t -> t.artistSort);
         setM(tfAlbumSort,      tags, t -> t.albumSort);
@@ -404,13 +432,20 @@ public class DetailPanel extends JPanel {
         setM(tfMedia,         tags, t -> t.media);
         setM(tfReleaseType,   tags, t -> t.releaseType);
         setM(tfOriginalYear,  tags, t -> t.originalYear);
+        setM(tfDate,          tags, t -> t.date);
+        for (var en : extraTf.entrySet()) {
+            final String prop = en.getKey();
+            setM(en.getValue(), tags, t -> com.opentagger.TagFieldRegistry.get(t, prop));
+        }
+        setM(tfOriginalDate,  tags, t -> t.originalDate);
         setM(tfCountry,       tags, t -> t.country);
         setM(tfScript,        tags, t -> t.script);
         // Paroles, IDs — laisser vide en mode multi
         taLyrics.setText("");
         set(tfLyricsUrl, "");
+        taArtistBio.setText("");
         for (JTextField tf : new JTextField[]{
-            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
+            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl, tfArtistRealName,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
             tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate}) {
@@ -475,6 +510,10 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfMedia)).isBlank())        t.media        = v;
             if (!(v = g(tfReleaseType)).isBlank())  t.releaseType  = v;
             if (!(v = g(tfOriginalYear)).isBlank()) t.originalYear = v;
+            if (!(v = g(tfDate)).isBlank())         t.date         = v;
+            for (var en : extraTf.entrySet())
+                if (!(v = g(en.getValue())).isBlank()) com.opentagger.TagFieldRegistry.put(t, en.getKey(), v);
+            if (!(v = g(tfOriginalDate)).isBlank()) t.originalDate = v;
             if (!(v = g(tfCountry)).isBlank())      t.country      = v;
             if (!(v = g(tfScript)).isBlank())       t.script       = v;
             if (!(v = g(tfComposer)).isBlank())     t.composer     = v;
@@ -512,6 +551,8 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfEngineer)).isBlank())         t.engineer         = v;
             if (!(v = g(tfMixer)).isBlank())            t.mixer            = v;
             if (!(v = g(tfDjMixer)).isBlank())          t.djMixer          = v;
+            if (!(v = g(tfPerformers)).isBlank())       t.performers       = v;
+            if (!(v = g(tfRemixer)).isBlank())          t.remixer          = v;
             if (!(v = g(tfTitleSort)).isBlank())        t.titleSort        = v;
             if (!(v = g(tfArtistSort)).isBlank())       t.artistSort       = v;
             if (!(v = g(tfAlbumSort)).isBlank())        t.albumSort        = v;
@@ -529,6 +570,8 @@ public class DetailPanel extends JPanel {
             if (!(v = g(tfArtistOfficialUrl)).isBlank())      t.artistOfficialUrl    = v;
             if (!(v = g(tfArtistWikipediaUrl)).isBlank())     t.artistWikipediaUrl   = v;
             if (!(v = g(tfArtistDiscogsUrl)).isBlank())       t.artistDiscogsUrl     = v;
+            if (!(v = g(tfArtistRealName)).isBlank())         t.artistRealName       = v;
+            if (!(v = taArtistBio.getText()).isBlank())       t.artistBio            = v;
             if (!(v = g(tfReleaseOfficialUrl)).isBlank())     t.releaseOfficialUrl   = v;
             if (!(v = g(tfReleaseWikipediaUrl)).isBlank())    t.releaseWikipediaUrl  = v;
             if (!(v = g(tfReleaseDiscogsUrl)).isBlank())      t.releaseDiscogsUrl    = v;
@@ -575,6 +618,9 @@ public class DetailPanel extends JPanel {
         t.media          = g(tfMedia);
         t.releaseType    = g(tfReleaseType);
         t.originalYear   = g(tfOriginalYear);
+        t.date           = g(tfDate);
+        for (var en : extraTf.entrySet()) com.opentagger.TagFieldRegistry.put(t, en.getKey(), g(en.getValue()));
+        t.originalDate   = g(tfOriginalDate);
         t.country        = g(tfCountry);
         t.script         = g(tfScript);
 
@@ -604,6 +650,8 @@ public class DetailPanel extends JPanel {
         t.engineer         = g(tfEngineer);
         t.mixer            = g(tfMixer);
         t.djMixer          = g(tfDjMixer);
+        t.performers       = g(tfPerformers);
+        t.remixer          = g(tfRemixer);
         t.titleSort        = g(tfTitleSort);
         t.artistSort       = g(tfArtistSort);
         t.albumSort        = g(tfAlbumSort);
@@ -631,6 +679,8 @@ public class DetailPanel extends JPanel {
         t.artistOfficialUrl   = g(tfArtistOfficialUrl);
         t.artistWikipediaUrl  = g(tfArtistWikipediaUrl);
         t.artistDiscogsUrl    = g(tfArtistDiscogsUrl);
+        t.artistRealName      = g(tfArtistRealName);
+        t.artistBio           = taArtistBio.getText();
         t.releaseOfficialUrl  = g(tfReleaseOfficialUrl);
         t.releaseWikipediaUrl = g(tfReleaseWikipediaUrl);
         t.releaseDiscogsUrl   = g(tfReleaseDiscogsUrl);
@@ -645,6 +695,7 @@ public class DetailPanel extends JPanel {
         clearHighlights();
         for (JTextField tf : allTextFields()) tf.setText("");
         taLyrics.setText("");
+        taArtistBio.setText("");
         for (JCheckBox cb : new JCheckBox[]{
             chkClassical, chkHD, chkLive, chkCompilation,
             chkGreatestHits, chkSoundtrack, chkInstrumental}) {
@@ -705,6 +756,8 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Ingénieur son :"),      tfEngineer);
         fields.put(I18n.t("Mixage :"),             tfMixer);
         fields.put(I18n.t("DJ Mixer :"),           tfDjMixer);
+        fields.put(I18n.t("Interprètes (solistes) :"), tfPerformers);
+        fields.put(I18n.t("Remixeur :"),               tfRemixer);
         fields.put(I18n.t("─── Tris ───"),         sep());
         fields.put(I18n.t("Tri titre :"),          tfTitleSort);
         fields.put(I18n.t("Tri artiste :"),        tfArtistSort);
@@ -840,12 +893,19 @@ public class DetailPanel extends JPanel {
         fields.put(I18n.t("Support :"),                 tfMedia);
         fields.put(I18n.t("Type de parution :"),        tfReleaseType);
         fields.put(I18n.t("Année d'origine :"),         tfOriginalYear);
+        fields.put(I18n.t("Date de parution :"),        tfDate);
+        for (com.opentagger.TagFieldRegistry.Entry e : com.opentagger.TagFieldRegistry.ALL)
+            if (extraTf.containsKey(e.prop()) && e.writeHere() && e.label() != null)
+                fields.put(I18n.t(e.label()), extraTf.get(e.prop()));
+        fields.put(I18n.t("Date d'origine :"),          tfOriginalDate);
         fields.put(I18n.t("Pays :"),                    tfCountry);
         fields.put(I18n.t("Script :"),                  tfScript);
         fields.put(I18n.t("─── URLs artiste ───"),    sep());
         fields.put(I18n.t("Site officiel :"),          tfArtistOfficialUrl);
         fields.put(I18n.t("Wikipedia artiste :"),      tfArtistWikipediaUrl);
         fields.put(I18n.t("Discogs artiste :"),        tfArtistDiscogsUrl);
+        fields.put(I18n.t("Vrai nom :"),               tfArtistRealName);
+        fields.put(I18n.t("Biographie :"),             bioArea());
         fields.put(I18n.t("─── URLs release ───"),     sep());
         fields.put(I18n.t("Site officiel release :"),  tfReleaseOfficialUrl);
         fields.put(I18n.t("Wikipedia release :"),      tfReleaseWikipediaUrl);
@@ -888,6 +948,18 @@ public class DetailPanel extends JPanel {
     private JLabel sep() {
         JLabel l = new JLabel(" ");
         return l;
+    }
+
+    /** taArtistBio dans son propre JScrollPane borné — formPanel() ne fait qu'un fill=HORIZONTAL
+     *  sur ses composants (voir sa boucle), une JTextArea nue y prendrait sa hauteur préférée sans
+     *  jamais pouvoir défiler si le texte dépasse ses 4 lignes visibles. */
+    private JScrollPane bioArea() {
+        taArtistBio.setLineWrap(true);
+        taArtistBio.setWrapStyleWord(true);
+        JScrollPane sp = new JScrollPane(taArtistBio,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        sp.setPreferredSize(new java.awt.Dimension(1, 70));
+        return sp;
     }
 
     private JScrollPane scroll(JPanel p) {
@@ -983,6 +1055,9 @@ public class DetailPanel extends JPanel {
         hl(tfMedia,         g(tfMedia),         before.media);
         hl(tfReleaseType,   g(tfReleaseType),   before.releaseType);
         hl(tfOriginalYear,  g(tfOriginalYear),  before.originalYear);
+        hl(tfDate,          g(tfDate),          before.date);
+        for (var en : extraTf.entrySet()) hl(en.getValue(), g(en.getValue()), com.opentagger.TagFieldRegistry.get(before, en.getKey()));
+        hl(tfOriginalDate,  g(tfOriginalDate),  before.originalDate);
         hl(tfCountry,       g(tfCountry),       before.country);
         hl(tfScript,        g(tfScript),        before.script);
         // Classique
@@ -1012,6 +1087,8 @@ public class DetailPanel extends JPanel {
         hl(tfEngineer,        g(tfEngineer),        before.engineer);
         hl(tfMixer,           g(tfMixer),           before.mixer);
         hl(tfDjMixer,         g(tfDjMixer),         before.djMixer);
+        hl(tfPerformers,      g(tfPerformers),      before.performers);
+        hl(tfRemixer,         g(tfRemixer),         before.remixer);
         hl(tfTitleSort,       g(tfTitleSort),       before.titleSort);
         hl(tfArtistSort,      g(tfArtistSort),      before.artistSort);
         hl(tfAlbumSort,       g(tfAlbumSort),       before.albumSort);
@@ -1045,6 +1122,9 @@ public class DetailPanel extends JPanel {
         // Paroles
         hlArea(taLyrics, taLyrics.getText(), before.lyrics);
         hl(tfLyricsUrl, g(tfLyricsUrl), before.lyricsUrl);
+        // Infos artiste
+        hlArea(taArtistBio, taArtistBio.getText(), before.artistBio);
+        hl(tfArtistRealName, g(tfArtistRealName), before.artistRealName);
     }
 
     /** Remet tous les champs à leur couleur par défaut. */
@@ -1059,6 +1139,7 @@ public class DetailPanel extends JPanel {
             // les champs read-only (MB IDs, mood) restent avec leur propre bg
         }
         if (taLyrics != null) taLyrics.setBackground(defTa);
+        if (taArtistBio != null) taArtistBio.setBackground(defTa);
         if (defCb != null) {
             for (JCheckBox cb : new JCheckBox[]{
                     chkClassical, chkHD, chkLive, chkCompilation,
@@ -1099,6 +1180,12 @@ public class DetailPanel extends JPanel {
     }
 
     private JTextField[] allTextFields() {
+        java.util.List<JTextField> all = new java.util.ArrayList<>(java.util.Arrays.asList(allBaseTextFields()));
+        all.addAll(extraTf.values());
+        return all.toArray(new JTextField[0]);
+    }
+
+    private JTextField[] allBaseTextFields() {
         return new JTextField[]{
             tfTitle, tfArtist, tfAlbumArtist, tfAlbum, tfYear, tfGenre,
             tfTrack, tfTrackTotal, tfDiscNo, tfDiscTotal, tfComment,
@@ -1106,19 +1193,19 @@ public class DetailPanel extends JPanel {
             tfWork, tfWorkMbid, tfMovement, tfMovementNo, tfMovementTotal,
             tfPart, tfPeriod, tfOpus, tfClassicalCatalog, tfClassicalNickname,
             tfSection, tfOverallWork, tfGrouping,
-            tfLyricist, tfProducer, tfArranger, tfEngineer, tfMixer, tfDjMixer,
+            tfLyricist, tfProducer, tfArranger, tfEngineer, tfMixer, tfDjMixer, tfPerformers, tfRemixer,
             tfTitleSort, tfArtistSort, tfAlbumSort, tfAlbumArtistSort,
             tfConductorSort, tfOrchestraSort,
             tfBpm, tfKey, tfLanguage, tfRating, tfIsrc, tfAmazonId, tfTags,
             tfMood, tfMoodAggressive, tfMoodAcoustic, tfMoodElectronic,
             tfMoodHappy, tfMoodSad, tfMoodRelaxed, tfMoodDance, tfMoodParty,
             tfLyricsUrl,
-            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl,
+            tfArtistOfficialUrl, tfArtistWikipediaUrl, tfArtistDiscogsUrl, tfArtistRealName,
             tfReleaseOfficialUrl, tfReleaseWikipediaUrl, tfReleaseDiscogsUrl,
             tfRecordingMbid, tfReleaseMbid, tfReleaseGroupMbid, tfArtistMbid, tfAlbumArtistMbid,
             tfAcoustidId, tfDiscogsId, tfAppleMusicId, tfRoonAlbumTag, tfRoonTrackTag, tfTaggedDate,
             tfLabel, tfCatalogNo, tfBarcode, tfReleaseStatus, tfMedia,
-            tfReleaseType, tfOriginalYear, tfCountry, tfScript
+            tfReleaseType, tfOriginalYear, tfDate, tfOriginalDate, tfCountry, tfScript
         };
     }
 }

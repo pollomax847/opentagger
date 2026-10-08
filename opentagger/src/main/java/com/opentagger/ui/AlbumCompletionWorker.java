@@ -14,7 +14,6 @@ import com.opentagger.model.FileEntry;
 import com.opentagger.model.TagInfo;
 
 import javax.swing.*;
-import java.io.File;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -114,6 +113,9 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         Map<String, Map<String, FileEntry>> releaseGroups = new LinkedHashMap<>();
 
         List<FileEntry> candidates = new ArrayList<>(); // SKIPPED/PENDING à compléter
+        // (release, enregistrement) → TOUS les fichiers qui portent ce morceau dans cette release. releaseGroups n'en garde qu'un
+        // par enregistrement ; les copies supplémentaires forment le réservoir de doublons (voir surplusCopies).
+        Map<String, List<FileEntry>> copiesByKey = new LinkedHashMap<>();
 
         // Ouvrir le cache ici pour vérifier la source d'identification des ancres TAGGED
         MetadataCache cacheForSrc = new MetadataCache();
@@ -130,10 +132,17 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                 if (e.status == FileEntry.Status.TAGGED || e.status == FileEntry.Status.IDENTIFIED) {
                     // N'utiliser comme ancre de release que les fichiers identifiés par source FIABLE.
                     // SOURCE_TEXT = recherche texte = releaseMbid potentiellement faux → faux positifs.
-                    // Pour TAGGED, la source vient du cache SQLite (renseigné à l'Enregistrement) ;
-                    // pour IDENTIFIED (jamais passé par cache.recordFileTagging(), qui n'a lieu qu'à
-                    // l'Enregistrement), elle vient directement du TagInfo en mémoire — voir
-                    // TagInfo.identificationSource, persisté par tous les pipelines d'identification.
+                    // SOURCE_GROUP_PIN exclu aussi (2026-09-19, audit dédié compilations/coffrets) :
+                    // sa propre Javadoc (MetadataCache.java) dit explicitement que SEULE une piste du
+                    // groupe a été vérifiée, les autres suivent SANS vérification individuelle — une
+                    // ancre construite là-dessus propagerait une éventuelle mauvaise release épinglée
+                    // à TOUTE la bibliothèque via findCandidate() plus bas (portée bien plus large
+                    // qu'un simple dossier scindé, voir le garde-fou de TaggingWorker pour le contexte
+                    // complet du risque). Pour TAGGED, la source vient du cache SQLite (renseigné à
+                    // l'Enregistrement) ; pour IDENTIFIED (jamais passé par cache.recordFileTagging(),
+                    // qui n'a lieu qu'à l'Enregistrement), elle vient directement du TagInfo en
+                    // mémoire — voir TagInfo.identificationSource, persisté par tous les pipelines
+                    // d'identification.
                     String source;
                     if (e.status == FileEntry.Status.TAGGED) {
                         String path = (e.currentPath != null ? e.currentPath : e.file.toPath()).toString();
@@ -141,7 +150,8 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                     } else {
                         source = e.result != null ? e.result.identificationSource : null;
                     }
-                    if (MetadataCache.SOURCE_TEXT.equals(source) || source == null || source.isBlank()) continue;
+                    if (MetadataCache.SOURCE_TEXT.equals(source) || MetadataCache.SOURCE_GROUP_PIN.equals(source)
+                            || source == null || source.isBlank()) continue;
 
                     TagInfo ref    = e.result != null ? e.result : e.current;
                     String rMbid   = ref != null ? ref.releaseMbid   : "";
@@ -150,6 +160,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                         releaseGroups
                             .computeIfAbsent(rMbid, k -> new LinkedHashMap<>())
                             .put(recMbid, e);
+                        copiesByKey.computeIfAbsent(rMbid + "|" + recMbid, k -> new ArrayList<>()).add(e);
                     }
                 } else if (e.status == FileEntry.Status.SKIPPED || e.status == FileEntry.Status.PENDING) {
                     candidates.add(e);
@@ -163,14 +174,26 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             publish(I18n.t("Aucun album identifié parmi les fichiers tagués/identifiés."));
             return null;
         }
-        if (candidates.isEmpty()) {
+        // Réservoir de doublons : dans une même release, les copies d'un même enregistrement au-delà de la meilleure. Elles ne manquent
+        // à personne là où elles sont, et peuvent combler la même piste manquante d'UN AUTRE album (une chanson présente sur plusieurs
+        // compilations). Rien n'est copié ni supprimé : la copie est réaffectée, donc déplacée à l'enregistrement.
+        final Map<String, List<SurplusCopy>> surplus = new ConcurrentHashMap<>();
+        if (com.opentagger.Config.get().bool("completion.use_duplicates", true)) {
+            for (Map.Entry<String, List<FileEntry>> en : copiesByKey.entrySet()) {
+                if (en.getValue().size() < 2) continue;
+                String[] k = en.getKey().split("\\|", 2);
+                for (FileEntry extra : surplusCopies(en.getValue(), AlbumCompletionWorker::fileSize))
+                    surplus.computeIfAbsent(k[1], x -> new ArrayList<>()).add(new SurplusCopy(extra, k[0]));
+            }
+        }
+        if (candidates.isEmpty() && surplus.isEmpty()) {
             publish(I18n.t("Aucun fichier SKIPPED/PENDING à compléter."));
             return null;
         }
 
         totalReleases = releaseGroups.size();
-        publish(I18n.t("Analyse de %d album(s) — %d fichier(s) à récupérer possible(s)…",
-                releaseGroups.size(), candidates.size()));
+        publish(I18n.t("Analyse de %d album(s) — %d fichier(s) à récupérer possible(s), %d doublon(s) en réserve…",
+                releaseGroups.size(), candidates.size(), surplus.values().stream().mapToInt(List::size).sum()));
 
         // Index titre normalisé → FileEntry pour les candidats. Partagé entre toutes les tâches
         // parallèles ci-dessous — accès protégé par synchronized (voir processRelease).
@@ -206,7 +229,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
         // ── 2. Pour chaque release (en parallèle), récupérer la tracklist et compléter
         MetadataCache cache = new MetadataCache();
         try {
-            int threads = Math.max(1, com.opentagger.Config.get().num("batch.threads", 3));
+            int threads = Math.max(1, com.opentagger.Config.get().batchThreads());
             pool = Executors.newFixedThreadPool(threads);
             List<Future<?>> futures = new ArrayList<>();
 
@@ -215,13 +238,18 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                 String relMbid = group.getKey();
                 Map<String, FileEntry> found = group.getValue();
                 futures.add(pool.submit(() -> processRelease(
-                        relMbid, found, cache, candidateIndex, new MusicBrainzClient(), new LastFmClient())));
+                        relMbid, found, cache, candidateIndex, surplus, new MusicBrainzClient(), new LastFmClient())));
             }
 
-            pool.shutdown();
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
+            // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+            // "blocages silencieux") : sans timeout, un seul item bloqué (appel réseau non borné,
+            // sous-processus qui ne rend jamais la main) gèle ce thread doInBackground() pour
+            // toujours — et comme ALBUM_COMPLETION bloque explicitement TAGGING dans
+            // WorkerHub.conflictsWith(), ça peut geler tout le re-taguage en cours sans la moindre
+            // trace, exactement la même signature que le bug FileRenamer/CROSS_DEVICE_COPY_LIMIT
+            // trouvé plus tôt aujourd'hui — mais ici un vrai garde-fou existait déjà, juste jamais
+            // branché à cet appelant.
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
             cache.close();
         }
@@ -232,6 +260,7 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
      *  un thread par release, depuis le pool créé dans doInBackground(). */
     private void processRelease(String relMbid, Map<String, FileEntry> found, MetadataCache cache,
                                  Map<String, List<FileEntry>> candidateIndex,
+                                 Map<String, List<SurplusCopy>> surplus,
                                  MusicBrainzClient mb, LastFmClient lastFm) {
         if (isCancelled()) return;
 
@@ -261,8 +290,12 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // retirer" doit être atomique, sinon deux releases traitées en parallèle peuvent
             // réclamer le même fichier candidat.
             FileEntry hit;
+            boolean fromSurplus = false;
             synchronized (candidateIndex) {
-                hit = findCandidate(candidateIndex, track, releaseDiscTotal);
+                // D'abord une copie en réserve du MÊME enregistrement (preuve exacte), puis la recherche par titre parmi les non reconnus.
+                hit = claimSurplus(surplus, track.recordingMbid(), relMbid);
+                fromSurplus = hit != null;
+                if (hit == null) hit = findCandidate(candidateIndex, track, releaseDiscTotal);
                 if (hit == null) {
                     stillMissing.add((track.trackNo() > 0 ? track.trackNo() + ". " : "") + track.title());
                     continue;
@@ -288,8 +321,13 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             ti.releaseMbid     = tl.releaseMbid();
             ti.releaseGroupMbid= tl.releaseGroupMbid();
             ti.recordingMbid   = track.recordingMbid();
+            ti.releaseTrackMbid= track.trackMbid();
+            ti.discSubtitle    = track.discTitle();
             ti.artistMbid      = track.artistMbid();
             ti.isCompilation   = tl.isCompilation() ? "1" : "";
+            // Champs de PARUTION (pays, label, code-barres, statut, date complète, type de parution,
+            // langue...) : ce chemin n'en recopiait aucun — voir TagInfo.applyReleaseLevelFrom().
+            ti.applyReleaseLevelFrom(tl.releaseMeta());
             ti.score           = 100;
 
             // Translittération artiste (si nom non-Latin et option activée) — même logique
@@ -321,6 +359,9 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
             // seulement recordingMbid — ajouté quand même pour cohérence avec les autres pipelines
             // et pour rester correct si ReleaseTrack gagne un jour ce champ.
             TagEnrichment.enrichClassicalWork(ti, mb, cache);
+            // Infos artiste (biographie/vrai nom/URLs) — jamais câblé dans ce pipeline avant ce
+            // correctif (même divergence qu'InfoCompleterWorker).
+            TagEnrichment.enrichArtistInfo(ti, discogs, lastFm, cache);
 
             // Empreinte AcoustID : calculée systématiquement après toute identification
             // réussie (TaggingWorker/BatchProcessor/App/MatchDialog le font déjà, comme
@@ -352,8 +393,11 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                 if (onUpdate != null) onUpdate.accept(hitFinal);
             });
 
-            publish(I18n.t("  ✓ %s → piste %d \"%s\" (identifié, pas encore enregistré)",
-                    hit.filename(), track.trackNo(), track.title()));
+            publish(fromSurplus
+                    ? I18n.t("  ✓ doublon %s réaffecté → « %s », piste %d \"%s\" (identifié, pas encore enregistré)",
+                            hit.filename(), tl.album(), track.trackNo(), track.title())
+                    : I18n.t("  ✓ %s → piste %d \"%s\" (identifié, pas encore enregistré)",
+                            hit.filename(), track.trackNo(), track.title()));
             matched.incrementAndGet();
         }
 
@@ -390,6 +434,43 @@ public class AlbumCompletionWorker extends SwingWorker<Void, String> {
                 releases.get(), matched.get()));
         }
         if (doneCallback != null) doneCallback.run();
+    }
+
+    // ── Réservoir de doublons ────────────────────────────────────────────────
+
+    /** Une copie en trop d'un enregistrement dans la release {@code originRelease} : elle ne manque à personne là où elle est. */
+    record SurplusCopy(FileEntry entry, String originRelease) {}
+
+    /** Copies à mettre en réserve parmi les fichiers qui portent le même enregistrement dans la même release : toutes sauf la meilleure
+     *  ({@code quality} le plus grand ; à égalité, la première reste). */
+    static List<FileEntry> surplusCopies(List<FileEntry> sameRecordingSameRelease, java.util.function.ToLongFunction<FileEntry> quality) {
+        if (sameRecordingSameRelease == null || sameRecordingSameRelease.size() < 2) return List.of();
+        FileEntry keeper = sameRecordingSameRelease.get(0);
+        long best = quality.applyAsLong(keeper);
+        for (FileEntry e : sameRecordingSameRelease) {
+            long q = quality.applyAsLong(e);
+            if (q > best) { best = q; keeper = e; }
+        }
+        List<FileEntry> out = new ArrayList<>();
+        for (FileEntry e : sameRecordingSameRelease) if (e != keeper) out.add(e);
+        return out;
+    }
+
+    /** Retire et renvoie une copie en réserve de {@code recordingMbid} qui vient d'une AUTRE release que {@code forRelease}. */
+    static FileEntry claimSurplus(Map<String, List<SurplusCopy>> surplus, String recordingMbid, String forRelease) {
+        if (surplus == null || recordingMbid == null || recordingMbid.isBlank()) return null;
+        List<SurplusCopy> list = surplus.get(recordingMbid);
+        if (list == null) return null;
+        for (java.util.Iterator<SurplusCopy> it = list.iterator(); it.hasNext(); ) {
+            SurplusCopy c = it.next();
+            if (!c.originRelease().equals(forRelease)) { it.remove(); return c.entry(); }
+        }
+        return null;
+    }
+
+    private static long fileSize(FileEntry e) {
+        try { return java.nio.file.Files.size(e.currentPath != null ? e.currentPath : e.file.toPath()); }
+        catch (Exception ex) { return 0L; }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

@@ -12,7 +12,6 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Vue arborescence par album du tableau principal — regroupe les {@link FileEntry} déjà exposés
@@ -39,11 +38,10 @@ public class AlbumTreeTableModel extends AbstractTableModel implements TableMode
 
     /** Un groupe = un album (ou, à défaut de tag album, un dossier) — voir {@link #groupKeyFor}. */
     private static final class Group {
-        final String key;
         final String title;
         final List<FileEntry> members = new ArrayList<>();
         boolean collapsed = true; // replié par défaut — choix utilisateur validé pour cette vue
-        Group(String key, String title) { this.key = key; this.title = title; }
+        Group(String key, String title) { this.title = title; }
     }
 
     /** Une ligne affichée : soit un en-tête de groupe, soit un fichier réel — même schéma que

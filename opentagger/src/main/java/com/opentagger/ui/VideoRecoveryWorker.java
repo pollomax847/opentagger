@@ -18,7 +18,7 @@ import java.util.function.Consumer;
 
 /**
  * "Récupérer l'audio des vidéos non reconnues" — identifie chaque fichier vidéo d'un dossier
- * (SongRec → AcoustID → AudD, voir {@link TagEnrichment#identifyFromAudio}) et, seulement si
+ * (SongRec → AcoustID, voir {@link TagEnrichment#identifyFromAudio}) et, seulement si
  * reconnu, extrait l'audio en MP3 ({@link AudioTranscoder}), le tague/range
  * ({@link TagEnrichment#saveEntry}, même point d'écriture partagé que SaveWorker/PodcastWorker/
  * AlbumCompletionWorker) puis déplace la vidéo d'origine dans un sous-dossier "Convertis" à côté
@@ -35,7 +35,7 @@ import java.util.function.Consumer;
  * la vidéo intacte.
  *
  * Parallélisé (même clé "batch.threads" que TaggingWorker/SaveWorker/AlbumCompletionWorker).
- * SongRecClient/AudDClient/CaaClient/FanArtClient/TagWriter/FileRenamer/MusicBrainzOAuth sont sans
+ * SongRecClient/CaaClient/FanArtClient/TagWriter/FileRenamer/MusicBrainzOAuth sont sans
  * état, partagés entre tâches (même motif que SaveWorker) ; MusicBrainzClient/AcoustIdClient
  * tiennent un état mutable entre appels, instance fraîche par tâche (même motif que TaggingWorker/
  * AlbumCompletionWorker).
@@ -53,10 +53,10 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     private final java.util.function.BiConsumer<Integer, Integer> onNumericProgress;
 
     private final SongRecClient    songRec = new SongRecClient();
-    private final AudDClient       audd     = new AudDClient();
     private final CaaClient        caa      = new CaaClient();
     private final FanArtClient     fanArt   = new FanArtClient();
     private final DeezerClient     deezer   = new DeezerClient();
+    private final DiscogsClient    discogs  = new DiscogsClient();
     private final TagWriter        writer   = new TagWriter();
     private final FileRenamer      renamer  = new FileRenamer();
     private final MusicBrainzOAuth mbOauth  = new MusicBrainzOAuth();
@@ -100,7 +100,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
     @Override
     protected Void doInBackground() throws Exception {
         int total = videos.size();
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
@@ -115,11 +115,11 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
             futures.add(pool.submit(() -> processOne(video, fileIdx, total, maskIndex)));
         }
 
-        pool.shutdown();
         try {
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
+            // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+            // "blocages silencieux") — voir AlbumCompletionWorker pour le même correctif et son
+            // pourquoi complet.
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
             for (MetadataCache c : cachePool) c.close();
         }
@@ -133,7 +133,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
 
         TagInfo ti;
         try {
-            ti = TagEnrichment.identifyFromAudio(video, songRec, new AcoustIdClient(), audd,
+            ti = TagEnrichment.identifyFromAudio(video, songRec, new AcoustIdClient(),
                     new MusicBrainzClient(), msg -> publish("  " + msg));
         } catch (Exception ex) {
             errors.incrementAndGet();
@@ -170,7 +170,7 @@ public class VideoRecoveryWorker extends SwingWorker<Void, String> {
             if (cache == null) cache = new MetadataCache(); // filet de sécurité
             try {
                 res = TagEnrichment.saveEntry(mp3Path.toFile(), ti, caa, fanArt,
-                        deezer, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
+                        deezer, discogs, writer, renamer, cache, mbOauth, scanRoot, maskIndex, msg -> publish("  " + msg));
             } finally {
                 cachePool.offer(cache);
             }

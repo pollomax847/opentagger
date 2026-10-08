@@ -2,7 +2,6 @@ package com.opentagger;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -66,17 +65,59 @@ public class AudioTranscoder {
         for (int i = 1; Files.exists(dest); i++)
             dest = source.getParent().resolve(stem + "_" + i + "." + format.ext);
 
+        // Pochette : conservée (MP3, FLAC, M4A) quand la source en porte une — avant, « -vn » la supprimait toujours
+        // et chaque transcodage faisait perdre la pochette. OGG/OPUS la stockent autrement (bloc METADATA_BLOCK_PICTURE) :
+        // pas gérée ici. Si ffmpeg refuse la pochette, on retente sans elle plutôt que d'échouer.
+        boolean keepCover = (format == Format.MP3 || format == Format.FLAC || format == Format.AAC)
+                && hasAttachedPicture(source);
+        // ffmpeg lit la source et écrit à côté : un seul à la fois par disque mécanique (voir DiskIoThrottle). Cinq conversions en
+        // parallèle sur le même disque USB le saturaient (file d'attente 4-6, < 1 Mo/s) et affamaient aussi l'enregistrement.
+        java.util.concurrent.Semaphore diskGate = DiskIoThrottle.acquireFor(source.toFile());
+        try {
+            try {
+                return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, keepCover);
+            } catch (IOException e) {
+                if (!keepCover) throw e;
+                Files.deleteIfExists(dest);
+                return transcodeOnce(source, format, bitrateKbps, deleteSource, dest, false);
+            }
+        } finally {
+            DiskIoThrottle.release(diskGate);
+        }
+    }
+
+    /** Vrai si la source contient une pochette (flux image marqué « attached_pic »). */
+    private boolean hasAttachedPicture(Path source) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(Config.get().str("audio.ffprobe_path", "ffprobe"), "-v", "error",
+                    "-select_streams", "v", "-show_entries", "stream_disposition=attached_pic", "-of", "csv=p=0",
+                    source.toAbsolutePath().toString());
+            pb.redirectErrorStream(true);
+            String out = ProcessUtils.readStringWithTimeout(pb, 15);
+            return out != null && out.lines().anyMatch(l -> l.trim().equals("1"));
+        } catch (Exception e) { return false; }
+    }
+
+    private Path transcodeOnce(Path source, Format format, int bitrateKbps, boolean deleteSource, Path dest,
+                               boolean keepCover) throws IOException, InterruptedException {
         List<String> cmd = new ArrayList<>();
         cmd.add(ffmpegPath);
         cmd.add("-y");
         cmd.add("-i");  cmd.add(source.toAbsolutePath().toString());
+        if (keepCover) {
+            cmd.add("-map"); cmd.add("0:a:0");
+            cmd.add("-map"); cmd.add("0:v:0");
+            cmd.add("-c:v"); cmd.add("copy");
+            cmd.add("-disposition:v:0"); cmd.add("attached_pic");
+            if (format == Format.MP3) { cmd.add("-id3v2_version"); cmd.add("3"); }
+        }
         cmd.add("-codec:a"); cmd.add(format.codec);
         if (format.hasBitrate && bitrateKbps > 0) {
             cmd.add("-b:a"); cmd.add(bitrateKbps + "k");
             if (format == Format.MP3) { cmd.add("-q:a"); cmd.add("0"); }
         }
         cmd.add("-map_metadata"); cmd.add("0"); // conserver les tags existants
-        cmd.add("-vn");                          // pas de flux vidéo/pochette (évite erreurs AAC)
+        if (!keepCover) cmd.add("-vn");          // sans pochette : pas de flux vidéo (évite erreurs AAC)
         cmd.add(dest.toAbsolutePath().toString());
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -104,9 +145,25 @@ public class AudioTranscoder {
             throw new IOException("Transcodage échoué (code " + p.exitValue() + ") — " + tail);
         }
 
-        if (deleteSource) Files.deleteIfExists(source);
+        // ffmpeg peut finir « avec succès » sur une source partiellement illisible : il saute les paquets abîmés et écrit un fichier
+        // plus court. Avant de supprimer la source, on compare les durées ; un écart signale une conversion incomplète, qu'on annule.
+        int srcSec = AudioDuration.probeSeconds(source.toAbsolutePath().toString());
+        int dstSec = AudioDuration.probeSeconds(dest.toAbsolutePath().toString());
+        if (srcSec > 0 && dstSec >= 0 && !durationsMatch(srcSec, dstSec)) {
+            Files.deleteIfExists(dest);
+            throw new IOException("Transcodage incomplet : " + dstSec + " s au lieu de " + srcSec
+                    + " s (flux source abîmé) — source conservée");
+        }
+        // Durée de la source inconnue : on ne peut pas prouver que la conversion est complète, donc on ne supprime rien.
+        if (deleteSource && srcSec > 0) Files.deleteIfExists(source);
 
         return dest;
+    }
+
+    /** Durées compatibles : écart d'au plus 2 s, ou 1 % de la durée de la source pour les longs fichiers. */
+    static boolean durationsMatch(int sourceSec, int convertedSec) {
+        int tolerance = Math.max(2, (int) Math.round(sourceSec * 0.01));
+        return Math.abs(sourceSec - convertedSec) <= tolerance;
     }
 
     /** Signatures ffmpeg typiques d'une source qu'il ne parvient même pas à ouvrir/décoder —
@@ -119,7 +176,18 @@ public class AudioTranscoder {
         return m.contains("moov atom not found")
             || m.contains("invalid data found when processing input")
             || m.contains("error opening input")
-            || m.contains("could not find codec parameters");
+            || m.contains("could not find codec parameters")
+            // Deux signatures manquantes trouvées en direct (2026-09-07) sur de vrais fichiers de
+            // cette bibliothèque, jusque-là jamais reconnues donc jamais proposées à la corbeille —
+            // elles se contentaient d'échouer en boucle silencieusement à chaque tentative de
+            // transcodage. "decode error rate" : seuil de robustesse propre à ffmpeg (n'apparaît que
+            // si une fraction significative des paquets échoue à décoder, pas un faux positif
+            // transitoire). "failed to configure output pad" : échec du graphe de filtres
+            // (auto_aresample) constaté sur plusieurs .m4a de cette bibliothèque — toujours
+            // recontrôlé indépendamment par verifyUnreadable() avant tout déplacement, donc pas plus
+            // risqué que les 4 signatures déjà en place.
+            || m.contains("decode error rate")
+            || m.contains("failed to configure output pad");
     }
 
     /**

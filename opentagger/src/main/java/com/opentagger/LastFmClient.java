@@ -19,23 +19,8 @@ public class LastFmClient {
             java.util.logging.Logger.getLogger(LastFmClient.class.getName());
     private static final String BASE_URL = "https://ws.audioscrobbler.com/2.0/";
 
-    // Tags Last.fm classifiés comme "mood"
-    private static final String[][] MOOD_MAP = {
-        {"happy", "upbeat", "feel good", "feel-good", "joyful", "cheerful", "fun", "positive"},
-        {"sad", "melancholic", "melancholy", "depressing", "heartbreak", "emotional", "tearjerker"},
-        {"chill", "chillout", "relax", "relaxed", "calm", "peaceful", "soothing", "mellow", "laid back"},
-        {"energetic", "energy", "pump up", "adrenaline", "workout", "running", "power"},
-        {"aggressive", "angry", "rage", "intense", "harsh"},
-        {"romantic", "love", "romance", "sensual"},
-        {"party", "dance", "danceable", "club", "rave"},
-        {"dark", "haunting", "gloomy", "atmospheric", "noir"},
-        {"acoustic", "unplugged", "folk acoustic"},
-        {"instrumental", "no vocals"},
-    };
-    private static final String[] MOOD_LABELS = {
-        "Happy", "Sad", "Relaxed", "Energetic", "Aggressive",
-        "Romantic", "Party", "Dark", "Acoustic", "Instrumental"
-    };
+    // Classification mood (mots-clés → label) déplacée dans MoodClassifier (2026-09-13), partagée
+    // avec MusicBrainzClient/DiscogsClient — voir sa Javadoc pour le pourquoi.
 
     private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
@@ -60,12 +45,15 @@ public class LastFmClient {
         if (!genres.isEmpty()) info.genre = joinGenres(genres);
     }
 
-    /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible). */
+    /** Enrichit les URLs artiste depuis Last.fm (page Last.fm + lien Wikipedia si disponible), et
+     *  sa biographie (bio.summary) en repli si Discogs n'en a pas fourni une (voir DiscogsClient.
+     *  enrichArtistInfo(), appelé en premier dans la cascade TagEnrichment.enrichArtistInfo()). */
     public void enrichArtistUrls(TagInfo info, MetadataCache cache) throws Exception {
         if (!Config.get().lastfmEnabled()) return;
         if (!Config.get().lastfmArtistUrlsEnabled()) return;
         if (Config.get().lastfmKey().isBlank()) return;
-        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank()) return;
+        if (!info.artistOfficialUrl.isBlank() && !info.artistWikipediaUrl.isBlank() && !info.artistBio.isBlank()
+                && !info.lastfmSimilarArtists.isBlank()) return;
         if (info.artist.isBlank()) return;
 
         // Clé de cache SANS l'api_key (contrairement à l'URL réellement appelée) — un secret n'a
@@ -81,7 +69,7 @@ public class LastFmClient {
 
         JsonNode artist = root.path("artist");
         if (info.artistOfficialUrl.isBlank()) {
-            String url = artist.path("url").asText("").trim();
+            String url = JsonText.of(artist.path("url"), "").trim();
             if (!url.isBlank()) info.artistOfficialUrl = url;
         }
         // Last.fm inclut parfois un lien Wikipedia dans les "links"
@@ -89,7 +77,7 @@ public class LastFmClient {
             JsonNode links = artist.path("bio").path("links").path("link");
             if (links.isArray()) {
                 for (JsonNode link : links) {
-                    String href = link.path("href").asText("").trim();
+                    String href = JsonText.of(link.path("href"), "").trim();
                     if (href.contains("wikipedia.org")) {
                         info.artistWikipediaUrl = href;
                         break;
@@ -97,6 +85,72 @@ public class LastFmClient {
                 }
             }
         }
+        if (info.artistBio.isBlank()) {
+            String summary = JsonText.of(artist.path("bio").path("summary"), "").trim();
+            if (!summary.isBlank()) info.artistBio = cleanBio(summary);
+        }
+        // Artistes similaires — présents dans cette même réponse artist.getInfo (aucun appel de plus).
+        if (info.lastfmSimilarArtists.isBlank()) {
+            JsonNode sim = artist.path("similar").path("artist");
+            if (sim.isArray()) {
+                List<String> names = new ArrayList<>();
+                for (JsonNode a : sim) {
+                    String n = JsonText.of(a.path("name"), "").trim();
+                    if (!n.isBlank() && names.size() < 5) names.add(n);
+                }
+                if (!names.isEmpty()) info.lastfmSimilarArtists = String.join("; ", names);
+            }
+        }
+    }
+
+    /**
+     * URL de la page Last.fm de la piste (construite, sans appel réseau — motif public stable
+     * {@code /music/ARTISTE/_/TITRE}, "+" pour les espaces) puis, si {@code lastfm.fetch_track_stats},
+     * auditeurs distincts et écoutes globales via {@code track.getInfo} (mis en cache comme les autres
+     * appels Last.fm). Ces trois champs sont GLOBAUX — distincts de lastfmPlayCount, l'écoute PERSONNELLE
+     * de l'utilisateur (voir LastFmSyncWorker).
+     */
+    public void enrichTrackStats(TagInfo info, MetadataCache cache) throws Exception {
+        if (!Config.get().lastfmEnabled()) return;
+        if (Config.get().lastfmKey().isBlank()) return;
+        if (info.artist.isBlank() || info.title.isBlank()) return;
+
+        if (info.lastfmUrl.isBlank()) {
+            info.lastfmUrl = "https://www.last.fm/music/" + encode(info.artist) + "/_/" + encode(info.title);
+        }
+        if (!Config.get().lastfmTrackStatsEnabled()) return;
+        if (!info.lastfmListeners.isBlank() && !info.lastfmGlobalPlaycount.isBlank()) return;
+
+        String cacheKey = "lastfm:trackinfo:" + MetadataCache.queryHash(info.artist, info.title);
+        JsonNode root = fetch(BASE_URL
+            + "?method=track.getInfo"
+            + "&artist=" + encode(info.artist)
+            + "&track="  + encode(info.title)
+            + "&autocorrect=1"
+            + "&api_key=" + Config.get().lastfmKey()
+            + "&format=json", cacheKey, cache);
+        if (root == null) return;
+        JsonNode track = root.path("track");
+        if (info.lastfmListeners.isBlank()) {
+            String v = JsonText.of(track.path("listeners"), "").trim();
+            if (v.matches("\\d+")) info.lastfmListeners = v;
+        }
+        if (info.lastfmGlobalPlaycount.isBlank()) {
+            String v = JsonText.of(track.path("playcount"), "").trim();
+            if (v.matches("\\d+")) info.lastfmGlobalPlaycount = v;
+        }
+        // L'URL renvoyée par Last.fm (après autocorrection d'orthographe) prime sur celle construite.
+        String url = JsonText.of(track.path("url"), "").trim();
+        if (url.startsWith("http")) info.lastfmUrl = url;
+    }
+
+    /** Last.fm ajoute systématiquement un lien de renvoi HTML en fin de résumé
+     *  ("&lt;a href="...""&gt;Read more on Last.fm&lt;/a&gt;.") — retiré, ainsi que toute autre
+     *  balise HTML éventuelle (le champ visé, TagInfo.artistBio, est du texte brut partout ailleurs). */
+    private String cleanBio(String summary) {
+        String s = summary.replaceAll("(?i)<a[^>]*>.*?</a>\\.?", "");
+        s = s.replaceAll("<[^>]+>", "");
+        return s.trim();
     }
 
     /** Enrichit le mood d'un TagInfo depuis les tags Last.fm. Ne modifie mood que si vide. */
@@ -106,21 +160,36 @@ public class LastFmClient {
         if (!info.mood.isBlank()) return;
 
         List<GenreFilter.Candidate> allTags = fetchAllTags(info, cache);
-
+        List<String> names = new java.util.ArrayList<>();
         for (GenreFilter.Candidate c : allTags) {
-            String t = c.name().toLowerCase().trim();
-            if (t.equals("instrumental") || t.equals("no vocals")) {
-                info.isInstrumental = "1";
-            }
-            for (int i = 0; i < MOOD_MAP.length; i++) {
-                for (String kw : MOOD_MAP[i]) {
-                    if (t.contains(kw)) {
-                        info.mood = MOOD_LABELS[i];
-                        return;
-                    }
-                }
-            }
+            names.add(c.name());
+            if (MoodClassifier.isInstrumentalTag(c.name())) info.isInstrumental = "1";
         }
+        info.mood = MoodClassifier.classify(names);
+    }
+
+    /**
+     * Enrichit les mots-clés (info.tags) depuis les mêmes tags Last.fm bruts déjà récupérés pour le
+     * genre/mood — jusqu'ici calculés puis systématiquement jetés (enrichGenres()/enrichMood() ne
+     * consomment cette liste QUE pour en dériver genre/mood, jamais les noms bruts eux-mêmes), champ
+     * "Mots-clés" resté vide pour tout le monde malgré la donnée déjà en main (2026-09-13, trouvé
+     * par audit). Gate indépendant de enrichGenres()/enrichMood() (qui s'arrêtent dès que genre/mood
+     * sont déjà connus, souvent avant même d'arriver ici) — les mots-clés doivent rester tentés
+     * même dans ce cas. fetchAllTags() est mis en cache par instance (voir son commentaire) : aucun
+     * appel réseau de plus si enrichGenres()/enrichMood() ont déjà tourné juste avant sur le même
+     * TagInfo/la même instance, comme c'est toujours le cas dans la cascade (TagEnrichment.
+     * enrichGenre() puis enrichMood(), tous deux avec le même LastFmClient partagé pour ce fichier).
+     */
+    public void enrichTags(TagInfo info, MetadataCache cache) throws Exception {
+        if (!Config.get().lastfmEnabled()) return;
+        if (Config.get().lastfmKey().isBlank()) return;
+        if (!info.tags.isBlank()) return;
+
+        List<GenreFilter.Candidate> allTags = fetchAllTags(info, cache);
+        if (allTags.isEmpty()) return;
+        List<String> names = new ArrayList<>();
+        for (GenreFilter.Candidate c : allTags) names.add(c.name());
+        info.tags = joinGenres(names);
     }
 
     /** Récupère tous les tags bruts Last.fm avec leur popularité (morceau puis artiste en fallback). */
@@ -167,7 +236,7 @@ public class LastFmClient {
         if (!tagArray.isArray()) return result;
 
         for (JsonNode tag : tagArray) {
-            String name  = tag.path("name").asText("").trim();
+            String name  = JsonText.of(tag.path("name"), "").trim();
             int    count = tag.path("count").asInt(0);
             if (!name.isBlank() && name.length() > 2)
                 result.add(new GenreFilter.Candidate(name, count));
@@ -236,12 +305,13 @@ public class LastFmClient {
      *         fréquent, la résolution dépend des tags du scrobble d'origine — sont ignorées, pas une
      *         erreur : rien à quoi les rattacher côté fichiers déjà identifiés par MBID).
      */
-    public java.util.Map<String, Integer> fetchTopTrackCounts(String username, int maxTracks) throws Exception {
+    public java.util.Map<String, Integer> fetchTopTrackCounts(String username) throws Exception {
         java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
         int perPage = 1000;
         int page = 1;
-        while (counts.size() < maxTracks) {
-            int want = Math.min(perPage, maxTracks - counts.size());
+        // Sans plafond (plus de réglage « pistes max » depuis le 2026-10-03) ; garde-fou : 2 000 pages de 1000.
+        while (page <= 2000) {
+            int want = perPage;
             String url = BASE_URL + "?method=user.gettoptracks&user=" + encode(username)
                     + "&api_key=" + Config.get().lastfmKey() + "&format=json"
                     + "&limit=" + want + "&page=" + page;
@@ -256,26 +326,26 @@ public class LastFmClient {
             if (response.statusCode() != 200)
                 throw new Exception("Last.fm HTTP " + response.statusCode() + " : " + response.body());
 
-            JsonNode tracks = mapper.readTree(response.body()).path("toptracks").path("track");
+            JsonNode top = mapper.readTree(response.body()).path("toptracks");
+            JsonNode tracks = top.path("track");
             if (!tracks.isArray() || tracks.isEmpty()) break;
 
             for (JsonNode t : tracks) {
-                String mbid = t.path("mbid").asText("").trim();
+                String mbid = JsonText.of(t.path("mbid"), "").trim();
                 int    n    = t.path("playcount").asInt(0);
                 if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
             }
 
-            if (tracks.size() < want) break; // dernière page (moins de résultats que demandé)
+            // Fin du classement : dernière page annoncée par l'API (@attr.totalPages), sinon page incomplète.
+            int totalPages = top.path("@attr").path("totalPages").asInt(-1);
+            if (totalPages >= 0 ? page >= totalPages : tracks.size() < want) break;
             page++;
         }
         return counts;
     }
 
     private boolean isMoodTag(String t) {
-        for (String[] group : MOOD_MAP)
-            for (String kw : group)
-                if (t.contains(kw)) return true;
-        return false;
+        return !MoodClassifier.classify(List.of(t)).isEmpty();
     }
 
     private String joinGenres(List<String> tags) {

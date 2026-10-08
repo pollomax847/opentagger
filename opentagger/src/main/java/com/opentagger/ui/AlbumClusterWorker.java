@@ -54,7 +54,9 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
     private final java.util.function.BiConsumer<Integer, Integer> onProgress;
 
     private final TagWriter writer = new TagWriter();
-    private final boolean rgEnabled = Config.get().replayGainEnabled() && ReplayGainAnalyzer.isAvailable();
+    // ReplayGain : disponibilité figée à la construction (coûteux à tester), mais le RÉGLAGE est relu à chaque fichier — le « Mode Express » agit ainsi tout de suite, sans relancer la passe en cours.
+    private final boolean rgAvailable = ReplayGainAnalyzer.isAvailable();
+    private boolean rgEnabled() { return rgAvailable && Config.get().replayGainEnabled(); }
 
     private final AtomicInteger albumsProcessed = new AtomicInteger();
     private final AtomicInteger tracksFixed     = new AtomicInteger();
@@ -152,6 +154,14 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                     updated.discTotal = String.valueOf(maxDisc);
                     changed = true;
                 }
+                // Id de la piste dans la parution + titre du disque (tags Picard, 2026-09-20) — comblés
+                // seulement s'ils sont vides, comme applyReleaseLevelFrom() plus bas.
+                if (updated.releaseTrackMbid.isBlank() && !matched.trackMbid().isBlank()) {
+                    updated.releaseTrackMbid = matched.trackMbid(); changed = true;
+                }
+                if (updated.discSubtitle.isBlank() && !matched.discTitle().isBlank()) {
+                    updated.discSubtitle = matched.discTitle(); changed = true;
+                }
                 if (!tracklist.albumArtist().isBlank())     updated.albumArtist     = tracklist.albumArtist();
                 if (!tracklist.albumArtistSort().isBlank()) updated.albumArtistSort = tracklist.albumArtistSort();
                 if (tracklist.isCompilation())              updated.isCompilation   = "1";
@@ -160,8 +170,12 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
                 // piste dont l'année divergerait du reste de l'album (import en plusieurs fois,
                 // source différente par piste...).
                 if (!tracklist.year().isBlank() && !tracklist.year().equals(updated.year)) {
-                    updated.year = tracklist.year(); changed = true;
+                    updated.year = tracklist.year(); updated.date = ""; changed = true;
                 }
+                // Champs de PARUTION encore vides (date complète, type "album;live", label, pays,
+                // langue...) — voir TagInfo.applyReleaseLevelFrom() : même source de vérité (la
+                // release MB) que l'année ci-dessus, jamais écrasés s'ils sont déjà renseignés.
+                if (updated.applyReleaseLevelFrom(tracklist.releaseMeta())) changed = true;
                 // Genre : voir le commentaire sur majorityGenre() plus haut — jamais pour combler
                 // un vide, seulement pour aligner une piste minoritaire sur le reste du groupe.
                 if (!majorityGenre.isEmpty() && !updated.genre.isBlank()
@@ -195,7 +209,7 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
             }
 
             // ── ReplayGain d'album (analyse concaténée sur TOUTES les pistes du groupe) ──
-            if (rgEnabled) {
+            if (rgEnabled()) {
                 List<String> paths = albumFiles.stream()
                     .map(e -> e.currentPath != null ? e.currentPath.toString() : e.file.getAbsolutePath())
                     .collect(java.util.stream.Collectors.toList());

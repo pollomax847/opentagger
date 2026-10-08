@@ -7,7 +7,6 @@ import com.opentagger.I18n;
 import com.opentagger.model.FileEntry;
 
 import javax.swing.*;
-import java.awt.Desktop;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -80,7 +79,7 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
         AtomicInteger done = new AtomicInteger(), skipped = new AtomicInteger(), errors = new AtomicInteger();
         int total = entries.size();
 
-        int threads = Math.max(1, cfg.num("batch.threads", 3));
+        int threads = Math.max(1, cfg.batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
@@ -119,13 +118,16 @@ public class TranscodeWorker extends SwingWorker<String, TranscodeWorker.Progres
                     // Corbeille système (récupérable), jamais suppression définitive — voir
                     // MainFrame.deleteErrorFiles() pour le même choix sur les fichiers illisibles
                     // détectés manuellement.
+                    // TrashHelper.moveToTrash() — voir sa Javadoc (2026-09-05) : sur cette machine
+                    // Desktop.moveToTrash() n'est jamais supporté, donc l'ancien code ici laissait
+                    // simplement le fichier en place avec un message d'échec — pas dangereux comme
+                    // les autres sites (pas de f.delete() de repli ici), mais le repli local de
+                    // TrashHelper fait maintenant réellement le travail plutôt que de renoncer.
                     boolean trashed = false;
                     if (unreadable && Config.get().transcodeMoveUnreadableEnabled()) {
                         try {
-                            Desktop desktop = Desktop.getDesktop();
-                            if (desktop.isSupported(Desktop.Action.MOVE_TO_TRASH)) {
-                                trashed = desktop.moveToTrash(curPath.toFile());
-                            }
+                            trashed = com.opentagger.TrashHelper.moveToTrash(curPath.toFile());
+                            if (!trashed) msg = msg + " (corbeille échouée)";
                         } catch (Exception trashEx) {
                             msg = msg + " (corbeille échouée: " + trashEx.getMessage() + ")";
                         }

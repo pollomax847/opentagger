@@ -41,8 +41,12 @@ public final class ClassicalDisplay {
         }
 
         if (t.composer.isBlank()) return rest.toString();
+        // ComposerInitials : "Johann Sebastian Bach" → "J.S. Bach" pour les quelques compositeurs
+        // où le nom complet ajoute de la longueur sans lever d'ambiguïté qu'un simple "Bach" ne
+        // lèverait pas déjà (écart SongKong, 2026-09-18) — sans effet sur les autres compositeurs.
+        String composer = ComposerInitials.displayName(t.composer);
         // Rien d'autre que le compositeur résolu (ex. Work MB pas encore atteint) : l'afficher
         // seul plutôt qu'avec un ":" final sans rien après.
-        return rest.isEmpty() ? t.composer : t.composer + ": " + rest;
+        return rest.isEmpty() ? composer : composer + ": " + rest;
     }
 }

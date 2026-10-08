@@ -21,16 +21,6 @@ public class CaaClient {
 
     private static final HttpClient http = HttpTimeouts.client();
 
-    /**
-     * Tente de télécharger la pochette avant (front) pour le TagInfo donné.
-     * Essaie d'abord par releaseMbid, puis par releaseGroupMbid.
-     * Retourne un fichier temporaire ou null en cas d'échec.
-     */
-    public Path downloadFront(TagInfo info, MetadataCache cache) {
-        Path p = downloadFromRelease(info, cache);
-        return p != null ? p : downloadFromReleaseGroup(info, cache);
-    }
-
     /** Pochette liée à l'édition exacte (la plus précise) — un des 2 niveaux CAA séparément activables.
      *  1200px (pas 500px) : demande utilisateur (2026-08-29) — le CAA garantit cette variante pour
      *  quasiment toute image (générée automatiquement à l'import), donc le repli sur "front" (taille

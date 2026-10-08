@@ -55,8 +55,6 @@ public class TaggerScript {
         }
     }
 
-    public boolean isReady() { return engine != null; }
-
     /**
      * Charge la liste des scripts. Migration automatique : si {@code scripts.json} n'existe pas
      * encore et que l'ancienne propriété unique {@code tagger.script} est renseignée, elle est

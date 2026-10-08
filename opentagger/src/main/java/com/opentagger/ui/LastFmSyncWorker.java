@@ -45,8 +45,10 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
             return null;
         }
 
+        log(I18n.t("Récupération des statistiques Last.fm pour \"%s\"…", username));
         onProgress.accept(I18n.t("Récupération des statistiques Last.fm pour \"%s\"…", username));
-        Map<String, Integer> counts = client.fetchTopTrackCounts(username, Config.get().lastfmMaxTracks());
+        Map<String, Integer> counts = client.fetchTopTrackCounts(username);
+        log(I18n.t("%d piste(s) dans le classement Last.fm récupéré.", counts.size()));
         onProgress.accept(I18n.t("%d piste(s) dans le classement Last.fm récupéré.", counts.size()));
 
         int total = entries.size();
@@ -62,9 +64,19 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
 
             Integer count = counts.get(mbid);
             if (count == null) { skipped++; continue; }
+            // Déjà à jour (ou compteur en ligne plus petit) : ne PAS réécrire le fichier — voir PlayCounts.
+            if (!com.opentagger.PlayCounts.needsUpdate(ti.lastfmPlayCount, count)) { skipped++; continue; }
 
             try {
                 File fichier = entry.currentPath != null ? entry.currentPath.toFile() : entry.file;
+                // Relecture COMPLÈTE du fichier quand l'entrée n'a pas été identifiée pendant cette session
+                // (ti = entry.current, issu du cache de scan : ancien contenu partiel, voir TagFieldRegistry) :
+                // avec tags.clear_existing_tags=true, TagWriter repart d'un tag vide et n'écrit QUE ce qu'on
+                // lui donne — écrire ce TagInfo partiel effaçait pays/label/ReplayGain/ids... du fichier.
+                if (entry.result == null) {
+                    TagInfo fresh = com.opentagger.TagReader.read(fichier);
+                    if (!fresh.title.isBlank() || !fresh.artist.isBlank()) ti = fresh;
+                }
                 ti.lastfmPlayCount = String.valueOf(count);
                 writer.write(fichier, ti);
 
@@ -72,18 +84,23 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
                 // message : sans lui, la ligne Journal ("✓ Tagué : ...") ne dirait pas pourquoi le
                 // fichier a été réécrit — appendLog() l'affiche en suffixe, voir MainFrame.
                 final int countFinal = count;
+                final TagInfo tiFinal = ti;
                 SwingUtilities.invokeLater(() -> {
-                    ef.result  = ti;
+                    ef.result  = tiFinal;
                     ef.message = I18n.t("Last.fm : %d écoute(s)", countFinal);
                     onUpdate.accept(ef);
                 });
+                log("  " + entry.filename() + " → Last.fm " + countFinal + " écoute(s)");
                 updated++;
             } catch (Exception ex) {
+                log("  ✗ " + entry.filename() + " : " + ex.getMessage());
                 onProgress.accept("  ✗ " + entry.filename() + " : " + ex.getMessage());
                 errors++;
             }
         }
 
+        log(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
+                updated, skipped, errors));
         onProgress.accept(I18n.t("Terminé — %d mis à jour, %d sans correspondance, %d erreur(s).",
                 updated, skipped, errors));
         return null;
@@ -92,6 +109,13 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
     @Override
     protected void process(List<FileEntry> chunks) {
         // rien : les mises à jour sont déjà publiées via onUpdate/invokeLater dans doInBackground()
+    }
+
+    /** Voir ListenBrainzSyncWorker.log() pour le pourquoi complet — même trou de journalisation,
+     *  même correctif, même format que le reste du pipeline. */
+    private static void log(String msg) {
+        System.out.println("[OT " + java.time.LocalTime.now().toString().substring(0, 8) + "] " + msg);
+        System.out.flush();
     }
 
     public int getUpdated() { return updated; }

@@ -8,26 +8,27 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Lecture/extraction de CD audio via cdparanoia (sous-processus, comme ffmpeg/fpcalc/songrec
- * ailleurs dans l'appli — aucune dépendance JNI/API CD-ROM native). cdparanoia gère lui-même la
- * correction d'erreurs de lecture (jitter, rayures) — préférable à un simple dd du périphérique
- * bloc, qui ne corrige rien.
+ * Lecture/extraction de CD audio. Lecteur NATIF par défaut, sans outil à installer :
+ * <ul>
+ *   <li><b>Windows</b> : PowerShell + DeviceIoControl (ressource {@code cd/cd_windows.ps1}) ;</li>
+ *   <li><b>Linux</b> : Python 3 + ioctl du pilote cdrom (ressource {@code cd/cd_linux.py}) ;</li>
+ *   <li>repli Linux : {@code cdparanoia} s'il est installé (meilleure correction d'erreurs, si l'utilisateur l'a).</li>
+ * </ul>
+ * Les deux scripts parlent le même protocole de lignes (voir leur en-tête) : un sous-processus, comme ffmpeg/fpcalc
+ * ailleurs dans l'appli. La conversion vers le format choisi se fait ensuite via AudioTranscoder.
  *
- * Demande utilisateur (2026-08-21) : import de CD audio (avec identification + vérification de
- * doublons dans la bibliothèque avant extraction) et de CD de données. Cette classe ne couvre que
- * le volet audio — un CD de données se traite par simple copie de fichiers depuis le point de
- * montage (géré par udisks2/gvfs côté OS, voir CdImportDialog), sans passer par cdparanoia.
+ * <p>Un CD de données se traite par simple copie de fichiers (voir CdImportDialog), sans passer par ici.
  *
- * PAS TESTÉ avec un lecteur physique réel au moment de l'écriture (aucun /dev/sr* présent sur la
- * machine où ce code a été développé) — cdparanoia lui-même est installé et son format de sortie
- * -Q est stable et documenté depuis des décennies, mais une vérification avec un vrai disque
- * inséré reste à faire dès qu'un lecteur est disponible.
+ * <p>Essayé avec un vrai CD audio sous Windows (19 pistes lues, extraction d'une piste en WAV). Sous Linux, seuls
+ * l'analyse des réponses et les chemins d'erreur sont testés.
  */
 public class CdRipper {
 
@@ -37,10 +38,72 @@ public class CdRipper {
         public int durationSec() { return lengthSectors / CDDA_SECTORS_PER_SEC; }
     }
 
-    /** tracks vide = pas de piste audio détectée (CD de données pur, ou lecteur vide/inaccessible). */
+    /** tracks vide = pas de piste audio détectée (CD de données pur). */
     public record Toc(List<Track> tracks) {
         public boolean isAudioDisc() { return !tracks.isEmpty(); }
+
+        /** Disc ID MusicBrainz EXACT (SHA-1 du premier/dernier numéro de piste puis des 100 offsets en hexadécimal, base64
+         *  adapté : {@code + / =} → {@code . _ -}). Sert à une recherche exacte, là où le lookup par durées arrondies est
+         *  approximatif. Vide si le disque n'est pas un CD audio simple (pistes non contiguës, CD mixte...). */
+        public String discId() {
+            if (tracks.isEmpty() || tracks.size() > 99) return "";
+            int first = tracks.get(0).number();
+            int last = tracks.get(tracks.size() - 1).number();
+            if (first != 1 || last != tracks.size()) return "";
+            int[] offsets = new int[100];
+            int cursor = 150; // lead-in de 2 s
+            for (int i = 0; i < tracks.size(); i++) {
+                if (tracks.get(i).number() != first + i) return "";
+                offsets[i + 1] = cursor;
+                cursor += tracks.get(i).lengthSectors();
+            }
+            offsets[0] = cursor; // lead-out
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format(Locale.ROOT, "%02X%02X", first, last));
+            for (int o : offsets) sb.append(String.format(Locale.ROOT, "%08X", o));
+            try {
+                byte[] sha = java.security.MessageDigest.getInstance("SHA-1").digest(sb.toString().getBytes(StandardCharsets.US_ASCII));
+                return java.util.Base64.getEncoder().encodeToString(sha).replace('+', '.').replace('/', '_').replace('=', '-');
+            } catch (java.security.NoSuchAlgorithmException e) {
+                return "";
+            }
+        }
+
+        /** Positions de début de chaque piste en secteurs (lead-in de 2 s inclus), comme les attend CDDB. */
+        public int[] cddbOffsets() {
+            int[] o = new int[tracks.size()];
+            int cursor = 150;
+            for (int i = 0; i < tracks.size(); i++) { o[i] = cursor; cursor += tracks.get(i).lengthSectors(); }
+            return o;
+        }
+
+        /** Durée totale du disque en secondes (position du lead-out), comme l'attend CDDB. */
+        public int cddbTotalSeconds() { return totalSectors() / CDDA_SECTORS_PER_SEC; }
+
+        /** Disc ID CDDB/freedb (8 chiffres hexadécimaux) — un calcul DIFFÉRENT du Disc ID MusicBrainz : somme des chiffres de la position
+         *  (en secondes) de chaque piste, durée utile, nombre de pistes. Vide si le disque n'est pas un CD audio. */
+        public String cddbDiscId() {
+            if (tracks.isEmpty() || tracks.size() > 99) return "";
+            int n = 0;
+            for (int o : cddbOffsets()) {
+                int sec = o / CDDA_SECTORS_PER_SEC;
+                while (sec > 0) { n += sec % 10; sec /= 10; }
+            }
+            int t = cddbTotalSeconds() - cddbOffsets()[0] / CDDA_SECTORS_PER_SEC;
+            long id = (((long) (n % 255)) << 24) | ((long) t << 8) | tracks.size();
+            return String.format(Locale.ROOT, "%08x", id);
+        }
+
+        /** Somme des secteurs avec le lead-in, telle que la compare MusicBrainz. */
+        public int totalSectors() {
+            int n = 150;
+            for (Track t : tracks) n += t.lengthSectors();
+            return n;
+        }
     }
+
+    /** Résultat de l'analyse des lignes d'un script natif. */
+    record NativeReply(List<Track> tracks, int readErrors, String errorCode, String errorMessage, boolean done) {}
 
     private final String cdparanoiaPath;
 
@@ -48,17 +111,169 @@ public class CdRipper {
         this.cdparanoiaPath = Config.get().str("cd.cdparanoia_path", "cdparanoia");
     }
 
-    public static boolean isAvailable() {
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    }
+
+    private static volatile Boolean nativeOk;
+
+    /** Lecteur natif utilisable : PowerShell (Windows) ou Python 3 (Linux/macOS). */
+    static boolean nativeAvailable() {
+        Boolean v = nativeOk;
+        if (v != null) return v;
+        boolean ok;
+        try {
+            ProcessBuilder pb = isWindows()
+                    ? new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "exit 0")
+                    : new ProcessBuilder("python3", "--version");
+            Process p = pb.redirectErrorStream(true).start();
+            try (InputStream is = p.getInputStream()) { is.readAllBytes(); }
+            ok = p.waitFor(20, TimeUnit.SECONDS) && p.exitValue() == 0;
+        } catch (Exception e) { ok = false; }
+        nativeOk = ok;
+        return ok;
+    }
+
+    /** Windows : toujours le lecteur natif. Linux : cdparanoia d'abord quand il est installé (voie éprouvée, avec sa
+     *  correction d'erreurs) ; le lecteur natif Python ne sert alors que s'il est absent. */
+    static boolean useNative() {
+        return nativeAvailable() && (isWindows() || !cdparanoiaAvailable());
+    }
+
+    static boolean cdparanoiaAvailable() {
         try {
             Process p = new ProcessBuilder(Config.get().str("cd.cdparanoia_path", "cdparanoia"), "--version")
                     .redirectErrorStream(true).start();
             try (InputStream is = p.getInputStream()) { is.readAllBytes(); }
             return p.waitFor(5, TimeUnit.SECONDS);
-            // Pas de contrôle sur exitValue() : certaines versions de cdparanoia renvoient un code
-            // non nul pour --version sans que ce soit un vrai échec — la seule chose qui compte
-            // ici est "le binaire existe et répond", pas son code de sortie exact.
+            // Pas de contrôle sur exitValue() : certaines versions renvoient un code non nul pour --version.
         } catch (Exception e) { return false; }
     }
+
+    public static boolean isAvailable() {
+        return nativeAvailable() || cdparanoiaAvailable();
+    }
+
+    // ── Protocole des scripts natifs ────────────────────────────────────────────────────────────────
+
+    /** Analyse les lignes {@code T/P/RIPPED/ERR/DONE} d'un script natif (testable sans lecteur). */
+    static NativeReply parseNative(List<String> lines, IntConsumer progress) {
+        List<Track> tracks = new ArrayList<>();
+        int errors = 0;
+        String code = "", msg = "";
+        boolean done = false;
+        for (String line : lines) {
+            String[] f = line.split("\t", -1);
+            switch (f[0]) {
+                case "T" -> {
+                    if (f.length >= 4 && f[3].trim().equals("1"))          // seulement les pistes AUDIO
+                        tracks.add(new Track(Integer.parseInt(f[1].trim()), Integer.parseInt(f[2].trim())));
+                }
+                case "P" -> {
+                    if (progress != null && f.length >= 3) {
+                        int total = Integer.parseInt(f[2].trim());
+                        if (total > 0) progress.accept((int) (100L * Integer.parseInt(f[1].trim()) / total));
+                    }
+                }
+                case "RIPPED" -> errors = f.length > 1 ? Integer.parseInt(f[1].trim()) : 0;
+                case "ERR" -> { code = f.length > 1 ? f[1] : "READ"; msg = f.length > 2 ? f[2] : ""; }
+                case "DONE" -> done = true;
+                default -> { /* bruit (avertissement du lanceur) : ignoré */ }
+            }
+        }
+        return new NativeReply(tracks, errors, code, msg, done);
+    }
+
+    /** Message lisible pour un code d'erreur du script natif. */
+    static String describe(String code, String msg) {
+        return switch (code) {
+            case "NODRIVE" -> I18n.t("Aucun lecteur de CD détecté.");
+            case "NODISC"  -> I18n.t("Aucun disque dans le lecteur (ou disque illisible).");
+            case "OPEN"    -> I18n.t("Impossible d'ouvrir le lecteur de CD (%s).", msg);
+            case "TOC"     -> I18n.t("Lecture de la table des pistes impossible (%s).", msg);
+            default        -> msg.isBlank() ? I18n.t("Erreur de lecture du CD.") : msg;
+        };
+    }
+
+    private Path scriptFile() throws IOException {
+        String res = isWindows() ? "/cd/cd_windows.ps1" : "/cd/cd_linux.py";
+        try (InputStream is = CdRipper.class.getResourceAsStream(res)) {
+            if (is == null) throw new IOException("ressource introuvable : " + res);
+            byte[] body = is.readAllBytes();
+            Path f = Files.createTempFile("opentagger_cd", isWindows() ? ".ps1" : ".py");
+            if (isWindows()) {      // BOM UTF-8 : PowerShell 5.1 lit sinon le script en ANSI
+                byte[] all = new byte[body.length + 3];
+                all[0] = (byte) 0xEF; all[1] = (byte) 0xBB; all[2] = (byte) 0xBF;
+                System.arraycopy(body, 0, all, 3, body.length);
+                body = all;
+            }
+            Files.write(f, body);
+            return f;
+        }
+    }
+
+    /** Lance le script natif et renvoie ses lignes ; {@code progress} reçoit 0-100 pendant une extraction. */
+    private NativeReply runNative(List<String> scriptArgs, IntConsumer progress, int timeoutSec)
+            throws IOException, InterruptedException {
+        // Un lecteur de CD ne sert pas deux lectures à la fois : lancées en parallèle (deux identifications, une
+        // identification pendant une extraction), elles se bloquent mutuellement. Tout accès au lecteur passe donc ici, un à la fois.
+        DRIVE.lockInterruptibly();
+        try {
+            return runNativeLocked(scriptArgs, progress, timeoutSec);
+        } finally {
+            DRIVE.unlock();
+        }
+    }
+
+    private static final java.util.concurrent.locks.ReentrantLock DRIVE = new java.util.concurrent.locks.ReentrantLock();
+
+    private NativeReply runNativeLocked(List<String> scriptArgs, IntConsumer progress, int timeoutSec)
+            throws IOException, InterruptedException {
+        Path script = scriptFile();
+        try {
+            List<String> cmd = new ArrayList<>();
+            if (isWindows()) {
+                cmd.addAll(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                        "-File", script.toString()));
+                // Les paramètres du script PowerShell sont nommés.
+                for (int i = 0; i + 1 < scriptArgs.size(); i += 2) { cmd.add(scriptArgs.get(i)); cmd.add(scriptArgs.get(i + 1)); }
+            } else {
+                cmd.addAll(List.of("python3", script.toString()));
+                cmd.addAll(scriptArgs);
+            }
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            List<String> lines = new ArrayList<>();
+            Thread reader = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        synchronized (lines) { lines.add(line); }
+                        if (progress != null && line.startsWith("P\t")) progress.accept(lastPercent(line));
+                    }
+                } catch (IOException ignored) { /* processus arrêté */ }
+            }, "cd-reader");
+            reader.setDaemon(true);
+            reader.start();
+            if (!p.waitFor(timeoutSec, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                throw new IOException("lecture du CD : délai dépassé");
+            }
+            reader.join(2000);
+            synchronized (lines) { return parseNative(new ArrayList<>(lines), null); }
+        } finally {
+            try { Files.deleteIfExists(script); } catch (IOException ignored) {}
+        }
+    }
+
+    private static int lastPercent(String pLine) {
+        String[] f = pLine.split("\t", -1);
+        try {
+            int total = Integer.parseInt(f[2].trim());
+            return total > 0 ? (int) (100L * Integer.parseInt(f[1].trim()) / total) : 0;
+        } catch (RuntimeException e) { return 0; }
+    }
+
+    // ── cdparanoia (repli) ──────────────────────────────────────────────────────────────────────────
 
     // Ligne cdparanoia -Q typique :  "  1.    17296 [03:50.46]        0 [00:00.00]    no   no  2"
     private static final Pattern TRACK_LINE = Pattern.compile("^\\s*(\\d+)\\.\\s+(\\d+)\\s+\\[");
@@ -72,10 +287,7 @@ public class CdRipper {
         return new Toc(tracks);
     }
 
-    /** Interroge la table des pistes du disque inséré — ne lit AUCUNE donnée audio, juste le TOC
-     *  (rapide, quelques secondes). Renvoie un Toc vide si le disque ne contient aucune piste
-     *  audio (CD de données pur) ou si aucun lecteur/disque n'est accessible. */
-    public Toc queryToc() throws IOException, InterruptedException {
+    private Toc queryTocCdparanoia() throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(cdparanoiaPath, "-Q");
         pb.redirectErrorStream(true); // cdparanoia écrit la table sur stderr, pas stdout
         Process p = pb.start();
@@ -87,24 +299,102 @@ public class CdRipper {
         return parseToc(out);
     }
 
-    /** Extrait UNE piste vers un fichier WAV brut (44.1kHz/16bit/stéréo, format CDDA natif) —
-     *  la conversion vers le format final choisi par l'utilisateur se fait ensuite via
-     *  AudioTranscoder (déjà utilisé partout ailleurs dans l'appli pour ça), pas ici. */
-    public Path ripTrackToWav(int trackNumber, Path destDir) throws IOException, InterruptedException {
-        Files.createDirectories(destDir);
+    private Path ripTrackCdparanoia(int trackNumber, Path destDir) throws IOException, InterruptedException {
         Path wav = destDir.resolve(String.format("track%02d.wav", trackNumber));
         ProcessBuilder pb = new ProcessBuilder(
                 cdparanoiaPath, String.valueOf(trackNumber), wav.toAbsolutePath().toString());
         pb.redirectErrorStream(true);
         Process p = pb.start();
-        // Journal du sous-processus purgé au fil de l'eau — sans ça, un pipe stdout plein peut
-        // bloquer cdparanoia en plein milieu d'une extraction de plusieurs minutes (même piège que
-        // ProcessUtils.readWithTimeout() ailleurs dans l'appli).
+        // Journal du sous-processus purgé au fil de l'eau (un pipe plein bloquerait l'extraction).
         try (InputStream is = p.getInputStream()) { is.readAllBytes(); }
-        boolean done = p.waitFor(600, TimeUnit.SECONDS); // 10 min — large marge, même une piste de 20 min avec relectures d'erreur reste couverte
+        boolean done = p.waitFor(600, TimeUnit.SECONDS);
         if (!done) { p.destroyForcibly(); throw new IOException("cdparanoia : délai dépassé sur la piste " + trackNumber); }
         if (p.exitValue() != 0 || !Files.exists(wav) || Files.size(wav) == 0)
             throw new IOException("Échec d'extraction de la piste " + trackNumber + " (code " + p.exitValue() + ")");
         return wav;
+    }
+
+    // ── API publique ────────────────────────────────────────────────────────────────────────────────
+
+    private String device() { return Config.get().str("cd.device", ""); }
+
+    /** Table des pistes du disque inséré — ne lit AUCUNE donnée audio. Toc vide = aucune piste audio (CD de
+     *  données). Lève une IOException au message lisible si aucun lecteur/disque n'est accessible. */
+    public Toc queryToc() throws IOException, InterruptedException {
+        IOException nativeFailure = null;
+        if (useNative()) {
+            List<String> args = new ArrayList<>();
+            if (isWindows()) { args.addAll(List.of("-Mode", "toc")); if (!device().isBlank()) args.addAll(List.of("-Drive", device())); }
+            else { args.add("toc"); if (!device().isBlank()) args.add(device()); }
+            NativeReply r = runNative(args, null, 60);
+            if (!r.errorCode().isEmpty()) {
+                nativeFailure = new IOException(describe(r.errorCode(), r.errorMessage()));
+            } else if (r.done()) {
+                return new Toc(r.tracks());
+            } else {
+                nativeFailure = new IOException(I18n.t("Erreur de lecture du CD."));
+            }
+        }
+        if (!isWindows() && cdparanoiaAvailable()) return queryTocCdparanoia();   // repli
+        if (nativeFailure != null) throw nativeFailure;
+        throw new IOException(I18n.t("Aucun lecteur de CD utilisable (PowerShell ou Python 3 requis)."));
+    }
+
+    /** Éjecte le disque (au mieux : un échec n'est jamais bloquant). Windows : verbe « Éjecter » via le script natif ; Linux : {@code eject}. */
+    public boolean eject() {
+        try {
+            if (isWindows()) {
+                if (!useNative()) return false;
+                List<String> args = new ArrayList<>(List.of("-Mode", "eject"));
+                if (!device().isBlank()) args.addAll(List.of("-Drive", device()));
+                NativeReply r = runNative(args, null, 30);
+                return r.errorCode().isEmpty() && r.done();
+            }
+            List<String> cmd = new ArrayList<>(List.of("eject"));
+            if (!device().isBlank()) cmd.add(device());
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
+            return p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0;
+        } catch (Exception e) {
+            System.err.println("[OT] CD : éjection impossible : " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Extrait UNE piste vers un WAV brut (44,1 kHz / 16 bits / stéréo). */
+    public Path ripTrackToWav(int trackNumber, Path destDir) throws IOException, InterruptedException {
+        return ripTrackToWav(trackNumber, destDir, null);
+    }
+
+    public Path ripTrackToWav(int trackNumber, Path destDir, IntConsumer progress) throws IOException, InterruptedException {
+        return ripTrackToWav(trackNumber, destDir, progress, 1800); // 30 min : large marge, relectures comprises
+    }
+
+    /** @param timeoutSec délai maximal pour CETTE piste (une piste échantillon d'identification n'attend pas 30 minutes) */
+    public Path ripTrackToWav(int trackNumber, Path destDir, IntConsumer progress, int timeoutSec) throws IOException, InterruptedException {
+        Files.createDirectories(destDir);
+        if (useNative()) {
+            Path wav = destDir.resolve(String.format("track%02d.wav", trackNumber));
+            List<String> args = new ArrayList<>();
+            if (isWindows()) {
+                args.addAll(List.of("-Mode", "rip", "-Track", String.valueOf(trackNumber), "-Out", wav.toAbsolutePath().toString()));
+                if (!device().isBlank()) args.addAll(List.of("-Drive", device()));
+            } else {
+                args.addAll(List.of("rip", String.valueOf(trackNumber), wav.toAbsolutePath().toString()));
+                if (!device().isBlank()) args.add(device());
+            }
+            NativeReply r = runNative(args, progress, timeoutSec);
+            if (r.errorCode().isEmpty() && r.done() && Files.exists(wav) && Files.size(wav) > 44) {
+                if (r.readErrors() > 0)
+                    System.out.println("[OT] CD piste " + trackNumber + " : " + r.readErrors() + " secteur(s) illisible(s) remplacé(s) par du silence.");
+                return wav;
+            }
+            if (isWindows() || !cdparanoiaAvailable())
+                throw new IOException(r.errorCode().isEmpty()
+                        ? "Échec d'extraction de la piste " + trackNumber
+                        : describe(r.errorCode(), r.errorMessage()));
+            // Linux : repli cdparanoia ci-dessous
+        }
+        return ripTrackCdparanoia(trackNumber, destDir);
     }
 }

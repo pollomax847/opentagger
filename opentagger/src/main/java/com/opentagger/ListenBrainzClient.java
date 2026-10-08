@@ -30,21 +30,22 @@ public class ListenBrainzClient {
     private static final HttpClient http = HttpTimeouts.client();
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /** Garde-fou contre une boucle infinie si l'API ne signalait jamais la fin (jamais atteint en pratique). */
+    private static final int HARD_CAP = 2_000_000;
+
     /**
-     * Récupère le classement des pistes les plus écoutées par {@code username}, jusqu'à
-     * {@code maxTracks} pistes (pagination automatique). Les pistes au-delà de ce plafond ne
-     * sont simplement pas incluses — pas une erreur, juste une limite pratique pour éviter de
-     * paginer indéfiniment pour un très gros utilisateur.
+     * Récupère TOUT le classement des pistes écoutées par {@code username}, sans plafond (pagination
+     * automatique jusqu'à la dernière page : plus de réglage « pistes max » depuis le 2026-10-03, demande
+     * utilisateur — un plafond de 1 000 laissait sans compteur tout le reste de la bibliothèque).
      *
      * @return map recordingMbid → nombre d'écoutes (les entrées sans recording_mbid sont ignorées :
      *         beaucoup de scrobbles ListenBrainz ne sont pas reliés à un enregistrement MusicBrainz)
      */
-    public Map<String, Integer> fetchTopRecordingCounts(String username, int maxTracks) throws Exception {
+    public Map<String, Integer> fetchTopRecordingCounts(String username) throws Exception {
         Map<String, Integer> counts = new LinkedHashMap<>();
         int offset = 0;
-        while (counts.size() < maxTracks) {
-            int want = Math.min(PAGE_SIZE, maxTracks - offset);
-            if (want <= 0) break;
+        while (offset < HARD_CAP) {
+            int want = PAGE_SIZE;
             String url = BASE_URL + "/stats/user/" + encode(username) + "/recordings"
                     + "?count=" + want + "&offset=" + offset;
 
@@ -59,17 +60,22 @@ public class ListenBrainzClient {
             if (response.statusCode() != 200)
                 throw new Exception("ListenBrainz HTTP " + response.statusCode() + " : " + response.body());
 
-            JsonNode recordings = mapper.readTree(response.body()).path("payload").path("recordings");
+            JsonNode payload = mapper.readTree(response.body()).path("payload");
+            JsonNode recordings = payload.path("recordings");
             if (!recordings.isArray() || recordings.isEmpty()) break;
 
             for (JsonNode rec : recordings) {
-                String mbid = rec.path("recording_mbid").asText("").trim();
+                String mbid = JsonText.of(rec.path("recording_mbid"), "").trim();
                 int    n    = rec.path("listen_count").asInt(0);
                 if (!mbid.isBlank() && n > 0) counts.put(mbid, n);
             }
 
-            if (recordings.size() < want) break; // dernière page (moins de résultats que demandé)
             offset += recordings.size();
+            // Fin du classement : le total annoncé par l'API est atteint. On ne s'arrête PAS sur « moins de
+            // résultats que demandé » : si le serveur plafonne une page à moins que PAGE_SIZE, on s'arrêterait
+            // trop tôt et on perdrait silencieusement la suite du classement.
+            int total = payload.path("total_recording_count").asInt(-1);
+            if (total >= 0 && offset >= total) break;
         }
         return counts;
     }

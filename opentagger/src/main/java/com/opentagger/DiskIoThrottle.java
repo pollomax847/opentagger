@@ -21,8 +21,10 @@ import java.util.concurrent.Semaphore;
  * SSD/NVMe, cette notion n'existe pas : l'accès concurrent ne coûte rien de comparable, donc aucun
  * frein n'est appliqué.
  *
- * Détection automatique, Linux uniquement (no-op silencieux ailleurs, ou si la détection échoue
- * pour n'importe quelle raison — ne doit jamais bloquer un run) : résout le point de montage du
+ * Détection automatique, Linux (via /proc/mounts) et Windows (via PowerShell : lettre de lecteur → disque physique → type de
+ * média, lu une seule fois) ; no-op silencieux ailleurs, ou si la détection échoue pour n'importe quelle raison — ne doit jamais
+ * bloquer un run. Sous Windows, un disque dont le type est « SSD » n'est jamais freiné ; tout autre (HDD, USB, « non spécifié ») l'est.
+ * Linux : résout le point de montage du
  * fichier via /proc/mounts, remonte au disque de base, lit /sys/block/<disque>/queue/rotational.
  * Mis en cache par point de montage — jamais recalculé par fichier, ce qui coûterait aussi cher
  * que ce qu'on essaie d'éviter.
@@ -40,6 +42,12 @@ public final class DiskIoThrottle {
     private static final Map<String, Semaphore> GATES = new ConcurrentHashMap<>();
     // Point de montage → disque mécanique de base ("sdf"), ou null si non-mécanique/inconnu.
     private static final Map<String, String> MOUNT_DEVICE_CACHE = new ConcurrentHashMap<>();
+    // Disques dont CE thread tient déjà le permis : un thread qui a pris le permis d'un disque (ex. l'enregistrement d'un fichier) puis
+    // relit ce même disque plus bas (empreinte pour comparer deux fichiers) ne doit pas se bloquer lui-même.
+    private static final ThreadLocal<java.util.Set<String>> HELD = ThreadLocal.withInitial(java.util.HashSet::new);
+    private static final Map<Semaphore, String> DEVICE_OF_GATE = new ConcurrentHashMap<>();
+    // Lecteur Windows ("E") → "win-disk-4" si mécanique, "" sinon. Chargé une fois.
+    private static volatile Map<Character, String> windowsDrives;
 
     /**
      * Acquiert un permis avant un accès disque local coûteux (fpcalc/ffmpeg) sur ce fichier — à
@@ -50,25 +58,43 @@ public final class DiskIoThrottle {
      */
     public static Semaphore acquireFor(File fichier) {
         try {
-            String device = rotationalDeviceOf(fichier);
-            if (device == null) return null;
-            Semaphore gate = GATES.computeIfAbsent(device, d -> new Semaphore(ROTATIONAL_PERMITS));
-            gate.acquire();
-            return gate;
+            return acquireForDevice(rotationalDeviceOf(fichier));
         } catch (Exception e) {
             return null; // jamais bloquant : pas de permis à libérer, l'appelant continue tel quel
         }
     }
 
+    /** Cœur de {@link #acquireFor}, séparé pour être testable sans disque réel. {@code null} = pas de limite. */
+    static Semaphore acquireForDevice(String device) throws InterruptedException {
+        if (device == null) return null;
+        if (HELD.get().contains(device)) return null; // déjà tenu par ce thread : pas de second permis
+        Semaphore gate = GATES.computeIfAbsent(device, d -> new Semaphore(ROTATIONAL_PERMITS));
+        // Attente bornée (2026-09-26, Linux) : un permis perdu (appelant interrompu entre acquire et
+        // son finally) bloquait jusqu'ici TOUT accès à ce disque pour le reste de la session —
+        // taguage figé 2 h 30 en direct. Au-delà de 10 min, on continue sans permis (au pire un
+        // accès disque concurrent de plus) et on le signale.
+        if (!gate.tryAcquire(10, java.util.concurrent.TimeUnit.MINUTES)) {
+            System.out.println("[OT] ⚠ Permis disque « " + device + " » non rendu depuis 10 min — accès "
+                    + "sans permis (évite un blocage complet du taguage).");
+            return null;
+        }
+        DEVICE_OF_GATE.put(gate, device);
+        HELD.get().add(device);
+        return gate;
+    }
+
     public static void release(Semaphore gate) {
-        if (gate != null) gate.release();
+        if (gate == null) return;
+        String device = DEVICE_OF_GATE.get(gate);
+        if (device != null) HELD.get().remove(device);
+        gate.release();
     }
 
     /** Retourne le nom du disque physique de base (ex. "sdf") si ce fichier vit sur un disque
      *  mécanique détecté, null sinon (SSD/NVMe, montage réseau, ou détection impossible). */
     private static String rotationalDeviceOf(File fichier) throws Exception {
         Path mountsFile = Paths.get("/proc/mounts");
-        if (!Files.isReadable(mountsFile)) return null; // pas Linux, ou /proc inaccessible
+        if (!Files.isReadable(mountsFile)) return windowsDeviceOf(fichier); // pas Linux : Windows, sinon rien
 
         String absPath = fichier.getAbsolutePath();
         String bestMountPoint = null, bestSource = null;
@@ -93,6 +119,49 @@ public final class DiskIoThrottle {
         String cached = MOUNT_DEVICE_CACHE.computeIfAbsent(bestMountPoint,
                 mp -> isRotational(finalSource) ? baseDeviceName(finalSource) : "");
         return cached.isEmpty() ? null : cached;
+    }
+
+    // ── Windows ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static String windowsDeviceOf(File fichier) {
+        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")) return null;
+        if (!com.opentagger.Config.get().bool("disk.throttle_windows", true)) return null;
+        String p = fichier.getAbsolutePath();
+        if (p.length() < 2 || p.charAt(1) != ':') return null; // chemin réseau (UNC) : pas de limite
+        Map<Character, String> drives = windowsDrives;
+        if (drives == null) { drives = loadWindowsDrives(); windowsDrives = drives; }
+        String dev = drives.get(Character.toUpperCase(p.charAt(0)));
+        return dev == null || dev.isEmpty() ? null : dev;
+    }
+
+    private static synchronized Map<Character, String> loadWindowsDrives() {
+        if (windowsDrives != null) return windowsDrives;
+        try {
+            // Aucun guillemet double dans le script : Windows les perd en passant la ligne de commande à PowerShell.
+            String script = "$d=Get-PhysicalDisk | Select-Object DeviceId,MediaType;"
+                    + "Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object { $n=[string]$_.DiskNumber;"
+                    + "$m=($d | Where-Object { $_.DeviceId -eq $n }).MediaType;($_.DriveLetter,$n,$m) -join ';' }";
+            Process proc = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+                    .redirectErrorStream(true).start();
+            String out = new String(proc.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            if (!proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) { proc.destroyForcibly(); return Map.of(); }
+            return parseWindowsDrives(out);
+        } catch (Exception e) {
+            return Map.of(); // détection impossible : aucune limite, comme avant
+        }
+    }
+
+    /** Lignes « lettre;numéro de disque;type de média » → lecteur → identifiant de disque mécanique (les SSD sont omis). */
+    static Map<Character, String> parseWindowsDrives(String out) {
+        Map<Character, String> map = new ConcurrentHashMap<>();
+        for (String line : out.split("\\r?\\n")) {
+            String[] f = line.trim().split(";", -1);
+            if (f.length < 3 || f[0].length() != 1) continue;
+            String media = f[2].trim().toUpperCase(java.util.Locale.ROOT);
+            if (media.equals("SSD") || media.equals("SCM")) continue;
+            map.put(Character.toUpperCase(f[0].charAt(0)), "win-disk-" + f[1].trim());
+        }
+        return map;
     }
 
     private static boolean isRotational(String devPath) {

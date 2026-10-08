@@ -92,8 +92,8 @@ public class EssentiaClient {
         // ── Tonalité ──────────────────────────────────────────────────────
         JsonNode tonal = root.path("tonal");
         if (!tonal.isMissingNode()) {
-            String key   = tonal.path("key_key").asText("");
-            String scale = tonal.path("key_scale").asText("");
+            String key   = JsonText.of(tonal.path("key_key"), "");
+            String scale = JsonText.of(tonal.path("key_scale"), "");
             if (!key.isBlank()) {
                 // ex: "C" + "minor" → "Cm", "F#" + "major" → "F#"
                 info.initialKey = scale.equalsIgnoreCase("minor") ? key + "m" : key;
@@ -132,7 +132,7 @@ public class EssentiaClient {
     private String topClass(JsonNode hl, String key) {
         JsonNode node = hl.path(key);
         if (node.isMissingNode()) return "";
-        return node.path("value").asText("").trim();
+        return JsonText.of(node.path("value"), "").trim();
     }
 
     // ── Disponibilité ────────────────────────────────────────────────────────

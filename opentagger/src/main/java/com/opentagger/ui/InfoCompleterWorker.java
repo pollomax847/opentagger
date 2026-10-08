@@ -61,8 +61,15 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.Map<String, String> aliasCache = new ConcurrentHashMap<>();
     private final LyricsClient      lyrics  = new LyricsClient();
     private final BpmDetector       bpmDet  = new BpmDetector();
+    // Instance unique partagée entre threads, même choix que TaggingWorker.replayGain (voir son
+    // commentaire) : ReplayGainAnalyzer n'a pas d'état d'appel-à-appel, contrairement à
+    // MusicBrainzClient/LastFmClient (instance fraîche par tâche, voir plus bas).
+    private final com.opentagger.ReplayGainAnalyzer replayGain = new com.opentagger.ReplayGainAnalyzer();
 
     private final boolean bpmEnabled   = BpmDetector.isAvailable();
+    // ReplayGain : disponibilité figée à la construction (coûteux à tester), mais le RÉGLAGE est relu à chaque fichier — le « Mode Express » agit ainsi tout de suite, sans relancer la passe en cours.
+    private final boolean rgAvailable  = com.opentagger.ReplayGainAnalyzer.isAvailable();
+    private boolean rgEnabled() { return rgAvailable && Config.get().replayGainEnabled(); }
 
     private final AtomicInteger doneCount = new AtomicInteger();
 
@@ -100,7 +107,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     protected Void doInBackground() throws Exception {
         int total = entries.size();
 
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new java.util.ArrayList<>();
 
@@ -126,10 +133,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 }));
             }
 
-            pool.shutdown();
-            for (Future<?> f : futures) {
-                try { f.get(); } catch (Exception ignored) {}
-            }
+            // WorkerHub.awaitAll() au lieu d'une boucle f.get() nue (2026-09-19, audit dédié
+            // "blocages silencieux") — voir AlbumCompletionWorker pour le même correctif et son
+            // pourquoi complet : sans timeout, un seul item bloqué gèle ce thread pour toujours,
+            // sans la moindre trace.
+            WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
             for (MetadataCache c : cachePool) c.close();
         }
@@ -171,7 +179,10 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
     private void completeEntry(FileEntry entry, File fichier, MusicBrainzClient mb, LastFmClient lastFm,
                                 MetadataCache cache) throws Exception {
         // Lire le TagInfo actuel depuis e.result ou depuis le fichier
-        TagInfo ti = entry.result != null ? entry.result : readTagsFromFile(fichier);
+        // COPIE de entry.result, jamais modifiée sur place : un Enregistrement peut tourner en même
+        // temps (voir WorkerHub.conflictsWith, SAVE ∥ INFO_COMPLETER) et lire ce même TagInfo —
+        // le résultat complété n'est publié qu'en fin de traitement, sur l'EDT (étape 8).
+        TagInfo ti = entry.result != null ? entry.result.copy() : readTagsFromFile(fichier);
         if (ti == null || (ti.artist.isBlank() && ti.title.isBlank())) {
             log(I18n.t("  ignoré (artiste+titre vides)"));
             return;
@@ -258,6 +269,8 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                 if (fillBlank(ti, "country",           mbr.country))          filled.add("country");
                 if (fillBlank(ti, "releaseType",       mbr.releaseType))      filled.add("releaseType");
                 if (fillBlank(ti, "originalYear",      mbr.originalYear))     filled.add("originalYear");
+                if (fillBlank(ti, "date",              mbr.date))             filled.add("date");
+                if (fillBlank(ti, "originalDate",      mbr.originalDate))     filled.add("originalDate");
                 if (fillBlank(ti, "artists",           mbr.artists))          filled.add("artists");
                 if (fillBlank(ti, "artistsSort",       mbr.artistsSort))      filled.add("artistsSort");
                 if (fillFlag(ti, "isSoundtrack",       mbr.isSoundtrack))     filled.add("isSoundtrack");
@@ -282,6 +295,16 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         TagEnrichment.enrichGenre(ti, discogs, lastFm, cache);
         if (!ti.genre.equals(genreBefore)) { log(I18n.t("  genre=%s", ti.genre)); changed = true; }
 
+        // ── 2a. Infos artiste (biographie/vrai nom/URLs) — jamais câblé dans ce pipeline avant
+        // ce correctif (même divergence que d'habitude entre InfoCompleterWorker et les 6 autres
+        // pipelines d'enrichissement, voir TaggingWorker/BatchProcessor/App.java/MatchDialog).
+        String artistInfoBefore = ti.artistBio + "|" + ti.artistRealName + "|" + ti.artistDiscogsUrl
+                + "|" + ti.artistOfficialUrl + "|" + ti.artistWikipediaUrl;
+        TagEnrichment.enrichArtistInfo(ti, discogs, lastFm, cache);
+        String artistInfoAfter = ti.artistBio + "|" + ti.artistRealName + "|" + ti.artistDiscogsUrl
+                + "|" + ti.artistOfficialUrl + "|" + ti.artistWikipediaUrl;
+        if (!artistInfoAfter.equals(artistInfoBefore)) changed = true;
+
         // ── 2b. Opus/Catalogue/Mouvement/Œuvre globale (classique) ─────────
         // detectClassical() (remplit ti.isClassical, la case "Musique classique" du panneau) était
         // absent de ce pipeline — TaggingWorker/BatchProcessor/MatchDialog/App.java l'appellent via
@@ -300,6 +323,11 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             try { lastFm.enrichMood(ti, cache); if (!ti.mood.isBlank()) { log(I18n.t("  mood←lastfm=%s", ti.mood)); changed = true; } } catch (Exception ignored) {}
         }
 
+        // ── 3c. Mots-clés (mêmes tags Last.fm que ci-dessus, voir enrichTags()) ─
+        if (ti.tags.isBlank()) {
+            try { lastFm.enrichTags(ti, cache); if (!ti.tags.isBlank()) changed = true; } catch (Exception ignored) {}
+        }
+
         // ── 3b. Translittération artiste (si nom non-Latin et option activée) ───
         String artistBeforeTranslit = ti.artist;
         TagEnrichment.translateArtist(ti, mb, aliasCache);
@@ -312,6 +340,24 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
         if (ti.bpm.isBlank() && bpmEnabled) {
             int bpm = bpmDet.detect(fichier.getAbsolutePath());
             if (bpm > 0) { ti.bpm = String.valueOf(bpm); log(I18n.t("  bpm=%s", bpm)); changed = true; }
+        }
+
+        // ── 4b. ReplayGain — absent de ce pipeline jusqu'à ce correctif (2026-09-13), ajouté au
+        // même moment que le "Mode Express" (voir Config.setExpressMode()) : c'est le seul des 3
+        // réglages coupés par ce mode qui n'avait ENCORE aucune passe de rattrapage (photo d'artiste
+        // → "Rafraîchir tags..." ; paroles/genre/bio → déjà juste au-dessus/en-dessous dans ce même
+        // fichier). Ne fait QUE peupler les champs ici (comme BPM/paroles ci-dessus) — l'écriture
+        // réelle sur le fichier attend, comme le reste de cette passe, un futur "Enregistrer tout".
+        if (ti.replayGainTrackGain.isBlank() && rgEnabled()) {
+            try {
+                com.opentagger.ReplayGainAnalyzer.RGResult rg = replayGain.analyze(fichier.getAbsolutePath());
+                if (rg != null) {
+                    ti.replayGainTrackGain = rg.trackGain();
+                    ti.replayGainTrackPeak = rg.trackPeak();
+                    log(I18n.t("  replaygain=%s", rg.trackGain()));
+                    changed = true;
+                }
+            } catch (Exception ignored) {}
         }
 
         // ── 5. Paroles ─────────────────────────────────────────────────────
@@ -440,7 +486,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             ti.title           = TagInfo.isGenericIdentityValue(rawTitle)       ? "" : rawTitle;
             ti.album           = TagInfo.isGenericIdentityValue(rawAlbum)       ? "" : rawAlbum;
             ti.albumArtist     = TagInfo.isGenericIdentityValue(rawAlbumArtist) ? "" : rawAlbumArtist;
-            ti.year            = tag.getFirst(FieldKey.YEAR);
+            ti.setYearFromRaw(tag.getFirst(FieldKey.YEAR));
             ti.track           = tag.getFirst(FieldKey.TRACK);
             ti.genre           = tag.getFirst(FieldKey.GENRE);
             ti.bpm             = tag.getFirst(FieldKey.BPM);

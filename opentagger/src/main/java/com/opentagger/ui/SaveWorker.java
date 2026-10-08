@@ -3,6 +3,7 @@ package com.opentagger.ui;
 import com.opentagger.CaaClient;
 import com.opentagger.Config;
 import com.opentagger.DeezerClient;
+import com.opentagger.DiscogsClient;
 import com.opentagger.FanArtClient;
 import com.opentagger.FileRenamer;
 import com.opentagger.I18n;
@@ -53,6 +54,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     private final CaaClient         caa      = new CaaClient();
     private final FanArtClient      fanArt   = new FanArtClient();
     private final DeezerClient      deezer   = new DeezerClient();
+    private final DiscogsClient     discogs  = new DiscogsClient();
     private final TagWriter         writer   = new TagWriter();
     private final FileRenamer       renamer  = new FileRenamer();
     private final MusicBrainzOAuth  mbOauth  = new MusicBrainzOAuth();
@@ -100,7 +102,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     @Override
     protected Void doInBackground() throws Exception {
         int total = entries.size();
-        int threads = Math.max(1, Config.get().num("batch.threads", 3));
+        int threads = Math.max(1, Config.get().batchThreads());
         pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
@@ -158,7 +160,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         if (cache == null) cache = new MetadataCache(); // filet de sécurité, ne devrait jamais arriver
         try {
             TagEnrichment.SaveResult res = TagEnrichment.saveEntry(
-                    fichier, ti, caa, fanArt, deezer, writer, renamer, cache, mbOauth,
+                    fichier, ti, caa, fanArt, deezer, discogs, writer, renamer, cache, mbOauth,
                     entry.scanRoot, maskIndex, msg -> log("  " + msg));
 
             // "Pochette non trouvée" ne peut être établi qu'ICI (résolution différée jusqu'à
@@ -169,7 +171,9 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
             boolean alreadyFlagged = sugg.stream().anyMatch(s -> s.contains("Pochette"));
             if (res.cover() == null && !alreadyFlagged) sugg.add(I18n.t("Pochette non trouvée"));
 
-            String message = res.renameError() != null
+            String message = res.duplicateOf() != null
+                    ? I18n.t("Enregistré — doublon de « %s », laissé en place (Outils → Doublons)", res.duplicateOf().getFileName())
+                    : res.renameError() != null
                     ? I18n.t("Enregistré, renommage échoué : %s", res.renameError())
                     : res.durationMismatchMoved()
                         ? I18n.t("Durée incohérente avec MusicBrainz — déplacé pour vérification")
@@ -187,6 +191,9 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
                 entry.message          = message;
                 entry.durationMismatch = durationMismatchMoved;
             });
+            // Enregistré : l'identification en attente (voir TaggingWorker) n'a plus lieu d'être — sous l'ancien chemin ET le nouveau.
+            cache.deletePendingIdentified(fichier.getAbsolutePath());
+            if (pathFinal != null) cache.deletePendingIdentified(pathFinal.toAbsolutePath().toString());
             log(I18n.t("  ✔ ENREGISTRÉ %s", fichier.getName()));
             saved.incrementAndGet();
         } catch (Exception ex) {

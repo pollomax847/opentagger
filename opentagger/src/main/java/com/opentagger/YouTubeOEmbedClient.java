@@ -63,8 +63,8 @@ public final class YouTubeOEmbedClient {
             if (resp.statusCode() != 200) return null;
 
             JsonNode root = mapper.readTree(resp.body());
-            String title  = root.path("title").asText("").trim();
-            String author = root.path("author_name").asText("").trim();
+            String title  = JsonText.of(root.path("title"), "").trim();
+            String author = JsonText.of(root.path("author_name"), "").trim();
             if (title.isBlank()) return null;
 
             TagInfo ti = new TagInfo();

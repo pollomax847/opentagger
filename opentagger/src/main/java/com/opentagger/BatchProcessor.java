@@ -78,7 +78,7 @@ public class BatchProcessor {
         // MusicBrainzClient.getWithRetry()) borne de toute façon le débit réel des requêtes MB
         // quel que soit le nombre de threads ; au-delà de 3, le gain vient surtout des étapes non-MB
         // (BPM, paroles, empreinte, écriture disque) qui peuvent, elles, tourner en parallèle.
-        int threads = Config.get().num("batch.threads", 6);
+        int threads = Config.get().batchThreads();
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         List<Future<?>> futures = new ArrayList<>();
 
@@ -116,7 +116,7 @@ public class BatchProcessor {
         String cmd = Config.get().postTagCommand();
         if (cmd.isBlank()) return;
         try {
-            new ProcessBuilder("sh", "-c", cmd)
+            PostTagCommands.shell(cmd)
                     .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
@@ -179,9 +179,9 @@ public class BatchProcessor {
                 LastFmClient lastFm = new LastFmClient();
                 TagEnrichment.enrichGenre(best, discogs, lastFm, cache);
                 TagEnrichment.enrichClassicalWork(best, new MusicBrainzClient(), cache);
-                // Mood + URLs artiste Last.fm — même gap : absents du CLI/batch jusqu'à présent.
+                // Mood + infos artiste (bio/URLs) — même gap : absents du CLI/batch jusqu'à présent.
                 if (best.mood.isBlank()) { try { lastFm.enrichMood(best, cache); } catch (Exception ignored) {} }
-                try { lastFm.enrichArtistUrls(best, cache); } catch (Exception ignored) {}
+                TagEnrichment.enrichArtistInfo(best, discogs, lastFm, cache);
 
                 // Paroles — même gap : absentes du CLI/batch jusqu'à présent.
                 try { new LyricsClient().enrich(best); } catch (Exception ignored) {}
@@ -193,7 +193,7 @@ public class BatchProcessor {
                 try {
                     writer.write(fichier, best, cover);
                 } finally {
-                    if (cover != null) { try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {} }
+                    TagEnrichment.discardTemporaryCover(cover);
                 }
                 appliques.incrementAndGet();
 

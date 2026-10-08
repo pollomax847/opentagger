@@ -62,14 +62,14 @@ public class PodcastSearchClient {
         JsonNode root = MAPPER.readTree(resp.body());
         List<PodcastResult> results = new ArrayList<>();
         for (JsonNode r : root.path("results")) {
-            String feedUrl = r.path("feedUrl").asText("").trim();
+            String feedUrl = JsonText.of(r.path("feedUrl"), "").trim();
             if (feedUrl.isBlank()) continue;
             results.add(new PodcastResult(
-                r.path("collectionName").asText("").trim(),
-                r.path("artistName").asText("").trim(),
+                JsonText.of(r.path("collectionName"), "").trim(),
+                JsonText.of(r.path("artistName"), "").trim(),
                 feedUrl,
-                r.path("artworkUrl100").asText("").trim(),
-                r.path("primaryGenreName").asText("Podcast").trim(),
+                JsonText.of(r.path("artworkUrl100"), "").trim(),
+                JsonText.of(r.path("primaryGenreName"), "Podcast").trim(),
                 r.path("trackCount").asInt(0)
             ));
         }

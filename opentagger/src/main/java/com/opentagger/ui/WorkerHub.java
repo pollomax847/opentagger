@@ -38,7 +38,13 @@ public final class WorkerHub {
     public enum TaskKind {
         TAGGING, SAVE, ALBUM_COMPLETION, INFO_COMPLETER, ALBUM_CLUSTER,
         COMPILATION_CLUSTER, TRANSCODE, VIDEO_RECOVERY, LISTENBRAINZ_SYNC, LASTFM_SYNC, PODCAST_TAG,
-        DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP
+        DUPLICATE_DETECT, MISNAMED_REPAIR, ORPHAN_CLEANUP,
+        /** Pochettes et portraits manquants (ArtworkCompletionWorker) : écrit dans les fichiers. */
+        ARTWORK_COMPLETION,
+        /** Audit audio ↔ tags (AudioTagAuditWorker) : LECTURE SEULE — n'écrit ni fichier ni tag, donc
+         *  volontairement absent de LIBRARY_WRITE (il peut tourner pendant un taguage/enregistrement ;
+         *  seul un second audit est refusé, via a == b dans conflictsWith()). */
+        AUDIO_AUDIT
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,
@@ -51,7 +57,8 @@ public final class WorkerHub {
     private static final Set<TaskKind> LIBRARY_WRITE = EnumSet.of(
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
             TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
-            TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP);
+            TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP,
+            TaskKind.ARTWORK_COMPLETION);
 
     public static final class TaskHandle {
         private final TaskKind kind;
@@ -70,6 +77,7 @@ public final class WorkerHub {
 
         public TaskKind kind()      { return kind; }
         public String   label()     { return label; }
+        public Instant  startTime() { return startTime; }
         public boolean  isRunning() { return !worker.isDone(); }
 
         /** Toujours passer par ici, jamais worker.cancel(true) en direct : cancelAction est le
@@ -212,6 +220,25 @@ public final class WorkerHub {
         // pas juste résoudre la famine.
         if ((a == TaskKind.TAGGING && b == TaskKind.INFO_COMPLETER)
                 || (a == TaskKind.INFO_COMPLETER && b == TaskKind.TAGGING)) return false;
+        // ORPHAN_CLEANUP (cleanOrphanFolders()) : la passe de scan elle-même ne fait QUE lire
+        // (File.listFiles()) et ne touche le disque qu'après confirmation explicite de
+        // l'utilisateur (JOptionPane, voir MainFrame.cleanOrphanFolders()) — demandé le 2026-09-18
+        // pour pouvoir lancer la recherche pendant qu'un lot de taguage tourne, plutôt que
+        // d'attendre des jours qu'il se termine. Risque résiduel accepté : un dossier vu "sans
+        // audio" au moment du scan pourrait légitimement en recevoir un pendant que l'utilisateur
+        // regarde encore la boîte de confirmation — couvert par une RE-vérification juste avant le
+        // déplacement effectif en corbeille (voir cleanOrphanFolders(), pas ici).
+        if ((a == TaskKind.TAGGING && b == TaskKind.ORPHAN_CLEANUP)
+                || (a == TaskKind.ORPHAN_CLEANUP && b == TaskKind.TAGGING)) return false;
+        // SAVE ∥ INFO_COMPLETER (2026-09-25) : la passe complète n'écrit plus rien sur le disque
+        // (voir InfoCompleterWorker, étape 8) et travaille sur une COPIE du TagInfo, publiée en fin
+        // de traitement — elle ne fait que remettre des fichiers en IDENTIFIED pour l'Enregistrement.
+        // Les bloquer mutuellement empêchait tout Enregistrement pendant toute la passe : vu en
+        // direct, 9 h 30 sans une seule écriture sur disque (21:54→07:26), ~17 000 complétions et
+        // ~1 000 identifications accumulées en mémoire, perdues au moindre redémarrage. Au pire, un
+        // fichier enregistré pendant qu'il est complété repasse en IDENTIFIED et est réenregistré.
+        if ((a == TaskKind.SAVE && b == TaskKind.INFO_COMPLETER)
+                || (a == TaskKind.INFO_COMPLETER && b == TaskKind.SAVE)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction

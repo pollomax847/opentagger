@@ -7,10 +7,31 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Logo OpenTagger dessiné en Java2D — une étiquette (price-tag) musicale.
- * Génère les icônes à toutes les résolutions sans dépendance externe.
+ * Logo OpenTagger dessiné en Java2D — une étiquette (price-tag) musicale, sans dépendance externe.
+ *
+ * <p>Réécrit le 2026-09-08 après examen du rendu en grand. La version précédente avait trois défauts
+ * qui ne se voyaient qu'agrandie :
+ * <ul>
+ *   <li><b>anatomie fausse</b> : le trou de ficelle était dans le coin HAUT-droit alors que la
+ *       pointe de l'étiquette était en BAS-droit — sur une vraie étiquette le trou est À la pointe.
+ *       Résultat : ça ne se lisait pas comme une étiquette mais comme un carré au coin mordu avec
+ *       un point isolé ailleurs ;</li>
+ *   <li><b>composition à l'étroit</b> : la note débordait presque du corps, barre contre le bord ;</li>
+ *   <li><b>trop de couches</b> (carré + dégradé + trou + ficelle + note) : illisible à 16-32px,
+ *       c'est-à-dire aux seules tailles où l'icône sert réellement.</li>
+ * </ul>
+ *
+ * <p>Deux variantes désormais, parce que les deux contextes n'ont pas les mêmes besoins :
+ * {@link #at(int)} garde le carré arrondi plein (obligatoire pour une icône de fenêtre/barre des
+ * tâches, qui doit occuper sa case), tandis que {@link #glyph(int, Color)} ne dessine QUE la marque
+ * sur fond transparent — dans une barre d'outils, un carré plein ferait autocollant collé par-dessus.
  */
 public class AppIcon {
+
+    /** Teal de l'accent applicatif — le logo et l'interface forment un seul système de couleur. */
+    private static final Color TAG_COLOR = new Color(0x4D, 0xB6, 0xAC);
+    private static final Color BG_TOP    = new Color(0x1A, 0x1F, 0x22);
+    private static final Color BG_BOTTOM = new Color(0x0D, 0x10, 0x12);
 
     /** Retourne les icônes à 16, 32, 48, 64, 128 et 256 px pour setIconImages(). */
     public static List<Image> all() {
@@ -19,123 +40,116 @@ public class AppIcon {
         return list;
     }
 
-    /** Génère l'icône à une taille précise (carrée). */
+    /** Icône complète (carré arrondi sombre + étiquette teal) — icône de fenêtre/barre des tâches. */
     public static BufferedImage at(int size) {
         BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = img.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,        RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_RENDERING,           RenderingHints.VALUE_RENDER_QUALITY);
-        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL,      RenderingHints.VALUE_STROKE_PURE);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,   RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-
+        Graphics2D g = prepare(img);
         double sc = size / 100.0;
-        draw(g, sc, size);
+
+        g.setPaint(new GradientPaint(0, 0, BG_TOP, size, size, BG_BOTTOM));
+        g.fill(new RoundRectangle2D.Double(0, 0, size, size, 22 * sc, 22 * sc));
+
+        g.setColor(TAG_COLOR);
+        g.fill(tagShape(sc));
+
+        // Trou + note évidés dans la couleur du fond plutôt que peints en blanc : une marque à deux
+        // couleurs seulement, qui reste lisible une fois réduite à 16px.
+        g.setColor(BG_BOTTOM);
+        punch(g, sc, size);
+
         g.dispose();
         return img;
     }
 
-    // ── Dessin principal ─────────────────────────────────────────────────────
+    /**
+     * Marque seule sur fond TRANSPARENT, dans la couleur demandée — pour l'en-tête de l'appli, où
+     * le carré plein de {@link #at(int)} se lirait comme un autocollant posé sur la barre d'outils.
+     * Le trou et la note sont réellement évidés (AlphaComposite.CLEAR), donc le fond de la barre —
+     * quel que soit le thème choisi — transparaît au travers.
+     */
+    public static BufferedImage glyph(int size, Color color) {
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = prepare(img);
+        double sc = size / 100.0;
 
-    private static void draw(Graphics2D g, double sc, int size) {
+        g.setColor(color);
+        g.fill(tagShape(sc));
 
-        // ── 1. Fond arrondi dégradé bleu nuit ────────────────────────────────
-        GradientPaint bg = new GradientPaint(
-            0, 0,    new Color(14, 21, 42),
-            size, size, new Color(7, 12, 26));
-        g.setPaint(bg);
-        g.fill(new RoundRectangle2D.Double(0, 0, size, size, 22*sc, 22*sc));
+        g.setComposite(AlphaComposite.Clear);
+        punch(g, sc, size);
 
-        // ── 2. Corps de l'étiquette (price-tag) ──────────────────────────────
-        //    Forme : rectangle aux coins ronds avec pointe en bas à droite
-        GradientPaint tagGrad = new GradientPaint(
-            (float)(12*sc), (float)(12*sc), new Color(25, 118, 210),
-            (float)(82*sc), (float)(80*sc), new Color(13, 71, 161));
-        g.setPaint(tagGrad);
-
-        Path2D tag = tagShape(sc);
-        g.fill(tag);
-
-        // Contour subtil
-        g.setPaint(new Color(100, 181, 246, 80));
-        g.setStroke(new BasicStroke((float)(0.8*sc)));
-        g.draw(tag);
-
-        // ── 3. Trou de l'étiquette ─────────────────────────────────────────
-        double hx = 72*sc, hy = 20*sc, hr = 4.5*sc;
-        g.setColor(new Color(7, 12, 26));
-        g.fill(new Ellipse2D.Double(hx - hr, hy - hr, 2*hr, 2*hr));
-
-        // ── 4. Ficelle de l'étiquette ─────────────────────────────────────
-        if (size >= 32) {
-            g.setColor(new Color(144, 202, 249, 160));
-            g.setStroke(new BasicStroke((float)(1.5*sc), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            g.draw(new CubicCurve2D.Double(
-                hx + hr, hy,
-                hx + 8*sc, hy - 4*sc,
-                hx + 12*sc, hy + 4*sc,
-                hx + 10*sc, hy + 14*sc));
-        }
-
-        // ── 5. Notes de musique doubles (♬) ───────────────────────────────
-        g.setColor(Color.WHITE);
-        drawDoubleNote(g, sc, size);
+        g.dispose();
+        return img;
     }
 
+    private static Graphics2D prepare(BufferedImage img) {
+        Graphics2D g = img.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,   RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING,      RenderingHints.VALUE_RENDER_QUALITY);
+        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+        return g;
+    }
+
+    /**
+     * Étiquette classique : corps rectangulaire arrondi dont le coin haut-droit est coupé en biais,
+     * la coupe formant la pointe. Le trou (voir {@link #punch}) est placé DANS cette pointe, comme
+     * sur une vraie étiquette — c'est ce rapport pointe/trou qui fait lire la forme d'un coup d'œil.
+     */
     private static Path2D tagShape(double sc) {
-        // Rectangle avec pointe au bas-droit (price-tag classique orienté à plat)
-        double x1 = 11*sc, y1 = 13*sc;
-        double x2 = 80*sc, y2 = 13*sc;
-        double x3 = 80*sc, y3 = 58*sc;
-        double px = 60*sc, py = 82*sc;  // pointe
-        double x4 = 11*sc, y4 = 82*sc;
-        double r  =  6*sc;              // rayon des coins
+        // Format PAYSAGE avec l'extrémité droite entièrement en pointe (2 diagonales, pas un simple
+        // coin coupé) : un corps quasi carré avec une petite coupe se lisait comme un "fichier à
+        // coin corné" — l'idiome le plus générique du monde des icônes — au lieu d'une étiquette.
+        // C'est l'allongement + la vraie pointe qui font reconnaître l'objet d'un coup d'œil.
+        double left = 10 * sc, top = 30 * sc, bottom = 80 * sc;
+        double bodyRight = 62 * sc, tipX = 90 * sc, midY = 55 * sc;
+        double r = 8 * sc;
 
         Path2D p = new Path2D.Double();
-        p.moveTo(x1 + r, y1);
-        p.lineTo(x2 - r, y1);  p.quadTo(x2, y1, x2, y1 + r);
-        p.lineTo(x3, y3);
-        p.lineTo(px, py);
-        p.lineTo(x4, y4);      p.quadTo(x1, y4, x1, y4 - r);
-        p.lineTo(x1, y1 + r);  p.quadTo(x1, y1, x1 + r, y1);
+        p.moveTo(left + r, top);
+        p.lineTo(bodyRight, top);
+        p.lineTo(tipX, midY);                      // diagonale haute → pointe
+        p.lineTo(bodyRight, bottom);               // diagonale basse ← pointe
+        p.lineTo(left + r, bottom);
+        p.quadTo(left, bottom, left, bottom - r);
+        p.lineTo(left, top + r);
+        p.quadTo(left, top, left + r, top);
         p.closePath();
         return p;
     }
 
-    private static void drawDoubleNote(Graphics2D g, double sc, int size) {
-        // Deux têtes de note + tiges + barre de liaison en haut
-        float sw = (float)(2.8 * sc);
-        if (size <= 24) sw = (float)(2.0 * sc);
+    /** Trou de ficelle + double croche — les deux évidements de la marque. */
+    private static void punch(Graphics2D g, double sc, int size) {
+        // Trou de ficelle dans la pointe, sur son axe.
+        double hr = 5.0 * sc;
+        g.fill(new Ellipse2D.Double(70 * sc - hr, 55 * sc - hr, 2 * hr, 2 * hr));
 
-        // ── Tête note gauche ─────────────────────────────────────────────
-        double nx1 = 28*sc, ny1 = 63*sc;
+        // ── Double croche, cadrée dans le corps avec de la marge de chaque côté ──
+        // Sous 20px, les hampes (≈1px) disparaissent au rendu : une seule tête pleine reste
+        // lisible, alors que la note complète tournerait à la bouillie grise.
+        double h1x = 26 * sc, h1y = 68 * sc;
+        double h2x = 44 * sc, h2y = 64 * sc;
+        double headW = 14 * sc, headH = 9.5 * sc;
+
         AffineTransform saved = g.getTransform();
-        g.rotate(Math.toRadians(-18), nx1, ny1);
-        g.fill(new Ellipse2D.Double(nx1 - 8*sc, ny1 - 5*sc, 14*sc, 9*sc));
+        g.rotate(Math.toRadians(-18), h1x, h1y);
+        g.fill(new Ellipse2D.Double(h1x - headW / 2, h1y - headH / 2, headW, headH));
         g.setTransform(saved);
 
-        // ── Tige note gauche ─────────────────────────────────────────────
-        g.setStroke(new BasicStroke(sw, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        double stem1x = nx1 + 5.5*sc;
-        g.draw(new Line2D.Double(stem1x, ny1 - 5*sc, stem1x, ny1 - 32*sc));
+        if (size < 20) return;
 
-        // ── Tête note droite ─────────────────────────────────────────────
-        double nx2 = 48*sc, ny2 = 57*sc;
-        g.rotate(Math.toRadians(-18), nx2, ny2);
-        g.fill(new Ellipse2D.Double(nx2 - 8*sc, ny2 - 5*sc, 14*sc, 9*sc));
+        g.rotate(Math.toRadians(-18), h2x, h2y);
+        g.fill(new Ellipse2D.Double(h2x - headW / 2, h2y - headH / 2, headW, headH));
         g.setTransform(saved);
 
-        // ── Tige note droite ─────────────────────────────────────────────
-        double stem2x = nx2 + 5.5*sc;
-        g.draw(new Line2D.Double(stem2x, ny2 - 5*sc, stem2x, ny2 - 32*sc));
+        double stem1x = h1x + headW / 2 - 1.2 * sc;
+        double stem2x = h2x + headW / 2 - 1.2 * sc;
+        double stemTop1 = 42 * sc, stemTop2 = 38 * sc;
+        g.setStroke(new BasicStroke((float) (3.2 * sc), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.draw(new Line2D.Double(stem1x, h1y - headH / 2, stem1x, stemTop1));
+        g.draw(new Line2D.Double(stem2x, h2y - headH / 2, stem2x, stemTop2));
 
-        // ── Barre de liaison ─────────────────────────────────────────────
-        //    légère inclinaison comme une vraie partition
-        g.setStroke(new BasicStroke((float)(4.5*sc), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        g.draw(new Line2D.Double(stem1x, ny1 - 32*sc, stem2x, ny2 - 32*sc));
-        if (size >= 48) {
-            // Deuxième barre (double croche)
-            g.setStroke(new BasicStroke((float)(3.5*sc), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            g.draw(new Line2D.Double(stem1x, ny1 - 25*sc, stem2x, ny2 - 25*sc));
-        }
+        // Barre de liaison, légèrement inclinée comme sur une vraie partition.
+        g.setStroke(new BasicStroke((float) (5.0 * sc), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.draw(new Line2D.Double(stem1x, stemTop1, stem2x, stemTop2));
     }
 }

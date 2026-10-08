@@ -36,10 +36,19 @@ public class AudioScanner {
     /** Variante en flux + annulable : cancelled est vérifié à chaque fichier/dossier, permettant
      *  d'interrompre un parcours en cours (bouton Annuler) sans attendre qu'il se termine tout seul. */
     public void scan(File dossier, Consumer<File> onFound, BooleanSupplier cancelled) {
-        scanRecursif(dossier, onFound, cancelled);
+        scanRecursif(dossier, onFound, cancelled, false);
     }
 
-    private void scanRecursif(File dossier, Consumer<File> onFound, BooleanSupplier cancelled) {
+    /** trustAudioExtension : un nom à extension audio est pris pour un fichier SANS appeler
+     *  isDirectory() (un stat() par entrée — ~100 ms sur MyBook sous charge, mesuré 2026-09-25,
+     *  soit ~6 h de parcours pour 217 000 fichiers). L'appelant DOIT vérifier ensuite que ce n'est
+     *  pas un dossier (cas rarissime « Album.mp3/ ») — voir MainFrame.loadDirectory(), phase 2. */
+    public void scan(File dossier, Consumer<File> onFound, BooleanSupplier cancelled, boolean trustAudioExtension) {
+        scanRecursif(dossier, onFound, cancelled, trustAudioExtension);
+    }
+
+    private void scanRecursif(File dossier, Consumer<File> onFound, BooleanSupplier cancelled,
+                              boolean trustAudioExtension) {
         if (cancelled.getAsBoolean()) return;
         File[] contenu = dossier.listFiles();
         if (contenu == null) {
@@ -57,12 +66,28 @@ public class AudioScanner {
 
         for (File f : contenu) {
             if (cancelled.getAsBoolean()) return;
-            if (f.isDirectory()) {
-                scanRecursif(f, onFound, cancelled);
+            if (trustAudioExtension && isAudio(f)) {
+                onFound.accept(f);
+            } else if (f.isDirectory()) {
+                if (isExcluded(f)) continue;
+                scanRecursif(f, onFound, cancelled, trustAudioExtension);
             } else if (isAudio(f)) {
                 onFound.accept(f);
             }
         }
+    }
+
+    /** true si {@code dir} correspond à un préfixe configuré dans Config.excludedFolders() —
+     *  comparaison par préfixe de chemin absolu normalisé (pas juste égalité stricte), pour qu'un
+     *  dossier exclu écarte aussi tous ses descendants sans avoir à les lister un par un. */
+    private boolean isExcluded(File dir) {
+        String[] excluded = Config.get().excludedFolders();
+        if (excluded.length == 0) return false;
+        String path = dir.getAbsolutePath();
+        for (String prefix : excluded) {
+            if (!prefix.isBlank() && (path.equals(prefix) || path.startsWith(prefix + File.separator))) return true;
+        }
+        return false;
     }
 
     private boolean isAudio(File f) {

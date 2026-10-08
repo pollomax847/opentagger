@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.awt.Desktop;
 import java.io.*;
 import java.net.*;
-import java.net.http.*;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -96,7 +95,7 @@ public class MusicBrainzOAuth {
     /**
      * Flow custom URL scheme (org.opentagger.app://auth).
      * Enregistre un handler xdg-mime au premier appel.
-     * MB redirige vers org.opentagger.app://auth?code=XXX, le handler écrit le code dans un fichier,
+     * MB redirige vers org.opentagger.app://auth?code=&lt;code&gt;, le handler écrit le code dans un fichier,
      * l'app le lit automatiquement.
      * URL de rappel MB (app installée) : org.opentagger.app://auth
      */
@@ -490,7 +489,7 @@ public class MusicBrainzOAuth {
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         JsonNode json = mapper.readTree(resp.body());
         if (json.has("error"))
-            throw new Exception("OAuth : " + json.path("error_description").asText(json.path("error").asText()));
+            throw new Exception("OAuth : " + JsonText.of(json.path("error_description"), json.path("error").asText()));
         if (!json.has("access_token"))
             throw new Exception("Réponse OAuth inattendue : " + resp.body());
         String refreshToken = json.has("refresh_token") ? json.get("refresh_token").asText() : "";

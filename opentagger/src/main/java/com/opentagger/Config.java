@@ -130,12 +130,17 @@ public class Config {
     public String fanartKey()          { return str("fanart.api_key"); }
     public String lastfmKey()          { return str("lastfm.api_key"); }
     public String contact()            { return str("app.contact"); }
-    public int    minScoreAuto()       { return num("autocorrector.min_score", 85); }
+    // Défaut remonté de 85 à 90 (2026-09-19, audit code mort) : "match.min_score_auto=90" traînait
+    // dans settings.properties (avec un commentaire explicite "seuil pour appliquer automatiquement")
+    // depuis longtemps, cité comme LE seuil réel dans des dizaines de commentaires à travers tout le
+    // projet (TaggingWorker.java notamment) — mais cette clé n'était lue par AUCUN code : le vrai
+    // seuil appliqué était "autocorrector.min_score", une clé différente, absente de
+    // settings.properties, donc silencieusement repliée sur son défaut de 85. 90 était la valeur
+    // manifestement voulue de longue date ; ce correctif aligne enfin le comportement réel dessus.
+    public int    minScoreAuto()       { return num("autocorrector.min_score", 90); }
     // Seuil du score composite pondéré fichier↔piste (TrackMatcher), même valeur par défaut que
     // Picard (picard/options.py: track_matching_threshold = 0.4) — voir TrackMatcher.findBestTrack().
     public double trackMatchingThreshold() { return dbl("match.track_matching_threshold", 0.4); }
-    public int    mbResultsLimit()     { return num("musicbrainz.results_limit", 5); }
-    public boolean mbOnlyOfficial()    { return bool("musicbrainz.only_official", true); }
 
     // --- Serveur MusicBrainz personnalisé (miroir) --- la clé musicbrainz.server existait déjà
     // dans settings.properties mais n'était en réalité JAMAIS lue par MusicBrainzClient (BASE_URL
@@ -167,10 +172,18 @@ public class Config {
     // désactiver JUSTE ça (et garder genre/mood Last.fm) économise un appel réseau par fichier
     // sans rien perdre d'autre. Défaut true = comportement inchangé pour qui ne touche pas ce réglage.
     public boolean lastfmArtistUrlsEnabled() { return bool("lastfm.fetch_artist_urls", true); }
+    // Statistiques PAR PISTE de Last.fm (auditeurs, écoutes globales, URL — track.getInfo, un appel de plus
+    // par piste, mis en cache) — demande utilisateur 2026-09-20 ("tous les tags Last.fm"). Désactivable si
+    // le débit du pipeline en souffre.
+    public boolean lastfmTrackStatsEnabled() { return bool("lastfm.fetch_track_stats", true); }
+    // Discogs : interroger la release même quand le genre est DÉJÀ connu (MusicBrainz d'abord) pour en tirer
+    // l'id, le master, les styles, le format, le label/catalogue/code-barres manquants — avant, Discogs
+    // n'était appelé que pour un genre vide, donc presque jamais avec mb.use_genres=true. Un appel de
+    // recherche par album (mis en cache), à couper si le débit Discogs (60/min) ralentit trop le pipeline.
+    public boolean discogsAlwaysEnrich() { return bool("discogs.always_enrich", true); }
     public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
-    public boolean followLogAfterRename()          { return bool("rename.follow_log",             true); }
     public String libraryRoot()                    { return str ("rename.library_root",            ""); }
     // Case à cocher UI qui grise/dégrise tfLibraryRoot dans SettingsDialog (voir bindGate()) —
     // défaut true pour ne rien changer au comportement des utilisateurs ayant déjà configuré ce
@@ -178,12 +191,32 @@ public class Config {
     public boolean useLibraryRootEnabled()         { return bool("rename.use_library_root",       true); }
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
-    public String  skippedMoveFolder()             { return str ("skipped.move_folder",              ""); }
+    /** Dossier des fichiers non identifiés. Vide dans les réglages = « <racine de la bibliothèque>\_À vérifier\Non identifiés »
+     *  (vide si aucune racine n'est définie : alors rien n'est déplacé). */
+    public String  skippedMoveFolder()             { return orReviewFolder(str("skipped.move_folder", ""), "Non identifiés"); }
+    private String orReviewFolder(String configured, String sub) {
+        if (configured != null && !configured.isBlank()) return configured;
+        String root = libraryRoot();
+        if (useLibraryRootEnabled() && root != null && !root.isBlank())
+            return java.nio.file.Paths.get(root, "_À vérifier", sub).toString();
+        return "";
+    }
     // Déplacement dédié des fichiers dont la durée ne correspond pas à celle déclarée par
     // MusicBrainz (rip tronqué/mauvais match probable) — indépendant du déplacement générique
     // SKIPPED/ERROR ci-dessus, désactivé par défaut (jamais de déplacement sans action explicite).
     public boolean durationMismatchMoveEnabled()   { return bool("duration_mismatch.move_enabled", false); }
-    public String  durationMismatchMoveFolder()    { return str ("duration_mismatch.move_folder",      ""); }
+    public String  durationMismatchMoveFolder()    { return orReviewFolder(str("duration_mismatch.move_folder", ""), "Durée incohérente"); }
+    /** ESSAI (2026-09-25, demande utilisateur : « les fichiers de 0:40 alors que MusicBrainz dit 3:34, on pourrait les
+     *  supprimer directement ») : envoie à la corbeille (jamais de suppression définitive) un fichier plus court que
+     *  {@link #durationMismatchTrashShortMaxSec()} dont la durée MusicBrainz est d'au moins
+     *  {@link #durationMismatchTrashShortMinGapSec()} secondes plus longue ET au moins double — un rip tronqué. Voir
+     *  TaggingWorker.tryTrashTruncated() pour les garde-fous (identification confirmée, journal d'essai). */
+    public boolean durationMismatchTrashShortEnabled()  { return bool("duration_mismatch.trash_short_enabled", false); }
+    public int     durationMismatchTrashShortMaxSec()   { return num("duration_mismatch.trash_short_max_sec", 60); }
+    public int     durationMismatchTrashShortMinGapSec(){ return num("duration_mismatch.trash_short_min_gap_sec", 60); }
+    /** Plafond de sécurité de l'essai : au-delà, les fichiers suivants retombent sur le comportement habituel (isolés pour
+     *  revue) jusqu'au prochain démarrage — évite une mise à la corbeille massive et silencieuse. */
+    public int     durationMismatchTrashShortMaxPerRun(){ return num("duration_mismatch.trash_short_max_per_run", 50); }
     // Récupération vidéo (voir VideoScanner/VideoRecoveryWorker) automatique à chaque scan de
     // dossier (Ouvrir dossier/Rafraîchir) — activée par défaut à la demande explicite de
     // l'utilisateur, qui trouvait le dialogue manuel "Bibliothèque → Récupérer l'audio..." trop
@@ -217,6 +250,12 @@ public class Config {
     // reste IDENTIFIED en mémoire sans jamais être écrit). Désactivable pour repasser en contrôle
     // 100% manuel (façon Picard strict) si préféré — voir chkAutoSaveEnabled.
     public boolean autoSaveEnabled()               { return bool("tagging.auto_save_enabled",    true); }
+    // Synchronisation AUTOMATIQUE des compteurs d'écoute (ListenBrainz / Last.fm → tags des fichiers),
+    // lancée à la fin d'un scan, au plus une fois par 24 h — voir MainFrame.scheduleAutoPlayCountSync().
+    // Désactivée par défaut, comme les autres automatismes du menu Tagger : elle réécrit des tags.
+    public boolean autoSyncPlayCounts()            { return bool("playcounts.auto_sync", false); }
+    public long    lastAutoPlayCountSyncMs()       { try { return Long.parseLong(str("playcounts.last_auto_sync_ms", "0")); } catch (Exception e) { return 0; } }
+    public void    setLastAutoPlayCountSyncMs(long ms) { set("playcounts.last_auto_sync_ms", String.valueOf(ms)); }
     // Défaut true (2026-08-16, demande utilisateur) : synchronise les playlists sidecar (.m3u/
     // .m3u8/.pls) trouvées dans le dossier d'origine à chaque renommage/déplacement de fichier
     // (FileRenamer.moveFile — voir PlaylistSync). Constat réel motivant : plusieurs .pls de la
@@ -237,19 +276,13 @@ public class Config {
     // BandcampClient) en tout dernier recours dans TaggingWorker.findTags(), uniquement si RIEN
     // d'autre n'a identifié le fichier, et seulement appliqué si le contenu récupéré correspond
     // vraiment (TrackMatcher.titleSimilarity) — jamais de fausse donnée écrite sur un essai raté.
-    public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", true); }
-    // Substitution de préfixe pour convertir un chemin "Location" de l'XML iTunes (souvent un
-    // lecteur Windows, ex. "C:/Users/xxx/OneDrive/Musiques") vers le point de montage réel sur ce
-    // système (ex. "/mnt/Music") — voir ITunesLibraryImporter.resolveLocalPath(). Vide par défaut
-    // (aucune substitution) : l'utilisateur doit le configurer une fois pour son propre système,
-    // même logique que le script itunes_path_updater.py déjà utilisé pour ce même problème.
-    public String  itunesXmlPathFrom()             { return str("itunes.xml_path_from", ""); }
-    public String  itunesXmlPathTo()               { return str("itunes.xml_path_to",   ""); }
-    // Chemin du fichier XML lui-même — mémorisé pour ne pas le re-choisir via JFileChooser à
-    // chaque import/écriture (demande utilisateur 2026-08-16). Modifiable dans Préférences >
-    // iTunes, et mis à jour automatiquement dès qu'un fichier est choisi dans ITunesImportDialog/
-    // MainFrame.writeItunesXmlCorrections.
-    public String  itunesXmlFilePath()             { return str("itunes.xml_file_path", ""); }
+    // Défaut passé de true à false le 2026-09-19 : cette étape (6a, dernier recours automatique
+    // de TaggingWorker.findTags()) mesurée en prod à 4 succès / 919 essais (~0,4%) — demande
+    // utilisateur de la sortir de la cascade automatique et d'en faire une action à la demande
+    // (voir MainFrame.bandcampOnlyOnSelection(), FileEntry.bandcampOnly, menu "Retraitement").
+    // Cette case à cocher reste utile pour qui veut quand même l'automatique malgré le faible
+    // rendement mesuré.
+    public boolean bandcampGuessEnabled()          { return bool("tagging.bandcamp_guess_enabled", false); }
     public boolean preserveCompilationAlbum()      { return bool("tags.preserve_compilation",     true); }
     public boolean trustExistingMbTags()           { return bool("tags.trust_existing_mb_tags",   true); }
     // Compromis vitesse/fiabilité demandé le 2026-07-17 : SongRec (empreinte audio) est la source
@@ -287,6 +320,29 @@ public class Config {
         return v.isBlank() ? new String[0] : v.split("\\|");
     }
 
+    /** Dossiers (préfixes de chemin absolu) jamais parcourus, ni au scan de démarrage ni par
+     *  "Nettoyer les dossiers orphelins" — écart trouvé vs SongKong ({@code excluded_folder.txt},
+     *  2026-09-18) : utile sur cette machine où le pool mergerfs partage ses disques physiques avec
+     *  Plex/Headphones/PhotoPrism/Docker (dossiers de travail d'autres apps qu'on ne veut jamais
+     *  voir remonter comme "orphelins"). Même format pipe-séparé que startupFolders(). */
+    public String[] excludedFolders() {
+        String v = str("scan.excluded_folders");
+        return v.isBlank() ? new String[0] : v.split("\\|");
+    }
+
+    /** Ordre de priorité des critères anti-doublons (Format/Débit/Durée/Nom/Date), en noms bruts —
+     *  écart trouvé vs SongKong (2026-09-18), voir DuplicateDetector.Criterion (paquet ui, pas
+     *  référencé ici pour ne pas faire dépendre Config d'une classe UI) pour le détail de chaque
+     *  critère et le parsing réel. Défaut = FORMAT,BITRATE, identique au comportement câblé en dur
+     *  avant ce correctif — un utilisateur qui n'a jamais ouvert ce réglage ne voit aucun changement. */
+    public java.util.List<String> duplicateCriteriaOrder() {
+        String v = str("duplicates.criteria_order", "FORMAT,BITRATE");
+        java.util.List<String> order = new java.util.ArrayList<>();
+        for (String s : v.split(",")) if (!s.isBlank()) order.add(s.trim());
+        if (order.isEmpty()) order.add("FORMAT");
+        return order;
+    }
+
     public String userAgent() {
         return "OpenTagger/" + appVersion() + " (" + contact() + ")";
     }
@@ -314,7 +370,21 @@ public class Config {
     // --- AcoustID fingerprint ---
     public boolean saveAcoustidFingerprints()     { return bool("acoustid.save_fingerprints", true); }
     public boolean ignoreExistingFingerprints()   { return bool("acoustid.ignore_existing",   false); }
-    public int     fpcalcThreads()                { return num ("acoustid.fpcalc_threads",    2); }
+    // "Lookup by track ID" de la doc AcoustID : un fichier qui porte déjà un "Acoustid Id" est identifié en
+    // interrogeant AcoustID par cet identifiant (aucun fpcalc, aucune empreinte envoyée), comme SongKong —
+    // uniquement quand acoustid.ignore_existing est FAUX (sinon l'empreinte est de toute façon recalculée).
+    // Rapide, mais l'audio réel n'est plus re-vérifié : l'identifiant du tag est cru sur parole. Désactivé.
+    public boolean acoustidLookupByTrackId()      { return bool("acoustid.lookup_by_track_id", false); }
+    /** Fichiers traités en parallèle. 0 ou absent = automatique (selon les cœurs du processeur, entre 2 et 8). */
+    public int     batchThreads() {
+        int n = num("batch.threads", 0);
+        return n > 0 ? n : Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+    }
+    /** Processus fpcalc simultanés. 0 ou absent = automatique (la moitié des cœurs, entre 1 et 4). */
+    public int     fpcalcThreads() {
+        int n = num("acoustid.fpcalc_threads", 0);
+        return n > 0 ? n : Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
+    }
 
     // --- Métadonnées ---
     public String  vaName()                 { return str("metadata.va_name",              "Various Artists"); }
@@ -355,8 +425,49 @@ public class Config {
     // --- Portrait d'artiste --- opt-in, désactivé par défaut (même esprit que cover.save_to_file).
     // Sidecar dans le dossier ALBUM (pas le dossier artiste, qui varie selon le masque de
     // renommage actif — remonter d'un niveau serait fragile) — voir TagEnrichment.saveEntry().
-    public boolean artistPhotoEnabled()  { return bool("artist_photo.enabled",  false); }
-    public String  artistPhotoFilename() { return str ("artist_photo.filename", "artist"); }
+    public boolean artistPhotoEnabled()   { return bool("artist_photo.enabled",   true); }   // défaut activé (2026-10-04) : sans portrait, Navidrome/Plex n'affichent aucune image d'artiste
+    public String  artistPhotoFilename()  { return str ("artist_photo.filename", "artist"); }
+    // Désactivé par défaut, comme cover.overwrite_file : sans ça, un artist.jpg déjà écrit par une
+    // identification erronée d'une piste précédente (mauvais artistMbid → mauvaise photo FanArt.tv)
+    // n'était jamais remplacé, même après correction du tag — voir "Régénérer le portrait d'artiste".
+    public boolean artistPhotoOverwrite() { return bool("artist_photo.overwrite_file", false); }
+
+    // --- Mode Express --- désactive en un clic les 3 étapes les plus coûteuses par fichier et sans
+    // valeur immédiate pour parcourir vite un gros arriéré (photo d'artiste et paroles : appel
+    // réseau par piste ; ReplayGain : analyse audio complète par ffmpeg, coûteuse en CPU) — demandé
+    // le 2026-09-13 pour rattraper les dizaines de milliers de fichiers en attente. Genre/bio ne
+    // sont PAS coupés : valeur immédiate, coût réseau bien plus faible (mis en cache par artiste,
+    // pas par piste). Sauvegarde l'état précédent de chaque clé avant de la couper, pour le
+    // restaurer exactement (pas juste tout réactiver) en repassant en mode Complet. ReplayGain n'a
+    // aucune passe de rattrapage existante (contrairement à photo d'artiste, couverte par
+    // "Rafraîchir tags..." — voir MainFrame.refreshSelectedMeta — et paroles/genre/bio, couverts par
+    // InfoCompleterWorker) : voir son ajout à InfoCompleterWorker au même correctif.
+    private static final String[] EXPRESS_MODE_KEYS = {
+        "artist_photo.enabled", "lyrics.enabled", "replaygain.enabled"
+    };
+
+    public boolean expressModeActive() { return bool("express_mode.active", false); }
+
+    public synchronized void setExpressMode(boolean on) {
+        if (on == expressModeActive()) return;
+        if (on) {
+            for (String key : EXPRESS_MODE_KEYS) {
+                // Valeur de repli = le VRAI défaut de la clé (photo et paroles sont actives par défaut) : avec « false », sortir du
+                // mode Express les laissait coupées pour toujours quand le réglage n'avait jamais été écrit dans le fichier.
+                boolean def = !"replaygain.enabled".equals(key);
+                props.setProperty("express_mode.saved." + key, String.valueOf(bool(key, def)));
+                props.setProperty(key, "false");
+            }
+        } else {
+            for (String key : EXPRESS_MODE_KEYS) {
+                String saved = props.getProperty("express_mode.saved." + key);
+                if (saved != null) props.setProperty(key, saved);
+                props.remove("express_mode.saved." + key);
+            }
+        }
+        props.setProperty("express_mode.active", String.valueOf(on));
+        persist();
+    }
 
     // --- Ponctuation & nettoyage ---
     public boolean correctPunctuation(){ return bool("tags.correct_punctuation", false); }
@@ -547,25 +658,9 @@ public class Config {
     public String mbCollectionId() { return str("mb.oauth.collection_id", ""); }
 
     public String listenbrainzUsername()  { return str("listenbrainz.username", ""); }
-    public int    listenbrainzMaxTracks() { return num("listenbrainz.max_tracks", 1000); }
 
     public String lastfmUsername()  { return str("lastfm.username", ""); }
-    public int    lastfmMaxTracks() { return num("lastfm.max_tracks", 1000); }
 
-    public boolean headphonesDbEnabled() { return bool("headphones.db_enabled", false); }
-    public String  headphonesDbPath()    { return str("headphones.db_path", System.getProperty("user.home") + "/headphones/headphones.db"); }
-    public String  headphonesUrl()       { return str("headphones.url", "http://127.0.0.1:8181"); }
-    public String  headphonesApiKey()    { return str("headphones.api_key", ""); }
-
-    public boolean beetsDbEnabled() { return bool("beets.db_enabled", false); }
-    public String  beetsDbPath()    { return str("beets.db_path", System.getProperty("user.home") + "/.config/beets/library.db"); }
-    public String  beetsMusicDir()  { return str("beets.music_dir", ""); }
-
-    /** Envoi automatique vers Headphones (queueAlbum) après chaque enregistrement réussi, si
-     *  l'album n'y est pas déjà connu — voir TagEnrichment.saveEntry() et HeadphonesClient. Demande
-     *  utilisateur explicite (2026-08-29), après avoir d'abord construit une version manuelle. */
-    public boolean headphonesAutoQueueEnabled()  { return bool("headphones.auto_queue_enabled", false); }
-    public int     headphonesAutoQueueMinScore() { return num("headphones.auto_queue_min_score", 90); }
 
     /** Met à jour une clé en mémoire et persiste immédiatement sur disque. */
     public synchronized void set(String key, String value) {

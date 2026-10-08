@@ -34,6 +34,34 @@ public final class TagEnrichment {
         }
     }
 
+    /** Cascade d'informations artiste : Discogs (profil résolu par nom exact — biographie, vrai
+     *  nom, URL) en premier, puis Last.fm inconditionnellement en complément — contrairement à
+     *  enrichGenre ci-dessus, lastFm.enrichArtistUrls() n'est PAS un simple repli : il peuple aussi
+     *  artistOfficialUrl/artistWikipediaUrl (jamais fournis par Discogs), donc doit tourner même
+     *  si Discogs a déjà rempli la biographie (ses propres gardes internes par champ évitent tout
+     *  travail redondant). Même garde silencieuse sur erreur réseau que enrichGenre. */
+    public static void enrichArtistInfo(TagInfo ti, DiscogsClient discogs, LastFmClient lastFm, MetadataCache cache) {
+        try { discogs.enrichArtistInfo(ti, cache); } catch (Exception ignored) {}
+        try { lastFm.enrichArtistUrls(ti, cache); } catch (Exception ignored) {}
+        enrichSourceDetails(ti, discogs, lastFm, cache);
+    }
+
+    /**
+     * Détails release/piste des sources tierces (Discogs : id/master/styles/format/label ; Last.fm : URL,
+     * auditeurs, écoutes globales) — branchés ICI parce que cette méthode est déjà appelée par TOUS les
+     * pipelines d'enrichissement (TaggingWorker ×2, BatchProcessor, InfoCompleterWorker, MatchDialog,
+     * AlbumCompletionWorker, App CLI) : un seul point à modifier au lieu de 7 (voir le commentaire
+     * d'InfoCompleterWorker sur leurs divergences habituelles). Le nom "enrichArtistInfo" est historique.
+     */
+    private static void enrichSourceDetails(TagInfo ti, DiscogsClient discogs, LastFmClient lastFm, MetadataCache cache) {
+        // enrichGenres() ne touche au genre que s'il est vide — l'appeler avec un genre déjà connu ne fait
+        // que combler les champs Discogs encore vides (id, master, styles, format, label, code-barres...).
+        if (Config.get().discogsAlwaysEnrich() && ti.discogsId.isBlank()) {
+            try { discogs.enrichGenres(ti, cache); } catch (Exception ignored) {}
+        }
+        try { lastFm.enrichTrackStats(ti, cache); } catch (Exception ignored) {}
+    }
+
     /**
      * Opus/Catalogue/Mouvement/Œuvre globale pour une piste classique, via le Work MB déjà lié à
      * l'enregistrement (voir {@link MusicBrainzClient#resolveClassicalWork}). Gate sur
@@ -113,6 +141,14 @@ public final class TagEnrichment {
             "folder.jpg", "cover.jpg", "front.jpg", "albumart.jpg", "album.jpg",
             "folder.png", "cover.png", "front.png");
 
+    /** Supprime la pochette renvoyée par {@link #resolveCover} quand c'est un téléchargement temporaire. Le fournisseur
+     *  « local » renvoie, lui, le folder.jpg/cover.jpg de l'utilisateur : ce fichier-là n'est JAMAIS supprimé. */
+    public static void discardTemporaryCover(Path cover) {
+        if (cover == null || cover.getFileName() == null) return;
+        if (LOCAL_COVER_FILENAMES.contains(cover.getFileName().toString().toLowerCase(java.util.Locale.ROOT))) return;
+        try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+    }
+
     /** Cherche une pochette dans le dossier : folder.jpg, cover.jpg, front.jpg… */
     public static Path findLocalCover(File dir) {
         if (dir == null || !dir.isDirectory()) return null;
@@ -127,17 +163,17 @@ public final class TagEnrichment {
 
     /**
      * Cascade d'identification indépendante pour un fichier vidéo (webm/vob/mpg/avi/mkv…) —
-     * SongRec (Shazam) → AcoustID → AudD, même ordre documenté que TaggingWorker.findTags().
+     * SongRec (Shazam) → AcoustID, même ordre documenté que TaggingWorker.findTags().
      * Écrite à neuf plutôt que réutilisée : findTags() est privée, ~400 lignes, et couplée à des
      * hypothèses inapplicables ici (tags déjà présents sur le fichier, ThreadLocal de session).
-     * fpcalc/ffmpeg (dans SongRecClient/AcoustIdClient/AudDClient) n'ont aucune vérification
+     * fpcalc/ffmpeg (dans SongRecClient/AcoustIdClient) n'ont aucune vérification
      * d'extension côté entrée : le fichier vidéo peut leur être passé directement.
      *
      * @return le résultat reconnu, ou {@code null} si rien n'est reconnu — signal pour ne PAS
      *         toucher la vidéo d'origine.
      */
     public static TagInfo identifyFromAudio(File fichier, SongRecClient songRec, AcoustIdClient acoustId,
-                                             AudDClient audd, MusicBrainzClient mb,
+                                             MusicBrainzClient mb,
                                              java.util.function.Consumer<String> log) throws Exception {
         if (SongRecClient.isAvailable()) {
             log.accept("  SongRec...");
@@ -159,18 +195,10 @@ public final class TagEnrichment {
             }
         }
 
-        if (AudDClient.isAvailable()) {
-            log.accept("  AudD...");
-            TagInfo ad = audd.recognize(fichier);
-            if (ad != null && !ad.artist.isBlank() && !ad.title.isBlank()) {
-                return enrichViaMusicBrainz(ad, mb, log);
-            }
-        }
-
         return null;
     }
 
-    /** Complète un résultat SongRec/AudD brut via une recherche MusicBrainz (MBID, album, piste,
+    /** Complète un résultat SongRec brut via une recherche MusicBrainz (MBID, album, piste,
      *  disque…) si elle confirme avec un score ≥ 50 — même seuil que la cascade existante de
      *  TaggingWorker — sinon garde le résultat brut avec score 85. */
     private static TagInfo enrichViaMusicBrainz(TagInfo raw, MusicBrainzClient mb,
@@ -200,8 +228,10 @@ public final class TagEnrichment {
     /** Résultat de {@link #saveEntry}. {@code cover} : pochette réellement résolue (ou null si
      *  aucune trouvée) — les appelants qui construisent des suggestions à l'utilisateur (ex.
      *  "Pochette non trouvée") ne peuvent le savoir qu'ICI, pas pendant l'identification. */
+    /** {@code duplicateOf} : non nul si le renommage a trouvé le même morceau déjà présent (fichier laissé en place, voir
+     *  {@link DuplicateFileException}) ; {@code renameError} contient alors le message lisible. */
     public record SaveResult(TagInfo written, Path cover, Path finalPath, String renameError,
-                              boolean durationMismatchMoved) {}
+                              boolean durationMismatchMoved, Path duplicateOf) {}
 
     /**
      * Étape "Enregistrer" partagée (façon Picard : le disque n'est touché qu'ici, jamais pendant
@@ -229,13 +259,21 @@ public final class TagEnrichment {
      * @param log        callback optionnel pour les messages de soumission MusicBrainz (peut être null)
      */
     public static SaveResult saveEntry(File fichier, TagInfo ti, CaaClient caa, FanArtClient fanArt,
-                                        DeezerClient deezer, TagWriter writer, FileRenamer renamer,
-                                        MetadataCache cache, MusicBrainzOAuth mbOauth, Path scanRoot,
-                                        int maskIndex, java.util.function.Consumer<String> log) throws Exception {
+                                        DeezerClient deezer, DiscogsClient discogs, TagWriter writer,
+                                        FileRenamer renamer, MetadataCache cache, MusicBrainzOAuth mbOauth,
+                                        Path scanRoot, int maskIndex,
+                                        java.util.function.Consumer<String> log) throws Exception {
         Path cover = resolveCover(ti, fichier, caa, fanArt, deezer, cache);
         TagInfo written;
         try {
-            written = writer.write(fichier, ti, cover);
+            // Écriture des tags (réécrit le fichier) : un accès à la fois par disque mécanique — voir DiskIoThrottle. Le réseau
+            // (pochette, MusicBrainz) reste hors de cette section : le permis ne couvre que le travail de disque.
+            java.util.concurrent.Semaphore diskGate = DiskIoThrottle.acquireFor(fichier);
+            try {
+                written = writer.write(fichier, ti, cover);
+            } finally {
+                DiskIoThrottle.release(diskGate);
+            }
 
             // Copie de la pochette en fichier séparé (cover.jpg à côté de la piste) — même logique
             // que l'ancien bloc inline de TaggingWorker.processEntry(), déplacée ici car elle dépend
@@ -250,28 +288,6 @@ public final class TagEnrichment {
                 } catch (Exception ignored) {}
             }
 
-            // Portrait d'artiste (artist.jpg à côté de cover.jpg dans le dossier album) — opt-in,
-            // voir Config.artistPhotoEnabled(). Pas de case "overwrite" séparée (contrairement à la
-            // pochette) : un fichier déjà présent suffit, évite un re-téléchargement à chaque piste
-            // du même artiste/album.
-            if (Config.get().artistPhotoEnabled() && fanArt != null) {
-                Path artistPhoto = null;
-                try {
-                    artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
-                    if (artistPhoto != null) {
-                        String fname = Config.get().artistPhotoFilename();
-                        String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
-                        Path dest = fichier.toPath().resolveSibling(fname + ext);
-                        if (!java.nio.file.Files.exists(dest))
-                            java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    }
-                } catch (Exception ignored) {
-                } finally {
-                    if (artistPhoto != null) {
-                        try { java.nio.file.Files.deleteIfExists(artistPhoto); } catch (Exception ignored) {}
-                    }
-                }
-            }
         } finally {
             // La pochette temporaire (CAA/FanArt/Deezer/Shazam) est déjà embarquée dans le fichier
             // audio (writer.write ci-dessus) et copiée en sidecar si demandé (juste au-dessus) — rien
@@ -282,7 +298,7 @@ public final class TagEnrichment {
             // pochette téléchargée restait sur toute écriture en échec, fuite de fichiers temporaires
             // qui s'accumule avec le taux d'échec réel observé sur cette bibliothèque.
             if (cover != null) {
-                try { java.nio.file.Files.deleteIfExists(cover); } catch (Exception ignored) {}
+                discardTemporaryCover(cover);
             }
         }
 
@@ -316,15 +332,19 @@ public final class TagEnrichment {
         // AlbumCompletionWorker, ni InfoCompleterWorker, ni MatchDialog ne soumettaient à
         // AcoustID) — centralisé ici, tous les pipelines qui appellent saveEntry() en bénéficient
         // maintenant de façon uniforme.
-        if (MetadataCache.SOURCE_ACOUSTID.equals(source) && !written.recordingMbid.isBlank()) {
-            try { new AcoustIdSubmitter().submit(fichier, written); }
-            catch (Exception ex) { if (log != null) log.accept("AcoustID submit skip: " + ex.getMessage()); }
-        }
+        // SUPPRIMÉ le 2026-09-20 : cette soumission automatique ne se déclenchait QUE pour les fichiers identifiés
+        // PAR AcoustID (source == ACOUSTID) — précisément ceux dont AcoustID connaît déjà l'empreinte pour cet
+        // enregistrement — donc une requête (+ un 2e fpcalc) par fichier pour ne rien apporter, à l'inverse de la
+        // règle de Picard (ne soumettre que si AcoustID ne relie pas déjà l'empreinte à l'enregistrement : voir
+        // AcoustIdSubmitter). La soumission utile reste l'action manuelle "Soumettre fingerprint AcoustID", qui
+        // applique ce filtre. Soumettre automatiquement des identifications issues d'une recherche TEXTE (non
+        // vérifiées) risquerait au contraire de polluer la base AcoustID de faux liens.
 
         submitToMusicBrainz(mbOauth, written, log != null ? log : msg -> {});
 
         Path finalPath = fichier.toPath();
         String renameError = null;
+        Path duplicateOf = null;
         if (maskIndex >= 0) {
             try {
                 Path curPath   = fichier.toPath();
@@ -333,7 +353,15 @@ public final class TagEnrichment {
                 Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
                         ? java.nio.file.Paths.get(libRoot)
                         : (scanRoot != null ? scanRoot : oldParent);
-                Path newPath = renamer.rename(curPath, written, maskIndex, root);
+                // Déplacement/renommage : permis du disque de DESTINATION (c'est lui qui encaisse les écritures et les créations de
+                // dossiers). Réentrant : la comparaison audio faite dans rename() relit des disques sans se bloquer elle-même.
+                java.util.concurrent.Semaphore moveGate = DiskIoThrottle.acquireFor(root.toFile());
+                Path newPath;
+                try {
+                    newPath = renamer.rename(curPath, written, maskIndex, root);
+                } finally {
+                    DiskIoThrottle.release(moveGate);
+                }
                 if (newPath != null) {
                     finalPath = newPath;
                     // Re-classer l'historique sous le nouveau chemin — sinon le prochain scan/
@@ -349,10 +377,60 @@ public final class TagEnrichment {
                         FileRenamer.deleteEmptyAncestors(oldParent, root);
                     }
                 }
+            } catch (DuplicateFileException ex) {
+                duplicateOf = ex.existing();
+                renameError = ex.getMessage();
+                if (log != null) log.accept(ex.getMessage());
             } catch (Exception ex) {
-                renameError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                // FileSystemException sans « reason » renvoie juste « source -> cible » : on ajoute la nature de l'erreur.
+                String m = ex.getMessage();
+                renameError = m == null ? ex.getClass().getSimpleName()
+                        : (ex instanceof java.nio.file.FileSystemException fse && fse.getReason() == null
+                                ? m + " (" + ex.getClass().getSimpleName() + ")" : m);
             }
         }
+
+            // Portrait d'artiste (artist.jpg dans le dossier de l'ARTISTE, après le renommage : voir artistPhotoFolder) — opt-in,
+            // voir Config.artistPhotoEnabled(). Par défaut, un fichier déjà présent suffit (évite un
+            // re-téléchargement à chaque piste du même artiste/album) ; artist_photo.overwrite_file
+            // (même esprit que cover.overwrite_file) permet de forcer le remplacement — nécessaire
+            // depuis qu'on sait qu'une mauvaise identification passée (mauvais artistMbid) peut avoir
+            // écrit la photo d'un artiste sans rapport, sans qu'aucun mécanisme ne la corrige ensuite
+            // (voir aussi l'action manuelle "Régénérer le portrait d'artiste").
+            if (Config.get().artistPhotoEnabled() && fanArt != null) {
+                Path artistPhoto = null;
+                try {
+                    // Un portrait déjà présent n'est pas re-téléchargé (sauf « écraser ») : on teste AVANT le réseau.
+                    Path destDir = artistPhotoFolder(finalPath.toAbsolutePath(), ti);
+                    String fname = Config.get().artistPhotoFilename();
+                    boolean haveOne = java.nio.file.Files.exists(destDir.resolve(fname + ".jpg"))
+                            || java.nio.file.Files.exists(destDir.resolve(fname + ".png"));
+                    if (!haveOne || Config.get().artistPhotoOverwrite()) {
+                        artistPhoto = fanArt.downloadArtistPhoto(ti, cache);
+                        // Repli Discogs (nom exact) quand FanArt n'a rien — le cas le plus courant étant
+                        // l'absence d'artistMbid (identification SongRec/texte seule, voir sa javadoc sur
+                        // FanArtClient.downloadArtistPhoto) plutôt qu'un artiste réellement sans photo.
+                        if (artistPhoto == null && discogs != null) {
+                            artistPhoto = discogs.downloadArtistPhotoFallback(ti, cache);
+                        }
+                        // Dernier repli : Deezer, sans clé ni MBID.
+                        if (artistPhoto == null && deezer != null) {
+                            artistPhoto = deezer.downloadArtistPhoto(ti, cache);
+                        }
+                    }
+                    if (artistPhoto != null) {
+                        String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
+                        Path dest = destDir.resolve(fname + ext);
+                        if (!java.nio.file.Files.exists(dest) || Config.get().artistPhotoOverwrite())
+                            java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (artistPhoto != null) {
+                        try { java.nio.file.Files.deleteIfExists(artistPhoto); } catch (Exception ignored) {}
+                    }
+                }
+            }
 
         // Filet de sécurité APRÈS coup, pas avant : TaggingWorker bloque déjà en SKIPPED tout
         // candidat dont la durée ne correspond pas à MusicBrainz (voir FileEntry.isDurationMismatch)
@@ -378,92 +456,15 @@ public final class TagEnrichment {
                 } catch (Exception ignored) {}
             }
         }
-        // Envoi automatique vers Headphones (queueAlbum) — demande utilisateur explicite
-        // (2026-08-29), après une première version manuelle (menu "Envoyer vers Headphones").
-        // Volontairement APRÈS coup, pas avant : ne doit jamais empêcher/retarder l'enregistrement
-        // réel du fichier si Headphones est injoignable — network best-effort, jamais bloquant.
-        // Seuil de confiance (score de CETTE identification, pas celui du résultat findAlbum côté
-        // Headphones) : seuil demandé par l'utilisateur (90%, configurable), pour ne jamais envoyer
-        // un album mal identifié en recherche/téléchargement chez un service externe.
-        //
-        // Sur un THREAD À PART (Thread.ofVirtual) depuis ce correctif — jusque-là, malgré le
-        // commentaire ci-dessus, cet appel bloquait bel et bien saveEntry() jusqu'à 20s (timeout
-        // HTTP par défaut) à CHAQUE tentative. Découvert en direct 2026-08-30 en creusant pourquoi
-        // aucun envoi ne réussissait jamais : sur un run réel, 360 tentatives sur 389 se sont
-        // soldées par un HttpTimeoutException — Headphones (une instance Python mono-processus,
-        // relayant chaque recherche à MusicBrainz) ne suit tout simplement pas le rythme du
-        // taguage. Non corrigeable côté OpenTagger (capacité de Headphones lui-même), mais le
-        // "jamais bloquant" du commentaire ci-dessus n'était pas respecté : ~2h de délai pur
-        // accumulé sur cette seule session (360 × jusqu'à 20s), invisible jusqu'ici. Passer en
-        // fire-and-forget rend enfin le commentaire vrai, sans changer le taux de succès côté
-        // Headphones (toujours best-effort, toujours loggé pareil).
-        if (Config.get().headphonesAutoQueueEnabled()
-                && !durationMismatchMoved
-                && written.score >= Config.get().headphonesAutoQueueMinScore()
-                && !written.artist.isBlank() && !written.album.isBlank()) {
-            Thread.ofVirtual().start(() -> {
-            try {
-                HeadphonesClient hp = new HeadphonesClient();
-                if (hp.isConfigured() && !hp.isAlbumKnown(written.artist, written.album)) {
-                    // findAlbum cherche par TITRE D'ALBUM seul (voir ~/headphones/API.md :
-                    // "findAlbum&name=$albumname"), pas par "artiste + album" concaténé —
-                    // confirmé en direct 2026-08-30 : la requête combinée faisait échouer
-                    // systématiquement la recherche MusicBrainz côté Headphones (4/4 tentatives
-                    // réelles "aucun candidat trouvé", y compris pour des artistes/albums aussi
-                    // connus que Céline Dion ou les Backstreet Boys). La requête ne pouvant plus
-                    // filtrer par artiste, on le fait nous-mêmes après coup sur le "uniquename"
-                    // renvoyé par l'API. Seuil bas (0.4, PAS le 0.85 utilisé ailleurs dans ce
-                    // client pour un gate d'égalité stricte) : titleSimilarity pénalise tout mot du
-                    // côté le plus long non apparié à hauteur de 0.4 chacun (voir sa Javadoc), donc
-                    // un artiste tag multi-crédité ("Bruno Mars, Anderson .Paak, Silk Sonic")
-                    // comparé au nom MusicBrainz réel ("Silk Sonic") plafonne structurellement à
-                    // ~0.56 même en cas de correspondance parfaite des mots communs — confirmé en
-                    // direct 2026-08-30 : un seuil à 0.6 rejetait systématiquement ce genre de cas
-                    // pourtant légitime (0/29 tentatives réussies avant ce correctif, y compris pour
-                    // des albums aussi connus que "An Evening With Silk Sonic", vérifié en direct
-                    // que Headphones le trouve bien). Un artiste réellement sans rapport tombe près
-                    // de 0 (quasi aucun mot en commun), donc 0.4 reste largement discriminant.
-                    List<HeadphonesClient.AlbumCandidate> candidates = hp.findAlbum(written.album);
-                    HeadphonesClient.AlbumCandidate pick = candidates.stream()
-                            .filter(c -> TrackMatcher.titleSimilarity(written.artist, c.artistName()) >= 0.4)
-                            .findFirst().orElse(null);
-                    if (pick != null) {
-                        hp.queueAlbum(pick.artistId(), pick.releaseId());
-                        // Seule preuve observable que l'envoi auto a réellement lieu — avant ce
-                        // correctif, catch(Exception ignored) rendait toute la chaîne invisible
-                        // (ni succès ni échec ne laissaient de trace), repéré en direct 2026-08-30
-                        // en cherchant à vérifier que "l'écriture vers Headphones fonctionne".
-                        System.out.println("[OT] Headphones : mis en file — " + written.artist + " - "
-                                + written.album + " (releaseId=" + pick.releaseId()
-                                + ", score identification=" + written.score + ")");
-                    } else {
-                        // Distingue "l'API n'a rien renvoyé" de "l'API a renvoyé des résultats mais
-                        // aucun ne matchait l'artiste" — ambiguïté trouvée en direct 2026-08-30 :
-                        // plusieurs albums bien connus (INXS - Live Baby Live Wembley Stadium)
-                        // ressortaient "aucun candidat" ici alors qu'un test manuel direct de l'API
-                        // Headphones renvoyait un candidat exact (score 100), sans qu'on puisse
-                        // savoir depuis ce seul message si le filtre artiste ou l'API elle-même
-                        // était en cause.
-                        double bestSim = candidates.stream()
-                                .mapToDouble(c -> TrackMatcher.titleSimilarity(written.artist, c.artistName()))
-                                .max().orElse(-1);
-                        System.out.println("[OT] Headphones : aucun candidat trouvé pour "
-                                + written.artist + " - " + written.album
-                                + " (" + candidates.size() + " résultat(s) API, meilleure similarité artiste="
-                                + String.format(java.util.Locale.ROOT, "%.2f", bestSim) + ")");
-                    }
-                }
-            } catch (Exception ex) {
-                // Best-effort : une panne réseau/Headphones ne doit jamais faire échouer
-                // l'enregistrement réel du fichier, déjà terminé à ce stade de toute façon —
-                // mais l'échec doit rester visible dans les logs, pas juste avalé.
-                System.out.println("[OT] ⚠ Headphones : échec envoi pour " + written.artist + " - "
-                        + written.album + " — " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
-            }
-            });
-        }
+        // (Supprimé 2026-09-24, demande utilisateur : "supprime l'écriture dans headphones navidrome, cela fait
+        // planter les dockers".) Il y avait ici l'envoi automatique vers Headphones (findAlbum + addArtist +
+        // queueAlbum après CHAQUE enregistrement de score >= 90) : sur un lot complet, des milliers d'appels HTTP
+        // (un thread virtuel par fichier, chacun attendant jusqu'à 20 s) vers une instance Python mono-processus
+        // qui relaie chaque recherche à MusicBrainz — 360 tentatives sur 389 étaient déjà des timeouts lors de la
+        // première mesure (2026-08-30). OpenTagger n'écrit plus JAMAIS dans Headphones, et ne lit plus sa base
+        // non plus depuis le 2026-09-25 (voir TaggingWorker.findTags(), ex-étape 0.62).
 
-        return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved);
+        return new SaveResult(written, cover, finalPath, renameError, durationMismatchMoved, duplicateOf);
     }
 
     /**
@@ -502,6 +503,33 @@ public final class TagEnrichment {
                 log.accept("MB collection : release ajoutée");
             } catch (Exception e) { log.accept("MB collection skip: " + e.getMessage()); }
         }
+    }
+
+    private static String foldName(String s) {
+        return s == null ? "" : s.toLowerCase(java.util.Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]+", "");
+    }
+
+    /**
+     * Dossier où écrire le portrait de l'artiste. Navidrome, Plex et Jellyfin cherchent {@code artist.jpg} dans le
+     * dossier de l'ARTISTE (le parent des dossiers d'albums), pas dans celui d'un album : l'ancien emplacement (à côté
+     * des pistes) n'était vu par aucun d'eux. Si le dossier parent porte le nom de l'artiste (ou de l'artiste de
+     * l'album) — disposition « Artiste/Album/piste » — on l'utilise ; si la piste est directement dans un dossier
+     * « Artiste » aussi ; sinon (vrac, compilation, autre disposition) on garde le dossier de la piste.
+     */
+    public static Path artistPhotoFolder(Path track, TagInfo ti) {
+        Path albumDir = track.getParent();
+        if (albumDir == null) return track.toAbsolutePath().getParent();
+        String a1 = foldName(ti.artist), a2 = foldName(ti.albumArtist);
+        Path parent = albumDir.getParent();
+        if (parent != null && parent.getFileName() != null) {
+            String p = foldName(parent.getFileName().toString());
+            if (!p.isEmpty() && (p.equals(a1) || p.equals(a2))) return parent;
+        }
+        if (albumDir.getFileName() != null) {
+            String d = foldName(albumDir.getFileName().toString());
+            if (!d.isEmpty() && (d.equals(a1) || d.equals(a2))) return albumDir;
+        }
+        return albumDir;
     }
 
     /** Convertit une valeur de rating brute (1-5 ou 1-255) en étoiles 1-5. Retourne 0 si non applicable. */

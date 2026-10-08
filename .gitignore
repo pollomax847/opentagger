@@ -33,3 +33,9 @@ docs/screenshots/main_table.png
 publish-release.sh
 package-deb.sh
 build-apt-repo.sh
+
+# Installeurs Windows generes (jpackage) : plusieurs dizaines de Mo chacun, au-dela de la limite de
+# 100 Mo de GitHub pour le plus gros. Les binaires se publient dans le depot opentagger-releases,
+# jamais dans le code source.
+opentagger/dist/
+*.exe

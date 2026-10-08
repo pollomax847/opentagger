@@ -35,6 +35,23 @@ public class FileRenamer {
             new java.util.concurrent.Semaphore(
                     Math.max(1, Config.get().num("rename.max_concurrent_cross_device_moves", 1)));
 
+    // Sémaphore SÉPARÉ pour TrashHelper (voir moveFile(Path,Path,Semaphore) ci-dessous) — trouvé en
+    // direct (2026-09-07) : "supprimer" (corbeille) et le renommage automatique du pipeline de
+    // taguage partageaient CROSS_DEVICE_COPY_LIMIT (un seul permis par défaut), donc une suppression
+    // demandée par l'utilisateur restait bloquée indéfiniment en Semaphore.acquire() derrière le flux
+    // quasi-continu de renommages cross-device de la passe de re-taguage en cours (confirmé par
+    // thread-dump : 2 threads de MainFrame.deleteSelectedFiles() parqués sur ce même sémaphore,
+    // pendant que 4 autres threads tenaient déjà la queue de renommage) — d'où "la suppression ne
+    // fonctionne plus" côté utilisateur alors qu'elle n'était en réalité que privée de tour
+    // indéfiniment. Même rationnel de protection anti-thrashing (un disque mécanique ne peut être
+    // qu'à un endroit à la fois) donc toujours throttlé — mais dans SA PROPRE file, pour ne plus
+    // jamais faire attendre une action interactive derrière un pipeline automatique en arrière-plan.
+    // Package-privé (pas private), même raison que moveFile() : TrashHelper le passe explicitement
+    // à moveFile(Path,Path,Semaphore) pour ne jamais partager la file d'attente du pipeline auto.
+    static final java.util.concurrent.Semaphore TRASH_MOVE_LIMIT =
+            new java.util.concurrent.Semaphore(
+                    Math.max(1, Config.get().num("rename.max_concurrent_cross_device_moves", 1)));
+
     // Un verrou par nom de destination CONTESTÉ (pas un verrou global — voir lockFor()) couvrant
     // "vérifier que la cible est libre" + "déplacer" dans rename()/moveToFolder() : sans lui, deux
     // threads du pool batch (batch.threads) visant le même nom de destination (deux fichiers
@@ -144,6 +161,22 @@ public class FileRenamer {
      * Déplace le fichier selon le masque, relatif à rootDir.
      * Gère les collisions avec le suffixe (2), (3)…
      */
+    /** Lève {@link DuplicateFileException} si {@code existant} est le MÊME AUDIO que {@code fichier}. Le nom et les tags ne comptent
+     *  pas (ils peuvent être faux) : copie identique octet pour octet, sinon empreintes Chromaprint comparées. Si l'analyse est
+     *  impossible (fpcalc absent, fichier illisible), on ne conclut rien et l'ancien comportement (numérotation) s'applique. */
+    private static void rejectIfSameSong(Path existant, Path fichier, TagInfo info) throws DuplicateFileException {
+        try {
+            if (!Files.isRegularFile(existant) || !Files.isRegularFile(fichier) || Files.isSameFile(existant, fichier)) return;
+            if (Files.size(existant) == Files.size(fichier) && Files.mismatch(existant, fichier) == -1L)
+                throw new DuplicateFileException(existant, true);
+        } catch (DuplicateFileException e) {
+            throw e;
+        } catch (IOException e) {
+            return; // illisible : numérotation comme avant plutôt que de bloquer
+        }
+        Boolean sameAudio = AudioSimilarity.sameAudio(existant.toFile(), fichier.toFile());
+        if (Boolean.TRUE.equals(sameAudio)) throw new DuplicateFileException(existant, false);
+    }
     public Path rename(Path fichier, TagInfo info, int maskIndex, Path rootDir) throws IOException {
         if (rootDir == null) rootDir = fichier.getParent();
 
@@ -152,6 +185,7 @@ public class FileRenamer {
 
         String chemin = evaluate(maskIndex, info);
         if (chemin.isBlank()) return null;
+        chemin = capPathLength(rootDir.toString(), chemin, ext, IS_WINDOWS);
 
         Path cible = rootDir.resolve(chemin + ext).normalize();
         if (cible.equals(fichier)) return null;
@@ -161,9 +195,13 @@ public class FileRenamer {
 
             // Résolution de collision
             if (Files.exists(cible)) {
+                // Le nom visé est pris par le MÊME morceau (copie identique, ou même enregistrement dans un autre fichier) :
+                // inutile de créer « nom (2) », on laisse le fichier où il est et on le signale (Outils → Doublons).
+                rejectIfSameSong(cible, fichier, info);
                 int n = 2;
                 do {
                     cible = rootDir.resolve(chemin + " (" + n++ + ")" + ext).normalize();
+                    if (Files.exists(cible) && !cible.equals(fichier)) rejectIfSameSong(cible, fichier, info);
                     // Le candidat de collision retombe sur le fichier LUI-MÊME (cas fréquent : deux
                     // copies identiques déjà présentes, l'une déjà au nom canonique, l'autre déjà
                     // au premier suffixe "(2)" — exactement le nom que cette boucle vient de
@@ -334,6 +372,8 @@ public class FileRenamer {
         engine.put("genre",           safe(info.genre));
         engine.put("composer",        safe(info.composer));
         engine.put("conductor",       safe(info.conductor));
+        engine.put("performer",       safe(info.performers));
+        engine.put("remixer",         safe(info.remixer));
         // overallWork prime sur work (mouvement d'une œuvre parente vs pièce autonome) — même
         // logique que ClassicalDisplay.summarize(), voir son commentaire pour le détail des champs.
         engine.put("work",            safe(info.overallWork.isBlank() ? info.work : info.overallWork));
@@ -416,6 +456,33 @@ public class FileRenamer {
     // n'affecte en pratique que les cas déjà à risque.
     static final int MAX_SEGMENT_LENGTH = 180; // package-privé : réutilisé par TagWriter.translateKnownJaudiotaggerBug()
 
+    // Écart trouvé vs SongKong (analyse du jar décompilé, 2026-09-18) : SongKong mesure sa propre
+    // limite de segment en OCTETS UTF-8 (getBytes(UTF_8).length), pas en caractères — la vraie
+    // limite du système de fichiers (255 octets sur ext4) EST en octets. MAX_SEGMENT_LENGTH
+    // ci-dessus tronque à 180 CARACTÈRES, qui ne protège plus une fois qu'on dépasse ~1,4 octet/
+    // caractère en moyenne — exactement le cas d'un texte français riche en accents (chaque
+    // caractère accentué encode sur 2 octets en UTF-8), le type de contenu le plus fréquent ici.
+    private static final int MAX_SEGMENT_BYTES = 255;
+
+    /** Tronque {@code s} pour ne jamais dépasser {@code maxBytes} une fois encodé en UTF-8, sans
+     *  jamais couper une séquence multi-octets au milieu (ce qui produirait un caractère de
+     *  remplacement "�" illisible plutôt qu'un nom simplement plus court). Coupe caractère par
+     *  caractère (pas point de code — un émoji/caractère combiné coupé au milieu resterait un
+     *  nom de fichier moche mais valide, pas un vrai risque comme une coupure d'octet UTF-8). */
+    private static String truncateToUtf8Bytes(String s, int maxBytes) {
+        if (s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= maxBytes) return s;
+        int bytes = 0;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            int charBytes = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes + charBytes > maxBytes) break;
+            sb.append(c);
+            bytes += charBytes;
+        }
+        return sb.toString().trim();
+    }
+
     private String sanitize(String s) {
         if (s == null || s.isBlank()) return "";
         // Retirer l'extension audio si le tag la contient (ex: title="Song.mp3")
@@ -439,8 +506,53 @@ public class FileRenamer {
                 .replaceAll("\\.{2,}", ".")
                 .replaceAll("\\s+", " ")
                 .trim();
-        return cleaned.length() > MAX_SEGMENT_LENGTH
-                ? cleaned.substring(0, MAX_SEGMENT_LENGTH).trim() : cleaned;
+        if (cleaned.length() > MAX_SEGMENT_LENGTH) cleaned = cleaned.substring(0, MAX_SEGMENT_LENGTH).trim();
+        // Second passage en octets UTF-8 : le cap en caractères ci-dessus ne suffit plus dès qu'un
+        // segment est riche en caractères accentués (voir MAX_SEGMENT_BYTES) — sans effet sur le
+        // cas courant déjà couvert par les 180 caractères.
+        return windowsSafeSegment(truncateToUtf8Bytes(cleaned, MAX_SEGMENT_BYTES));
+    }
+
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+
+    /** Windows limite un chemin complet à 260 caractères (MAX_PATH) : au-delà, déplacer/créer le fichier échoue. On
+     *  raccourcit le NOM DU FICHIER (dernier segment) pour rester sous 255, en gardant de la place pour « (nn) » et
+     *  l'extension. Sans effet hors Windows ou si le chemin tient déjà. */
+    static String capPathLength(String rootDir, String chemin, String ext, boolean windows) {
+        if (!windows) return chemin;
+        int budget = 255 - rootDir.length() - 1 - ext.length() - 6;
+        if (chemin.length() <= budget) return chemin;
+        int slash = chemin.lastIndexOf('/');
+        String dir = slash >= 0 ? chemin.substring(0, slash + 1) : "";
+        String file = chemin.substring(slash + 1);
+        int fileBudget = Math.max(12, budget - dir.length());
+        if (file.length() <= fileBudget) return chemin;
+        return dir + file.substring(0, fileBudget).trim();
+    }
+
+    private static final java.util.regex.Pattern WINDOWS_RESERVED =java.util.regex.Pattern.compile(
+            "(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\..*)?$");
+
+    /** Règles NTFS appliquées sur TOUS les systèmes (une bibliothèque se copie souvent vers/depuis Windows) :
+     *  caractères de contrôle supprimés ; point ou espace final retiré (Windows les supprime en silence, d'où des
+     *  dossiers « Album. » introuvables ou en double) ; nom réservé (CON, PRN, AUX, NUL, COM1-9, LPT1-9, avec ou sans
+     *  extension) préfixé d'un « _ ». Reste un nom valide partout. */
+    static String windowsSafeSegment(String s) {
+        // Sous Linux/macOS, comportement INCHANGÉ (un dossier « Dr. » ou « Con » y est valide, et renommer une
+        // bibliothèque existante n'aurait aucune raison d'être). Actif sous Windows, ou si la bibliothèque est
+        // partagée avec Windows et que « rename.windows_safe_names=true » est réglé.
+        if (!IS_WINDOWS && !Config.get().bool("rename.windows_safe_names", false)) return s == null ? "" : s;
+        return windowsSafeSegmentForce(s);
+    }
+
+    /** Applique toujours les règles NTFS (testable sur n'importe quel système). */
+    static String windowsSafeSegmentForce(String s) {
+        if (s == null) return "";
+        String t = s.replaceAll("[\\x00-\\x1F\\x7F]", "");
+        t = t.replaceAll("[. ]+$", "");
+        if (WINDOWS_RESERVED.matcher(t).matches()) t = "_" + t;
+        return t;
     }
 
     private String pad(String track) {
@@ -478,6 +590,12 @@ public class FileRenamer {
         if (cible.equals(fichier.toAbsolutePath().normalize())) return null;
 
         synchronized (lockFor(cible)) {
+            // Fichier IDENTIQUE (même taille, mêmes octets) déjà présent à la destination : le déplacer créerait un
+            // doublon « nom (2) » — on ne touche à rien. L'appelant garde le chemin d'origine (retour null).
+            if (Files.isRegularFile(cible) && Files.isRegularFile(fichier)
+                    && Files.size(cible) == Files.size(fichier) && Files.mismatch(cible, fichier) == -1L) {
+                return null;
+            }
             if (Files.exists(cible)) {
                 int n = 2;
                 do {
@@ -498,6 +616,15 @@ public class FileRenamer {
             }
 
             moveFile(fichier, cible);
+            // moveMatchingLrc()/moveLocalCoverIfPresent() manquaient ici (2026-09-05, repéré en
+            // direct : des .lrc orphelins datés d'APRÈS le correctif du 2026-08-13 sur rename(),
+            // retrouvés dans /mnt/Music à côté de RIEN — leur audio associé introuvable au même
+            // nom). Cette méthode déplace aussi des fichiers déjà tagués (durée incohérente, non
+            // identifié re-quarantainé…) qui peuvent très bien avoir un .lrc/une pochette locale
+            // écrits lors d'un passage précédent — même besoin que rename(), simplement oublié ici
+            // lors de l'ajout initial du suivi.
+            moveMatchingLrc(fichier, nom, cible);
+            moveLocalCoverIfPresent(fichier.getParent(), cible.getParent());
         }
         return cible;
     }
@@ -535,6 +662,7 @@ public class FileRenamer {
             }
 
             moveFile(fichier, cible);
+            moveMatchingLrc(fichier, nom, cible); // même besoin que rename()/moveToFolder(), voir leurs commentaires
         }
         return cible;
     }
@@ -547,7 +675,15 @@ public class FileRenamer {
      * dupliquer aux 3 sites d'appel : garantit qu'un futur 4e appelant de moveFile() hérite de la
      * synchronisation des playlists sans action supplémentaire.
      */
-    private static void moveFile(Path src, Path dst) throws IOException {
+    // Package-privé (pas private) : réutilisé par TrashHelper pour son repli local — voir son
+    // commentaire de classe pour le pourquoi (Desktop.moveToTrash() indisponible sur cette machine).
+    static void moveFile(Path src, Path dst) throws IOException {
+        moveFile(src, dst, CROSS_DEVICE_COPY_LIMIT);
+    }
+
+    /** Variante avec sémaphore explicite — voir TRASH_MOVE_LIMIT ci-dessus pour le pourquoi (isoler
+     *  TrashHelper de la file d'attente du pipeline de renommage automatique). */
+    static void moveFile(Path src, Path dst, java.util.concurrent.Semaphore crossDeviceLimit) throws IOException {
         try {
             Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
@@ -557,11 +693,35 @@ public class FileRenamer {
             // ne fassent toutes converger leurs copies en même temps sur un même disque mécanique
             // de destination.
             try {
-                CROSS_DEVICE_COPY_LIMIT.acquire();
+                crossDeviceLimit.acquire();
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Déplacement cross-device interrompu : " + src, ie);
             }
+            // Visibilité (2026-09-19) : trouvé en direct via jstack qu'une SEULE copie cross-device
+            // bloquée (thread RUNNABLE dans Files.copy()/directCopy0, 17+ minutes, sans la moindre
+            // erreur ni ligne de log) suffit à geler TOUT le pipeline d'enregistrement — un seul
+            // permis sur CROSS_DEVICE_COPY_LIMIT (volontaire, voir son commentaire), donc chaque
+            // thread SaveWorker suivant reste juste parqué sur crossDeviceLimit.acquire() sans
+          // qu'AUCUNE trace n'indique où ni pourquoi (716 fichiers accumulés, zéro "Enregistré",
+            // seul un jstack a permis de trouver le vrai coupable). Java ne peut pas interrompre
+            // proprement un Files.copy() natif déjà en cours (pas de vrai fix possible côté
+            // annulation ici) — ce garde-fou n'empêche donc pas un futur blocage, mais le rend enfin
+            // VISIBLE dans le journal normal plutôt que de nécessiter un jstack manuel à chaque fois.
+            final java.util.concurrent.atomic.AtomicBoolean stillCopying = new java.util.concurrent.atomic.AtomicBoolean(true);
+            final long copyStartMs = System.currentTimeMillis();
+            Thread watchdog = new Thread(() -> {
+                try { Thread.sleep(60_000); } catch (InterruptedException ignored) { return; }
+                if (stillCopying.get()) {
+                    System.out.println("[OT] ⚠ Copie cross-device bloquée depuis plus de 60s (src="
+                            + src + ", dst=" + dst + ") — le pipeline d'enregistrement est gelé "
+                            + "derrière elle (CROSS_DEVICE_COPY_LIMIT=1 permis). Probable contention "
+                            + "disque/montage lent, pas un bug applicatif — voir si le disque de "
+                            + "destination répond normalement.");
+                }
+            }, "cross-device-copy-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
             try {
                 long srcSize = Files.size(src);
                 // PAS de COPY_ATTRIBUTES : sur un point de montage FUSE (ex. pool mergerfs monté
@@ -581,11 +741,17 @@ public class FileRenamer {
                 }
                 Files.delete(src);
             } finally {
-                CROSS_DEVICE_COPY_LIMIT.release();
+                stillCopying.set(false);
+                watchdog.interrupt();
+                long elapsedMs = System.currentTimeMillis() - copyStartMs;
+                if (elapsedMs > 60_000) {
+                    System.out.println("[OT] Copie cross-device terminée après " + (elapsedMs / 1000)
+                            + "s (anormalement long) : " + src);
+                }
+                crossDeviceLimit.release();
             }
         }
         PlaylistSync.onFileMoved(src, dst);
-        ITunesXmlSyncQueue.onFileMoved(src, dst);
     }
 
     // ── Nettoyage des dossiers vides ──────────────────────────────────────────
@@ -625,7 +791,15 @@ public class FileRenamer {
         // — ce qui restait ici est donc un doublon réel, jamais la seule copie existante.
         if (localCoverCandidateNames().contains(name)) return true;
         if (name.startsWith("opentagger_") && name.endsWith(".log")) return true;
-        return name.startsWith("._");
+        if (name.startsWith("._")) return true;
+        // Résidus système/tiers bien connus (liste SongKong delete_files.txt, écart trouvé en
+        // audit 2026-09-18) : Thumbs.db/desktop.ini (Windows, fréquents sur les dossiers réseau
+        // partagés), cddbinfo.txt (résidu de ripper CD), AMGReport.log (rapport SongKong/AMG). PDF/
+        // image génériques volontairement PAS ajoutés ici : contrairement à Thumbs.db, un PDF ou une
+        // image dans un dossier d'album peut être un vrai livret voulu par l'utilisateur, pas du
+        // résidu — cohérent avec la préférence déjà établie de rester non-destructif face au doute.
+        return name.equals("thumbs.db") || name.equals("desktop.ini")
+            || name.equals("cddbinfo.txt") || name.equals("amgreport.log");
     }
 
     // ── CLI ───────────────────────────────────────────────────────────────────

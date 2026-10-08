@@ -50,7 +50,7 @@ public final class I18n {
         String path = "/i18n/messages_" + code + ".json";
         try (InputStream in = I18n.class.getResourceAsStream(path)) {
             if (in == null) return Map.of();
-            return new ObjectMapper().readValue(in, Map.class);
+            return new ObjectMapper().readValue(in, new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {});
         } catch (Exception e) {
             return Map.of();
         }

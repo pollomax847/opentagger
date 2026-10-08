@@ -175,6 +175,17 @@ public class MetadataCache implements AutoCloseable {
                 // d'albums) — réutilisé tel quel pour les réponses texte de ces 4 fournisseurs
                 // (clés "discogs:"/"lastfm:"/"fanart:"). Les pochettes (binaire) ont besoin d'une
                 // table à part, BLOB au lieu de TEXT.
+                // Identifications faites mais PAS ENCORE enregistrées sur le disque : sans cette table elles n'existaient qu'en mémoire et
+                // étaient perdues à chaque fermeture ou arrêt de l'app (plusieurs heures de travail perdues deux fois). Retrouvées au scan
+                // suivant si le fichier n'a pas changé (taille + date de modification) ; supprimées une fois le fichier enregistré.
+                st.execute("""
+                    CREATE TABLE IF NOT EXISTS pending_identified (
+                        path  TEXT    PRIMARY KEY,
+                        size  INTEGER NOT NULL,
+                        mtime INTEGER NOT NULL,
+                        json  TEXT    NOT NULL,
+                        ts    INTEGER NOT NULL
+                    )""");
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS image_cache (
                         key   TEXT    PRIMARY KEY,
@@ -421,19 +432,9 @@ public class MetadataCache implements AutoCloseable {
      *  suivent sans vérification individuelle propre — évite juste que des pistes du même album
      *  divergent vers des éditions MusicBrainz différentes. */
     public static final String SOURCE_GROUP_PIN = "group_pin";
-    /** Piste retrouvée par similarité de texte (artiste+titre) dans la base SQLite locale d'une
-     *  instance Headphones tierce (lecture seule) — voir HeadphonesClient.lookupTrack() et
-     *  TaggingWorker.findTags() étape 0.62. Confiance modérée : texte seul (comme SOURCE_TEXT),
-     *  mais contre un catalogue déjà curé par l'utilisateur (uniquement des pistes qu'il a lui-même
-     *  téléchargées/organisées via Headphones), donc un cran au-dessus d'une recherche MB à
-     *  l'aveugle. Aucun appel réseau (fichier local), placée tôt dans la cascade pour cette raison. */
-    public static final String SOURCE_HEADPHONES = "headphones";
-    /** Piste retrouvée dans la base SQLite locale d'une instance beets tierce (lecture seule) — voir
-     *  BeetsClient et TaggingWorker.findTags() étapes 0.61 (chemin exact, quasi certain) et 0.63
-     *  (repli similarité texte, même confiance que SOURCE_HEADPHONES). Schéma beets bien plus riche
-     *  (ISRC, MBID complets, composer/work classique) que Headphones — voir BeetsClient pour le
-     *  détail des champs importés. */
-    public static final String SOURCE_BEETS = "beets";
+    // "beets" et "headphones" peuvent encore apparaître dans file_history (identifications
+    // antérieures au 2026-09-25) : ces deux bases tierces ont été retirées de l'identification, ces
+    // lignes sont traitées comme toute source non vérifiée par l'audio (étape 0 : SongRec re-vérifie).
 
     /** Enregistre l'association chemin de fichier → MBID après un taguage. */
     public synchronized void recordFileTagging(String path, String mbid) {
@@ -549,7 +550,9 @@ public class MetadataCache implements AutoCloseable {
      * Version légère pour le scan initial : évite de charger les TagInfo en RAM.
      */
     public synchronized java.util.Set<String> loadTaggedPaths() {
-        java.util.Set<String> set = new java.util.HashSet<>();
+        // Casse ignorée sous Windows : la bibliothèque contient des dossiers qui ne diffèrent que par la casse, et sans cela un fichier
+        // déjà tagué était retrouvé « inconnu » dès que son chemin était écrit autrement que dans l'historique.
+        java.util.Set<String> set = PathIdentity.newPathSet();
         if (conn == null) return set;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -564,7 +567,7 @@ public class MetadataCache implements AutoCloseable {
      * Remplace les N appels unitaires à getFileTagging() pendant le scan initial.
      */
     public synchronized java.util.Map<String, String> loadFileHistoryMap() {
-        java.util.Map<String, String> map = new java.util.HashMap<>();
+        java.util.Map<String, String> map = PathIdentity.newPathMap();
         if (conn == null) return map;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -720,7 +723,7 @@ public class MetadataCache implements AutoCloseable {
      * fichiers — même principe que loadFileHistoryMap()/loadTaggingHistoryMap().
      */
     public synchronized java.util.Map<String, ScanCacheEntry> loadScanCacheMap() {
-        java.util.Map<String, ScanCacheEntry> map = new java.util.HashMap<>();
+        java.util.Map<String, ScanCacheEntry> map = PathIdentity.newPathMap();
         if (conn == null) return map;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT path, mtime, size, json FROM scan_cache")) {
@@ -735,6 +738,51 @@ public class MetadataCache implements AutoCloseable {
     }
 
     /** Enregistre (ou met à jour) le TagInfo lu pour ce chemin, avec son empreinte mtime/size. */
+    // ── Identifications en attente d'enregistrement (survivent à une fermeture) ──────────────────────────────────────────────
+
+    /** Mémorise une identification pas encore enregistrée, avec l'empreinte (taille, date) du fichier au moment où elle a été faite. */
+    public synchronized void savePendingIdentified(String path, long size, long mtime, TagInfo ti) {
+        if (conn == null || path == null || ti == null) return;
+        String json;
+        try { json = mapper.writeValueAsString(ti); }
+        catch (Exception e) { LOG.fine("savePendingIdentified (sérialisation): " + e.getMessage()); return; }
+        writeWithRetry("savePendingIdentified", path, () -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT OR REPLACE INTO pending_identified(path,size,mtime,json,ts) VALUES(?,?,?,?,?)")) {
+                ps.setString(1, path);
+                ps.setLong(2, size);
+                ps.setLong(3, mtime);
+                ps.setString(4, json);
+                ps.setLong(5, System.currentTimeMillis());
+                ps.executeUpdate();
+            }
+        });
+    }
+
+    /** L'identification mémorisée pour ce fichier, SEULEMENT si le fichier est inchangé (même taille, même date) ; sinon {@code null}. */
+    public synchronized TagInfo loadPendingIdentified(String path, long size, long mtime) {
+        if (conn == null || path == null) return null;
+        try (PreparedStatement ps = conn.prepareStatement("SELECT size, mtime, json FROM pending_identified WHERE path=?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                if (rs.getLong(1) != size || rs.getLong(2) != mtime) return null; // le fichier a changé depuis : on ne s'y fie plus
+                return mapper.readValue(rs.getString(3), TagInfo.class);
+            }
+        } catch (Exception e) { LOG.fine("loadPendingIdentified: " + e.getMessage()); return null; }
+    }
+
+    /** Oublie l'identification en attente de ce fichier (appelé quand il vient d'être enregistré). */
+    public synchronized void deletePendingIdentified(String path) {
+        if (conn == null || path == null) return;
+        writeWithRetry("deletePendingIdentified", path, () -> {
+            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM pending_identified WHERE path=?")) {
+                ps.setString(1, path);
+                ps.executeUpdate();
+            }
+        });
+    }
+
     public synchronized void putScanCache(String path, long mtime, long size, TagInfo ti) {
         if (conn == null || path == null) return;
         String json;
@@ -835,6 +883,66 @@ public class MetadataCache implements AutoCloseable {
         if (conn == null) return;
         try (Statement st = conn.createStatement()) { st.execute("VACUUM"); }
         catch (Exception e) { LOG.warning("vacuum : " + e.getMessage()); }
+    }
+
+    /** Tables purement techniques : recherches réseau, pochettes, lecture des tags au scan. Régénérées toutes seules, sans perte de travail. */
+    public static final List<String> TECHNICAL_TABLES = List.of("lookups", "recordings", "image_cache", "scan_cache");
+    /** Tables PERSONNELLES : ce qui a été tagué, les corrections manuelles, l'annulation. Non régénérables. */
+    public static final List<String> PERSONAL_TABLES = List.of("tagging_history", "file_history", "corrections", "undo_history", "pending_identified");
+
+    /** Nombre de lignes de chaque table concernée (pour montrer ce qui va partir avant de confirmer). */
+    public synchronized java.util.Map<String, Long> countRows(boolean includePersonal) {
+        java.util.Map<String, Long> out = new java.util.LinkedHashMap<>();
+        if (conn == null) return out;
+        for (String t : tablesToClear(includePersonal)) {
+            try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT count(*) FROM \"" + t + "\"")) {
+                out.put(t, rs.next() ? rs.getLong(1) : 0L);
+            } catch (Exception e) { out.put(t, -1L); }
+        }
+        return out;
+    }
+
+    static List<String> tablesToClear(boolean includePersonal) {
+        List<String> all = new ArrayList<>(TECHNICAL_TABLES);
+        if (includePersonal) all.addAll(PERSONAL_TABLES);
+        return all;
+    }
+
+    /**
+     * Vide le cache d'un coup (puis récupère l'espace disque). {@code includePersonal=false} : cache technique seulement, l'historique
+     * de taguage reste. {@code true} : TOUTE la base. Ne supprime jamais le fichier : le schéma reste, l'app continue de fonctionner.
+     * À lancer hors EDT et sans aucun taguage/enregistrement en cours (VACUUM exige un accès exclusif).
+     *
+     * @return lignes supprimées par table
+     */
+    public synchronized java.util.Map<String, Integer> clearAll(boolean includePersonal) {
+        if (conn == null) return java.util.Map.of();
+        java.util.Map<String, Integer> removed = clearTables(conn, includePersonal);
+        try (Statement st = conn.createStatement()) {
+            st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        } catch (Exception e) { LOG.warning("clearAll (checkpoint) : " + e.getMessage()); }
+        vacuum();
+        return removed;
+    }
+
+    /** Cœur de {@link #clearAll}, sur une connexion donnée (testable sur une base en mémoire). Liste blanche de tables uniquement. */
+    static java.util.Map<String, Integer> clearTables(Connection c, boolean includePersonal) {
+        java.util.Map<String, Integer> removed = new java.util.LinkedHashMap<>();
+        try {
+            c.setAutoCommit(false);
+            for (String t : tablesToClear(includePersonal)) {
+                try (Statement st = c.createStatement()) {
+                    removed.put(t, st.executeUpdate("DELETE FROM \"" + t + "\""));
+                } catch (Exception e) { removed.put(t, -1); } // table absente : ignorée
+            }
+            c.commit();
+        } catch (Exception e) {
+            LOG.warning("clearTables : " + e.getMessage());
+            try { c.rollback(); } catch (Exception ignored) {}
+        } finally {
+            try { c.setAutoCommit(true); } catch (Exception ignored) {}
+        }
+        return removed;
     }
 
     /** Supprime tout l'historique personnel (action irréversible, demande confirmation dans l'UI). */

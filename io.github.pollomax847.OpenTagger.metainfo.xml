@@ -11,7 +11,7 @@
   <description>
     <p>
       OpenTagger identifie et complète automatiquement les métadonnées de vos fichiers audio
-      (MP3, FLAC, M4A, OGG) via une chaîne de reconnaissance audio (AcoustID, SongRec, AudD),
+      (MP3, FLAC, M4A, OGG) via une chaîne de reconnaissance audio (AcoustID, SongRec),
       enrichie par MusicBrainz, Discogs et Last.fm — une alternative libre à Jaikoz.
     </p>
     <p>Fonctionnalités principales :</p>
@@ -35,6 +35,9 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.9.19" date="2026-09-15" />
+    <release version="0.9.18" date="2026-09-08" />
+    <release version="" date="2026-09-08" />
     <release version="0.9.17" date="2026-09-03" />
     <release version="0.9.16" date="2026-08-26" />
     <release version="0.9.15" date="2026-08-20" />

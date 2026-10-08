@@ -44,6 +44,12 @@ public final class SelfHealthMonitor {
     // de nettement plus de temps de taguage réel entre deux redémarrages.
     private static final long   RSS_LIMIT_KB          = 12L * 1024 * 1024; // 12 Go
     private static final double MIN_AVAILABLE_PERCENT = 15.0;             // système
+    // Le déclencheur "mémoire système basse" n'a de sens que si CETTE appli en est une cause notable :
+    // earlyoom tue le plus gros consommateur, pas une appli de 200 Mo. Trouvé en direct le 2026-09-20 à 13:04 :
+    // Picard (8,2 Go de RSS, lancé en parallèle) faisait passer la mémoire disponible sous 15 % ; OpenTagger,
+    // à ~200 Mo, s'est "relancé préventivement" pour rien — sans libérer un octet côté système, en perdant son
+    // travail en cours (chaque redémarrage = rechargement complet de la bibliothèque).
+    private static final long   SYSTEM_LOW_MIN_OWN_RSS_KB = 3L * 1024 * 1024; // 3 Go
     // Jamais avant ce délai après démarrage — filet de sécurité contre une boucle de redémarrages
     // rapides si quelque chose cause un RSS élevé dès le lancement (ne devrait jamais arriver en
     // pratique, mais un correctif qui se retournerait en boucle infinie serait pire que le
@@ -66,7 +72,8 @@ public final class SelfHealthMonitor {
             long rssKb = readOwnRssKb();
             double availPct = readSystemAvailablePercent();
             boolean rssTooHigh = rssKb > 0 && rssKb > RSS_LIMIT_KB;
-            boolean systemLow  = availPct >= 0 && availPct < MIN_AVAILABLE_PERCENT;
+            boolean systemLow  = availPct >= 0 && availPct < MIN_AVAILABLE_PERCENT
+                    && rssKb >= SYSTEM_LOW_MIN_OWN_RSS_KB;
             if (rssTooHigh || systemLow) {
                 String reason = rssTooHigh
                         ? String.format("RSS appli = %.1f Go (limite %.1f Go)",
@@ -120,6 +127,18 @@ public final class SelfHealthMonitor {
             try { WorkerHub.get().cancelAll(); } catch (Exception ignored) {}
             try { Thread.sleep(2000); } catch (InterruptedException ignored) {} // laisser les écritures en cours se terminer
 
+            // Supervisé par systemd (INVOCATION_ID est posé pour tout processus d'une unité) : NE PAS relancer soi-même.
+            // Le processus fils créé ci-dessous appartiendrait au cgroup de l'unité, et systemd — voyant le processus
+            // principal se terminer en code 0 — arrête l'unité en tuant tout le cgroup, fils compris ET sans jamais la
+            // redémarrer (Restart=on-failure ne s'applique pas à un code 0) : c'est exactement ce qui s'est passé le
+            // 2026-09-20 à 13:04, l'appli est restée éteinte. Sortie en code non nul → systemd relance proprement
+            // après RestartSec (unité opentagger.service, StartLimitBurst protège d'une boucle).
+            if (System.getenv("INVOCATION_ID") != null) {
+                System.out.println("[OT] Sortie (code 75) — systemd relance l'appli (Restart=on-failure)");
+                System.out.flush();
+                System.exit(75);
+            }
+
             List<String> cmd = buildRelaunchCommand();
             System.out.println("[OT] Relance : " + String.join(" ", cmd));
             ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -156,6 +175,11 @@ public final class SelfHealthMonitor {
     private static File nextLogFile() {
         // Nom distinct (horodatage) — ne doit jamais écraser le journal du process qui vient de
         // se terminer, utile pour repérer après coup qu'un redémarrage automatique a eu lieu.
-        return new File("restart-auto-" + System.currentTimeMillis() + ".log");
+        // Dans ~/.opentagger/logs (comme la sortie console du lanceur ~/.local/bin/opentagger), pas
+        // dans le dossier courant : depuis que l'appli est lancée comme une appli normale (plus par
+        // systemd, 2026-09-28), le dossier courant est celui du bureau/menu, souvent $HOME.
+        File dir = new File(Config.configDir(), "logs");
+        dir.mkdirs();
+        return new File(dir, "restart-auto-" + System.currentTimeMillis() + ".log");
     }
 }
