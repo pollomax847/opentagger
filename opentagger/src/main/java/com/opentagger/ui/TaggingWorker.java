@@ -739,8 +739,13 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             boolean unverifiedFallback = MetadataCache.SOURCE_UNVERIFIED_TAGS.equals(lastFindTagsSource.get())
                     || MetadataCache.SOURCE_BANDCAMP.equals(lastFindTagsSource.get());
             if (best.score < seuil && !unverifiedFallback) {
+                boolean songRecOnly = MetadataCache.SOURCE_SONGREC.equals(lastFindTagsSource.get())
+                        && best.recordingMbid.isBlank();
                 skipForManualReview(entry, results, com.opentagger.model.SkipReason.LOW_SCORE,
-                        I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size())
+                        (songRecOnly
+                                ? I18n.t("Reconnu par SongRec (« %s – %s ») mais inconnu de MusicBrainz, et ni le nom du "
+                                        + "fichier ni les tags ne le confirment — à vérifier", best.artist, best.title)
+                                : I18n.t("Score %s%% < %s%% — %s candidat(s)", best.score, seuil, results.size()))
                                 + videoHintIfAny(fichier),
                         I18n.t("  SKIPPED score trop bas"));
                 return;
@@ -2626,9 +2631,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 }
             }
             if (!songRecDurationSuspect && songRecResultPlausible(fichier, sr)) {
-                // MB n'a rien enrichi : garder le résultat SongRec seul
-                sr.score = 85;
-                log(I18n.t("  SongRec seul (MB sans match): %s – %s", sr.artist, sr.title));
+                // MB n'a rien enrichi : garder le résultat SongRec seul. 85 (sous le seuil
+                // autocorrector.min_score=90 → revue) sauf si le fichier lui-même dit la même chose
+                // que Shazam — voir songRecConfirmedByFile().
+                String[] fn = parseFilename(fichier);
+                boolean confirmed = songRecConfirmedByFile(fn[0], fn[1], existingTags.artist, existingTags.title,
+                        sr.artist, sr.title);
+                sr.score = confirmed ? 90 : 85;
+                log(confirmed
+                        ? I18n.t("  SongRec seul (MB sans match), confirmé par le nom du fichier/les tags : %s – %s", sr.artist, sr.title)
+                        : I18n.t("  SongRec seul (MB sans match): %s – %s — ni le nom du fichier ni les tags ne le confirment, à vérifier",
+                                sr.artist, sr.title));
                 // Cascade centralisée (au lieu d'une copie inline qui divergerait silencieusement
                 // si TagEnrichment.enrichGenre change) — de toute façon re-noopée sans risque à
                 // l'étape enrichGenre() plus loin dans processEntry() si le genre est déjà rempli.
@@ -2741,6 +2754,76 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 TrackMatcher.titleSimilarity(t.toLowerCase(), String.valueOf(candTitle).toLowerCase()));
         return artistSim < 0.3 && titleSim < 0.6;
     }
+
+    /** Partie « titre » d'un titre : sans ce qui est entre parenthèses/crochets (remix, feat., version),
+     *  sans « feat. X » ni « - Radio Edit » final. Le titre complet s'il ne reste rien. */
+    static String coreTitle(String t) {
+        if (t == null) return "";
+        String s = t.replaceAll("\\s*[(\\[][^)\\]]*[)\\]]", " ")
+                .replaceAll("(?i)\\s+(feat\\.?|ft\\.?|featuring)\\s+.*$", "")
+                .replaceAll("\\s+-\\s+.*$", "")
+                .replaceAll("\\s{2,}", " ").trim();
+        return s.isEmpty() ? t.trim() : s;
+    }
+
+    /**
+     * Résultat SongRec que MusicBrainz ne connaît pas : le fichier dit-il la même chose que Shazam ?
+     * Le seuil 85→90 du 2026-09-19 (voir Config.minScoreAuto()) a fait passer TOUS ces résultats
+     * (score 85) en « Score trop bas » → Sans_correspondance, y compris quand le nom du fichier est
+     * exactement le morceau reconnu (« Miguel Campbell - Into You.mp3 » → Miguel Campbell – Into You,
+     * « 02 Red.mp3 » → Viken Arman – Red) : 0 accepté sur ~140 depuis, contre ~590 avant, alors que
+     * songrec-rename les renommait sans problème. Deux signaux indépendants qui concordent (l'audio via
+     * Shazam, le nom/les tags du fichier) suffisent ; Shazam seul, sans rien pour le confirmer ou contre
+     * le nom du fichier (téléchargement par titre tombé sur un autre morceau : « Wonderful Days » →
+     * CHARLS – Down Days), reste en revue.
+     */
+    static boolean songRecConfirmedByFile(String fnArtist, String fnTitle, String tagArtist, String tagTitle,
+                                          String srArtist, String srTitle) {
+        String sa = fold(srArtist), st = fold(srTitle);
+        // Nom de fichier sans séparateur (« 03-veust-ralenti_feat_slimka_grandbazaar ») : tout le nom
+        // contre « artiste titre ».
+        String whole = ((fnArtist == null ? "" : fnArtist) + " " + (fnTitle == null ? "" : fnTitle)).trim();
+        if (!whole.isEmpty() && !isGenericTag(whole)) {
+            String w = fold(whole);
+            if (TrackMatcher.titleSimilarity(w, sa + " " + st) >= 0.85
+                    || TrackMatcher.titleSimilarity(coreTitle(w), sa + " " + coreTitle(st)) >= 0.85) return true;
+        }
+        boolean titleOk = false;
+        for (String t : new String[] { fnTitle, tagTitle }) {
+            if (t == null || t.isBlank() || isGenericTag(t)) continue;
+            String tl = fold(t);
+            if (TrackMatcher.titleSimilarity(coreTitle(tl), coreTitle(st)) >= 0.85
+                    || TrackMatcher.titleSimilarity(tl, st) >= 0.85) titleOk = true;
+        }
+        if (!titleOk) return false;
+        boolean anyArtist = false;
+        for (String a : new String[] { fnArtist, tagArtist }) {
+            if (a == null || a.isBlank() || isGenericTag(a)) continue;
+            anyArtist = true;
+            String al = fold(a);
+            if (TrackMatcher.titleSimilarity(al, sa) >= 0.5 || wordsIncluded(al, sa)) return true;
+        }
+        return !anyArtist;   // titre identique et aucun artiste écrit dans le fichier pour le contredire
+    }
+
+    /** Minuscules sans accents, même forme Unicode des deux côtés (noms de fichiers en NFD : « méli-mélo »
+     *  du disque ≠ « méli-mélo » de Shazam octet pour octet). */
+    private static String fold(String s) {
+        if (s == null) return "";
+        return java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "").toLowerCase();
+    }
+
+    /** Tous les mots de l'un figurent dans l'autre (« Akvarium » ⊂ « Akvarium & Lee "Scratch" Perry »). */
+    private static boolean wordsIncluded(String a, String b) {
+        java.util.Set<String> wa = new java.util.HashSet<>(java.util.List.of(WORDS.split(a.trim())));
+        java.util.Set<String> wb = new java.util.HashSet<>(java.util.List.of(WORDS.split(b.trim())));
+        wa.remove(""); wb.remove("");
+        if (wa.isEmpty() || wb.isEmpty()) return false;
+        return wa.size() <= wb.size() ? wb.containsAll(wa) : wa.containsAll(wb);
+    }
+    private static final java.util.regex.Pattern WORDS =
+            java.util.regex.Pattern.compile("\\W+", java.util.regex.Pattern.UNICODE_CHARACTER_CLASS);
 
     private boolean songRecResultPlausible(File fichier, TagInfo candidate) {
         String[] fn = parseFilename(fichier);
@@ -3440,7 +3523,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * Tente de deviner artiste et titre depuis le nom de fichier.
      * Supporte "Artiste - Titre.mp3" et "Titre.mp3".
      */
-    private String[] parseFilename(File f) {
+    static String[] parseFilename(File f) {
         String name = f.getName().replaceFirst("\\.[^.]+$", "").trim(); // retirer extension
         // Retirer un suffixe "-temp-NNNNN" résiduel d'un outil externe — voir stripTrailingTempSuffix().
         name = stripTrailingTempSuffix(name);
@@ -3451,7 +3534,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         // laisserait sinon un résidu du long identifiant collé au titre.
         name = stripTrailingLongId(name);
         // Retirer résolution/bitrate en fin : "_320k", "(320)", "[HD]"...
-        name = name.replaceAll("(?i)[_\\s]*[\\[(]?\\d{2,3}k?[\\])]?$", "").trim();
+        // (?<!\\d) : ne jamais mordre dans une année finale — « First Stroke 2016 » devenait « First
+        // Stroke 2 » et « 9_11 2 (2008) » « 9 11 2 (20 » (repéré 2026-10-08 dans Sans_correspondance).
+        name = name.replaceAll("(?i)[_\\s]*[\\[(]?(?<!\\d)\\d{2,3}k?[\\])]?$", "").trim();
         // Underscores → espaces (ex: Baby_Don_T_Cry → Baby Don T Cry)
         name = name.replace('_', ' ').replaceAll("\\s{2,}", " ").trim();
         // Retirer préfixe numérique de piste : voir stripLeadingNumericPrefix() ci-dessus — la
