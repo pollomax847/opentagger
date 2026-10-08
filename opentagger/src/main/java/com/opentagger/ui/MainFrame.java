@@ -5149,6 +5149,8 @@ public class MainFrame extends JFrame {
                     refreshStats();
                     if (!w.isCancelled() && Config.get().bool("artwork.auto_after_save", false)) {
                         for (FileEntry fe : toSave) if (fe.status == FileEntry.Status.TAGGED) pendingArtwork.add(fe);
+                        // invokeLater : SAVE est encore enregistré dans WorkerHub à cet instant (voir onTaggingDone).
+                        SwingUtilities.invokeLater(this::flushArtworkIfDue);
                     }
                     // Ici, pas après "Tout tagger" : voir le commentaire sur chkAutoGroupCompilations
                     // (buildMenuTagger()) — les fichiers ne deviennent TAGGED (recordingMbid fiable)
@@ -5295,6 +5297,22 @@ public class MainFrame extends JFrame {
     private final java.util.Set<FileEntry> pendingArtwork = new java.util.LinkedHashSet<>();
 
     /**
+     * Passe pochettes/portraits par paquets, sans attendre la fin de la chaîne (2026-10-08) : sur une grosse bibliothèque
+     * où scan + taguage tournent des jours (Linux, MyBook), la « vraie fin de chaîne » (runPostTagCommand) n'arrivait
+     * jamais et aucune pochette/photo manquante n'était complétée. Dès {@code artwork.auto_batch} fichiers en attente
+     * (200 par défaut) et si rien d'incompatible ne tourne (le taguage, lui, est compatible), on lance la passe ; sinon
+     * les fichiers restent en attente pour le prochain enregistrement ou la fin de chaîne — jamais perdus.
+     */
+    private void flushArtworkIfDue() {
+        if (pendingArtwork.size() < Math.max(1, Config.get().num("artwork.auto_batch", 200))) return;
+        if (!WorkerHub.get().blockerLabels(WorkerHub.TaskKind.ARTWORK_COMPLETION).isEmpty()) return;
+        List<FileEntry> batch = new ArrayList<>(pendingArtwork);
+        pendingArtwork.clear();
+        System.out.println("[OT] Pochettes et photos manquantes : passe sur " + batch.size() + " fichier(s) enregistré(s).");
+        completeArtwork(batch, true, null);
+    }
+
+    /**
      * Complète les pochettes (par album) et portraits (par artiste) manquants des fichiers donnés, en arrière-plan.
      * Ne touche pas ce qui existe déjà. Appelé après l'enregistrement si {@code artwork.auto_after_save} est actif,
      * ou à la demande depuis Outils.
@@ -5318,6 +5336,9 @@ public class MainFrame extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     try {
                         ArtworkCompletionWorker.Summary s = w.get();
+                        System.out.println("[OT] Pochettes et photos manquantes : pochettes ajoutées " + s.coversAdded()
+                                + " (introuvables " + s.coversNotFound() + "), photos d'artistes ajoutées " + s.photosAdded()
+                                + " (introuvables " + s.photosNotFound() + ").");
                         setStatus(s.nothingToDo()
                                 ? I18n.t("Aucune pochette ni photo manquante.")
                                 : I18n.t("Pochettes ajoutées : %d (introuvables : %d) — photos d'artistes ajoutées : %d (introuvables : %d)",

@@ -239,6 +239,12 @@ public final class WorkerHub {
         // fichier enregistré pendant qu'il est complété repasse en IDENTIFIED et est réenregistré.
         if ((a == TaskKind.SAVE && b == TaskKind.INFO_COMPLETER)
                 || (a == TaskKind.INFO_COMPLETER && b == TaskKind.SAVE)) return false;
+        // ARTWORK_COMPLETION ∥ TAGGING (2026-10-08) : la passe pochettes/portraits ne touche que des fichiers déjà TAGUÉS
+        // (photographiés à sa création), le taguage n'identifie que des PENDING et n'écrit rien dans les fichiers —
+        // ensembles disjoints, même raisonnement que Enregistrer/Tagger ci-dessous. Sans ça, sur une grosse bibliothèque
+        // où le taguage tourne en continu (Linux : plusieurs jours), la passe ne trouvait jamais de créneau.
+        if ((a == TaskKind.ARTWORK_COMPLETION && b == TaskKind.TAGGING)
+                || (a == TaskKind.TAGGING && b == TaskKind.ARTWORK_COMPLETION)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction
