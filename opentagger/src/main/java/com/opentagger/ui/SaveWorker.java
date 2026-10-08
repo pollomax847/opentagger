@@ -171,7 +171,13 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
             boolean alreadyFlagged = sugg.stream().anyMatch(s -> s.contains("Pochette"));
             if (res.cover() == null && !alreadyFlagged) sugg.add(I18n.t("Pochette non trouvée"));
 
-            String message = res.duplicateOf() != null
+            // Même audio déjà présent à l'emplacement visé : réglé tout seul si les doublons automatiques sont actifs
+            // (2026-10-08, demande utilisateur : plus d'outil manuel) — voir AutoDedup.resolveAtSave().
+            AutoDedup.Resolution dup = res.duplicateOf() != null
+                    ? AutoDedup.resolveAtSave(res.finalPath(), res.duplicateOf(), ti, msg -> log("  " + msg)) : null;
+            String message = dup != null && dup.resolved()
+                    ? dup.message()
+                    : res.duplicateOf() != null
                     ? I18n.t("Enregistré — doublon de « %s », laissé en place (Outils → Doublons)", res.duplicateOf().getFileName())
                     : res.renameError() != null
                     ? I18n.t("Enregistré, renommage échoué : %s", res.renameError())
@@ -180,7 +186,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
                         : "";
 
             final TagInfo      writtenFinal = res.written();
-            final java.nio.file.Path pathFinal = res.finalPath();
+            final java.nio.file.Path pathFinal = dup != null && dup.resolved() ? dup.keptPath() : res.finalPath();
             final List<String> suggFinal = sugg;
             final boolean      durationMismatchMoved = res.durationMismatchMoved();
             SwingUtilities.invokeLater(() -> {

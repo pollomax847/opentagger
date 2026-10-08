@@ -75,6 +75,30 @@ public final class AutoDedup {
         return a > 0 && b > 0 && Math.abs(a - b) <= MAX_DURATION_GAP_SEC;
     }
 
+    private static String norm(String s) {
+        if (s == null) return "";
+        String n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKD).replaceAll("\\p{M}", "");
+        return n.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+
+    /** Le fichier est-il rangé là où ses tags le disent : son nom contient le titre et son dossier (hors « Disc 01 »)
+     *  le nom de l'album ? Comparaison tolérante (accents, ponctuation, casse, débuts seulement). */
+    static boolean wellPlaced(Path path, TagInfo tags) {
+        if (path == null || tags == null) return false;
+        String title = norm(tags.title), album = norm(tags.album);
+        if (title.isEmpty() || album.isEmpty()) return false;
+        String file = path.getFileName().toString();
+        int dot = file.lastIndexOf('.');
+        String stem = norm(dot > 0 ? file.substring(0, dot) : file);
+        Path dir = path.getParent();
+        if (dir == null || dir.getFileName() == null) return false;
+        String folder = dir.getFileName().toString();
+        if (folder.matches("(?i)^(disc|disque|cd)\\s*\\d+.*") && dir.getParent() != null && dir.getParent().getFileName() != null)
+            folder = dir.getParent().getFileName().toString();
+        return stem.contains(title.substring(0, Math.min(14, title.length())))
+                && norm(folder).contains(album.substring(0, Math.min(10, album.length())));
+    }
+
     /** Durée RÉELLE du fichier (lue au scan), pas celle annoncée par MusicBrainz. */
     static int fileDuration(FileEntry e) {
         if (e.current != null && e.current.durationSec > 0) return e.current.durationSec;
@@ -130,6 +154,12 @@ public final class AutoDedup {
                 return;
             }
             FileEntry best  = DuplicateDetector.bestInGroup(List.of(saved, other));
+            // Le fichier bien rangé gagne toujours (2026-10-08) : un fichier mal nommé (contenu ≠ nom, ex. « 12 - Deorro -
+            // Going Up.mp3 » qui contient en réalité Peter von Poehl) n'est pas renommé à l'enregistrement quand la
+            // destination existe déjà (même audio) — la qualité seule faisait alors jeter la copie BIEN rangée de l'album.
+            boolean savedPlaced = wellPlaced(pathOf(saved), saved.activeTags());
+            boolean otherPlaced = wellPlaced(pathOf(other), other.activeTags());
+            if (savedPlaced != otherPlaced) best = savedPlaced ? saved : other;
             FileEntry loser = best == saved ? other : saved;
             File keep = pathOf(best).toFile(), drop = pathOf(loser).toFile();
             long dropSize = drop.length();
@@ -152,6 +182,57 @@ public final class AutoDedup {
             });
         } catch (Exception ex) {
             note(journal, I18n.t("Doublon : erreur %s", ex.getMessage()));
+        }
+    }
+
+    /** Résultat de {@link #resolveAtSave} : {@code resolved} faux = rien fait (fichier laissé en place comme avant). */
+    public record Resolution(boolean resolved, Path keptPath, String message) {}
+
+    /**
+     * L'enregistrement n'a pas pu renommer {@code saved} parce que {@code existing} — à l'emplacement visé, donc bien rangé —
+     * contient déjà le même audio (DuplicateFileException, empreinte confirmée). Au lieu de laisser le fichier mal nommé en
+     * place « à relire dans Outils → Doublons » (2026-10-08 : 360 cas en une session, ex. « 02 - David Guetta - Memories.mp3 »
+     * contenant « Secoues Ton Boule »), on garde UNE copie, au bon endroit : la meilleure (format puis débit) ; si c'est la
+     * nouvelle, elle remplace l'ancienne à l'emplacement visé. L'autre part dans la corbeille d'OpenTagger. Appelé hors EDT.
+     */
+    public static Resolution resolveAtSave(Path saved, Path existing, TagInfo tags, Consumer<String> log) {
+        if (!Config.get().bool("duplicates.auto_trash_enabled", false)) return new Resolution(false, saved, "");
+        try {
+            File fs = saved.toFile(), fe = existing.toFile();
+            if (!fs.isFile() || !fe.isFile()) return new Resolution(false, saved, "");
+            int max = Config.get().num("duplicates.auto_trash_max_per_run", 50);
+            if (TRASHED.get() >= max) return new Resolution(false, saved, "");
+            FileEntry eNew = new FileEntry(fs, tags), eOld = new FileEntry(fe, tags);
+            // Ancienne copie d'abord : à qualité égale, c'est elle qui reste (déjà en place, rien à déplacer).
+            boolean newIsBetter = DuplicateDetector.bestInGroup(List.of(eOld, eNew)) == eNew
+                    && DuplicateDetector.qualityScore(eNew) > DuplicateDetector.qualityScore(eOld);
+            long dropSize;
+            File dropped;
+            if (newIsBetter) {
+                dropped = fe; dropSize = fe.length();
+                if (!TrashHelper.moveToTrash(fe)) return new Resolution(false, saved, "");
+                java.nio.file.Files.move(saved, existing);
+            } else {
+                dropped = fs; dropSize = fs.length();
+                if (!TrashHelper.moveToTrash(fs)) return new Resolution(false, saved, "");
+            }
+            TRASHED.incrementAndGet();
+            String what = newIsBetter ? "ancienne copie (moins bonne qualité)" : "copie mal rangée";
+            System.out.println("[OT] ♊ Doublon à l'enregistrement : " + what + " → corbeille OpenTagger : " + dropped + " — gardé : " + existing);
+            try {
+                String line = java.time.LocalDateTime.now() + "\t" + dropped + "\t" + dropSize + "\t" + existing + "\t"
+                        + existing.toFile().length() + "\t" + tags.artist + " – " + tags.title + "\n";
+                Files.writeString(Paths.get(Config.configDir(), "doublons.log"), line, StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (Exception ignored) {}
+            String msg = newIsBetter
+                    ? I18n.t("Doublon : meilleure qualité, remplace « %s » (ancienne copie → corbeille OpenTagger)", existing.getFileName())
+                    : I18n.t("Doublon de « %s » déjà bien rangé — cette copie mal nommée → corbeille OpenTagger", existing.getFileName());
+            log.accept(msg);
+            return new Resolution(true, existing, msg);
+        } catch (Exception ex) {
+            log.accept(I18n.t("Doublon : résolution automatique impossible (%s) — fichier laissé en place", ex.getMessage()));
+            return new Resolution(false, saved, "");
         }
     }
 
