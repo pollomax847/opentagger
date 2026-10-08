@@ -850,6 +850,16 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             best.artist      = stripYoutubeTopicSuffix(best.artist);
             best.albumArtist = stripYoutubeTopicSuffix(best.albumArtist);
 
+            // Album du DOSSIER prioritaire (2026-10-08, demande utilisateur) : une piste rangée dans « Hits Total 2013 » sortait
+            // taguée « Chilled » parce que l'enregistrement figure sur les deux et que l'identification avait choisi l'autre —
+            // 130 fichiers en une journée, et un fichier ainsi tagué peut même être déplacé hors de son dossier au renommage.
+            // Si l'enregistrement figure AUSSI sur une parution qui porte le nom du dossier, on prend celle-là. Avant la
+            // cohérence de groupe ci-dessous, pour que le reste du dossier s'aligne sur cette parution.
+            if (!best.recordingMbid.isBlank()) {
+                try { retargetToFolderRelease(best, fichier, entry.current.durationSec); }
+                catch (Exception ex) { log(I18n.t("  album du dossier : ignoré (%s)", ex.getMessage())); }
+            }
+
             // Cohérence de groupe (voir groupPinnedRelease) : cette piste vient de trouver une release
             // à haute confiance (score ≥ seuil ET durée cohérente, validé juste au-dessus) — la fixer
             // pour le reste du groupe si aucune autre piste ne l'a déjà fait. putIfAbsent : la première
@@ -2865,6 +2875,17 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (durKnown && FileEntry.isStrictDurationMismatch(fileDurationSec, t.lengthMs() / 1000)) continue;
             if (sim >= (durKnown ? 0.85 : 0.95) && sim > bestSim) { best = t; bestSim = sim; }
         }
+        if (best != null || fileDurationSec <= 0) return best;
+        // Repli (2026-10-08) : titres comparés SANS les précisions de version, et seulement si la durée est connue et
+        // cohérente — « Ces Soirées Là (radio Edit) » est la piste « Ces soirées-là » de la compilation du dossier.
+        String core = title.replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", " ").trim().toLowerCase();
+        if (core.length() < 3) return null;
+        for (MusicBrainzClient.ReleaseTrack t : tracks) {
+            if (t.lengthMs() <= 0 || FileEntry.isStrictDurationMismatch(fileDurationSec, t.lengthMs() / 1000)) continue;
+            String tc = t.title().replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", " ").trim().toLowerCase();
+            double sim = TrackMatcher.titleSimilarity(core, tc);
+            if (sim >= 0.9 && sim > bestSim) { best = t; bestSim = sim; }
+        }
         return best;
     }
 
@@ -2890,6 +2911,64 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 tl.album(), best.artist, best.title));
         return true;
     }
+
+    /** Nom d'album porté par le dossier du fichier (le dossier parent, ou le grand-parent si le parent est « Disc 01 »,
+     *  « CD2 »…), sans ce qui est entre parenthèses ou crochets (« (2014) », « [MP3 320] »). */
+    static String folderAlbumName(File fichier) {
+        File dir = fichier.getParentFile();
+        if (dir == null) return "";
+        String name = dir.getName();
+        if (name.matches("(?i)^(disc|disque|cd)\\s*\\d+.*") && dir.getParentFile() != null) name = dir.getParentFile().getName();
+        return name.replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", " ").trim();
+    }
+
+    /** Deux noms d'album désignent-ils la même parution ? Égaux une fois normalisés, ou l'un est le début de l'autre (noms de
+     *  dossier tronqués : « Footloose_ Original Soundtrack of the Pa »), ou très proches. */
+    static boolean sameAlbumName(String a, String b) {
+        String x = AlbumMatcher.norm(a), y = AlbumMatcher.norm(b);
+        if (x.isEmpty() || y.isEmpty()) return false;
+        if (x.equals(y)) return true;
+        String shorter = x.length() <= y.length() ? x : y, longer = shorter == x ? y : x;
+        if (shorter.length() >= 12 && longer.startsWith(shorter)) return true;
+        return TrackMatcher.titleSimilarity(x, y) >= 0.92;
+    }
+
+    /** Rattache {@code best} à la parution qui porte le nom du dossier, si son enregistrement y figure (voir l'appel). */
+    private boolean retargetToFolderRelease(TagInfo best, File fichier, int fileDurationSec) throws Exception {
+        String folder = folderAlbumName(fichier);
+        String fn = AlbumMatcher.norm(folder);
+        if (fn.length() < 4 || isGenericAlbumName(fn)) return false;
+        if (sameAlbumName(folder, best.album)) return false;
+        // 1) Parutions qui contiennent CET enregistrement ; 2) sinon parutions qui portent le nom du dossier (même chanson
+        //    sous un autre enregistrement MusicBrainz, cas le plus fréquent sur les compilations : 128 cas sur 144 mesurés),
+        //    où la piste est retrouvée par titre ET durée (pickTrackInPinnedRelease), jamais au hasard.
+        java.util.LinkedHashSet<String> candidates = new java.util.LinkedHashSet<>();
+        for (MusicBrainzClient.ReleaseRef ref : mb.releasesOfRecording(best.recordingMbid))
+            if (!ref.releaseMbid().isBlank() && sameAlbumName(folder, ref.title())) candidates.add(ref.releaseMbid());
+        if (candidates.isEmpty()) {
+            List<String> byTitle = folderReleaseCache.computeIfAbsent(fn, k -> {
+                List<String> ids = new ArrayList<>();
+                try {
+                    for (MusicBrainzClient.ReleaseRef ref : mb.searchReleasesByTitle(folder, 10))
+                        if (!ref.releaseMbid().isBlank() && sameAlbumName(folder, ref.title())) ids.add(ref.releaseMbid());
+                } catch (Exception ignored) {}
+                return ids.size() > 3 ? ids.subList(0, 3) : ids;
+            });
+            candidates.addAll(byTitle);
+        }
+        candidates.remove(best.releaseMbid);
+        for (String releaseMbid : candidates) {
+            String before = best.album;
+            if (retargetToPinnedRelease(best, releaseMbid, fileDurationSec)) {
+                log(I18n.t("  Album du dossier « %s » → parution « %s » retenue au lieu de « %s »", folder, best.album, before));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Parutions trouvées par le NOM d'un dossier (normalisé) — une seule recherche MusicBrainz par dossier et par lot. */
+    private final java.util.Map<String, List<String>> folderReleaseCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Release dominante d'un dossier : au moins 3 pistes ET au moins 60 % des pistes identifiées ; sinon {@code null}
      *  (dossier mélangé — compilations diverses — où rien ne doit être uniformisé). */

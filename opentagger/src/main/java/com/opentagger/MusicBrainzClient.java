@@ -765,6 +765,22 @@ public class MusicBrainzClient {
         return JsonText.of(best.path("id"), "").trim();
     }
 
+    /** Releases dont le TITRE correspond à {@code albumName} (recherche MusicBrainz, score ≥ 90), meilleures d'abord. */
+    public List<ReleaseRef> searchReleasesByTitle(String albumName, int limit) throws Exception {
+        if (albumName == null || albumName.isBlank()) return List.of();
+        String q = "release:\"" + escapeLucene(albumName) + "\"";
+        String url = mbBaseUrl() + "/release?query=" + URLEncoder.encode(q, StandardCharsets.UTF_8)
+                + "&limit=" + Math.max(1, Math.min(limit, 25)) + "&fmt=json";
+        HttpResponse<String> resp = getWithRetry(url);
+        if (resp == null) return List.of();
+        List<ReleaseRef> out = new ArrayList<>();
+        for (JsonNode rel : mapper.readTree(resp.body()).path("releases")) {
+            if (rel.path("score").asInt(0) < 90) continue;
+            out.add(new ReleaseRef(JsonText.of(rel.path("id"), "").trim(), JsonText.of(rel.path("title"), "").trim(), List.of()));
+        }
+        return out;
+    }
+
     // ── Identification d'album par TOC (façon "Albunack Disc IDs" de SongKong) ───────────────
 
     /** Une release qui contient un enregistrement donné, avec le nombre de pistes de chacun de ses disques. */
