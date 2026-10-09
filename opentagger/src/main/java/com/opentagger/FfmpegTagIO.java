@@ -114,6 +114,10 @@ public final class FfmpegTagIO {
             ti.track = trk[0]; ti.trackTotal = trk[1];
             String[] dsk = splitTotal(tag(tags, "disc"));
             ti.discNo = dsk[0]; ti.discTotal = dsk[1];
+            // Opus/Vorbis/APE/WV : le sous-titre du disque se perdait (TagRoundTripTest). Selon le conteneur, ffmpeg le relit sous « DISCSUBTITLE »
+            // ou sous « DISC_SUBTITLE » (observé sur Opus : la clé écrite DISCSUBTITLE ressort en disc_subtitle).
+            String ds = tag(tags, "DISCSUBTITLE");
+            ti.discSubtitle = ds.isBlank() ? tag(tags, "DISC_SUBTITLE") : ds;
 
             // Noms standards Vorbis-comment (convention Picard), pas les noms FieldKey internes
             // de jaudiotagger — ce sont ces clés-là qu'écrit write() ci-dessous, et celles que
@@ -372,6 +376,7 @@ public final class FfmpegTagIO {
             meta(cmd, "track", i.trackTotal.isBlank() ? i.track : i.track + "/" + i.trackTotal);
         if (!i.discNo.isBlank())
             meta(cmd, "disc", i.discTotal.isBlank() ? i.discNo : i.discNo + "/" + i.discTotal);
+        meta(cmd, "DISCSUBTITLE", i.discSubtitle);
 
         cmd.add(tmp.getAbsolutePath());
 

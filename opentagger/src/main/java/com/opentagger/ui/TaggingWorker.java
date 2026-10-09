@@ -713,7 +713,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // Un résultat dont le titre est lui-même générique (« Track 3 », « Piste 12 ») n'apprend rien : c'est typiquement un faux positif
             // (livre audio, enregistrement mal nommé) qui ne doit pas être écrit comme identification — vu en direct sur un CD gravé
             // (« Greg Wise & Saskia Reeves – Track 3 » pour un remix de Fairmont, score 100).
-            if (isGenericTag(best.title)) {
+            if (isPlaceholderTitle(best.title)) {
                 skipForManualReview(entry, results, com.opentagger.model.SkipReason.NOT_IDENTIFIED,
                         I18n.t("Identifié seulement comme « %s » (titre générique) — à vérifier", best.title) + videoHintIfAny(fichier),
                         I18n.t("  SKIPPED titre générique"));
@@ -2402,11 +2402,27 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     private static String tidyFilenameLike(String s) { return s.replace('_', ' ').replaceAll("\\s{2,}", " ").trim(); }
 
+    /**
+     * Vrai pour un titre qui n'est qu'un EMPLACEMENT (« Track 3 », « Piste 12 », « Titre », « Untitled »), jamais pour un vrai titre court :
+     * « 2U », « HP », « 2010 », « 1990 », « 江南 » sont de vrais titres. La règle plus large de {@link #isGenericTag} (trop court, chiffres…) est faite
+     * pour des TAGS à ne pas croire, pas pour refuser une identification : l'utiliser ici rejetait à tort ces morceaux.
+     */
+    static boolean isPlaceholderTitle(String s) {
+        if (s == null) return false;
+        String low = s.trim().toLowerCase(java.util.Locale.ROOT);
+        return low.matches("(track|piste|pista|spur|audiotrack|audio track|cd track|cdtrack|trk|titre|title|untitled|unknown|sans titre)[\\s_.-]*0*\\d{0,3}");
+    }
+
+    /** Retire la ponctuation de tête (« , », « - ») laissée par un découpage de nom de fichier. */
+    private static String trimLeadingPunct(String s) { return s.replaceFirst("^[\\s,;:\\-–—]+", "").trim(); }
+
     static String[] cleanFallbackIdentity(String artist, String title) {
         // Le préfixe est retiré AVANT de remplacer les « _ » (un « 04_ » est alors un séparateur explicite), et seulement s'il a la forme d'un
         // numéro de piste : « 1-04 », « 04 - », « 04. », « 04_ ». Jamais « 50 Cent », « 21 Guns » ou « 1-800-273-8255 » (chiffres suivis d'un simple espace).
-        String a = tidyFilenameLike(stripTrackPrefix(artist == null ? "" : artist));
-        String t = tidyFilenameLike(stripTrackPrefix(title == null ? "" : title));
+        String a = trimLeadingPunct(tidyFilenameLike(stripTrackPrefix(artist == null ? "" : artist)));
+        String t = trimLeadingPunct(tidyFilenameLike(stripTrackPrefix(title == null ? "" : title)));
+        // Un « artiste » qui contient un « = » (« Renderer Allowaccessjs=true ») est un morceau de configuration collé dans le tag, pas un nom : on ne l'écrit pas.
+        if (a.contains("=")) a = "";
         int sep = t.indexOf(" - ");
         if (sep > 0) {
             String head = t.substring(0, sep).trim(), rest = t.substring(sep + 3).trim();

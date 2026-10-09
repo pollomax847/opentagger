@@ -2,6 +2,8 @@ package com.opentagger.ui;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -28,6 +30,21 @@ public class FallbackIdentityTest {
     @Test public void aTitleThatSimplyContainsADashIsKeptWhenTheHeadIsNotTheArtist() {
         assertArrayEquals(new String[]{"Daft Punk", "Around the World - Radio Edit"},
                 TaggingWorker.cleanFallbackIdentity("Daft Punk", "Around the World - Radio Edit"));
+    }
+
+    @Test public void realShortTitlesAreNotPlaceholders() {
+        for (String s : new String[]{"2U", "HP", "2010", "1990", "江南", "Gazebo", "Track Star", "Piste Noire", "Hello"})
+            assertFalse(s, TaggingWorker.isPlaceholderTitle(s));
+    }
+
+    @Test public void realPlaceholdersAre() {
+        for (String s : new String[]{"Track 3", "track03", "Piste 12", "Track", "Titre", "Untitled", "Audio Track 07", "Sans titre"})
+            assertTrue(s, TaggingWorker.isPlaceholderTitle(s));
+    }
+
+    @Test public void leadingPunctuationAndConfigJunkAreNotWrittenAsArtist() {
+        assertArrayEquals(new String[]{"Kid Cudi vs Bad Bunny", "Titre"}, TaggingWorker.cleanFallbackIdentity("- Kid Cudi vs Bad Bunny", "Titre"));
+        assertArrayEquals(new String[]{"", "Afrobombas"}, TaggingWorker.cleanFallbackIdentity(", Renderer Allowaccessjs=true, Fautoupdatedisabled=false", "Afrobombas"));
     }
 
     @Test public void trackPrefixShapes() {
