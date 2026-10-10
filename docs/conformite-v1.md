@@ -5,7 +5,7 @@ Règle : **la 1.0.0 ne part que si chaque ligne ci-dessous est « OK »**. Une l
 
 Légende : ✅ preuve citée · 🟡 partiel (voir note) · ⬜ aucune preuve · 👤 nécessite l'utilisateur / une machine précise.
 
-Dernier état connu : **282 tests automatiques, 0 échec** (build du 2026-10-10). Les tests ne touchent ni
+Dernier état connu : **282 tests automatiques, 0 échec** (+ vérifications réelles listées ci-dessous) (build du 2026-10-10). Les tests ne touchent ni
 la bibliothèque ni `cache.db` (voir `feedback-isoler-user-home-tests`).
 
 ## 1. Identification
@@ -31,7 +31,7 @@ la bibliothèque ni `cache.db` (voir `feedback-isoler-user-home-tests`).
 | Aller-retour de tous les champs (MP3, M4A, FLAC, Opus, OGG) | `TagRoundTripTest` (ffmpeg requis) | ✅ | — |
 | Sous-titre de disque Opus | `TagRoundTripTest` (corrigé 2026-10-10) | ✅ | — |
 | Commentaires, play counts | `TagReaderCommentTest`, `PlayCountsTest` | ✅ | — |
-| Écriture M4A (AtomicParsley / réparation faststart) | pas de test dédié | ⬜ | essai réel M4A |
+| Écriture M4A (AtomicParsley / réparation faststart) | `TagRoundTripTest` écrit puis relit un vrai M4A au format iTunes (ipod) | ✅ | — |
 | Sauvegarde sur gros lot (3 500+ fichiers) | retours utilisateur + `SaveBacklogTest`, `DiskIoThrottleWindowsTest` | 🟡 | mesurer un lot complet après les correctifs de débit |
 
 ## 3. Bibliothèque
@@ -70,9 +70,9 @@ la bibliothèque ni `cache.db` (voir `feedback-isoler-user-home-tests`).
 | Niveaux d'automatisation | `AutomationModeTest` | ✅ | — |
 | Réglages cohérents, compte MusicBrainz | `SettingsConsistencyTest`, `SettingsMbAccountTest` | ✅ | — |
 | Vider cache / base | `CacheClearTest` | ✅ | — |
-| Préférences : bouton « Installer SongRec… » | aucun | ⬜ | ouvrir le dialogue sous Windows |
+| Préférences : bouton « Installer SongRec… » | dialogue construit en vrai (2026-10-10) : bouton et état « installé : … » présents | ✅ | le clic de téléchargement attend l'archive hébergée |
 | Parcours complet de chaque menu / dialogue | aucun test automatisé de l'interface | ⬜ | passe manuelle (liste à établir) |
-| Langue anglaise (`messages_en.json`) | aucun | ⬜ | beaucoup de textes récents sans traduction |
+| Langue anglaise (`messages_en.json`) | 703 textes traduits (placeholders et sauts de ligne vérifiés un à un par script) ; JSON relu par Jackson | 🟡 | ~137 textes construits par concaténation restent en français ; relecture par un anglophone |
 
 ## 6. Distribution
 
