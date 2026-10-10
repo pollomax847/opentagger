@@ -74,8 +74,32 @@ public class SongRecClient {
     /** Vrai si le dernier recognize() de CE thread n'a pas pu interroger Shazam (limite 429/pause). */
     public static boolean wasThrottled() { return Boolean.TRUE.equals(THROTTLED.get()); }
     public static void resetThrottled() { THROTTLED.remove(); }
-    public static boolean isPaused() { return System.currentTimeMillis() < pausedUntilMs; }
-    public static long pausedUntil() { return pausedUntilMs; }
+    public static boolean isPaused() { return System.currentTimeMillis() < pausedUntil(); }
+    public static long pausedUntil() { return Math.max(pausedUntilMs, budgetUntilMs); }
+
+    // ── Budget d'appels (2026-10-10) ──────────────────────────────────────────────────────────────────────────────────
+    // Journal réel : sur 884 fichiers, Shazam a répondu 429 après ~10 min de SongRec, et la pause réactive ci-dessus n'intervient
+    // qu'APRÈS la limite. On borne donc proactivement le nombre d'appels sur une fenêtre glissante de 10 min
+    // (songrec.max_calls_per_10min, 80 par défaut ≈ 1 appel / 7,5 s ; 0 = illimité). Passé ce budget, les fichiers restants sont
+    // « retentés plus tard » (même chemin que la limite 429), sans toucher Shazam : le lot continue avec les autres méthodes.
+    private static final long BUDGET_WINDOW_MS = 10 * 60_000L;
+    private static final java.util.ArrayDeque<Long> CALL_TIMES = new java.util.ArrayDeque<>();
+    private static volatile long budgetUntilMs = 0;
+
+    /** Réserve un appel Shazam. @return 0 si autorisé, sinon l'instant où la fenêtre se libère. */
+    static synchronized long reserveCall(long now, int maxPerWindow) {
+        if (maxPerWindow <= 0) return 0;
+        while (!CALL_TIMES.isEmpty() && now - CALL_TIMES.peekFirst() >= BUDGET_WINDOW_MS) CALL_TIMES.pollFirst();
+        if (CALL_TIMES.size() >= maxPerWindow) {
+            budgetUntilMs = CALL_TIMES.peekFirst() + BUDGET_WINDOW_MS;
+            return budgetUntilMs;
+        }
+        CALL_TIMES.addLast(now);
+        return 0;
+    }
+
+    /** Pour les tests : oublie l'historique d'appels. */
+    static synchronized void resetBudget() { CALL_TIMES.clear(); budgetUntilMs = 0; }
 
     private static synchronized void pause(String why) {
         long now = System.currentTimeMillis();
@@ -128,7 +152,11 @@ public class SongRecClient {
         // quasi nul, alors que iostat montrait le disque à 13-32% d'utilisation seulement (pas
         // 80-98% comme dans le scénario ayant motivé DiskIoThrottle à l'origine) — la vraie attente
         // était le réseau (Shazam), pas la tête de lecture.
-        String bin = Config.get().str("songrec.path", SONGREC_BIN);
+        String bin = SongRecInstaller.resolve();
+        if (bin == null) {
+            LAST_FAILURE_REASON.set("SongRec introuvable (Préférences → Audio)");
+            return null;
+        }
 
         // Récupérer la durée avec ffprobe pour choisir les offsets
         double duration = probeDuration(audioFile);
@@ -213,7 +241,7 @@ public class SongRecClient {
         // vit sous /tmp, et le binaire songrec appelé plus bas ne lit plus que lui + le réseau) :
         // le permis DiskIoThrottle est donc pris et rendu ICI seulement, pas autour de l'appel
         // songrec qui suit (voir le commentaire de recognize() ci-dessus).
-        if (offsetSec > 0 || duration > 120) {
+        if (offsetSec > 0 || duration > 120 || !decodesNatively(audioFile)) {
             tmp = Files.createTempFile("ot_shazam_", ".wav");
             java.util.concurrent.Semaphore gate = DiskIoThrottle.acquireFor(audioFile);
             try {
@@ -258,6 +286,13 @@ public class SongRecClient {
                 if (isPaused()) {
                     THROTTLED.set(true);
                     LAST_FAILURE_REASON.set("SongRec en pause (Shazam limite les requêtes)");
+                    return null;
+                }
+                long budgetFree = reserveCall(System.currentTimeMillis(), Config.get().num("songrec.max_calls_per_10min", 80));
+                if (budgetFree > 0) {
+                    THROTTLED.set(true);
+                    LAST_FAILURE_REASON.set("budget d'appels Shazam atteint (" + Config.get().num("songrec.max_calls_per_10min", 80)
+                        + " / 10 min) — reprise à " + new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date(budgetFree)));
                     return null;
                 }
                 // Espacement minimal entre deux appels Shazam (songrec.min_interval_ms).
@@ -334,16 +369,16 @@ public class SongRecClient {
         return -1;
     }
 
+    /** Vrai si un binaire SongRec utilisable existe : celui des Préférences, celui du PATH, ou — sous
+     *  Windows — celui que l'application installe elle-même (voir {@link SongRecInstaller}). */
     public static boolean isAvailable() {
-        // SongRec n'a pas de build Windows officiel → désactivé silencieusement
-        if (System.getProperty("os.name","").toLowerCase().contains("win")) return false;
-        String bin = Config.get().str("songrec.path", SONGREC_BIN);
-        try {
-            Process p = new ProcessBuilder(bin, "--version")
-                    .redirectErrorStream(true).start();
-            p.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
-            return p.waitFor() == 0;
-        } catch (Exception e) { return false; }
+        return SongRecInstaller.isAvailable();
+    }
+
+    /** Formats que SongRec décode seul ; tout le reste passe d'abord par ffmpeg (m4a/aac/wma/opus…). */
+    private static boolean decodesNatively(File f) {
+        String n = f.getName().toLowerCase(Locale.ROOT);
+        return n.endsWith(".mp3") || n.endsWith(".wav") || n.endsWith(".flac") || n.endsWith(".ogg");
     }
 
     private TagInfo parse(String json) throws Exception {

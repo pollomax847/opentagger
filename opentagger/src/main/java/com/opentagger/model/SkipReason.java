@@ -12,5 +12,8 @@ public enum SkipReason {
     // rien — voir son commentaire d'appel).
     GROUP_MISMATCH,
     // Non reconnu comme musique ET ressemble à un épisode de podcast (voir PodcastDetector) : à confirmer dans « Tagger comme podcast… ».
-    PODCAST_PROBABLE
+    PODCAST_PROBABLE,
+    // L'audio lui-même ne se décode pas (flux AAC/MP3 abîmé, téléchargement incomplet, ex. iTunes Match) : aucune méthode
+    // d'identification ne peut aboutir, le fichier est à retélécharger — voir TaggingWorker.unreadableProblem().
+    UNREADABLE
 }

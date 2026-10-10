@@ -344,6 +344,20 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "shazam-retry"); t.setDaemon(true); return t; });
 
+    /** Erreur de décodage si l'audio du fichier est abîmé, sinon null. Ne coûte un redécodage complet que pour un fichier
+     *  qu'aucune méthode n'a reconnu ET dont l'extrait envoyé à Shazam n'a pas pu être extrait par ffmpeg : un fichier sain
+     *  mais simplement inconnu ne paie rien de plus. */
+    private static String unreadableProblem(java.io.File fichier) {
+        String why = com.opentagger.SongRecClient.lastFailureReason();
+        if (why == null || !why.contains("ffmpeg")) return null;
+        java.util.concurrent.Semaphore gate = com.opentagger.DiskIoThrottle.acquireFor(fichier);
+        try {
+            return new com.opentagger.AudioTranscoder().decodeProblem(fichier.toPath());
+        } finally {
+            com.opentagger.DiskIoThrottle.release(gate);
+        }
+    }
+
     private static void scheduleShazamRetry(FileEntry entry) {
         int n = SHAZAM_RETRIES.merge(entry, 1, Integer::sum);
         if (n > 2) return;
@@ -685,6 +699,14 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     entry.message = I18n.t("Pas encore vérifié par Shazam (limite de requêtes) — retenté plus tard");
                     log(I18n.t("  SKIPPED (Shazam limité, à retenter)"));
                     scheduleShazamRetry(entry);
+                    return;
+                }
+                String decodeError = unreadableProblem(fichier);
+                if (decodeError != null) {
+                    entry.status     = FileEntry.Status.SKIPPED;
+                    entry.skipReason = com.opentagger.model.SkipReason.UNREADABLE;
+                    entry.message = I18n.t("Audio illisible (téléchargement incomplet ?) — à retélécharger") + " [" + decodeError + "]";
+                    log(I18n.t("  SKIPPED (audio illisible : %s)", decodeError));
                     return;
                 }
                 entry.status     = FileEntry.Status.SKIPPED;

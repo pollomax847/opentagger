@@ -486,6 +486,7 @@ public class MainFrame extends JFrame {
         });
 
         autoInstallFpcalcIfMissing();
+        autoInstallSongRecIfMissing();
         startSaveBacklogMeter();
         // Vue (liste/arborescence/Cover Flow) choisie à la dernière session — après
         // buildMainSplit() (table/coverFlowPanel doivent exister) ; ViewMode.FLAT (déjà la valeur
@@ -1025,6 +1026,25 @@ public class MainFrame extends JFrame {
                 System.out.println("[OT] fpcalc : installation automatique impossible — " + ex.getMessage());
             }
         }, "fpcalc-auto-install");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** SongRec n'a pas de version Windows officielle : on installe une fois, en arrière-plan, la compilation
+     *  embarquée par OpenTagger. Linux : SongRec vient du gestionnaire de paquets, rien à faire ici.
+     *  Coupable via {@code songrec.auto_install=false}. */
+    private void autoInstallSongRecIfMissing() {
+        if (!com.opentagger.SongRecInstaller.isWindows()) return;
+        if (!Config.get().bool("songrec.auto_install", true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                if (com.opentagger.SongRecInstaller.isAvailable()) return;
+                String path = com.opentagger.SongRecInstaller.download(msg -> {});
+                SwingUtilities.invokeLater(() -> setStatus(I18n.t("SongRec installé automatiquement : %s", path)));
+            } catch (Exception ex) {
+                System.out.println("[OT] SongRec : installation automatique impossible — " + ex.getMessage());
+            }
+        }, "songrec-auto-install");
         t.setDaemon(true);
         t.start();
     }

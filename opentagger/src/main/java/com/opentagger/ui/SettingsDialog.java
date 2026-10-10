@@ -1727,10 +1727,40 @@ public class SettingsDialog extends JDialog {
         JPanel songrecRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         songrecRow.add(new JLabel(I18n.t("<html><i>SongRec (Shazam open-source) :</i></html>")));
         songrecRow.add(apiLinkBtn("https://github.com/marin-m/SongRec#installation"));
+        if (com.opentagger.SongRecInstaller.isWindows()) {
+            JLabel lblSongRec = new JLabel();
+            Runnable refresh = () -> {
+                String p = com.opentagger.SongRecInstaller.resolve();
+                lblSongRec.setText(p != null ? "✓ " + I18n.t("installé : %s", p) : "✗ " + I18n.t("non installé"));
+            };
+            refresh.run();
+            JButton btnInstall = new JButton(I18n.t("Installer SongRec…"));
+            btnInstall.addActionListener(e -> {
+                btnInstall.setEnabled(false);
+                new SwingWorker<String, String>() {
+                    @Override protected String doInBackground() throws Exception {
+                        return com.opentagger.SongRecInstaller.download(this::publish);
+                    }
+                    @Override protected void process(java.util.List<String> c) { lblSongRec.setText(c.get(c.size() - 1)); }
+                    @Override protected void done() {
+                        btnInstall.setEnabled(true);
+                        try { get(); }
+                        catch (Exception ex) {
+                            Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                            JOptionPane.showMessageDialog(SettingsDialog.this, I18n.t("Erreur : %s", c.getMessage()),
+                                I18n.t("Installation SongRec"), JOptionPane.ERROR_MESSAGE);
+                        }
+                        refresh.run();
+                    }
+                }.execute();
+            });
+            songrecRow.add(btnInstall);
+            songrecRow.add(lblSongRec);
+        }
         GridBagConstraints src = new GridBagConstraints();
         src.gridx = 0; src.gridy = rows.length; src.gridwidth = 3;
         src.anchor = GridBagConstraints.WEST; src.insets = new Insets(4, 8, 2, 8);
-        songrecRow.setVisible(com.opentagger.SongRecClient.isAvailable());
+        songrecRow.setVisible(com.opentagger.SongRecClient.isAvailable() || com.opentagger.SongRecInstaller.isWindows());
         inner.add(songrecRow, src);
 
         JPanel audioSection = new JPanel(new BorderLayout(0, 4));

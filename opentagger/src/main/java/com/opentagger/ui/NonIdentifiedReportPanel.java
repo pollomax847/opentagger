@@ -91,6 +91,7 @@ public class NonIdentifiedReportPanel extends JPanel {
             case NETWORK_ERROR    -> I18n.t("Erreur réseau (coupure/timeout) — probablement à réessayer");
             case GROUP_MISMATCH   -> I18n.t("Contredit la release des autres pistes du dossier — revue manuelle");
             case PODCAST_PROBABLE -> I18n.t("Podcast probable — à tagger via « Tagger comme podcast… »");
+            case UNREADABLE       -> I18n.t("Audio illisible (téléchargement incomplet ?) — à retélécharger");
         };
     }
 

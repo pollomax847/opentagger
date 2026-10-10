@@ -199,6 +199,46 @@ public class AudioTranscoder {
      * le disque, ni fichier de sortie ni risque d'écraser quoi que ce soit) et on ne considère le
      * fichier illisible que si CETTE tentative séparée échoue AUSSI avec une signature reconnue.
      */
+    /** Première ligne d'erreur de décodage de {@code source} (redécodage complet vers le muxer « null », rien n'est
+     *  écrit), ou null si le fichier se décode proprement — ou si ffmpeg est indisponible/trop lent : dans le doute, on
+     *  ne prétend pas que le fichier est abîmé. Sert à dire « audio illisible » plutôt que « Non identifié » : aucun
+     *  moteur d'identification ne peut reconnaître un son qu'on ne sait pas décoder (téléchargement incomplet, etc.). */
+    public String decodeProblem(Path source) {
+        if (!Files.isRegularFile(source)) return null;   // absent/déplacé : ce n'est pas un problème d'audio
+        try {
+            List<String> cmd = List.of(ffmpegPath, "-v", "error",
+                    "-i", source.toAbsolutePath().toString(), "-f", "null", "-");
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try (InputStream is = p.getInputStream()) { is.transferTo(out); }
+                catch (Exception ignored) {}
+            });
+            if (!p.waitFor(2, TimeUnit.MINUTES)) { p.destroyForcibly(); return null; }
+            try { drain.join(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            return firstDecodeError(out.toString(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Première ligne de la sortie ffmpeg qui trahit un flux indécodable, ou null. */
+    static String firstDecodeError(String ffmpegOutput) {
+        if (ffmpegOutput == null) return null;
+        for (String line : ffmpegOutput.split("\\R")) {
+            String l = line.toLowerCase();
+            if (l.contains("no such file") || l.contains("permission denied")) return null;   // accès, pas audio
+            if (l.contains("invalid data") || l.contains("error while decoding") || l.contains("error submitting")
+                    || l.contains("channel element") || l.contains("moov atom") || l.contains("decode error")
+                    || l.contains("could not find codec") || l.contains("error opening input")
+                    || l.contains("end of file") || l.contains("truncated"))
+                return line.strip();
+        }
+        return null;
+    }
+
     public boolean verifyUnreadable(Path source) {
         try {
             List<String> cmd = List.of(ffmpegPath, "-v", "error",
