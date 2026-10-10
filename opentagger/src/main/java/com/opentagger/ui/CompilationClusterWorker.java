@@ -125,6 +125,12 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
             MusicBrainzClient.ReleaseTracklist tracklist =
                     fetchTracklistCached(cache, match.releaseId(), mb);
 
+            // « Greatest Hits » de blink-182, « Rêves » de Grégory Lemarchal : MusicBrainz les type « Compilation » alors qu'ils
+            // sont d'UN artiste — leur imposer « Various Artists » comme artiste d'album serait faux. Seule une release dont
+            // l'artiste est lui-même « Various Artists » est une compilation au sens d'iTunes/Plex. Sans tracklist (réseau),
+            // on ne propose rien plutôt que de deviner.
+            if (tracklist == null || !isVariousArtists(tracklist.albumArtist())) return null;
+
             TagInfo updated = entry.result.copy();
             updated.album         = match.releaseTitle();
             updated.albumArtist   = Config.get().vaName();
@@ -177,6 +183,13 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
         }
     }
 
+    static boolean isVariousArtists(String albumArtist) {
+        if (albumArtist == null) return false;
+        String a = albumArtist.trim().toLowerCase(Locale.ROOT);
+        return a.contains("various artists") || a.equals("va") || a.contains("artistes variés")
+            || a.contains("artistes varies") || a.equals(Config.get().vaName().trim().toLowerCase(Locale.ROOT));
+    }
+
     private static boolean isCompilationType(MusicBrainzClient.RecordingRelease r) {
         return r.secondaryTypes() != null
                 && r.secondaryTypes().stream().anyMatch(t -> t.equalsIgnoreCase("Compilation"));
@@ -194,6 +207,12 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
         boolean hasStudio = releases.stream().anyMatch(r -> !isCompilationType(r));
         if (!hasStudio) return releases;
         String cur = currentAlbum == null ? "" : currentAlbum.trim();
+        // Même titre qu'un album/single NON compilation où figure aussi l'enregistrement (« Let's Groove », « Boule de
+        // flipper » : une compilation homonyme existe) : le fichier est très probablement dans celui-là, on n'y touche pas.
+        final String curKey = cur;
+        boolean sameTitleStudio = !cur.isEmpty() && releases.stream()
+                .anyMatch(r -> !isCompilationType(r) && r.releaseTitle().trim().equalsIgnoreCase(curKey));
+        if (sameTitleStudio) cur = "";
         List<MusicBrainzClient.RecordingRelease> kept = new ArrayList<>();
         for (MusicBrainzClient.RecordingRelease r : releases) {
             if (isCompilationType(r) && !cur.isEmpty() && r.releaseTitle().trim().equalsIgnoreCase(cur)) kept.add(r);

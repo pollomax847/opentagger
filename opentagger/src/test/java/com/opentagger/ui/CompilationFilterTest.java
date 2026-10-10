@@ -27,6 +27,21 @@ public class CompilationFilterTest {
     }
 
     @Test
+    public void onlyVariousArtistsReleasesCountAsCompilations() {
+        assertTrue(CompilationClusterWorker.isVariousArtists("Various Artists"));
+        assertTrue(CompilationClusterWorker.isVariousArtists("Artistes variés"));
+        assertTrue(!CompilationClusterWorker.isVariousArtists("blink-182"));
+        assertTrue(!CompilationClusterWorker.isVariousArtists(""));
+        assertTrue(!CompilationClusterWorker.isVariousArtists(null));
+    }
+
+    @Test
+    public void homonymCompilationOfAStudioAlbumIsNotProposed() {
+        var all = List.of(rel("Let's Groove", false), rel("Let's Groove", true));
+        assertTrue(CompilationClusterWorker.onlyPlausibleCompilations(all, "Let's Groove", new String[0]).isEmpty());
+    }
+
+    @Test
     public void fileAlreadyInACompilationKeepsThatOne() {
         var all = List.of(rel("Real Things", false), rel("Best Hits", true), rel("Other Mix", true));
         var kept = CompilationClusterWorker.onlyPlausibleCompilations(all, "best hits", new String[0]);
