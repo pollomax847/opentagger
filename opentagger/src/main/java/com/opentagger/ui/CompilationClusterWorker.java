@@ -118,7 +118,8 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
         try {
             List<MusicBrainzClient.RecordingRelease> releases =
                     fetchRecordingReleasesCached(cache, recordingMbid, mb);
-            MusicBrainzClient.RecordingRelease match = findSeriesMatch(releases, seriesNames);
+            MusicBrainzClient.RecordingRelease match = findSeriesMatch(
+                    onlyPlausibleCompilations(releases, entry.result.album, seriesNames), seriesNames);
             if (match == null) return null;
 
             MusicBrainzClient.ReleaseTracklist tracklist =
@@ -174,6 +175,41 @@ public class CompilationClusterWorker extends SwingWorker<List<CompilationCluste
             if (logLine != null) logLine.accept(errMsg);
             return null;
         }
+    }
+
+    private static boolean isCompilationType(MusicBrainzClient.RecordingRelease r) {
+        return r.secondaryTypes() != null
+                && r.secondaryTypes().stream().anyMatch(t -> t.equalsIgnoreCase("Compilation"));
+    }
+
+    /** Une piste présente sur une compilation n'en est pas pour autant « de » cette compilation : sur un
+     *  échantillon réel (400 enregistrements du cache), 65 % figurent sur au moins une compilation alors
+     *  qu'ils ont aussi leur album d'origine — les proposer tous réécrirait l'album d'un titre rangé dans
+     *  son album studio (« Revoir un printemps » → « Meth &amp; Red in da House »). On ne garde donc les
+     *  compilations que si (a) l'enregistrement n'existe QUE sur des compilations, ou (b) l'album actuel du
+     *  fichier est déjà l'une d'elles (on ne fait alors que compléter artiste d'album / MBID), ou (c) la
+     *  release correspond à une série saisie par l'utilisateur dans les Réglages (choix explicite). */
+    static List<MusicBrainzClient.RecordingRelease> onlyPlausibleCompilations(
+            List<MusicBrainzClient.RecordingRelease> releases, String currentAlbum, String[] seriesNames) {
+        boolean hasStudio = releases.stream().anyMatch(r -> !isCompilationType(r));
+        if (!hasStudio) return releases;
+        String cur = currentAlbum == null ? "" : currentAlbum.trim();
+        List<MusicBrainzClient.RecordingRelease> kept = new ArrayList<>();
+        for (MusicBrainzClient.RecordingRelease r : releases) {
+            if (isCompilationType(r) && !cur.isEmpty() && r.releaseTitle().trim().equalsIgnoreCase(cur)) kept.add(r);
+            else if (!isCompilationType(r) && matchesSeries(r, seriesNames)) kept.add(r);
+        }
+        return kept;
+    }
+
+    private static boolean matchesSeries(MusicBrainzClient.RecordingRelease r, String[] seriesNames) {
+        String title = r.releaseTitle().toLowerCase(Locale.ROOT);
+        String group = r.releaseGroupTitle().toLowerCase(Locale.ROOT);
+        for (String series : seriesNames) {
+            String s = series.trim().toLowerCase(Locale.ROOT);
+            if (!s.isBlank() && (title.contains(s) || group.contains(s))) return true;
+        }
+        return false;
     }
 
     /** Cherche, parmi TOUTES les releases marquées "Compilation" par MusicBrainz lui-même
