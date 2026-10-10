@@ -14,7 +14,7 @@ la bibliothèque ni `cache.db` (voir `feedback-isoler-user-home-tests`).
 |---|---|---|---|
 | AcoustID / fpcalc | journal réel du 2026-10-10 (centaines de `score=100, AcoustID`) ; `AudioTagAuditTest` | ✅ | — |
 | MusicBrainz (choix de release, album d'origine) | `AlbumMatcherTest`, `PinnedReleaseRetargetTest`, `ReleaseProofTest` | ✅ | — |
-| SongRec sous Windows | essai réel 2026-10-10 : 5 identifiés sur ~44 fichiers « download » (le reste illisible) ; `SongRecInstallerTest` | 🟡 | taux sur un échantillon de fichiers **sains** ; héberger l'archive (👤 accord de publication) |
+| SongRec sous Windows | essai réel 2026-10-10 : sur 8 fichiers « download » **sains** (décodage vérifié), 2 reconnus, 6 inconnus de Shazam ; `SongRecInstallerTest` | 🟡 | échantillon trop petit (8) pour un taux fiable : la grande majorité des « download » échantillonnés étaient absents ou illisibles ; héberger l'archive (👤 accord de publication) |
 | SongRec sous Linux | aucun essai | 👤 | machine Linux |
 | Budget d'appels Shazam (80 / 10 min) | `SongRecBudgetTest` (logique) | 🟡 | seuil réel de Shazam inconnu : à mesurer sur un gros lot |
 | Fichier au son illisible → « Audio illisible » | `DecodeProblemTest` (octets aléatoires signalés, mp3 sain et fichier absent jamais) + essai réel sur un m4a abîmé | 🟡 | la branche dans `TaggingWorker` elle-même n'a pas de test |
@@ -72,7 +72,7 @@ la bibliothèque ni `cache.db` (voir `feedback-isoler-user-home-tests`).
 | Vider cache / base | `CacheClearTest` | ✅ | — |
 | Préférences : bouton « Installer SongRec… » | dialogue construit en vrai (2026-10-10) : bouton et état « installé : … » présents | ✅ | le clic de téléchargement attend l'archive hébergée |
 | Parcours complet de chaque menu / dialogue | aucun test automatisé de l'interface | ⬜ | passe manuelle (liste à établir) |
-| Langue anglaise (`messages_en.json`) | 703 textes traduits (placeholders et sauts de ligne vérifiés un à un par script) ; JSON relu par Jackson | 🟡 | ~137 textes construits par concaténation restent en français ; relecture par un anglophone |
+| Langue anglaise (`messages_en.json`) | 819 textes traduits dont 116 info-bulles concaténées (placeholders, sauts de ligne et balises HTML vérifiés un à un par script) ; JSON relu par Jackson | ✅ | relecture par un anglophone souhaitable |
 
 ## 6. Distribution
 
