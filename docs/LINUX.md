@@ -122,6 +122,9 @@ Si le disque n'est pas trouvé automatiquement, l'application demande le dossier
 
 ## 6. À vérifier sur une vraie machine Linux avant la 1.0
 
+Lancez d'abord `bash docs/linux-check.sh` (depuis la racine du dépôt) : il contrôle l'environnement (Java, ffmpeg, fpcalc, SongRec, CD,
+détection d'audio abîmé) et lance les tests automatiques, sans toucher à votre bibliothèque ni à `~/.opentagger`.
+
 Ces points sont couverts par des tests automatiques, mais **n'ont pas tourné sur un Linux réel** pendant la préparation de la 0.9.39 :
 
 - [ ] Lancement par le paquet apt et par `install-opentagger.sh` (icône, `.desktop`, clic droit).
