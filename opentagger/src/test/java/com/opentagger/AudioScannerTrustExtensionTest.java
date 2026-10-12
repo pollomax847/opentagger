@@ -32,6 +32,19 @@ public class AudioScannerTrustExtensionTest {
                 "Artiste/Album/d.opus", "Artiste/Album/e.dsf", "Bizarre.mp3"), fast);
     }
 
+    @Test public void sidecarsAreNotStatted_butDottedFoldersAreStillWalked() throws Exception {
+        Path root = Files.createTempDirectory("otscan");
+        Files.createDirectories(root.resolve("St. Germain/Tourist Vol. 2"));
+        for (String n : new String[]{"01 Rose Rouge.mp3", "01 Rose Rouge.lrc", "cover.JPG", "folder.png", "rip.log", "._x"}) {
+            Files.createFile(root.resolve("St. Germain/Tourist Vol. 2").resolve(n));
+        }
+        assertEquals(List.of("St. Germain/Tourist Vol. 2/01 Rose Rouge.mp3"), names(root, true));
+        org.junit.Assert.assertTrue(AudioScanner.isSidecar("cover.JPG"));
+        org.junit.Assert.assertTrue(AudioScanner.isSidecar("._01 Rose Rouge.mp3"));
+        org.junit.Assert.assertFalse(AudioScanner.isSidecar("Tourist Vol. 2"));
+        org.junit.Assert.assertFalse(AudioScanner.isSidecar("St. Germain"));
+    }
+
     private static List<String> names(Path root, boolean trust) {
         List<File> found = new ArrayList<>();
         new AudioScanner().scan(root.toFile(), found::add, () -> false, trust);

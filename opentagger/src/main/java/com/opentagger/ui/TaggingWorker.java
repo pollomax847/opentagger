@@ -358,10 +358,23 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         }
     }
 
+    // Prochain créneau libre pour un fichier « retenté plus tard ». Avant (2026-10-12) : tous les fichiers reportés
+    // repartaient au même instant (fin de pause + 30 s), épuisaient aussitôt le budget Shazam, et après 2 essais
+    // restaient « Shazam limité » pour toute la session — 862 fichiers au bout de 17 h. Désormais ils repassent un par
+    // un, au rythme que Shazam accepte (SongRecClient.retrySpacingMs()).
+    private static final java.util.concurrent.atomic.AtomicLong NEXT_RETRY_SLOT = new java.util.concurrent.atomic.AtomicLong();
+
+    static long nextRetrySlot(long now, long pausedUntil, long spacing) {
+        long earliest = Math.max(now + 60_000L, pausedUntil + 30_000L);
+        return NEXT_RETRY_SLOT.updateAndGet(prev -> Math.max(earliest, prev + spacing));
+    }
+
     private static void scheduleShazamRetry(FileEntry entry) {
         int n = SHAZAM_RETRIES.merge(entry, 1, Integer::sum);
-        if (n > 2) return;
-        long delay = Math.max(60_000L, com.opentagger.SongRecClient.pausedUntil() - System.currentTimeMillis() + 30_000L);
+        if (n > 5) return;
+        long now = System.currentTimeMillis();
+        long delay = nextRetrySlot(now, com.opentagger.SongRecClient.pausedUntil(),
+                com.opentagger.SongRecClient.retrySpacingMs()) - now;
         RETRY_TIMER.schedule(() -> SwingUtilities.invokeLater(() -> {
             if (entry.status != FileEntry.Status.SKIPPED
                     || entry.skipReason != com.opentagger.model.SkipReason.NETWORK_ERROR) return;

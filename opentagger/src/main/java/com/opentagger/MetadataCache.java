@@ -827,7 +827,9 @@ public class MetadataCache implements AutoCloseable {
         }
     }
 
-    public void purgeExpired() {
+    // synchronized : appelé au début de chaque lot pendant qu'un scan lit loadTaggedPaths() sur la même connexion
+    // — « loadTaggedPaths: stmt pointer is closed » vu en direct le 2026-10-11 (ensemble « déjà tagué » perdu).
+    public synchronized void purgeExpired() {
         if (conn == null) return;
         long cutoff = System.currentTimeMillis() - ttlMs;
         try (PreparedStatement ps1 = conn.prepareStatement("DELETE FROM recordings WHERE ts<?");

@@ -18,6 +18,23 @@ public class AudioScanner {
         ".aiff", ".aif", ".mpc", ".mp4", ".dsf", ".dff"
     );
 
+    /** Fichiers annexes qu'on trouve à côté des morceaux (pochettes, paroles synchronisées, listes, rapports
+     *  de rip) : en mode trustAudioExtension, jamais un stat() pour eux. Mesuré 2026-10-12 : sur MyBook,
+     *  ~33 annexes pour 39 morceaux (« Magic System »), chacune un aller-retour par ntfs-3g (FUSE, un seul
+     *  fil) déjà saturé par la lecture des fichiers — le parcours y tournait encore après 17 h 30. */
+    private static final Set<String> SIDECAR_EXTENSIONS = Set.of(
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff",
+        ".lrc", ".txt", ".nfo", ".log", ".cue", ".m3u", ".m3u8", ".pls", ".pdf",
+        ".ini", ".db", ".sfv", ".md5", ".ffp", ".accurip", ".url", ".json", ".xml"
+    );
+
+    static boolean isSidecar(String name) {
+        if (name.startsWith("._")) return true;   // AppleDouble macOS, toujours un fichier
+        String lower = name.toLowerCase();
+        int dot = lower.lastIndexOf('.');
+        return dot > 0 && SIDECAR_EXTENSIONS.contains(lower.substring(dot));
+    }
+
     public List<File> scan(File dossier) {
         List<File> fichiers = new ArrayList<>();
         scan(dossier, fichiers::add);
@@ -68,6 +85,8 @@ public class AudioScanner {
             if (cancelled.getAsBoolean()) return;
             if (trustAudioExtension && isAudio(f)) {
                 onFound.accept(f);
+            } else if (trustAudioExtension && isSidecar(f.getName())) {
+                continue;
             } else if (f.isDirectory()) {
                 if (isExcluded(f)) continue;
                 scanRecursif(f, onFound, cancelled, trustAudioExtension);

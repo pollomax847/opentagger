@@ -98,6 +98,15 @@ public class SongRecClient {
         return 0;
     }
 
+    /** Écart entre deux fichiers « retentés plus tard » : le rythme que Shazam accepte (budget, ou espacement
+     *  minimal s'il est plus lent), pour ~2 appels par fichier. */
+    public static long retrySpacingMs() {
+        int max = Config.get().num("songrec.max_calls_per_10min", 80);
+        long perCall = Math.max(max > 0 ? BUDGET_WINDOW_MS / max : 0,
+                Config.get().num("songrec.min_interval_ms", 2500) + extraIntervalMs);
+        return 2 * perCall;
+    }
+
     /** Pour les tests : oublie l'historique d'appels. */
     static synchronized void resetBudget() { CALL_TIMES.clear(); budgetUntilMs = 0; }
 
@@ -136,8 +145,12 @@ public class SongRecClient {
         }
         if (isPaused()) {
             THROTTLED.set(true);
-            LAST_FAILURE_REASON.set("SongRec en pause jusqu'à "
-                + new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date(pausedUntilMs))
+            // pausedUntil() et non pausedUntilMs : c'est le plus souvent le budget d'appels qui bloque, et
+            // l'ancien message affichait l'heure de fin d'une pause déjà passée (« jusqu'à 19:27 » à 19:46).
+            LAST_FAILURE_REASON.set((budgetUntilMs > pausedUntilMs
+                    ? "budget d'appels Shazam atteint — reprise à "
+                    : "SongRec en pause jusqu'à ")
+                + new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date(pausedUntil()))
                 + " (Shazam limite les requêtes)");
             return null;
         }

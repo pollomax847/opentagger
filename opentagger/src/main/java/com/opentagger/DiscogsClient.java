@@ -247,6 +247,7 @@ public class DiscogsClient {
     private JsonNode fetchArtistDetail(long id, MetadataCache cache) throws Exception {
         String cacheKey = "discogs:artist:" + id;
         String cachedJson = cache.getLookup(cacheKey);
+        if (MISSING.equals(cachedJson)) return null;
         if (cachedJson != null) return mapper.readTree(cachedJson);
 
         String url = BASE_URL + "/artists/" + id;
@@ -258,10 +259,14 @@ public class DiscogsClient {
                 .GET()
                 .build();
         HttpResponse<String> response = sendWithThrottleRetry(request);
+        // 404 : artiste supprimé/fusionné sur Discogs mais encore renvoyé par la recherche — mémorisé, sinon
+        // redemandé à chaque morceau (jusqu'à 16 fois le même artiste en une session, 2026-10-12).
+        if (response != null && response.statusCode() == 404) cache.putLookup(cacheKey, MISSING);
         if (response == null || response.statusCode() != 200) return null;
         cache.putLookup(cacheKey, response.body());
         return mapper.readTree(response.body());
     }
+    private static final String MISSING = "{\"_missing\":true}";
 
     private String normalizeArtistName(String s) {
         return s.trim().toLowerCase().replaceAll("\\s*\\(\\d+\\)$", "");
