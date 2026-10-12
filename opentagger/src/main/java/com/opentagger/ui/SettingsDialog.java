@@ -51,6 +51,7 @@ public class SettingsDialog extends JDialog {
     private JComboBox<String> cmbDefaultMask;
     private JCheckBox  chkAutoRename;
     private JCheckBox  chkDeleteEmptyDirs;
+    private JCheckBox  chkMergeFolderVariants;
     private JCheckBox  chkFollowLog;
     private JCheckBox  chkUseLibraryRoot;
     private JTextField tfLibraryRoot;
@@ -1467,6 +1468,12 @@ public class SettingsDialog extends JDialog {
             "Quand un renommage déplace un fichier vers un nouveau dossier, l'ancien dossier peut se "
             + "retrouver vide (plus aucun fichier dedans) — cocher ceci le supprime automatiquement "
             + "plutôt que de laisser traîner des dossiers vides dans la bibliothèque."));
+        chkMergeFolderVariants = new JCheckBox(I18n.t("Fusionner les dossiers en double (« Jean-Louis Aubert » / « Jean‐louis Aubert » / « Robbie_Williams »…) à chaque scan"));
+        chkMergeFolderVariants.setToolTipText(I18n.t(
+            "Avant de parcourir un dossier, regroupe ses sous-dossiers qui ne diffèrent que par la casse, le trait "
+            + "d'union, l'apostrophe, un « _ » à la place d'une espace ou l'encodage des accents. Simples renommages "
+            + "sur le même disque ; un fichier déjà présent sous le même nom n'est jamais écrasé. Journal dans "
+            + "~/.opentagger/rangement/."));
         chkFollowLog       = new JCheckBox(I18n.t("Garder le panneau Journal synchronisé sur le fichier en cours de traitement"));
         chkFollowLog.setToolTipText(I18n.t(
             "Fait défiler automatiquement le panneau Journal (en bas de la fenêtre principale) pour "
@@ -1609,8 +1616,8 @@ public class SettingsDialog extends JDialog {
 
         JPanel p = form(
             new String[]{"", "Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
-            new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs,
+                    "", "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
+            new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkMergeFolderVariants,
                     chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
                     chkTrashShortDuration, chkAutoTrashDuplicates, chkVideoAutoRecover},
             "Renommage automatique des fichiers");
@@ -2413,6 +2420,7 @@ public class SettingsDialog extends JDialog {
                                                      cmbDefaultMask.getItemCount() - 1));
         chkAutoRename     .setSelected(cfg.bool("rename.auto_enabled",       false));
         chkDeleteEmptyDirs.setSelected(cfg.bool("rename.delete_empty_dirs",  true));
+        chkMergeFolderVariants.setSelected(cfg.mergeFolderVariants());
         chkFollowLog      .setSelected(cfg.bool("rename.follow_log",         true));
         cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
@@ -2655,6 +2663,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rename.default_mask",           String.valueOf(cmbDefaultMask.getSelectedIndex()));
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
         p.setProperty("rename.delete_empty_dirs",      String.valueOf(chkDeleteEmptyDirs.isSelected()));
+        p.setProperty("rename.merge_folder_variants",  String.valueOf(chkMergeFolderVariants.isSelected()));
         p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());

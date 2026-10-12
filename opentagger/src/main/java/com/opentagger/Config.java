@@ -184,6 +184,8 @@ public class Config {
     public int    defaultRenameMask()       { return num ("rename.default_mask",       3); }
     public boolean autoRenameEnabled()      { return bool("rename.auto_enabled",       false); }
     public boolean deleteEmptyDirsAfterRename()    { return bool("rename.delete_empty_dirs",    true); }
+    /** Avant le parcours d'un dossier scanné : fusionner ses sous-dossiers presque identiques (voir LibraryTidy). */
+    public boolean mergeFolderVariants()           { return bool("rename.merge_folder_variants", true); }
     public String libraryRoot()                    { return str ("rename.library_root",            ""); }
     // Case à cocher UI qui grise/dégrise tfLibraryRoot dans SettingsDialog (voir bindGate()) —
     // défaut true pour ne rien changer au comportement des utilisateurs ayant déjà configuré ce

@@ -1999,6 +1999,28 @@ public class MainFrame extends JFrame {
         return l;
     }
 
+    /** Nouveau chemin de {@code p} si lui-même ou l'un de ses dossiers a été déplacé (voir LibraryTidy), sinon null. */
+    static Path relocated(Path p, java.util.Map<Path, Path> moves) {
+        Path tail = null;
+        for (Path cur = p; cur != null; cur = cur.getParent()) {
+            Path to = moves.get(cur);
+            if (to != null) return tail == null ? to : to.resolve(tail);
+            Path name = cur.getFileName();
+            if (name == null) break;
+            tail = tail == null ? name : name.resolve(tail);
+        }
+        return null;
+    }
+
+    /** Lignes du tableau dont le fichier vient d'être déplacé par le rangement : suivre le déplacement (EDT). */
+    private void relocateEntries(java.util.Map<Path, Path> moves) {
+        for (FileEntry e : tableModel.allEntries()) {
+            Path cur = (e.currentPath != null ? e.currentPath : e.file.toPath()).toAbsolutePath();
+            Path q = relocated(cur, moves);
+            if (q != null) { e.currentPath = q; tableModel.update(e); }
+        }
+    }
+
     private void refreshStats() {
         // Chargement paresseux de l'historique undo persistant (voir UndoManager) — au plus tôt
         // possible sans dépendre d'un callback "scan terminé" spécifique, mais pas avant que la
@@ -4318,6 +4340,29 @@ public class MainFrame extends JFrame {
                 // Au plus 2 marches récursives à la fois, tous dossiers de démarrage confondus —
                 // voir phase1Semaphore. Bloque CE thread de fond (pas l'EDT) jusqu'à son tour.
                 phase1Semaphore.acquire();
+                // Rangement (2026-10-12) : sous-dossiers presque identiques fusionnés AVANT le parcours, pour que
+                // le scan voie déjà les bons chemins — voir LibraryTidy.
+                if (Config.get().mergeFolderVariants()) {
+                    try {
+                        java.util.Map<Path, Path> moves = new java.util.LinkedHashMap<>();
+                        com.opentagger.LibraryTidy.Result tr = com.opentagger.LibraryTidy.mergeFolderVariants(
+                                dir.toPath(), moves::put, this::isCancelled);
+                        if (tr.groups() > 0) {
+                            System.out.println("[OT] Rangement de \"" + dir + "\" : " + tr.groups()
+                                    + " dossier(s) en plusieurs exemplaires regroupé(s) — " + tr.moved() + " élément(s) déplacé(s), "
+                                    + tr.leftInPlace().size() + " laissé(s) en place (même nom déjà présent) — journal : ~/.opentagger/rangement/");
+                        }
+                        if (!moves.isEmpty()) {
+                            for (Path p : new ArrayList<>(alreadyInTable)) {
+                                Path q = relocated(p, moves);
+                                if (q != null) alreadyInTable.add(q);
+                            }
+                            SwingUtilities.invokeLater(() -> relocateEntries(moves));
+                        }
+                    } catch (Exception ex) {
+                        System.out.println("[OT] ⚠ Rangement de \"" + dir + "\" interrompu : " + ex.getMessage());
+                    }
+                }
                 // Détacher le RowSorter seulement maintenant que ce scan a VRAIMENT son permis —
                 // pas pendant qu'il patientait en file, ce qui aurait inutilement prolongé la
                 // période où le filtre est indisponible pour les autres scans déjà en cours.
