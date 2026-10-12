@@ -186,12 +186,16 @@ public class FileRenamer {
         String chemin = evaluate(maskIndex, info);
         if (chemin.isBlank()) return null;
         chemin = capPathLength(rootDir.toString(), chemin, ext, IS_WINDOWS);
+        chemin = resolveExistingDirs(rootDir, chemin);
 
         Path cible = rootDir.resolve(chemin + ext).normalize();
         if (cible.equals(fichier)) return null;
 
         synchronized (lockFor(cible)) {
-            if (cible.getParent() != null) Files.createDirectories(cible.getParent());
+            if (cible.getParent() != null) {
+                Files.createDirectories(cible.getParent());
+                rememberDirs(rootDir, cible.getParent());
+            }
 
             // Résolution de collision
             if (Files.exists(cible)) {
@@ -322,6 +326,7 @@ public class FileRenamer {
      *  @return null si rien à faire (déjà au bon nom, ou variante de collision déjà occupée par ce
      *          fichier lui-même) — même contrat que rename(). */
     public static Path previewTarget(Path fichier, Path rootDir, String cheminSansExt, String ext) {
+        cheminSansExt = resolveExistingDirs(rootDir, cheminSansExt);
         Path cible = rootDir.resolve(cheminSansExt + ext).normalize();
         if (cible.equals(fichier)) return null;
         if (Files.exists(cible)) {
@@ -333,6 +338,96 @@ public class FileRenamer {
             if (Files.exists(cible)) return null; // 98 collisions — rename() lèvera la vraie erreur si on applique quand même
         }
         return cible;
+    }
+
+    // ── Dossiers existants « presque identiques » ────────────────────────────
+    // Trouvé 2026-10-12 sur MyBook : 2 271 dossiers d'artistes en plusieurs exemplaires (Jean-Louis Aubert ×4 :
+    // « Jean-Louis Aubert », « Jean‐Louis Aubert » avec le trait d'union typographique de MusicBrainz, « Jean‐louis
+    // Aubert »…), car le masque recréait un dossier dès que la casse, le trait d'union, l'apostrophe ’, un « _ » à la
+    // place d'une espace ou la forme Unicode (é composé/décomposé) différait d'un dossier déjà là. Un nouveau fichier
+    // rejoint maintenant le dossier existant au lieu d'en créer une variante.
+
+    /** Clé de comparaison d'un nom de dossier : forme Unicode, casse, tirets, apostrophes, « _ » et espaces ignorés.
+     *  Les accents restent significatifs (« Anais » et « Anaïs » ne sont pas fusionnés). */
+    static String folderKey(String s) {
+        String t = java.text.Normalizer.normalize(s == null ? "" : s, java.text.Normalizer.Form.NFC)
+                .replaceAll("[\u2010\u2011\u2012\u2013\u2212]", "-")
+                .replaceAll("[\u2018\u2019\u02BC`´]", "'")
+                .replace('_', ' ')
+                .replaceAll("\\s+", " ").trim()
+                .replaceAll("[. ]+$", "");
+        return t.toLowerCase(Locale.ROOT);
+    }
+
+    /** Entre deux variantes déjà présentes, celle à réutiliser : sans « _ », pas tout en majuscules/minuscules,
+     *  trait d'union et apostrophe simples, forme Unicode composée. */
+    static String preferredName(String a, String b) {
+        return nameScore(b) > nameScore(a) ? b : a;
+    }
+    private static int nameScore(String n) {
+        int sc = 0;
+        if (n.indexOf('_') < 0) sc += 8;
+        if (!n.equals(n.toUpperCase(Locale.ROOT)) && !n.equals(n.toLowerCase(Locale.ROOT))) sc += 4;
+        if (!n.matches(".*[\\u2010\\u2011\\u2019].*")) sc += 2;
+        if (java.text.Normalizer.isNormalized(n, java.text.Normalizer.Form.NFC)) sc += 1;
+        return sc;
+    }
+
+    private static final Map<Path, Map<String, String>> DIR_INDEX = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Map<Path, Long> DIR_INDEX_TS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long DIR_INDEX_TTL_MS = 10 * 60_000L;
+
+    /** Noms présents dans {@code parent}, par clé — une seule lecture du dossier toutes les 10 min (la racine MyBook
+     *  compte ~31 000 dossiers d'artistes ; pas un stat() par entrée). */
+    private static Map<String, String> dirIndex(Path parent) {
+        long now = System.currentTimeMillis();
+        Map<String, String> idx = DIR_INDEX.get(parent);
+        Long ts = DIR_INDEX_TS.get(parent);
+        if (idx != null && ts != null && now - ts < DIR_INDEX_TTL_MS) return idx;
+        if (!Files.isDirectory(parent)) return null;
+        Map<String, String> fresh = new java.util.concurrent.ConcurrentHashMap<>();
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(parent)) {
+            for (Path p : ds) {
+                String n = p.getFileName().toString();
+                fresh.merge(folderKey(n), n, FileRenamer::preferredName);
+            }
+        } catch (IOException | DirectoryIteratorException e) {
+            return null;
+        }
+        DIR_INDEX.put(parent, fresh);
+        DIR_INDEX_TS.put(parent, now);
+        return fresh;
+    }
+
+    /** Remplace chaque dossier de {@code chemin} (tous les segments sauf le nom de fichier) par la variante déjà présente
+     *  sur le disque, s'il y en a une. */
+    static String resolveExistingDirs(Path rootDir, String chemin) {
+        if (rootDir == null || chemin == null || chemin.indexOf('/') < 0) return chemin;
+        String[] parts = chemin.split("/");
+        StringBuilder out = new StringBuilder();
+        Path cur = rootDir;
+        for (int i = 0; i < parts.length; i++) {
+            String seg = parts[i];
+            if (i < parts.length - 1 && cur != null) {
+                Map<String, String> idx = dirIndex(cur);
+                String found = idx == null ? null : idx.get(folderKey(seg));
+                if (found != null && !found.equals(seg) && Files.isDirectory(cur.resolve(found))) seg = found;
+                cur = idx == null ? null : cur.resolve(seg);   // dossier pas encore créé : rien plus bas
+            }
+            if (out.length() > 0) out.append('/');
+            out.append(seg);
+        }
+        return out.toString();
+    }
+
+    /** Ajoute les dossiers tout juste créés aux index déjà en mémoire (sinon une variante serait recréée à côté
+     *  pendant les 10 min de validité de l'index). */
+    private static void rememberDirs(Path rootDir, Path dir) {
+        Path root = rootDir.normalize();
+        for (Path d = dir.normalize(); d != null && d.getParent() != null && d.startsWith(root) && !d.equals(root); d = d.getParent()) {
+            Map<String, String> idx = DIR_INDEX.get(d.getParent());
+            if (idx != null) idx.putIfAbsent(folderKey(d.getFileName().toString()), d.getFileName().toString());
+        }
     }
 
     // ── Évaluation JavaScript (Nashorn) ───────────────────────────────────────
