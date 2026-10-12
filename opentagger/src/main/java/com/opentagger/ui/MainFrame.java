@@ -2689,7 +2689,7 @@ public class MainFrame extends JFrame {
                     // priorité, sinon dossier scanné) pour un comportement cohérent partout.
                     Path curPath   = entry.currentPath != null ? entry.currentPath : entry.file.toPath();
                     Path oldParent = curPath.getParent();
-                    String libRoot = Config.get().libraryRoot();
+                    String libRoot = Config.get().effectiveLibraryRoot();
                     Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
                             ? java.nio.file.Paths.get(libRoot)
                             : (entry.scanRoot != null ? entry.scanRoot : oldParent);
@@ -6186,7 +6186,7 @@ public class MainFrame extends JFrame {
                             if (maskIndex >= 0) {
                                 Path curPath   = fichier.toPath();
                                 Path oldParent = curPath.getParent();
-                                String libRoot = Config.get().libraryRoot();
+                                String libRoot = Config.get().effectiveLibraryRoot();
                                 Path root = (!libRoot.isBlank() && Files.isDirectory(java.nio.file.Paths.get(libRoot)))
                                         ? java.nio.file.Paths.get(libRoot)
                                         : (e.scanRoot != null ? e.scanRoot : oldParent);

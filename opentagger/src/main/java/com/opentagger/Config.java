@@ -189,6 +189,10 @@ public class Config {
     // défaut true pour ne rien changer au comportement des utilisateurs ayant déjà configuré ce
     // dossier avant l'ajout de cette case.
     public boolean useLibraryRootEnabled()         { return bool("rename.use_library_root",       true); }
+    /** Racine où ranger les fichiers à l'enregistrement : vide si la case « Utiliser un dossier racine de bibliothèque
+     *  dédié » est décochée. Jusqu'au 2026-10-12, seul l'import de CD respectait cette case : tous les enregistrements
+     *  déplaçaient quand même vers rename.library_root (MyBook), même décochée. */
+    public String  effectiveLibraryRoot()          { return useLibraryRootEnabled() ? libraryRoot() : ""; }
     public String podcastLibraryRoot()             { return str ("podcast.library_root",            ""); }
     public boolean skippedMoveEnabled()            { return bool("skipped.move_enabled",         false); }
     /** Dossier des fichiers non identifiés. Vide dans les réglages = « <racine de la bibliothèque>\_À vérifier\Non identifiés »

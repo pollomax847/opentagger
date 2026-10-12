@@ -208,7 +208,7 @@ public class BatchProcessor {
                         // bibliothèque configurée en priorité, sinon le dossier scanné — sans ça
                         // (avant ce correctif) chaque fichier utilisait son propre dossier parent,
                         // imbriquant la nouvelle arborescence au lieu de réorganiser à la racine.
-                        String libRoot = Config.get().libraryRoot();
+                        String libRoot = Config.get().effectiveLibraryRoot();
                         Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
                                 ? java.nio.file.Paths.get(libRoot)
                                 : (scanRoot != null ? scanRoot : oldParent);

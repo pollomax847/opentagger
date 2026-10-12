@@ -84,7 +84,7 @@ public class PodcastWorker extends SwingWorker<Void, String> {
                     try {
                         java.nio.file.Path oldParent = writePath.getParent();
                         String podcastRoot = com.opentagger.Config.get().podcastLibraryRoot();
-                        String libRoot      = com.opentagger.Config.get().libraryRoot();
+                        String libRoot      = com.opentagger.Config.get().effectiveLibraryRoot();
                         java.nio.file.Path root =
                             (!podcastRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(podcastRoot)))
                                 ? java.nio.file.Paths.get(podcastRoot)

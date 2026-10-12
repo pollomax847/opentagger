@@ -349,7 +349,7 @@ public final class TagEnrichment {
             try {
                 Path curPath   = fichier.toPath();
                 Path oldParent = curPath.getParent();
-                String libRoot = Config.get().libraryRoot();
+                String libRoot = Config.get().effectiveLibraryRoot();
                 Path root = (!libRoot.isBlank() && java.nio.file.Files.isDirectory(java.nio.file.Paths.get(libRoot)))
                         ? java.nio.file.Paths.get(libRoot)
                         : (scanRoot != null ? scanRoot : oldParent);
