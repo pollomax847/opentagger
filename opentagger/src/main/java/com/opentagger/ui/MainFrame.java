@@ -7584,10 +7584,24 @@ public class MainFrame extends JFrame {
         // intelligente"). Retour utilisateur : "recherche audio en double [...] fige l'application".
         SwingWorker<DuplicateDetector.DetectionResult, Void> w = new SwingWorker<>() {
             @Override protected DuplicateDetector.DetectionResult doInBackground() {
-                List<DuplicateDetector.DuplicateGroup> groups = DuplicateDetector.detect(all);
-                java.util.Map<DuplicateDetector.DuplicateGroup, FileEntry> bestByGroup = DuplicateDetector.computeBestMap(groups);
-                java.util.Map<FileEntry, Long> sizesByFile = DuplicateDetector.computeSizes(groups);
-                return new DuplicateDetector.DetectionResult(groups, bestByGroup, sizesByFile);
+                // Vraies copies seulement (même dossier / même album rangé deux fois) — voir
+                // DuplicateDetector.detectCopies() pour le pourquoi (2026-10-12).
+                DuplicateDetector.CopyScan scan = DuplicateDetector.detectCopies(all);
+                List<DuplicateDetector.DuplicateGroup> groups = new ArrayList<>(scan.groups());
+                java.util.Map<String, Integer> perFolder = new java.util.HashMap<>();
+                for (FileEntry fe : all) {
+                    java.io.File pf = (fe.currentPath != null ? fe.currentPath.toFile() : fe.file).getParentFile();
+                    if (pf != null) perFolder.merge(pf.getPath(), 1, Integer::sum);
+                }
+                java.util.Map<DuplicateDetector.DuplicateGroup, FileEntry> bestByGroup = new java.util.LinkedHashMap<>();
+                java.util.Map<FileEntry, Long> sizesByFile = new java.util.IdentityHashMap<>();
+                for (DuplicateDetector.DuplicateGroup g : groups) {
+                    bestByGroup.put(g, DuplicateDetector.bestCopy(g.files(), perFolder));
+                    for (FileEntry fe : g.files())
+                        sizesByFile.put(fe, fe.sizeBytes > 0 ? fe.sizeBytes
+                                : (fe.currentPath != null ? fe.currentPath.toFile() : fe.file).length());
+                }
+                return new DuplicateDetector.DetectionResult(groups, bestByGroup, sizesByFile, scan.songsOnSeveralAlbums());
             }
             @Override protected void done() {
                 if (isCancelled()) return;
@@ -7600,13 +7614,16 @@ public class MainFrame extends JFrame {
                 }
                 List<DuplicateDetector.DuplicateGroup> groups = result.groups();
                 if (groups.isEmpty()) {
-                    setStatus(I18n.t("Aucun doublon détecté."));
+                    setStatus(result.songsOnSeveralAlbums() > 0
+                            ? I18n.t("Aucune copie en trop. %d chanson(s) sont sur plusieurs albums différents (compilations) : "
+                                    + "ce ne sont pas des doublons.", result.songsOnSeveralAlbums())
+                            : I18n.t("Aucun doublon détecté."));
                     LOG.info("[Doublons] Aucun doublon parmi " + all.size() + " fichiers.");
                     return;
                 }
                 int total = groups.stream().mapToInt(g -> g.files().size()).sum();
                 LOG.info("[Doublons] " + groups.size() + " groupe(s), " + total + " fichier(s) sur " + all.size() + " analysés.");
-                for (DuplicateDetector.DuplicateGroup g : groups) {
+                for (DuplicateDetector.DuplicateGroup g : groups.subList(0, Math.min(groups.size(), 2000))) {
                     LOG.info("[Doublons] Groupe " + g.confidence().badge + ": " + g.files().stream()
                         .map(e -> (e.currentPath != null ? e.currentPath : e.file.toPath()).getFileName().toString())
                         .collect(java.util.stream.Collectors.joining(" | ")));
@@ -7636,7 +7653,7 @@ public class MainFrame extends JFrame {
                             refreshStats();
                         }
                         if (done >= dtotal) endProgress(ProgressSlot.DUPLICATE_DETECT);
-                    })
+                    }), result.songsOnSeveralAlbums()
                 ).setVisible(true);
                 refreshStats(); // dialog modal → bloquant, rafraîchir après fermeture
             }

@@ -53,6 +53,82 @@ public final class TrashHelper {
         return fallbackMove(dir);
     }
 
+    // ── Corbeille « rangée » (2026-10-12) ───────────────────────────────────────────────────────────
+    // La corbeille à plat ci-dessous perd le chemin d'origine (« 01 - Titre (2).mp3 » sans son dossier) : la
+    // remettre en place demandait de fouiller les journaux, et un outil qui renomme les fichiers de la corbeille
+    // (vu le 12/10 : songrec-rename lancé dessus) coupait définitivement le lien. Pour les doublons retirés en lot,
+    // le chemin complet est conservé sous corbeille/<lot>/, avec un journal et un script de remise en place.
+
+    /** Déplace {@code f} (et son .lrc) vers {@code corbeille/<lot>/<chemin d'origine>}, note le déplacement dans
+     *  {@code corbeille/<lot>/journal.tsv} (même format que le nettoyage du 12/10, lu par remettre_en_place.py).
+     *  @return le nouveau chemin, ou null si rien n'a été déplacé (fichier absent, copie gardée absente, erreur). */
+    public static Path moveToTrashKeepingPath(File f, String lot, String kind, File keptCopy) {
+        if (!f.isFile()) return null;
+        if (keptCopy != null && !keptCopy.isFile()) return null;   // jamais retirer une copie dont la gardée a disparu
+        Path batch = FALLBACK_DIR.resolve(lot);
+        Path src = f.toPath().toAbsolutePath();
+        Path dst = batch.resolve(src.getRoot() == null ? src.toString() : src.getRoot().relativize(src).toString());
+        try {
+            if (Files.exists(dst)) return null;
+            Files.createDirectories(dst.getParent());
+            long size = Files.size(src);
+            System.out.println("[OT] 🗑 Corbeille : " + src + " ← " + callerOf());
+            FileRenamer.moveFile(src, dst, FileRenamer.TRASH_MOVE_LIMIT);
+            journal(batch, "DÉPLACÉ", kind, src, dst, size, keptCopy);
+            String name = src.getFileName().toString();
+            int dot = name.lastIndexOf('.');
+            Path lrc = src.resolveSibling((dot > 0 ? name.substring(0, dot) : name) + ".lrc");
+            if (Files.isRegularFile(lrc)) {
+                Path lrcDst = dst.resolveSibling(lrc.getFileName());
+                if (!Files.exists(lrcDst)) {
+                    FileRenamer.moveFile(lrc, lrcDst, FileRenamer.TRASH_MOVE_LIMIT);
+                    journal(batch, "DÉPLACÉ-LRC", kind, lrc, lrcDst, 0, keptCopy);
+                }
+            }
+            writeRestoreScript(batch);
+            return dst;
+        } catch (IOException e) {
+            try { journal(batch, "ERREUR", kind, src, Paths.get(String.valueOf(e.getMessage())), 0, keptCopy); }
+            catch (IOException ignored) { /* journal best-effort */ }
+            return null;
+        }
+    }
+
+    private static synchronized void journal(Path batch, String what, String kind, Path src, Path dst, long size,
+                                             File kept) throws IOException {
+        Files.createDirectories(batch);
+        String line = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date()) + "\t" + what
+                + "\t" + kind + "\t" + src + "\t" + dst + "\t" + size + "\t" + (kept == null ? "" : kept.getAbsolutePath()) + "\n";
+        Files.writeString(batch.resolve("journal.tsv"), line, java.nio.charset.StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+    }
+
+    private static final String RESTORE_SCRIPT = String.join("\n",
+        "#!/usr/bin/env python3",
+        "\"\"\"Remet les fichiers de ce lot à leur place d'origine.",
+        "   python3 remettre_en_place.py            -> tout remettre",
+        "   python3 remettre_en_place.py \"Daft Punk\" -> seulement les chemins contenant ce texte",
+        "Un fichier n'est jamais écrasé : si l'original existe déjà, il reste ici.\"\"\"",
+        "import os, shutil, sys",
+        "here = os.path.dirname(os.path.abspath(__file__))",
+        "filtre = sys.argv[1] if len(sys.argv) > 1 else ''",
+        "n = 0",
+        "for line in open(os.path.join(here, 'journal.tsv'), encoding='utf-8'):",
+        "    f = line.rstrip('\\n').split('\\t')",
+        "    if len(f) < 5 or f[1] not in ('DÉPLACÉ', 'DÉPLACÉ-LRC'): continue",
+        "    src, dst = f[3], f[4]",
+        "    if filtre and filtre not in src: continue",
+        "    if os.path.exists(dst) and not os.path.exists(src):",
+        "        os.makedirs(os.path.dirname(src), exist_ok=True)",
+        "        shutil.move(dst, src); n += 1",
+        "print(n, 'fichier(s) remis en place')",
+        "");
+
+    private static void writeRestoreScript(Path batch) throws IOException {
+        Path script = batch.resolve("remettre_en_place.py");
+        if (!Files.exists(script)) Files.writeString(script, RESTORE_SCRIPT, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     // ── Garde-fou « jamais un dossier qui contient de l'audio » (2026-09-24) ─────────────────────
     // Incident réel : ~8 000 pistes audio VALIDES (76,8 Go, ~5 000 dossiers artiste/album/disque) ont quitté
     // la bibliothèque (MyBook) pour cette corbeille le 24/09 entre 06:27 et 18:33, sans aucune trace dans le

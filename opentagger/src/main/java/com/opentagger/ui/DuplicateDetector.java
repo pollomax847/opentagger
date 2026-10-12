@@ -41,8 +41,172 @@ public class DuplicateDetector {
         Confidence(String badge, String tooltip) { this.badge = badge; this.tooltip = tooltip; }
     }
 
-    /** Un groupe de fichiers potentiellement en double. */
-    public record DuplicateGroup(List<FileEntry> files, Confidence confidence) {}
+    /** Où se trouve l'autre copie (2026-10-12, refonte « selon ton idée » demandée par l'utilisateur). L'ancienne
+     *  détection groupait toute la bibliothèque par enregistrement MusicBrainz ou par artiste+titre : la même chanson
+     *  sur une compilation et sur l'album de l'artiste sortait comme « doublon », des chansons DIFFÉRENTES mal taguées
+     *  pareil aussi, et la sélection intelligente cochait les copies des compilations. Seuls ces deux cas sont de
+     *  vraies copies : */
+    public enum Scope {
+        SAME_FOLDER(I18n.t("Même dossier"), I18n.t("Le même morceau plusieurs fois dans le même dossier (copies « (2) », « 1 »…)")),
+        SAME_ALBUM_ELSEWHERE(I18n.t("Même album ailleurs"), I18n.t("La même piste du même album, rangée dans deux dossiers"));
+
+        public final String badge;
+        public final String tooltip;
+        Scope(String badge, String tooltip) { this.badge = badge; this.tooltip = tooltip; }
+    }
+
+    /** Un groupe de fichiers potentiellement en double. {@code scope} null : ancienne détection ({@link #detect}). */
+    public record DuplicateGroup(List<FileEntry> files, Confidence confidence, Scope scope) {
+        public DuplicateGroup(List<FileEntry> files, Confidence confidence) { this(files, confidence, null); }
+    }
+
+    /** Résultat de {@link #detectCopies} : les vraies copies, et le nombre de chansons présentes sur plusieurs albums
+     *  différents (compilations…) — volontairement PAS listées : ce ne sont pas des doublons. */
+    public record CopyScan(List<DuplicateGroup> groups, int songsOnSeveralAlbums) {}
+
+    /**
+     * Vraies copies : (1) même dossier, même artiste+titre, durée à ±2 s, même numéro de piste ; (2) même piste du même
+     * album (même nom de dossier d'album, même sous-dossier, même disque/piste) rangée dans deux dossiers. Le numéro de
+     * piste est indispensable : des dossiers réels contiennent des chansons différentes taguées à l'identique (trois
+     * pistes d'un même album toutes nommées « Again And Again » au 12/10). Même règle que le nettoyage de MyBook.
+     */
+    public static CopyScan detectCopies(List<FileEntry> entries) {
+        List<FileEntry> usable = new ArrayList<>();
+        for (FileEntry e : entries) {
+            TagInfo t = e.activeTags();
+            if (!t.artist.isBlank() && !t.title.isBlank()) usable.add(e);
+        }
+        Map<String, List<FileEntry>> byFolder = new LinkedHashMap<>();
+        for (FileEntry e : usable) {
+            TagInfo t = e.activeTags();
+            byFolder.computeIfAbsent(parentOf(e) + "\u0000" + normalize(t.artist) + "\u0000" + normalize(t.title),
+                    k -> new ArrayList<>()).add(e);
+        }
+        List<DuplicateGroup> groups = new ArrayList<>();
+        Set<FileEntry> extras = new HashSet<>();
+        for (List<FileEntry> g : clusterByDuration(byFolder.values())) {
+            if (!sameTrack(g)) continue;
+            groups.add(new DuplicateGroup(g, evidence(g), Scope.SAME_FOLDER));
+            FileEntry rep = g.stream().min(Comparator.comparingInt((FileEntry e) -> fileOf(e).getName().length())).get();
+            for (FileEntry e : g) if (e != rep) extras.add(e);
+        }
+        Map<String, List<FileEntry>> byAlbum = new LinkedHashMap<>();
+        Map<String, Set<String>> albumsOfSong = new HashMap<>();
+        for (FileEntry e : usable) {
+            TagInfo t = e.activeTags();
+            String song = normalize(t.artist) + "|" + normalize(t.title);
+            String album = folderAlbum(fileOf(e));
+            albumsOfSong.computeIfAbsent(song, k -> new HashSet<>()).add(album);
+            if (extras.contains(e) || album.isEmpty()) continue;
+            File dir = fileOf(e).getParentFile();
+            String sub = dir == null ? "" : normalize(dir.getName());
+            byAlbum.computeIfAbsent(song + "|" + album + "|" + sub + "|" + leadNumber(t.discNo) + "|" + leadNumber(t.track),
+                    k -> new ArrayList<>()).add(e);
+        }
+        for (List<FileEntry> g : clusterByDuration(byAlbum.values())) {
+            if (g.stream().map(DuplicateDetector::parentOf).distinct().count() < 2 || !sameTrack(g)) continue;
+            groups.add(new DuplicateGroup(g, evidence(g), Scope.SAME_ALBUM_ELSEWHERE));
+        }
+        int several = 0;
+        for (Set<String> albums : albumsOfSong.values()) if (albums.size() > 1) several++;
+        return new CopyScan(groups, several);
+    }
+
+    private static File fileOf(FileEntry e) { return e.currentPath != null ? e.currentPath.toFile() : e.file; }
+    private static String parentOf(FileEntry e) { File p = fileOf(e).getParentFile(); return p == null ? "" : p.getPath(); }
+
+    /** Sépare un groupe de même clé en sous-groupes de durées proches (±2 s). Durée inconnue (0) : rangé avec les
+     *  autres seulement si le numéro de piste concorde (vérifié ensuite par sameTrack). */
+    private static List<List<FileEntry>> clusterByDuration(java.util.Collection<List<FileEntry>> keyed) {
+        List<List<FileEntry>> out = new ArrayList<>();
+        for (List<FileEntry> lst : keyed) {
+            if (lst.size() < 2) continue;
+            List<FileEntry> sorted = new ArrayList<>(lst);
+            sorted.sort(Comparator.comparingInt(e -> e.activeTags().durationSec));
+            List<FileEntry> cur = new ArrayList<>();
+            for (FileEntry e : sorted) {
+                int d = e.activeTags().durationSec;
+                if (!cur.isEmpty()) {
+                    int first = cur.get(0).activeTags().durationSec;
+                    if (d > 0 && first > 0 && d - first > 2) {
+                        if (cur.size() > 1) out.add(cur);
+                        cur = new ArrayList<>();
+                    }
+                }
+                cur.add(e);
+            }
+            if (cur.size() > 1) out.add(cur);
+        }
+        return out;
+    }
+
+    /** Un seul numéro de piste dans le groupe (début du nom de fichier, tag piste). */
+    static boolean sameTrack(List<FileEntry> g) {
+        Set<Integer> leads = new HashSet<>(), tags = new HashSet<>();
+        for (FileEntry e : g) {
+            java.util.regex.Matcher m = LEAD.matcher(fileOf(e).getName());
+            if (m.find()) leads.add(Integer.parseInt(m.group(1)));
+            int t = leadNumber(e.activeTags().track);
+            if (t > 0) tags.add(t);
+        }
+        return leads.size() <= 1 && tags.size() <= 1;
+    }
+    private static final java.util.regex.Pattern LEAD = java.util.regex.Pattern.compile("^\\s*(\\d{1,3})\\b");
+
+    private static int leadNumber(String s) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^\\s*(\\d+)").matcher(s == null ? "" : s);
+        return m.find() ? Integer.parseInt(m.group(1)) : 0;
+    }
+
+    /** Nom du dossier d'album (le parent, ou le grand-parent pour « Disc 2 »/« CD 2 »), sans crochets ni accents. */
+    static String folderAlbum(File f) {
+        File d = f.getParentFile();
+        if (d == null) return "";
+        if (d.getName().trim().matches("(?i)(disc|disque|cd)\\s*\\d+") && d.getParentFile() != null) d = d.getParentFile();
+        return normalize(d.getName().replaceAll("[\\[(][^\\])]*[\\])]", ""));
+    }
+
+    /** Preuve la plus forte partagée par tout le groupe (affichée en badge). */
+    private static Confidence evidence(List<FileEntry> g) {
+        if (allSame(g, t -> t.recordingMbid)) return Confidence.MBID_EXACT;
+        if (allSame(g, t -> t.acoustidId)) return Confidence.ACOUSTID_EXACT;
+        if (allSame(g, t -> t.acoustidFingerprint)) return Confidence.FINGERPRINT_EXACT;
+        return Confidence.TITLE_HEURISTIC;
+    }
+    private static boolean allSame(List<FileEntry> g, java.util.function.Function<TagInfo, String> f) {
+        String v = f.apply(g.get(0).activeTags());
+        if (v == null || v.isBlank()) return false;
+        for (FileEntry e : g) if (!v.equals(f.apply(e.activeTags()))) return false;
+        return true;
+    }
+
+    /** Copie à garder dans un groupe de {@link #detectCopies} : la meilleure qualité (taille ≥ 90 % de la plus grosse,
+     *  puis format), puis hors dossier Downloads, puis sans marque de copie « (2) »/« 1 » quand l'original est là, puis
+     *  le dossier qui contient le plus de morceaux (l'album complet). E/S possibles (ALAC) : arrière-plan seulement. */
+    public static FileEntry bestCopy(List<FileEntry> g, Map<String, Integer> filesPerFolder) {
+        long max = 0;
+        for (FileEntry e : g) max = Math.max(max, sizeOf(e));
+        final long maxSize = max;
+        Set<String> stems = new HashSet<>();
+        for (FileEntry e : g) stems.add(stem(fileOf(e).getName()));
+        Comparator<FileEntry> cmp = Comparator
+                .comparing((FileEntry e) -> sizeOf(e) >= 0.9 * maxSize)
+                .thenComparingInt(e -> formatRank(fileOf(e)))
+                .thenComparing(e -> !fileOf(e).getPath().contains("/Downloads/"))
+                .thenComparing(e -> !isMarkedCopy(stem(fileOf(e).getName()), stems))
+                .thenComparingInt(e -> filesPerFolder.getOrDefault(parentOf(e), 0))
+                .thenComparingInt(e -> -fileOf(e).getName().length());
+        return g.stream().max(cmp).orElse(g.get(0));
+    }
+
+    private static long sizeOf(FileEntry e) { return e.sizeBytes > 0 ? e.sizeBytes : fileOf(e).length(); }
+    private static String stem(String n) { int d = n.lastIndexOf('.'); return d > 0 ? n.substring(0, d) : n; }
+    private static final java.util.regex.Pattern COPY_MARK = java.util.regex.Pattern.compile("(\\s\\(\\d+\\)|\\s\\d|_\\d+)$");
+    /** « Titre (2) » / « Titre 1 » / « Titre_1 » alors que « Titre » est aussi dans le groupe. */
+    static boolean isMarkedCopy(String stem, Set<String> stems) {
+        java.util.regex.Matcher m = COPY_MARK.matcher(stem);
+        return m.find() && stems.contains(stem.substring(0, m.start()));
+    }
 
     /** Résultat complet d'une passe detect() : les groupes, le meilleur fichier de chacun, et la
      *  taille de CHAQUE fichier (-1 si absent) — tous les trois déjà calculés en arrière-plan (voir
@@ -52,7 +216,10 @@ public class DuplicateDetector {
      *  constructeur (donc sur l'EDT) — gel de plusieurs heures constaté en direct (2026-08-29) sur
      *  ~18000 fichiers répartis en 7099 groupes, beaucoup sur un montage NTFS lent. */
     public record DetectionResult(List<DuplicateGroup> groups, Map<DuplicateGroup, FileEntry> bestByGroup,
-                                   Map<FileEntry, Long> sizesByFile) {}
+                                   Map<FileEntry, Long> sizesByFile, int songsOnSeveralAlbums) {
+        public DetectionResult(List<DuplicateGroup> groups, Map<DuplicateGroup, FileEntry> bestByGroup,
+                               Map<FileEntry, Long> sizesByFile) { this(groups, bestByGroup, sizesByFile, 0); }
+    }
 
     /** Taille en octets de chaque fichier de chaque groupe (-1 si le fichier n'existe plus) — un
      *  seul passage E/S, à faire en arrière-plan (voir DetectionResult). */

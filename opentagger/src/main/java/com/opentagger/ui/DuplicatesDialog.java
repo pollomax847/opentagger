@@ -44,9 +44,17 @@ public class DuplicatesDialog extends JDialog {
      *  justement ce qui gelait l'appli pendant des heures (des milliers d'E/S disque directement
      *  dans le constructeur, donc sur l'EDT) — repéré en direct 2026-08-29. */
     private final Map<FileEntry, Long> sizesByFile;
-    /** Correspondance parallèle : allBoxes[i] ↔ allEntries[i] */
+    /** Correspondance parallèle : allBoxes[i] ↔ allEntries[i] (seulement les groupes affichés). */
     private final List<JCheckBox>  allBoxes   = new ArrayList<>();
     private final List<FileEntry>  allEntries = new ArrayList<>();
+    /** Sélection de TOUS les fichiers, affichés ou non (au-delà de MAX_SHOWN groupes, seule la liste est tronquée :
+     *  « Sélection intelligente » et la mise à la corbeille portent sur tous les groupes). */
+    private final Map<FileEntry, Boolean> selected = new java.util.IdentityHashMap<>();
+    /** Copie gardée du groupe de chaque fichier — pour ne jamais retirer une copie dont la gardée aurait disparu. */
+    private final Map<FileEntry, FileEntry> keeperOf = new java.util.IdentityHashMap<>();
+    private final Map<FileEntry, DuplicateGroup> groupOfEntry = new java.util.IdentityHashMap<>();
+    private final int songsOnSeveralAlbums;
+    private static final int MAX_SHOWN = 300;
     private JCheckBox chkCleanDirs;
     /** Journal principal (panneau du bas) et barre de progression (bas-droite) de MainFrame —
      *  avant ce correctif, suppression/déplacement de doublons n'écrivaient RIEN dans le journal
@@ -63,7 +71,20 @@ public class DuplicatesDialog extends JDialog {
                              FileTableModel tableModel,
                              java.util.function.BiConsumer<String, FileEntry.Status> journalLine,
                              java.util.function.BiConsumer<Integer, Integer> onProgress) {
+        this(owner, groups, bestByGroup, sizesByFile, tableModel, journalLine, onProgress, 0);
+    }
+
+    public DuplicatesDialog(Frame owner, List<DuplicateGroup> groups,
+                             Map<DuplicateGroup, FileEntry> bestByGroup, Map<FileEntry, Long> sizesByFile,
+                             FileTableModel tableModel,
+                             java.util.function.BiConsumer<String, FileEntry.Status> journalLine,
+                             java.util.function.BiConsumer<Integer, Integer> onProgress, int songsOnSeveralAlbums) {
         super(owner, I18n.t("Doublons détectés — %d groupe(s)", groups.size()), true);
+        this.songsOnSeveralAlbums = songsOnSeveralAlbums;
+        for (DuplicateGroup g : groups) {
+            FileEntry best = bestByGroup.get(g);
+            for (FileEntry e : g.files()) { selected.put(e, false); keeperOf.put(e, best); groupOfEntry.put(e, g); }
+        }
         this.groups      = groups;
         this.bestByGroup = bestByGroup;
         this.sizesByFile = sizesByFile;
@@ -74,6 +95,7 @@ public class DuplicatesDialog extends JDialog {
         setMinimumSize(new Dimension(660, 400));
         setLocationRelativeTo(owner);
 
+        if (groups.stream().anyMatch(g -> g.scope() != null)) smartSelectAll();   // vraies copies : pré-cochées
         JPanel content = buildContent();
         JScrollPane scroll = new JScrollPane(content);
         scroll.getVerticalScrollBar().setUnitIncrement(18);
@@ -96,15 +118,31 @@ public class DuplicatesDialog extends JDialog {
         outer.setLayout(new BoxLayout(outer, BoxLayout.Y_AXIS));
         outer.setBorder(new EmptyBorder(10, 14, 10, 14));
 
-        JLabel intro = new JLabel(I18n.t("<html><b>Cochez les fichiers à SUPPRIMER.</b> "
-            + "Le meilleur fichier de chaque groupe est mis en évidence — ne le cochez pas.</html>"));
+        boolean copies = groups.stream().anyMatch(g -> g.scope() != null);
+        JLabel intro = new JLabel(copies
+            ? I18n.t("<html><b>Copies en trop déjà cochées</b> : dans chaque groupe, la copie à garder (★) est la "
+                + "meilleure qualité, puis celle au nom propre et dans le dossier le plus complet. Seuls deux cas sont "
+                + "listés : le même morceau plusieurs fois <b>dans le même dossier</b>, et la même piste du même album "
+                + "<b>rangée dans deux dossiers</b>.%s</html>",
+                songsOnSeveralAlbums > 0 ? I18n.t("<br>%d chanson(s) présente(s) sur plusieurs albums différents "
+                        + "(compilations…) ne sont pas listées : ce ne sont pas des doublons.", songsOnSeveralAlbums) : "")
+            : I18n.t("<html><b>Cochez les fichiers à SUPPRIMER.</b> "
+                + "Le meilleur fichier de chaque groupe est mis en évidence — ne le cochez pas.</html>"));
         intro.putClientProperty("FlatLaf.style", "foreground: #cc7744; font: 11 $defaultFont");
         intro.setBorder(new EmptyBorder(0, 0, 10, 0));
         outer.add(intro);
 
+        int shown = 0;
         for (DuplicateGroup group : groups) {
+            if (shown++ >= MAX_SHOWN) break;
             outer.add(buildGroup(group));
             outer.add(Box.createVerticalStrut(12));
+        }
+        if (groups.size() > MAX_SHOWN) {
+            JLabel more = new JLabel(I18n.t("… et %d autre(s) groupe(s), non affichés mais traités de la même façon "
+                    + "par les boutons ci-dessous.", groups.size() - MAX_SHOWN));
+            more.putClientProperty("FlatLaf.style", "foreground: #888888; font: italic 11 $defaultFont");
+            outer.add(more);
         }
         return outer;
     }
@@ -119,14 +157,15 @@ public class DuplicatesDialog extends JDialog {
             case TITLE_HEURISTIC   -> new Color(0x6d4c41); // marron
         };
 
-        // Badge de confiance
-        JLabel badge = new JLabel("  " + group.confidence().badge + "  ");
+        // Badge : où est l'autre copie (nouvelle détection), sinon niveau de confiance
+        JLabel badge = new JLabel("  " + (group.scope() != null ? group.scope().badge : group.confidence().badge) + "  ");
         badge.setOpaque(true);
         badge.setBackground(badgeColor);
         badge.setForeground(Color.WHITE);
         badge.putClientProperty("FlatLaf.style", "font: bold 10 $defaultFont");
         badge.setBorder(new EmptyBorder(2, 4, 2, 4));
-        badge.setToolTipText(group.confidence().tooltip);
+        badge.setToolTipText(group.scope() != null
+                ? group.scope().tooltip + " — " + group.confidence().tooltip : group.confidence().tooltip);
 
         JLabel title = new JLabel(label);
         title.putClientProperty("FlatLaf.style", "font: bold 12 $defaultFont");
@@ -146,7 +185,8 @@ public class DuplicatesDialog extends JDialog {
         for (FileEntry e : group.files()) {
             boolean isBest = (e == best);
             JCheckBox cb = new JCheckBox();
-            cb.setSelected(false); // jamais pré-coché
+            cb.setSelected(Boolean.TRUE.equals(selected.get(e)));
+            cb.addItemListener(ev -> selected.put(e, cb.isSelected()));
             allBoxes.add(cb);
             allEntries.add(e);
 
@@ -202,7 +242,9 @@ public class DuplicatesDialog extends JDialog {
         // visible/parcourable dans un sous-dossier "Doublons/" plutôt que planqué dans la
         // corbeille système, sans jamais rien supprimer.
         JButton btnMoveDup = new JButton(I18n.t("Déplacer vers Doublons/…"));
-        JButton btnDelete  = new JButton(I18n.t("Déplacer dans la corbeille…"));
+        JButton btnDelete  = new JButton(I18n.t("Retirer les copies cochées…"));
+        btnDelete.setToolTipText(I18n.t("Vers la corbeille de l'appli, en gardant leur dossier d'origine (journal + "
+                + "script remettre_en_place.py) — rien n'est supprimé définitivement"));
         JButton btnClose   = new JButton(I18n.t("Fermer"));
         btnDelete.putClientProperty("FlatLaf.style", "background: #8b1a1a");
 
@@ -212,7 +254,7 @@ public class DuplicatesDialog extends JDialog {
 
         btnSmart.setToolTipText(I18n.t("Coche automatiquement les fichiers de moindre qualité dans chaque groupe"));
         btnSmart  .addActionListener(e -> smartSelect());
-        btnNone   .addActionListener(e -> allBoxes.forEach(cb -> cb.setSelected(false)));
+        btnNone   .addActionListener(e -> { selected.replaceAll((k, v) -> false); allBoxes.forEach(cb -> cb.setSelected(false)); });
         btnMoveDup.addActionListener(e -> moveToDoublonsSelected());
         btnDelete .addActionListener(e -> deleteSelected());
         btnClose  .addActionListener(e -> dispose());
@@ -249,21 +291,19 @@ public class DuplicatesDialog extends JDialog {
 
     // ── Sélection intelligente ────────────────────────────────────────────────
 
-    private void smartSelect() {
-        // D'abord tout décocher
-        allBoxes.forEach(cb -> cb.setSelected(false));
-
-        // Pour chaque groupe : cocher tous SAUF le meilleur
-        int idx = 0;
+    /** Tous les groupes (affichés ou non) : tout sauf la copie gardée. */
+    private void smartSelectAll() {
         for (DuplicateGroup group : groups) {
             FileEntry best = bestByGroup.get(group);
-            for (FileEntry e : group.files()) {
-                if (e != best) allBoxes.get(idx).setSelected(true);
-                idx++;
-            }
+            for (FileEntry e : group.files()) selected.put(e, e != best);
         }
+    }
 
-        long cocheCount = allBoxes.stream().filter(JCheckBox::isSelected).count();
+    private void smartSelect() {
+        smartSelectAll();
+        for (int i = 0; i < allBoxes.size(); i++) allBoxes.get(i).setSelected(Boolean.TRUE.equals(selected.get(allEntries.get(i))));
+
+        long cocheCount = selected.values().stream().filter(Boolean::booleanValue).count();
         if (cocheCount == 0) {
             JOptionPane.showMessageDialog(this,
                 I18n.t("Tous les fichiers ont le même score de qualité.\nCochez manuellement les fichiers à supprimer."),
@@ -273,11 +313,14 @@ public class DuplicatesDialog extends JDialog {
 
     // ── Suppression ───────────────────────────────────────────────────────────
 
+    private List<FileEntry> checked() {
+        List<FileEntry> out = new ArrayList<>();
+        for (DuplicateGroup g : groups) for (FileEntry e : g.files()) if (Boolean.TRUE.equals(selected.get(e))) out.add(e);
+        return out;
+    }
+
     private void deleteSelected() {
-        List<FileEntry> toDelete = new ArrayList<>();
-        for (int i = 0; i < allBoxes.size(); i++) {
-            if (allBoxes.get(i).isSelected()) toDelete.add(allEntries.get(i));
-        }
+        List<FileEntry> toDelete = checked();
 
         if (toDelete.isEmpty()) {
             JOptionPane.showMessageDialog(this,
@@ -286,9 +329,14 @@ public class DuplicatesDialog extends JDialog {
             return;
         }
 
-        // Construire un résumé lisible
+        // Construire un résumé lisible — l'ancien texte annonçait « Supprimer définitivement » alors que les
+        // fichiers ont toujours été déplacés dans la corbeille de l'appli (récupérables).
+        long bytes = 0;
+        for (FileEntry e : toDelete) { Long b = sizesByFile.get(e); if (b != null && b > 0) bytes += b; }
         StringBuilder sb = new StringBuilder(
-            I18n.t("<html>Supprimer définitivement <b>%d fichier(s)</b> du disque ?<br><br>", toDelete.size()));
+            I18n.t("<html>Retirer <b>%d fichier(s)</b> (%s Go) vers la corbeille de l'appli ?<br>"
+                + "<i>Leur dossier d'origine est conservé ; un journal et remettre_en_place.py permettent de tout "
+                + "remettre.</i><br><br>", toDelete.size(), SZ.format(bytes / 1e9)));
         int shown = Math.min(toDelete.size(), 6);
         for (int i = 0; i < shown; i++) {
             File f = toDelete.get(i).currentPath != null
@@ -323,9 +371,18 @@ public class DuplicatesDialog extends JDialog {
                 // l'appli sur une bibliothèque multi-racines).
                 Map<File, Path> deletedParents = new LinkedHashMap<>();
                 int processed = 0;
+                String lot = "doublons-" + java.time.LocalDate.now();
                 for (FileEntry e : toDelete) {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
-                    boolean moved = com.opentagger.TrashHelper.moveToTrash(f);
+                    FileEntry keep = keeperOf.get(e);
+                    DuplicateGroup g = groupOf(e);
+                    boolean moved;
+                    if (g != null && g.scope() != null && keep != null && keep != e) {
+                        File kf = keep.currentPath != null ? keep.currentPath.toFile() : keep.file;
+                        moved = com.opentagger.TrashHelper.moveToTrashKeepingPath(f, lot, g.scope().name(), kf) != null;
+                    } else {
+                        moved = com.opentagger.TrashHelper.moveToTrash(f);
+                    }
                     processed++;
                     if (onProgress != null) onProgress.accept(processed, toDelete.size());
                     if (moved) {
@@ -351,15 +408,14 @@ public class DuplicatesDialog extends JDialog {
                 return null;
             }
 
-            @Override protected void process(List<FileEntry> chunks) {
-                for (FileEntry e : chunks) {
-                    int modelIdx = tableModel.indexOf(e);
-                    if (modelIdx >= 0) tableModel.remove(modelIdx);
-                }
-            }
+            // Retrait du tableau en UNE fois à la fin (removeEntries) : indexOf()+remove() par fichier coûtait un
+            // parcours complet du tableau à chaque copie — des dizaines de milliers ici.
+            final java.util.Set<FileEntry> removed = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            @Override protected void process(List<FileEntry> chunks) { removed.addAll(chunks); }
 
             @Override protected void done() {
                 setCursor(java.awt.Cursor.getDefaultCursor());
+                if (!removed.isEmpty()) tableModel.removeEntries(removed);
                 String msg = I18n.t("%d fichier(s) déplacé(s) dans la corbeille", deleted)
                     + (dirsRemoved > 0 ? I18n.t(", %d dossier(s) vide(s) supprimé(s)", dirsRemoved) : "")
                     + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "") + ".";
@@ -379,11 +435,10 @@ public class DuplicatesDialog extends JDialog {
      * "Doublons" à la racine mélangerait des albums entiers sans contexte. Jamais de suppression :
      * alternative non-destructive à "Déplacer dans la corbeille…", retour utilisateur explicite.
      */
+    private DuplicateGroup groupOf(FileEntry e) { return groupOfEntry.get(e); }
+
     private void moveToDoublonsSelected() {
-        List<FileEntry> toMove = new ArrayList<>();
-        for (int i = 0; i < allBoxes.size(); i++) {
-            if (allBoxes.get(i).isSelected()) toMove.add(allEntries.get(i));
-        }
+        List<FileEntry> toMove = checked();
 
         if (toMove.isEmpty()) {
             JOptionPane.showMessageDialog(this,
