@@ -187,6 +187,8 @@ public class FileRenamer {
         if (chemin.isBlank()) return null;
         chemin = capPathLength(rootDir.toString(), chemin, ext, IS_WINDOWS);
         chemin = resolveExistingDirs(rootDir, chemin);
+        chemin = keepVinylNumber(chemin, nom);
+        chemin = stayInCompilationFolder(fichier, rootDir, chemin);
 
         Path cible = rootDir.resolve(chemin + ext).normalize();
         if (cible.equals(fichier)) return null;
@@ -327,6 +329,8 @@ public class FileRenamer {
      *          fichier lui-même) — même contrat que rename(). */
     public static Path previewTarget(Path fichier, Path rootDir, String cheminSansExt, String ext) {
         cheminSansExt = resolveExistingDirs(rootDir, cheminSansExt);
+        cheminSansExt = keepVinylNumber(cheminSansExt, fichier.getFileName().toString());
+        cheminSansExt = stayInCompilationFolder(fichier, rootDir, cheminSansExt);
         Path cible = rootDir.resolve(cheminSansExt + ext).normalize();
         if (cible.equals(fichier)) return null;
         if (Files.exists(cible)) {
@@ -338,6 +342,67 @@ public class FileRenamer {
             if (Files.exists(cible)) return null; // 98 collisions — rename() lèvera la vraie erreur si on applique quand même
         }
         return cible;
+    }
+
+    // ── Garde-fous du rangement (2026-10-13) ──────────────────────────────────
+    // Aperçu réel de « Renommer les tagués » sur MyBook : des pistes seraient sorties de leur compilation pour rejoindre
+    // l'album original de leurs tags (« Compilations/#1's/11 - Mariah Carey - I'll Be There » → « MTV Unplugged »), et les
+    // pistes de vinyle « A5 - … » seraient devenues « 00 - … » (numéro perdu, ~2 000 fichiers).
+
+    private static final java.util.regex.Pattern VINYL_NUMBER = java.util.regex.Pattern.compile("^([A-Ha-h]\\d{1,2})\\b");
+    private static final java.util.regex.Pattern ZERO_TRACK = java.util.regex.Pattern.compile("^0{1,3}(?=\\s*[-.])");
+
+    /** « 00 - Titre » produit par le masque pour une piste sans numéro, alors que le fichier s'appelait « A5 - … » :
+     *  garder « A5 ». */
+    static String keepVinylNumber(String chemin, String currentName) {
+        if (chemin == null || currentName == null) return chemin;
+        java.util.regex.Matcher v = VINYL_NUMBER.matcher(currentName);
+        if (!v.find()) return chemin;
+        int slash = chemin.lastIndexOf('/');
+        String dir = slash >= 0 ? chemin.substring(0, slash + 1) : "";
+        String file = chemin.substring(slash + 1);
+        java.util.regex.Matcher z = ZERO_TRACK.matcher(file);
+        return z.find() ? dir + v.group(1).toUpperCase(Locale.ROOT) + file.substring(z.end()) : chemin;
+    }
+
+    /** Un fichier rangé dans un dossier de compilation n'en sort pas : si ses tags l'envoient vers un AUTRE dossier
+     *  d'album, seul son nom change, il reste dans son dossier (ses tags sont à revoir, pas l'endroit). */
+    static String stayInCompilationFolder(Path fichier, Path rootDir, String chemin) {
+        if (fichier == null || rootDir == null || chemin == null) return chemin;
+        Path parent = fichier.toAbsolutePath().getParent();
+        if (parent == null || !isCompilationFolder(parent)) return chemin;
+        Path target = rootDir.resolve(chemin).normalize();
+        Path targetDir = target.getParent();
+        if (targetDir == null || targetDir.equals(parent)) return chemin;
+        if (folderKey(albumDirName(targetDir)).equals(folderKey(albumDirName(parent)))) return chemin;   // même album
+        Path kept = parent.resolve(target.getFileName().toString());
+        Path root = rootDir.toAbsolutePath().normalize();
+        return kept.startsWith(root) ? root.relativize(kept).toString().replace('\\', '/') : kept.toString();
+    }
+
+    private static String albumDirName(Path dir) {
+        String n = dir.getFileName() == null ? "" : dir.getFileName().toString();
+        if (n.trim().matches("(?i)(disc|disque|cd)\\s*\\d+") && dir.getParent() != null && dir.getParent().getFileName() != null)
+            return dir.getParent().getFileName().toString();
+        return n;
+    }
+
+    private static final java.util.regex.Pattern PERFORMER_IN_NAME =
+            java.util.regex.Pattern.compile("^\\s*\\d{1,3}\\s*[-.]\\s*(.+?)\\s+-\\s+.+$");
+
+    /** Dossier « …/Compilations/… », ou dont les fichiers « NN - Interprète - Titre » nomment au moins 3 interprètes. */
+    static boolean isCompilationFolder(Path dir) {
+        for (Path d = dir; d != null && d.getFileName() != null; d = d.getParent())
+            if (d.getFileName().toString().equalsIgnoreCase("Compilations")) return true;
+        Map<String, String> idx = dirIndex(dir);
+        if (idx == null) return false;
+        Set<String> performers = new HashSet<>();
+        for (String n : idx.values()) {
+            java.util.regex.Matcher m = PERFORMER_IN_NAME.matcher(n);
+            if (m.matches()) performers.add(folderKey(m.group(1)));
+            if (performers.size() >= 3) return true;
+        }
+        return false;
     }
 
     // ── Dossiers existants « presque identiques » ────────────────────────────

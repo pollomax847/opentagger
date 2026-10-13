@@ -57,6 +57,9 @@ public class TagWriter {
         // silencing effectif dès CETTE écriture, sans attendre la prochaine fenêtre de 2s.
         Config.silenceJaudiotaggerLogging();
         long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
+        // Noms d'artistes faux écrits jusqu'ici par tous les chemins (chaîne YouTube, DJ à la place de l'interprète)
+        // — corrigés ici, point d'écriture unique (voir ArtistNames).
+        ArtistNames.clean(info, fichier);
 
         // Musepack (.mpc) : ni jaudiotagger ("No Reader associated with this extension:mpc",
         // vérifié en direct — CannotReadException, pas même une entrée dans son enum

@@ -2985,11 +2985,9 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      *  communautaires. Repéré en direct 2026-08-28 : a remplacé "Adriatique, Marino Canal et Delhia
      *  De France" (crédit complet, correct) par "Adriatique - Topic" (un seul artiste, suffixe
      *  parasite) — une régression, pas une amélioration. */
-    private static final java.util.regex.Pattern YOUTUBE_TOPIC_SUFFIX = java.util.regex.Pattern.compile(
-            "(?i)\\s*-\\s*topic$");
 
     private static String stripYoutubeTopicSuffix(String artist) {
-        return artist == null ? null : YOUTUBE_TOPIC_SUFFIX.matcher(artist).replaceAll("");
+        return com.opentagger.ArtistNames.stripYoutubeChannel(artist);   // « - Topic » et « VEVO » (2026-10-13)
     }
 
     /** Piste de la release épinglée qui correspond au morceau identifié : d'abord le MÊME enregistrement MusicBrainz,

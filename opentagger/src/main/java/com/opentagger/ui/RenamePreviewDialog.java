@@ -210,6 +210,9 @@ public class RenamePreviewDialog extends JDialog {
     public static List<PreviewRow> compute(List<FileEntry> entries, int maskIndex, Path destRoot) {
         FileRenamer renamer = new FileRenamer();
         List<PreviewRow> result = new ArrayList<>();
+        // Destinations déjà promises à une autre ligne de CE lot (2026-10-13) : sans ça, deux copies du même morceau
+        // annonçaient toutes les deux « 03 - One Sweet Day (3).mp3 », et une seule l'obtenait vraiment à l'application.
+        java.util.Set<Path> claimed = new java.util.HashSet<>();
 
         for (FileEntry e : entries) {
             if (e.status != FileEntry.Status.TAGGED) continue;
@@ -239,8 +242,26 @@ public class RenamePreviewDialog extends JDialog {
                         result.add(new PreviewRow(e, current.toString(), curName,
                             current.toString(), RowState.ALREADY_OK, ""));
                     } else {
-                        result.add(new PreviewRow(e, current.toString(), resolved.getFileName().toString(),
-                            resolved.toString(), RowState.WILL_RENAME, ""));
+                        String note = "";
+                        if (claimed.contains(resolved)) {
+                            String base = resolved.getFileName().toString();
+                            String stem = base.substring(0, base.length() - ext.length()).replaceAll("\\s\\(\\d+\\)$", "");
+                            int n = 2;
+                            Path alt;
+                            do { alt = resolved.resolveSibling(stem + " (" + n++ + ")" + ext); }
+                            while ((claimed.contains(alt) || java.nio.file.Files.exists(alt)) && n < 100);
+                            resolved = alt;
+                            note = I18n.t("même nom qu'un autre fichier de ce lot : doublon probable (voir Doublons)");
+                        }
+                        claimed.add(resolved);
+                        // Dossier de destination affiché quand il change (avant : seul le nom de fichier, d'où des lignes
+                        // « 01 - Curious.mp3 → 01 - Curious.mp3 » marquées « Renommer » sans dire où le fichier allait).
+                        String shown = resolved.getParent() != null && resolved.getParent().equals(current.getParent())
+                                ? resolved.getFileName().toString()
+                                : (resolved.startsWith(root) ? root.relativize(resolved).toString() : resolved.toString());
+                        if (!note.isEmpty()) shown += "   ⚠ " + note;
+                        result.add(new PreviewRow(e, current.toString(), shown,
+                            resolved.toString(), RowState.WILL_RENAME, note));
                     }
                 }
             } catch (Exception ex) {
