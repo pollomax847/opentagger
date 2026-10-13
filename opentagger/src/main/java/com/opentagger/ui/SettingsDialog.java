@@ -1588,7 +1588,7 @@ public class SettingsDialog extends JDialog {
         skippedFolderPanel.add(btnBrowseSkipped,  BorderLayout.EAST);
 
         // ── Dossier des fichiers à durée incohérente avec MusicBrainz ──────────
-        chkMoveDurationMismatch = new JCheckBox(I18n.t("Déplacer les fichiers à durée incohérente avec MusicBrainz vers ce dossier"));
+        chkMoveDurationMismatch = new JCheckBox(I18n.t("Déplacer les fichiers « version, mix long ou coupé » vers ce dossier"));
         chkMoveDurationMismatch.setToolTipText(I18n.t(
             "Un fichier identifié dont la durée diffère fortement (>20s et >20%) de celle déclarée par "
             + "MusicBrainz pour ce titre est probablement un rip tronqué ou un mauvais match — jamais "
@@ -1629,7 +1629,7 @@ public class SettingsDialog extends JDialog {
 
         JPanel p = form(
             new String[]{"", "Dossier racine bibliothèque :", "Dossier racine podcasts :", "Masque par défaut :",
-                    "", "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier durée incohérente :", "", "", ""},
+                    "", "", "", "", "", "Dossier fichiers non tagués :", "", "Dossier version / mix / coupé :", "", "", ""},
             new JComponent[]{chkUseLibraryRoot, rootPanel, podcastRootPanel, cmbDefaultMask, chkAutoRename, chkDeleteEmptyDirs, chkMergeFolderVariants,
                     chkFollowLog, chkMoveSkipped, skippedFolderPanel, chkMoveDurationMismatch, durationMismatchFolderPanel,
                     chkTrashShortDuration, chkAutoTrashDuplicates, chkVideoAutoRecover},

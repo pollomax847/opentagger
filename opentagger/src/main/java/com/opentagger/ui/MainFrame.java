@@ -1305,7 +1305,7 @@ public class MainFrame extends JFrame {
                 Config.get().set("skipped.move_enabled", String.valueOf(chkMoveSkippedMenu.isSelected())));
         moveMenu.add(chkMoveSkippedMenu);
 
-        chkMoveDurationMismatchMenu = new StayOpenCheckBoxMenuItem(I18n.t("Déplacer les fichiers à durée incohérente"));
+        chkMoveDurationMismatchMenu = new StayOpenCheckBoxMenuItem(I18n.t("Déplacer les fichiers « version, mix long ou coupé »"));
         chkMoveDurationMismatchMenu.setSelected(Config.get().durationMismatchMoveEnabled());
         chkMoveDurationMismatchMenu.addActionListener(e ->
                 Config.get().set("duration_mismatch.move_enabled", String.valueOf(chkMoveDurationMismatchMenu.isSelected())));

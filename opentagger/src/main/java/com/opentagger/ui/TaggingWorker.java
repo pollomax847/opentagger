@@ -481,7 +481,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     if (moved != null) entry.currentPath = moved;
                 }
             } catch (Exception ex) {
-                log(I18n.t("  déplacement (durée incohérente) échoué: %s", ex.getMessage()));
+                log(I18n.t("  déplacement (version, mix long ou coupé) échoué: %s", ex.getMessage()));
             }
         }
 
@@ -878,8 +878,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         log(I18n.t("  version différente de MusicBrainz (%s au lieu de %s) — identification gardée (%s)",
                                 FileTableModel.formatDuration(fileSec), FileTableModel.formatDuration(shown.mbDurationSec),
                                 audioConfirmed ? "reconnue par l'audio" : "le fichier dit la même chose"));
-                        shown.durationSec = fileSec;
-                        durationOk = shown;
+                        // Copie : l'écart est jugé ICI, mbDurationSec=0 évite que le filet de TagEnrichment.saveEntry()
+                        // déplace quand même le fichier « pour vérification » à l'enregistrement.
+                        TagInfo kept = shown.copy();
+                        kept.durationSec = fileSec;
+                        kept.mbDurationSec = 0;
+                        durationOk = kept;
                     } else {
                         entry.candidates = results;
                         entry.status = FileEntry.Status.SKIPPED;
@@ -2599,7 +2603,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             // "Dreams", rejeté par la durée mais qui s'arrêtait là avant ce correctif au lieu de
             // tenter la recherche texte ci-dessous — pourtant la meilleure chance ici, les tags
             // existants étant fiables.
-            log(I18n.t("  AcoustID : durée incohérente (%ds vs %ds, %s – %s) → poursuite vers le texte",
+            log(I18n.t("  AcoustID : autre durée (%ds vs %ds, %s – %s) → recherche par le texte",
                     existingTags.durationSec, r.get(0).mbDurationSec, r.get(0).artist, r.get(0).title));
             return null;
         }
@@ -2673,7 +2677,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // What's The Difference.mp3", matché à tort à "Breathe" de Blu Cantrell). On
                     // laisse tomber vers les étapes suivantes (titre nettoyé, texte) au lieu de
                     // rendre ce résultat.
-                    log(I18n.t("  SongRec→MB : durée incohérente (%ds vs %ds) → poursuite vers les autres méthodes",
+                    log(I18n.t("  SongRec→MB : autre durée (%ds vs %ds) → recherche par les autres méthodes",
                             existingTags.durationSec, srMb.get(0).mbDurationSec));
                     songRecDurationSuspect = true;
                 } else {
@@ -2707,7 +2711,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                         return srMbClean;
                     } else if (!durationOk) {
                         // Même garde-fou que srMb ci-dessus.
-                        log(I18n.t("  SongRec→MB (titre nettoyé) : durée incohérente (%ds vs %ds) → poursuite",
+                        log(I18n.t("  SongRec→MB (titre nettoyé) : autre durée (%ds vs %ds) → recherche continue",
                                 existingTags.durationSec, srMbClean.get(0).mbDurationSec));
                         songRecDurationSuspect = true;
                     } else {

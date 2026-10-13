@@ -182,7 +182,7 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
                     : res.renameError() != null
                     ? I18n.t("Enregistré, renommage échoué : %s", res.renameError())
                     : res.durationMismatchMoved()
-                        ? I18n.t("Durée incohérente avec MusicBrainz — déplacé pour vérification")
+                        ? I18n.t("Durée différente de MusicBrainz — déplacé pour vérification")
                         : "";
 
             final TagInfo      writtenFinal = res.written();

@@ -124,7 +124,7 @@ public class DurationMismatchReviewPanel extends JPanel {
             }
         }
         lblCount.setText(root == null
-            ? I18n.t("Aucun dossier de déplacement configuré (Préférences → Durée incohérente).")
+            ? I18n.t("Aucun dossier de déplacement configuré (Préférences → Renommage → « version, mix long ou coupé »).")
             : I18n.t("%d fichier(s) — %d probablement cassé(s), %d à revérifier manuellement",
                     rowEntries.size(), shortCount, longCount));
     }
