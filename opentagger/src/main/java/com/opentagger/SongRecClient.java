@@ -55,19 +55,19 @@ public class SongRecClient {
     // alors bloqué jusqu'au timeout sans rien imprimer sur stdout, et le fichier finissait « Non
     // identifié » (puis déplacé vers Sans_correspondance) alors que Shazam n'avait jamais vraiment
     // répondu. Désormais : 429 (lu sur stderr) ou 3 non-réponses d'affilée → SongRec en PAUSE
-    // (15 min, doublée à chaque récidive jusqu'à 2 h) ; pendant la pause, aucun appel, et le
+    // (1 min, doublée à chaque récidive jusqu'à 15 min) ; pendant la pause, aucun appel, et le
     // fichier est marqué « limité » (wasThrottled) pour être retenté plus tard, pas classé.
     private static volatile long pausedUntilMs = 0;
-    private static volatile long pauseMs = 15 * 60_000L;
+    // Rythme de songrec-rename (2026-10-13, demande utilisateur : « pourquoi on ne fait pas comme lui ? ») : 1 s après un
+    // morceau reconnu, 4 s après un échec, pas de budget. La pause ne sert plus qu'au vrai blocage de Shazam (429) et
+    // reste courte : 1 min, doublée seulement si le blocage continue, 15 min au plus (avant : 15 min → 2 h).
+    static final long FIRST_PAUSE_MS = 60_000L;
+    private static volatile long pauseMs = FIRST_PAUSE_MS;
+    private static volatile boolean lastWasMatch = true;
     private static final java.util.concurrent.atomic.AtomicInteger NO_ANSWER_STREAK =
         new java.util.concurrent.atomic.AtomicInteger();
     private static final ThreadLocal<Boolean> THROTTLED = new ThreadLocal<>();
     private static volatile long lastCallMs = 0;
-    // Ralentissement adaptatif (2026-10-08) : mesuré en direct, 8 pauses « 429 » en 5 h (359 reconnus, 884 reportés) —
-    // chaque pause repartait à 15 min et au même rythme d'appels, donc retombait aussitôt dans la limite. Désormais un
-    // 429 double l'espacement entre deux appels (jusqu'à 30 s) ; il ne redescend que de moitié après 50 réponses
-    // d'affilée, et la durée de pause n'est remise à 15 min qu'après 50 réponses sans limite.
-    private static volatile long extraIntervalMs = 0;
     private static final java.util.concurrent.atomic.AtomicInteger ANSWERED_STREAK =
         new java.util.concurrent.atomic.AtomicInteger();
 
@@ -80,7 +80,7 @@ public class SongRecClient {
     // ── Budget d'appels (2026-10-10) ──────────────────────────────────────────────────────────────────────────────────
     // Journal réel : sur 884 fichiers, Shazam a répondu 429 après ~10 min de SongRec, et la pause réactive ci-dessus n'intervient
     // qu'APRÈS la limite. On borne donc proactivement le nombre d'appels sur une fenêtre glissante de 10 min
-    // (songrec.max_calls_per_10min, 80 par défaut ≈ 1 appel / 7,5 s ; 0 = illimité). Passé ce budget, les fichiers restants sont
+    // (songrec.max_calls_per_10min ; 0 = illimité, le défaut depuis le 2026-10-13 — rythme de songrec-rename). Passé ce budget, les fichiers restants sont
     // « retentés plus tard » (même chemin que la limite 429), sans toucher Shazam : le lot continue avec les autres méthodes.
     private static final long BUDGET_WINDOW_MS = 10 * 60_000L;
     private static final java.util.ArrayDeque<Long> CALL_TIMES = new java.util.ArrayDeque<>();
@@ -101,10 +101,17 @@ public class SongRecClient {
     /** Écart entre deux fichiers « retentés plus tard » : le rythme que Shazam accepte (budget, ou espacement
      *  minimal s'il est plus lent), pour ~2 appels par fichier. */
     public static long retrySpacingMs() {
-        int max = Config.get().num("songrec.max_calls_per_10min", 80);
-        long perCall = Math.max(max > 0 ? BUDGET_WINDOW_MS / max : 0,
-                Config.get().num("songrec.min_interval_ms", 2500) + extraIntervalMs);
+        int max = Config.get().num("songrec.max_calls_per_10min", 0);
+        long perCall = Math.max(max > 0 ? BUDGET_WINDOW_MS / max : 0, delayAfterMissMs());
         return 2 * perCall;
+    }
+
+    static long delayAfterMatchMs() { return Config.get().num("songrec.delay_after_match_ms", 1000); }
+    static long delayAfterMissMs()  { return Config.get().num("songrec.delay_after_miss_ms", 4000); }
+
+    /** Attente avant le prochain appel : comme songrec-rename, 1 s après un morceau reconnu, 4 s après un échec. */
+    static long waitBeforeNextCall(long now, long lastCall, boolean lastMatched, long afterMatch, long afterMiss) {
+        return Math.max(0, lastCall + (lastMatched ? afterMatch : afterMiss) - now);
     }
 
     /** Pour les tests : oublie l'historique d'appels. */
@@ -114,21 +121,17 @@ public class SongRecClient {
         long now = System.currentTimeMillis();
         if (now < pausedUntilMs) return; // déjà en pause (autre thread)
         pausedUntilMs = now + pauseMs;
-        long base = Math.max(500, Config.get().num("songrec.min_interval_ms", 2500));
-        extraIntervalMs = Math.min(Math.max(base, (base + extraIntervalMs) * 2) - base, 30_000L - base);
         ANSWERED_STREAK.set(0);
-        System.out.println("[OT] ⏸ SongRec en pause " + (pauseMs / 60_000) + " min, puis 1 appel toutes les "
-            + (base + extraIntervalMs) / 1000.0 + " s (" + why
-            + ") — fichiers concernés retentés ensuite, pas classés « Non identifié ».");
-        pauseMs = Math.min(pauseMs * 2, 2 * 60 * 60_000L);
+        System.out.println("[OT] ⏸ SongRec en pause " + (pauseMs >= 60_000 ? (pauseMs / 60_000) + " min" : (pauseMs / 1000) + " s")
+            + " (" + why + ") — fichiers concernés retentés ensuite, pas classés « Non identifié ».");
+        pauseMs = Math.min(pauseMs * 2, 15 * 60_000L);
     }
 
     private static void answered() {
         NO_ANSWER_STREAK.set(0);
         if (ANSWERED_STREAK.incrementAndGet() >= 50) {
             ANSWERED_STREAK.set(0);
-            pauseMs = 15 * 60_000L;
-            extraIntervalMs = extraIntervalMs / 2;
+            pauseMs = FIRST_PAUSE_MS;
         }
     }
 
@@ -301,15 +304,16 @@ public class SongRecClient {
                     LAST_FAILURE_REASON.set("SongRec en pause (Shazam limite les requêtes)");
                     return null;
                 }
-                long budgetFree = reserveCall(System.currentTimeMillis(), Config.get().num("songrec.max_calls_per_10min", 80));
+                long budgetFree = reserveCall(System.currentTimeMillis(), Config.get().num("songrec.max_calls_per_10min", 0));
                 if (budgetFree > 0) {
                     THROTTLED.set(true);
-                    LAST_FAILURE_REASON.set("budget d'appels Shazam atteint (" + Config.get().num("songrec.max_calls_per_10min", 80)
+                    LAST_FAILURE_REASON.set("budget d'appels Shazam atteint (" + Config.get().num("songrec.max_calls_per_10min", 0)
                         + " / 10 min) — reprise à " + new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date(budgetFree)));
                     return null;
                 }
-                // Espacement minimal entre deux appels Shazam (songrec.min_interval_ms).
-                long wait = lastCallMs + Config.get().num("songrec.min_interval_ms", 2500) + extraIntervalMs - System.currentTimeMillis();
+                // Espacement entre deux appels Shazam : celui de songrec-rename (voir lastWasMatch).
+                long wait = waitBeforeNextCall(System.currentTimeMillis(), lastCallMs, lastWasMatch,
+                        delayAfterMatchMs(), delayAfterMissMs());
                 if (wait > 0) Thread.sleep(wait);
                 lastCallMs = System.currentTimeMillis();
                 ProcessBuilder pb = new ProcessBuilder(bin, "audio-file-to-recognized-song",
@@ -337,6 +341,7 @@ public class SongRecClient {
                         LAST_FAILURE_REASON.set("Shazam limite les requêtes (429) à " + offsetSec + "s");
                         return null;
                     }
+                    lastWasMatch = false;
                     if (NO_ANSWER_STREAK.incrementAndGet() >= 3) {
                         THROTTLED.set(true);
                         pause("3 appels sans réponse d'affilée");
@@ -346,7 +351,8 @@ public class SongRecClient {
                     return null;
                 }
                 answered();
-                if (!json.contains("\"track\"")) {
+                lastWasMatch = json.contains("\"track\"");
+                if (!lastWasMatch) {
                     LAST_FAILURE_REASON.set("aucun morceau reconnu par Shazam à " + offsetSec + "s");
                     return null;
                 }
