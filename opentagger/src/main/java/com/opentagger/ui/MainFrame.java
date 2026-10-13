@@ -7863,7 +7863,7 @@ public class MainFrame extends JFrame {
         }
 
         List<String> roots = new ArrayList<>();
-        for (String s : Config.get().startupFolders()) if (s != null && !s.isBlank()) roots.add(s);
+        for (String s : Config.get().libraryFolders()) if (s != null && !s.isBlank()) roots.add(s);
         if (roots.isEmpty()) {
             setStatus(I18n.t("Aucun dossier de démarrage configuré (Préférences → Dossiers)."));
             return;
@@ -8044,7 +8044,7 @@ public class MainFrame extends JFrame {
         }
 
         List<String> roots = new ArrayList<>();
-        for (String s : Config.get().startupFolders()) if (s != null && !s.isBlank()) roots.add(s);
+        for (String s : Config.get().libraryFolders()) if (s != null && !s.isBlank()) roots.add(s);
         if (roots.isEmpty()) {
             setStatus(I18n.t("Aucun dossier de démarrage configuré (Préférences → Dossiers)."));
             return;

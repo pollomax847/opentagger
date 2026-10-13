@@ -323,7 +323,7 @@ public class App {
     /** Fusionne les dossiers CLI avec les dossiers de démarrage configurés dans les préférences. */
     private static File[] startupDirs(File[] cliDirs) {
         java.util.LinkedHashSet<File> all = new java.util.LinkedHashSet<>(java.util.Arrays.asList(cliDirs));
-        for (String p : com.opentagger.Config.get().startupFolders()) {
+        for (String p : com.opentagger.Config.get().libraryFolders()) {
             File f = new File(p.trim());
             if (f.isDirectory()) all.add(f);
         }

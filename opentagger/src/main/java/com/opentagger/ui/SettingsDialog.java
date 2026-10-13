@@ -52,6 +52,7 @@ public class SettingsDialog extends JDialog {
     private JCheckBox  chkAutoRename;
     private JCheckBox  chkDeleteEmptyDirs;
     private JCheckBox  chkMergeFolderVariants;
+    private JCheckBox  chkWindowsMusicLibrary;
     private JCheckBox  chkFollowLog;
     private JCheckBox  chkUseLibraryRoot;
     private JTextField tfLibraryRoot;
@@ -406,12 +407,24 @@ public class SettingsDialog extends JDialog {
         hint.setBorder(new EmptyBorder(8, 0, 4, 0));
         hint.putClientProperty("FlatLaf.style", "foreground: #888888; font: 11 $defaultFont");
 
+        // Bibliothèque « Musique » de Windows (2026-10-13) : ses dossiers sont scannés en plus de la liste ci-dessus.
+        java.util.List<String> winLib = com.opentagger.WindowsMusicLibrary.folders();
+        chkWindowsMusicLibrary = new JCheckBox(winLib.isEmpty()
+                ? I18n.t("Inclure aussi les dossiers de la bibliothèque Musique de Windows")
+                : I18n.t("Inclure aussi la bibliothèque Musique de Windows : %s", String.join(" ; ", winLib)));
+        chkWindowsMusicLibrary.setToolTipText(I18n.t("Lue à chaque démarrage dans les bibliothèques de Windows (Musique, et "
+                + "celles de type Musique) — pas besoin de recopier ses dossiers ici. Sans effet hors Windows."));
+        chkWindowsMusicLibrary.setEnabled(System.getProperty("os.name", "").toLowerCase().contains("win"));
+        JPanel south = new JPanel(new BorderLayout(0, 4));
+        south.add(buttons, BorderLayout.NORTH);
+        south.add(chkWindowsMusicLibrary, BorderLayout.SOUTH);
+
         JPanel inner = new JPanel(new BorderLayout(0, 6));
         inner.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), I18n.t("Dossiers chargés au démarrage")));
         inner.add(hint,   BorderLayout.NORTH);
         inner.add(scroll, BorderLayout.CENTER);
-        inner.add(buttons, BorderLayout.SOUTH);
+        inner.add(south, BorderLayout.SOUTH);
 
         // Dossiers exclus du scan (2026-09-18, écart vs SongKong excluded_folder.txt) — même
         // idiome JList+boutons que ci-dessus, en plus compact (pas de rendu "disque introuvable" :
@@ -2421,6 +2434,7 @@ public class SettingsDialog extends JDialog {
         chkAutoRename     .setSelected(cfg.bool("rename.auto_enabled",       false));
         chkDeleteEmptyDirs.setSelected(cfg.bool("rename.delete_empty_dirs",  true));
         chkMergeFolderVariants.setSelected(cfg.mergeFolderVariants());
+        chkWindowsMusicLibrary.setSelected(cfg.includeWindowsMusicLibrary());
         chkFollowLog      .setSelected(cfg.bool("rename.follow_log",         true));
         cmbDefaultMask    .setEnabled(chkAutoRename.isSelected());
         chkMoveSkipped    .setSelected(cfg.bool("skipped.move_enabled",      false));
@@ -2664,6 +2678,7 @@ public class SettingsDialog extends JDialog {
         p.setProperty("rename.auto_enabled",           String.valueOf(chkAutoRename.isSelected()));
         p.setProperty("rename.delete_empty_dirs",      String.valueOf(chkDeleteEmptyDirs.isSelected()));
         p.setProperty("rename.merge_folder_variants",  String.valueOf(chkMergeFolderVariants.isSelected()));
+        p.setProperty("startup.windows_music_library", String.valueOf(chkWindowsMusicLibrary.isSelected()));
         p.setProperty("rename.follow_log",             String.valueOf(chkFollowLog.isSelected()));
         p.setProperty("skipped.move_enabled",          String.valueOf(chkMoveSkipped.isSelected()));
         p.setProperty("skipped.move_folder",           tfSkippedFolder.getText().trim());

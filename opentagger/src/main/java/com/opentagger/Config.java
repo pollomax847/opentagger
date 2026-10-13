@@ -326,6 +326,41 @@ public class Config {
         return v.isBlank() ? new String[0] : v.split("\\|");
     }
 
+    /** Sous Windows : ajouter aux dossiers de démarrage ceux de la bibliothèque « Musique » de Windows. */
+    public boolean includeWindowsMusicLibrary()  { return bool("startup.windows_music_library", true); }
+
+    /** Tout ce qui est scanné au démarrage : les dossiers de Préférences → Démarrage, plus (Windows) ceux de la
+     *  bibliothèque Musique de Windows — sans doublon (casse ignorée sous Windows) ni dossier déjà contenu dans un autre. */
+    public String[] libraryFolders() {
+        java.util.List<String> all = new java.util.ArrayList<>();
+        for (String s : startupFolders()) if (s != null && !s.isBlank()) all.add(s.trim());
+        if (includeWindowsMusicLibrary()) all.addAll(WindowsMusicLibrary.folders());
+        return withoutNested(all, java.io.File.separatorChar == '\\').toArray(new String[0]);
+    }
+
+    /** Retire les doublons et les dossiers inclus dans un autre de la liste (ordre conservé). */
+    static java.util.List<String> withoutNested(java.util.List<String> paths, boolean ignoreCase) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        java.util.List<String> keys = new java.util.ArrayList<>();
+        for (String p : paths) {
+            String k = java.nio.file.Paths.get(p).toAbsolutePath().normalize().toString();
+            if (ignoreCase) k = k.toLowerCase(java.util.Locale.ROOT);
+            boolean covered = false;
+            for (String o : keys) {
+                if (k.equals(o) || k.startsWith(o.endsWith(java.io.File.separator) ? o : o + java.io.File.separator)) { covered = true; break; }
+            }
+            if (covered) continue;
+            // un dossier déjà gardé est DANS celui-ci : le remplacer
+            for (int i = keys.size() - 1; i >= 0; i--) {
+                String o = keys.get(i);
+                if (o.startsWith(k.endsWith(java.io.File.separator) ? k : k + java.io.File.separator)) { keys.remove(i); out.remove(i); }
+            }
+            keys.add(k);
+            out.add(p);
+        }
+        return out;
+    }
+
     /** Dossiers (préfixes de chemin absolu) jamais parcourus, ni au scan de démarrage ni par
      *  "Nettoyer les dossiers orphelins" — écart trouvé vs SongKong ({@code excluded_folder.txt},
      *  2026-09-18) : utile sur cette machine où le pool mergerfs partage ses disques physiques avec
