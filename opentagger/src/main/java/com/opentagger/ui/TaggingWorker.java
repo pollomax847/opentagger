@@ -852,17 +852,51 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             if (durationOk == null) {
                 TagInfo shown = closestMiss != null ? closestMiss : best;
                 if (closestMiss != null && tryTrashTruncated(entry, fichier, closestMiss)) return;   // essai, voir la méthode
-                entry.candidates = results;
-                entry.status = FileEntry.Status.SKIPPED;
-                entry.durationMismatch = true;
-                entry.skipReason = com.opentagger.model.SkipReason.DURATION_MISMATCH;
-                entry.message = I18n.t("Durée incohérente : fichier %s vs MusicBrainz %s (%s)",
-                    FileTableModel.formatDuration(entry.current.durationSec),
-                    FileTableModel.formatDuration(shown.mbDurationSec), shown.title)
-                        + videoHintIfAny(fichier);
-                log(I18n.t("  SKIPPED durée incohérente (%ds vs %ds)",
-                    entry.current.durationSec, shown.mbDurationSec));
-                return;
+                // Plus de « Durée incohérente » sans suite (2026-10-13, demande utilisateur : « soit c'est un mix plus long,
+                // une mauvaise release ou autre »). Comme MediaMonkey (searchMusicbrainz.js : la durée CLASSE les
+                // enregistrements d'un même titre au lieu de les rejeter) : d'abord chercher la bonne VERSION du morceau
+                // (version longue, radio edit, live…) parmi les autres enregistrements MusicBrainz du même artiste/titre.
+                int fileSec = entry.current.durationSec;
+                TagInfo version = findVersionWithDuration(shown, fileSec, mb);
+                if (version != null) {
+                    log(I18n.t("  autre version du morceau : « %s » (%s) au lieu de « %s » (%s)", version.title,
+                            FileTableModel.formatDuration(version.mbDurationSec), shown.title,
+                            FileTableModel.formatDuration(shown.mbDurationSec)));
+                    version.score = Math.max(version.score, best.score);
+                    version.durationSec = fileSec;
+                    durationOk = version;
+                } else {
+                    DurationGap gap = durationGap(fileSec, shown.mbDurationSec);
+                    String src = lastFindTagsSource.get();
+                    boolean audioConfirmed = MetadataCache.SOURCE_ACOUSTID.equals(src) || MetadataCache.SOURCE_SONGREC.equals(src);
+                    String claimed = entry.current.title == null || entry.current.title.isBlank()
+                            ? parseFilename(fichier)[1] : entry.current.title;
+                    boolean fileSaysSameSong = !claimed.isBlank() && !isGenericTag(claimed)
+                            && TrackMatcher.titleSimilarity(coreTitle(claimed.toLowerCase()), coreTitle(shown.title.toLowerCase())) >= 0.85;
+                    if (gap == DurationGap.OTHER_VERSION && (audioConfirmed || (shown.score >= 95 && fileSaysSameSong))) {
+                        // Bon morceau, version absente de MusicBrainz : on garde l'identification (artiste/titre/album).
+                        log(I18n.t("  version différente de MusicBrainz (%s au lieu de %s) — identification gardée (%s)",
+                                FileTableModel.formatDuration(fileSec), FileTableModel.formatDuration(shown.mbDurationSec),
+                                audioConfirmed ? "reconnue par l'audio" : "le fichier dit la même chose"));
+                        shown.durationSec = fileSec;
+                        durationOk = shown;
+                    } else {
+                        entry.candidates = results;
+                        entry.status = FileEntry.Status.SKIPPED;
+                        entry.durationMismatch = true;
+                        entry.skipReason = com.opentagger.model.SkipReason.DURATION_MISMATCH;
+                        entry.message = switch (gap) {
+                            case LONG_RECORDING -> I18n.t("Mix ou enregistrement long (%s) — pas un morceau seul",
+                                    FileTableModel.formatDuration(fileSec));
+                            case CUT -> I18n.t("Fichier coupé : %s au lieu de %s (« %s ») — à retélécharger",
+                                    FileTableModel.formatDuration(fileSec), FileTableModel.formatDuration(shown.mbDurationSec), shown.title);
+                            default -> I18n.t("Autre version de « %s » (fichier %s, MusicBrainz %s) — à vérifier", shown.title,
+                                    FileTableModel.formatDuration(fileSec), FileTableModel.formatDuration(shown.mbDurationSec));
+                        } + videoHintIfAny(fichier);
+                        log("  SKIPPED " + entry.message);
+                        return;
+                    }
+                }
             }
             best = durationOk;
 
@@ -2804,6 +2838,39 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
         for (String t : titles) titleSim = Math.max(titleSim,
                 TrackMatcher.titleSimilarity(t.toLowerCase(), String.valueOf(candTitle).toLowerCase()));
         return artistSim < 0.3 && titleSim < 0.6;
+    }
+
+    enum DurationGap { LONG_RECORDING, CUT, OTHER_VERSION }
+
+    /** Nature de l'écart de durée entre le fichier et l'enregistrement MusicBrainz trouvé. */
+    static DurationGap durationGap(int fileSec, int mbSec) {
+        if (fileSec >= 600 && mbSec > 0 && fileSec >= 2 * mbSec) return DurationGap.LONG_RECORDING;   // mix, concert, émission
+        // Coupé : nettement plus court ET court tout court (extraits de 30 s à 2 min) — une version radio d'un remix de
+        // 7:47 dure couramment 3:45, ce n'est pas un fichier coupé.
+        if (mbSec > 0 && fileSec > 0 && fileSec < 150 && fileSec < 0.6 * mbSec && mbSec - fileSec >= 30) return DurationGap.CUT;
+        return DurationGap.OTHER_VERSION;   // radio edit, version longue, live… d'un même morceau
+    }
+
+    /** Autre enregistrement MusicBrainz du MÊME morceau (même artiste, même titre de base) dont la durée colle au fichier
+     *  (écart ≤ 10 s ou 5 %) — le plus proche. Règle de MediaMonkey : la durée départage les versions d'un titre. */
+    private TagInfo findVersionWithDuration(TagInfo shown, int fileSec, MusicBrainzClient mb) {
+        if (fileSec <= 0 || shown == null || shown.artist.isBlank() || shown.title.isBlank()) return null;
+        String base = coreTitle(shown.title);
+        try {
+            List<TagInfo> found = mb.searchRecording(shown.artist, base);
+            TagInfo bestV = null;
+            int bestDiff = Integer.MAX_VALUE;
+            for (TagInfo t : found) {
+                if (t.mbDurationSec <= 0) continue;
+                if (TrackMatcher.titleSimilarity(coreTitle(t.title).toLowerCase(), base.toLowerCase()) < 0.7) continue;
+                if (TrackMatcher.titleSimilarity(t.artist.toLowerCase(), shown.artist.toLowerCase()) < 0.5) continue;
+                int diff = Math.abs(t.mbDurationSec - fileSec);
+                if (diff <= Math.max(10, fileSec * 0.05) && diff < bestDiff) { bestDiff = diff; bestV = t; }
+            }
+            return bestV;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** Partie « titre » d'un titre : sans ce qui est entre parenthèses/crochets (remix, feat., version),

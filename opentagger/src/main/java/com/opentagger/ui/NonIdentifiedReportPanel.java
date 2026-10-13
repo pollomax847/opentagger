@@ -86,7 +86,7 @@ public class NonIdentifiedReportPanel extends JPanel {
             case FILE_MISSING     -> I18n.t("Fichier introuvable");
             case NOT_IDENTIFIED   -> I18n.t("Aucune méthode n'a rien trouvé");
             case LOW_SCORE        -> I18n.t("Score trop bas");
-            case DURATION_MISMATCH -> I18n.t("Durée incohérente avec MusicBrainz");
+            case DURATION_MISMATCH -> I18n.t("Version, mix long ou fichier coupé");
             case ERROR_GENERIC    -> I18n.t("Erreur (transcodage, fichier corrompu…)");
             case NETWORK_ERROR    -> I18n.t("Erreur réseau (coupure/timeout) — probablement à réessayer");
             case GROUP_MISMATCH   -> I18n.t("Contredit la release des autres pistes du dossier — revue manuelle");
