@@ -246,7 +246,6 @@ public class SongRecClient {
                 long wait = waitBeforeNextCall(System.currentTimeMillis(), lastCallMs, lastWasMatch,
                         delayAfterMatchMs(), delayAfterMissMs());
                 if (wait > 0) Thread.sleep(wait);
-                lastCallMs = System.currentTimeMillis();
                 ProcessBuilder pb = new ProcessBuilder(bin, "audio-file-to-recognized-song",
                         segment.getAbsolutePath());
                 pb.redirectErrorStream(false);
@@ -293,6 +292,10 @@ public class SongRecClient {
                         + "s sans titre/artiste exploitable");
                 return parsed;
             } finally {
+                // Compté à partir de la FIN de l'appel, comme songrec-rename (il attend 1 s / 4 s après la réponse) :
+                // compté depuis le début, un appel de 3 s suivi d'un autre 1 s après son départ = 2× plus de requêtes,
+                // et Shazam a bloqué l'adresse plus d'1 h 30 le 13/10 au soir (pauses de 15 min enchaînées).
+                lastCallMs = System.currentTimeMillis();
                 SHAZAM_GATE.release();
                 if (errFile != null) { try { Files.deleteIfExists(errFile); } catch (IOException ignored) {} }
             }
