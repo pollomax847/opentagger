@@ -146,106 +146,37 @@ public class SongRecClient {
             LAST_FAILURE_REASON.set("fichier trop petit pour contenir de l'audio (" + len + " octets)");
             return null;
         }
-        if (isPaused()) {
-            THROTTLED.set(true);
-            // pausedUntil() et non pausedUntilMs : c'est le plus souvent le budget d'appels qui bloque, et
-            // l'ancien message affichait l'heure de fin d'une pause déjà passée (« jusqu'à 19:27 » à 19:46).
-            LAST_FAILURE_REASON.set((budgetUntilMs > pausedUntilMs
-                    ? "budget d'appels Shazam atteint — reprise à "
-                    : "SongRec en pause jusqu'à ")
-                + new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date(pausedUntil()))
-                + " (Shazam limite les requêtes)");
-            return null;
-        }
-        // Le permis DiskIoThrottle n'est PLUS pris ici pour tout l'appel : il est acquis/libéré à
-        // l'intérieur de recognizeAt(), autour de la seule extraction ffmpeg (vraie E/S disque sur
-        // le fichier source). Avant ce correctif, le même permis restait tenu pendant TOUT l'appel
-        // réseau au binaire songrec (reconnaissance Shazam, plusieurs secondes, aucun rapport avec
-        // le disque) — jusqu'à 4 allers-retours réseau (2 offsets × 1re passe + confirmation) tenant
-        // le seul permis du disque mécanique concerné, immobilisant les 5 AUTRES threads du pool
-        // (batch.threads=6) qui n'attendaient, eux, qu'une E/S disque réellement rapide. Constaté en
-        // direct (2026-08-07) via jstack : 6 threads bloqués depuis 14h sur LE MÊME Semaphore, CPU
-        // quasi nul, alors que iostat montrait le disque à 13-32% d'utilisation seulement (pas
-        // 80-98% comme dans le scénario ayant motivé DiskIoThrottle à l'origine) — la vraie attente
-        // était le réseau (Shazam), pas la tête de lecture.
         String bin = SongRecInstaller.resolve();
         if (bin == null) {
             LAST_FAILURE_REASON.set("SongRec introuvable (Préférences → Audio)");
             return null;
         }
-
-        // Récupérer la durée avec ffprobe pour choisir les offsets
+        // Comme songrec-rename (2026-10-13, demande utilisateur) : UNE demande à Shazam par fichier, et une vraie file
+        // d'attente. Avant : jusqu'à 4 demandes par fichier (3 extraits + un second extrait de confirmation), donc Shazam
+        // bloquait 2 à 4 fois plus vite ; et pendant un blocage chaque fichier était sauté (« Pas encore vérifié par
+        // Shazam — retenté plus tard », des centaines de lignes en deux minutes). Désormais le fichier ATTEND la fin du
+        // blocage puis est envoyé, l'un après l'autre (SHAZAM_GATE). Extrait pris au tiers des morceaux longs (passe
+        // les intros), le fichier entier pour les courts — comme songrec-rename qui donne le fichier entier.
         double duration = probeDuration(audioFile);
-        int[] offsets;
-        if (duration <= 0) {
-            offsets = new int[]{0};
-        } else if (duration < 60) {
-            offsets = new int[]{0};
-        } else if (duration < 180) {
-            offsets = new int[]{0, (int)(duration / 3)};
-        } else {
-            offsets = new int[]{0, (int)(duration / 4), (int)(duration / 2)};
-        }
-
-        TagInfo first = null;
-        int firstOffset = -1;
-        for (int offset : offsets) {
+        int offset = duration > 120 ? (int) (duration / 3) : 0;
+        for (int attempt = 0; attempt < 6; attempt++) {
+            waitWhilePaused();
+            THROTTLED.remove();
             TagInfo result = recognizeAt(bin, audioFile, offset, duration);
-            if (result != null) { first = result; firstOffset = offset; break; }
-            if (wasThrottled()) return null;
-        }
-        if (first == null) {
-            if (LAST_FAILURE_REASON.get() == null)
-                LAST_FAILURE_REASON.set("aucun résultat sur " + offsets.length + " segment(s) testé(s)");
-            return null;
-        }
-
-        // Deuxième vérification, sur un extrait DIFFÉRENT du même fichier — trouvée nécessaire
-        // en direct (2026-08-01) : un fichier nommé "Rasputin" (durée réelle 4:28, cohérente
-        // avec le vrai Rasputin de Boney M) a été identifié par SongRec comme "Some L.A.
-        // N****z" de Dr. Dre — une empreinte de 15 secondes suffit parfois à matcher le
-        // mauvais morceau (rythme/sample partagé), et ce faux positif n'avait aucune fiche
-        // MusicBrainz avec durée pour être rattrapé par isDurationMismatch. Un vrai morceau
-        // correctement reconnu se reconfirme presque toujours sur un second extrait pris
-        // ailleurs dans le fichier ; un faux positif isolé, beaucoup plus rarement. N'annule
-        // QUE si le second extrait pointe vers un AUTRE morceau (désaccord net) — un second
-        // extrait sans résultat (silence, parole, générique...) ne prouve rien et ne doit pas
-        // invalider une identification par ailleurs correcte.
-        int secondOffset = -1;
-        for (int o : offsets) if (o != firstOffset) { secondOffset = o; break; }
-        if (secondOffset < 0 && duration > 30) {
-            int mid = (int) (duration / 2);
-            if (Math.abs(mid - firstOffset) > 5) secondOffset = mid;
-        }
-        if (secondOffset >= 0) {
-            TagInfo second = recognizeAt(bin, audioFile, secondOffset, duration);
-            if (second != null && !sameTrack(first, second)) {
-                LAST_FAILURE_REASON.set("confirmation contredite : \"" + first.artist + " - " + first.title
-                    + "\" (" + firstOffset + "s) vs \"" + second.artist + " - " + second.title
-                    + "\" (" + secondOffset + "s) — rejeté par prudence");
-                return null;
+            if (!wasThrottled()) {
+                if (result == null && LAST_FAILURE_REASON.get() == null)
+                    LAST_FAILURE_REASON.set("aucun morceau reconnu par Shazam");
+                return result;
             }
         }
-
-        LAST_FAILURE_REASON.remove();
-        return first;
+        return null;   // toujours bloqué après 6 essais : marqué « limité », retenté plus tard par TaggingWorker
     }
 
-    /** Même morceau à la ponctuation/casse près, et en ignorant un qualificatif entre parenthèses
-     *  en fin de titre (Shazam renvoie parfois "(Explicit)"/"(Radio Edit)" de façon inconsistante
-     *  d'un extrait à l'autre du même vrai morceau — voir le même traitement dans TaggingWorker
-     *  pour le "titre nettoyé"). */
-    private static boolean sameTrack(TagInfo a, TagInfo b) {
-        return normalize(a.artist).equals(normalize(b.artist))
-            && normalizeTitle(a.title).equals(normalizeTitle(b.title));
-    }
-
-    private static String normalize(String s) {
-        return s == null ? "" : s.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private static String normalizeTitle(String s) {
-        return normalize(s).replaceAll("\\s*\\([^)]*\\)\\s*$", "");
+    /** Attend la fin d'un blocage Shazam (pause ou budget) au lieu de sauter le fichier. */
+    private static void waitWhilePaused() throws InterruptedException {
+        long now;
+        while ((now = System.currentTimeMillis()) < pausedUntil())
+            Thread.sleep(Math.min(1000, pausedUntil() - now));
     }
 
     private TagInfo recognizeAt(String bin, File audioFile, int offsetSec, double duration) throws Exception {
