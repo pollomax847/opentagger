@@ -6,8 +6,8 @@ import javax.swing.*;
 import java.awt.*;
 
 /**
- * « Rapports de la bibliothèque » : UNE fenêtre, trois onglets — Non identifiés (par cause), Complétude des
- * tags et Compilations restaurées.
+ * « Rapports de la bibliothèque » : UNE fenêtre, trois onglets — Non identifiés (par cause), À corriger (les
+ * « Fichiers à éditer » de MediaMonkey, qui a remplacé l'onglet Complétude le 2026-10-13) et Compilations restaurées.
  *
  * <p>Fusion du 2026-10-03 (retour utilisateur : « trop d'options gâchent l'application », le sous-menu
  * Rapports en comptait 10) : ces rapports avaient la même forme (un tableau, un pied de page
@@ -32,22 +32,22 @@ public class LibraryReportsDialog extends JDialog {
 
     private final JTabbedPane                  tabs = new JTabbedPane();
     private final NonIdentifiedReportPanel     nonIdentified;
-    private final CompletenessReportPanel      completeness;
+    private final CorrectionsPanel             corrections;
     private final CompilationRestoreReportPanel compilations;
 
     private LibraryReportsDialog(MainFrame owner, FileTableModel tableModel) {
         super(owner, I18n.t("Rapports de la bibliothèque"), false);
-        setSize(920, 560);
+        setSize(1080, 600);
         setMinimumSize(new Dimension(700, 420));
         setLocationRelativeTo(owner);
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
 
         Runnable close = this::dispose;
         nonIdentified = new NonIdentifiedReportPanel(owner, tableModel, close);
-        completeness  = new CompletenessReportPanel(owner, tableModel, close);
+        corrections  = new CorrectionsPanel(owner, tableModel, close);
         compilations  = new CompilationRestoreReportPanel(close);
         tabs.addTab(I18n.t("Non identifiés"), nonIdentified);
-        tabs.addTab(I18n.t("Complétude"), completeness);
+        tabs.addTab(I18n.t("À corriger"), corrections);
         tabs.addTab(I18n.t("Compilations restaurées"), compilations);
         // Ces trois rapports se relisent en mémoire : les rafraîchir à chaque retour sur leur onglet est gratuit.
         tabs.addChangeListener(e -> refreshCurrent());
@@ -62,7 +62,7 @@ public class LibraryReportsDialog extends JDialog {
     private void refreshCurrent() {
         Component c = tabs.getSelectedComponent();
         if (c == nonIdentified) nonIdentified.refresh();
-        else if (c == completeness) completeness.refresh();
+        else if (c == corrections) corrections.refresh();
         else if (c == compilations) compilations.refresh();
         // L'onglet iTunes n'est volontairement jamais relancé tout seul : l'analyse est longue.
     }

@@ -93,6 +93,8 @@ public class MainFrame extends JFrame {
     // (double-clic sur une catégorie), combiné (.and()) avec les filtres texte/statut dans
     // applyFilter(). Réinitialisé par le bouton "Effacer les filtres" et par tout clic sur un chip.
     private com.opentagger.model.SkipReason activeSkipReasonFilter = null;
+    // Même principe pour l'onglet « À corriger » (CorrectionsPanel) : les fichiers d'un problème précis.
+    private java.util.Set<FileEntry> activeEntryFilter = null;
     private JLabel lblMemory;
     // Taille totale des fichiers chargés (barre d'état, à gauche de la RAM) — voir refreshStats().
     private JLabel lblLibrarySize;
@@ -1910,6 +1912,7 @@ public class MainFrame extends JFrame {
             tfFilter.setText("");
             activeStatusFilter = FILTER_ALL;
             activeSkipReasonFilter = null;
+            activeEntryFilter = null;
             applyFilter();
         });
 
@@ -1935,6 +1938,7 @@ public class MainFrame extends JFrame {
                 activeStatusFilter = (filterIndex == FILTER_ALL) ? FILTER_ALL
                     : (activeStatusFilter == filterIndex ? FILTER_ALL : filterIndex);
                 activeSkipReasonFilter = null;
+                activeEntryFilter = null;
                 applyFilter();
             }
         });
@@ -7247,7 +7251,13 @@ public class MainFrame extends JFrame {
             pred = pred.and(e -> e.skipReason == r);
         }
 
-        boolean noFilter = text.isBlank() && statusSel == FILTER_ALL && activeSkipReasonFilter == null;
+        if (activeEntryFilter != null) {
+            java.util.Set<FileEntry> only = activeEntryFilter;
+            pred = pred.and(only::contains);
+        }
+
+        boolean noFilter = text.isBlank() && statusSel == FILTER_ALL && activeSkipReasonFilter == null
+                && activeEntryFilter == null;
         tableModel.setFilter(noFilter ? null : pred);
 
         // Mettre à jour les chips de stats pour refléter la vue filtrée
@@ -7262,7 +7272,20 @@ public class MainFrame extends JFrame {
     public void filterBySkipReason(com.opentagger.model.SkipReason reason) {
         activeStatusFilter = FILTER_ALL;
         activeSkipReasonFilter = reason;
+        activeEntryFilter = null;
         applyFilter();
+    }
+
+    /** Affiche seulement {@code entries} dans le tableau principal — appelé depuis l'onglet « À corriger »
+     *  (CorrectionsPanel). Levé par « Effacer les filtres » ou un clic sur un chip, comme filterBySkipReason(). */
+    public void filterByEntries(String label, java.util.Set<FileEntry> entries) {
+        activeStatusFilter = FILTER_ALL;
+        activeSkipReasonFilter = null;
+        activeEntryFilter = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        activeEntryFilter.addAll(entries);
+        applyFilter();
+        setStatus(I18n.t("À corriger — %s : %d fichier(s) affiché(s). « Effacer les filtres » pour tout revoir.",
+                label, entries.size()));
     }
 
     private static boolean containsIgnoreCase(String haystack, String needleLower) {

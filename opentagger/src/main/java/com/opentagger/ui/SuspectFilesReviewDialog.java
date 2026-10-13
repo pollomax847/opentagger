@@ -49,7 +49,7 @@ public class SuspectFilesReviewDialog extends JDialog {
 
         duration = new DurationMismatchReviewPanel(owner, tableModel, this::dispose);
         audit    = new AudioTagAuditPanel(owner, tableModel, this::dispose);
-        tabs.addTab(I18n.t("Durées incohérentes"), duration);
+        tabs.addTab(I18n.t("Version, mix long ou coupé"), duration);
         tabs.addTab(I18n.t("Audio ↔ tags"), audit);
         // Le lot « durées » se relit en mémoire : le rafraîchir à chaque retour sur son onglet est gratuit.
         tabs.addChangeListener(e -> { if (tabs.getSelectedIndex() == TAB_DURATION) duration.load(); });

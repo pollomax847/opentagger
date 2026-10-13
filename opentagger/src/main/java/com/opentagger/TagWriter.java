@@ -173,6 +173,25 @@ public class TagWriter {
         } catch (Exception ignored) {}
     }
 
+    /** Écrit UNIQUEMENT les champs donnés (valeur vide = champ retiré), sans relire ni réécrire les autres et sans le
+     *  marqueur OT_TAGGEDDATE : une correction façon MediaMonkey (ui.LibraryChecks) ne doit pas faire passer pour tagué
+     *  un fichier que l'appli n'a jamais identifié. Les champs personnels (ReplayGain…) ne sont jamais retirés. */
+    public void writeFields(File fichier, Map<FieldKey, String> fields, Map<String, String> custom) throws Exception {
+        String n = fichier.getName().toLowerCase();
+        if (FfmpegTagIO.handles(fichier) || n.endsWith(".mpc"))
+            throw new Exception("format non modifiable champ par champ : " + n.substring(n.lastIndexOf('.') + 1));
+        Config.silenceJaudiotaggerLogging();
+        repairM4aIfNeeded(fichier);
+        AudioFile audio = AudioFileIO.read(fichier);
+        Tag tag = audio.getTagOrCreateAndSetDefault();
+        for (Map.Entry<FieldKey, String> e : fields.entrySet()) {
+            if (e.getValue() == null || e.getValue().isBlank()) tag.deleteField(e.getKey());
+            else tag.setField(e.getKey(), e.getValue());
+        }
+        for (Map.Entry<String, String> e : custom.entrySet()) setCustomField(tag, e.getKey(), e.getValue());
+        audio.commit();
+    }
+
     // ── Écriture native jaudiotagger ──────────────────────────────────────────
 
     /** Vrai pour .m4a ET .mp4 : même conteneur ISO-BMFF, même fragilité de parsing d'arbre

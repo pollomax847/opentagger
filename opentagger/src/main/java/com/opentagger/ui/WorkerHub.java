@@ -44,7 +44,10 @@ public final class WorkerHub {
         /** Audit audio ↔ tags (AudioTagAuditWorker) : LECTURE SEULE — n'écrit ni fichier ni tag, donc
          *  volontairement absent de LIBRARY_WRITE (il peut tourner pendant un taguage/enregistrement ;
          *  seul un second audit est refusé, via a == b dans conflictsWith()). */
-        AUDIO_AUDIT
+        AUDIO_AUDIT,
+        /** Corrections façon MediaMonkey (onglet « À corriger », CorrectionsPanel) : écrit quelques champs dans les
+         *  fichiers. Jamais un fichier PROCESSING, et seulement en mémoire pour un fichier IDENTIFIED. */
+        LIBRARY_FIX
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,
@@ -58,7 +61,7 @@ public final class WorkerHub {
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
             TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
             TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP,
-            TaskKind.ARTWORK_COMPLETION);
+            TaskKind.ARTWORK_COMPLETION, TaskKind.LIBRARY_FIX);
 
     public static final class TaskHandle {
         private final TaskKind kind;
@@ -245,6 +248,10 @@ public final class WorkerHub {
         // où le taguage tourne en continu (Linux : plusieurs jours), la passe ne trouvait jamais de créneau.
         if ((a == TaskKind.ARTWORK_COMPLETION && b == TaskKind.TAGGING)
                 || (a == TaskKind.TAGGING && b == TaskKind.ARTWORK_COMPLETION)) return false;
+        // LIBRARY_FIX ∥ TAGGING (2026-10-13) : le taguage n'écrit rien dans les fichiers et les corrections sautent les
+        // fichiers PROCESSING — même raisonnement que les pochettes ci-dessus. L'Enregistrement, lui, reste exclu.
+        if ((a == TaskKind.LIBRARY_FIX && b == TaskKind.TAGGING)
+                || (a == TaskKind.TAGGING && b == TaskKind.LIBRARY_FIX)) return false;
         if (a == TaskKind.SAVE || b == TaskKind.SAVE) {
             TaskKind other = (a == TaskKind.SAVE) ? b : a;
             // Enregistrer et Tagger touchent des ensembles de fichiers disjoints par construction
