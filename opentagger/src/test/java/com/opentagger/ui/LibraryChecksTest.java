@@ -233,4 +233,23 @@ public class LibraryChecksTest {
         assertFalse(LibraryChecks.whispering("u2"));
         assertEquals("jeanlouisaubert", LibraryChecks.key("Jean‐Louis Aubert"));
     }
+    @Test public void coversAndAlbumVolume() {
+        add("/m/A/Album/01.mp3", "A", "A", "x", "Album Cover").coverInfo = "1:aaaa";
+        add("/m/A/Album/02.mp3", "A", "A", "y", "Album Cover").coverInfo = "3:aaaa";
+        add("/m/A/Album/03.mp3", "A", "A", "z", "Album Cover").coverInfo = "1:bbbb";
+        add("/m/A/Album/04.mp3", "A", "A", "w", "Album Cover").coverInfo = "0";
+        add("/m/A/Album/05.mp3", "A", "A", "v", "Album Cover");                       // jamais lu
+        add("/m/A/Album/06.opus", "A", "A", "u", "Album Cover");                      // jamais lu, pas modifiable
+        tracks.get(0).tags().replayGainAlbumGain = "-6.00 dB";
+        var r = run();
+        assertEquals(List.of("/m/A/Album/04.mp3"), r.found(Check.NO_COVER));
+        assertEquals(List.of("/m/A/Album/02.mp3"), r.found(Check.MULTI_COVER));
+        assertEquals(3, r.found(Check.COVER_MISMATCH).size());                        // aaaa / bbbb parmi les fichiers lus
+        assertEquals(List.of("/m/A/Album/05.mp3"), r.coversNotRead());
+        assertEquals(5, r.found(Check.NO_ALBUM_GAIN).size());
+        assertEquals(1, r.albumsWithoutGain().size());
+        assertEquals(6, r.albumsWithoutGain().get(0).size());                         // tout l'album est recalculé
+        assertEquals(3, LibraryChecks.coverCount("3:aaaa"));
+        assertEquals(-1, LibraryChecks.coverCount(""));
+    }
 }

@@ -54,7 +54,8 @@ public final class TagReader {
         if (af == null) return ti;
         try {
             Tag tag = af.getTag();
-            if (tag == null) return ti;
+            if (tag == null) { ti.coverInfo = "0"; return ti; }
+            ti.coverInfo = coverInfo(tag);
 
             // ── Standard ──────────────────────────────────────────────────
             ti.title          = g(tag, FieldKey.TITLE);
@@ -187,6 +188,29 @@ public final class TagReader {
 
         } catch (Exception ignored) {}
         return ti;
+    }
+
+    /** « 0 » sans image, sinon « nombre:empreinte » de la pochette de face (la première marquée face, sinon la première). */
+    public static String coverInfo(Tag tag) {
+        try {
+            java.util.List<org.jaudiotagger.tag.images.Artwork> arts = tag.getArtworkList();
+            if (arts == null || arts.isEmpty()) return "0";
+            org.jaudiotagger.tag.images.Artwork front = frontCover(arts);
+            return arts.size() + ":" + crc(front.getBinaryData());
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    static org.jaudiotagger.tag.images.Artwork frontCover(java.util.List<org.jaudiotagger.tag.images.Artwork> arts) {
+        for (org.jaudiotagger.tag.images.Artwork a : arts) if (a.getPictureType() == 3) return a;
+        return arts.get(0);
+    }
+
+    public static String crc(byte[] data) {
+        java.util.zip.CRC32 c = new java.util.zip.CRC32();
+        if (data != null) c.update(data);
+        return String.format("%08x", c.getValue());
     }
 
     /** getFirst avec protection NPE et chaîne vide par défaut. */

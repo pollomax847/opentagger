@@ -33,7 +33,7 @@ public class TagRoundTripTest {
     /** Non persistés dans le fichier, ou dépendants d'un réglage utilisateur (notation Camelot de la
      *  tonalité, empreintes AcoustID désactivables) — hors comparaison. */
     private static final Set<String> SKIP = Set.of(
-            "identificationSource", "shazamCoverUrl", "syncedLyrics", "remixerSort", "taggedDate",
+            "identificationSource", "shazamCoverUrl", "coverInfo", "syncedLyrics", "remixerSort", "taggedDate",
             "year", "initialKey", "acoustidId", "acoustidFingerprint");
 
     private static TagInfo fullTagInfo() throws Exception {

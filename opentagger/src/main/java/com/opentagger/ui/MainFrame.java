@@ -5423,6 +5423,11 @@ public class MainFrame extends JFrame {
     }
 
     /** Outils → Re-traitement : sur la sélection, ou sur toute la liste s'il n'y en a pas. */
+    /** Pochettes manquantes de ces fichiers, recherchées en ligne — appelé par l'onglet « À corriger » (Sans pochette). */
+    void completeArtworkFor(List<FileEntry> targets) {
+        completeArtwork(new ArrayList<>(targets), false, null);
+    }
+
     private void completeArtworkFromMenu() {
         int[] sel = table != null ? table.getSelectedRows() : new int[0];
         java.util.Set<FileEntry> targets = new java.util.LinkedHashSet<>();

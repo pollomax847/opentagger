@@ -123,8 +123,9 @@ class FixPreviewDialog extends JDialog {
             case GENRE -> I18n.t("Genre");
             case TRACK -> I18n.t("Piste");
             case COMPILATION -> I18n.t("Compilation");
-            case RG_TRACK_GAIN -> "ReplayGain";
-            case RG_TRACK_PEAK -> I18n.t("Crête");
+            case RG_TRACK_GAIN, RG_ALBUM_GAIN -> "ReplayGain";
+            case RG_TRACK_PEAK, RG_ALBUM_PEAK -> I18n.t("Crête");
+            case COVER_INFO -> I18n.t("Pochette");
         };
     }
 }

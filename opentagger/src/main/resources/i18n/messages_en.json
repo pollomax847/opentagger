@@ -1954,7 +1954,6 @@
   "Encore en cours : %s — réessaie quand c'est fini.": "Still running: %s — try again when it is finished.",
   "analyse impossible": "analysis failed",
   "%s : %d / %d…": "%s: %d / %d…",
-  "%s : %d fichier(s) corrigé(s)": "%s: %d file(s) fixed",
   ", %d en cours de traitement laissé(s) pour plus tard": ", %d being processed left for later",
   ", %d erreur(s) — ex. %s": ", %d error(s) — e.g. %s",
   "Corrections (%s)": "Fixes (%s)",
@@ -1970,5 +1969,19 @@
   "Avant → après": "Before → after",
   "Artiste de l'album": "Album artist",
   "Crête": "Peak",
-  "<html><b>%s</b> : analyser %d fichier(s) ?<br>%s — « Arrêter » à tout moment.</html>": "<html><b>%s</b>: analyse %d file(s)?<br>%s — \"Stop\" at any time.</html>"
+  "Sans pochette": "No cover",
+  "Plusieurs images dans le fichier (Fix Album Art)": "Several images in the file (Fix Album Art)",
+  "Pochettes différentes dans un même album": "Different covers within one album",
+  "Volume d'album non analysé (ReplayGain album)": "Album volume not analysed (album ReplayGain)",
+  "cover.jpg / folder.jpg du dossier, sinon recherche en ligne — parmi les fichiers déjà lus (%d pas encore)": "the folder's cover.jpg / folder.jpg, otherwise an online search — among the files already read (%d not yet)",
+  "cover.jpg / folder.jpg du dossier, sinon recherche en ligne (fichiers identifiés)": "the folder's cover.jpg / folder.jpg, otherwise an online search (identified files)",
+  "garde la pochette de face, retire les autres (gardées pour annuler) — lit aussi les %d fichier(s) jamais vérifiés (≈ 1 s chacun sur MyBook, « Arrêter » quand tu veux, ça reprend où ça s'est arrêté)": "keeps the front cover, removes the others (kept for undo) — also reads the %d never-checked file(s) (≈ 1 s each on MyBook, \"Stop\" whenever you like, it resumes where it stopped)",
+  "garde la pochette de face, retire les autres (gardées pour annuler)": "keeps the front cover, removes the others (kept for undo)",
+  "à vérifier à l'œil — %d fichier(s) pas encore lus : « Corriger » sur la ligne Fix Album Art les lit": "to check by eye — %d file(s) not read yet: \"Fix\" on the Fix Album Art row reads them",
+  "à vérifier à l'œil (Afficher)": "to check by eye (Show)",
+  "analyse du volume de chaque album entier (long)": "volume analysis of each whole album (slow)",
+  "<html><b>%s</b> : traiter %d fichier(s) ?<br>%s — « Arrêter » à tout moment, « Annuler la dernière correction » ensuite.</html>": "<html><b>%s</b>: process %d file(s)?<br>%s — \"Stop\" at any time, \"Undo the last fix\" afterwards.</html>",
+  "<html><b>%s</b> : analyser %d album(s) ?<br>%s — « Arrêter » à tout moment.</html>": "<html><b>%s</b>: analyse %d album(s)?<br>%s — \"Stop\" at any time.</html>",
+  "%s : rien à faire maintenant (%d fichier(s) en cours de traitement).": "%s: nothing to do now (%d file(s) being processed).",
+  "%s : %d traité(s)": "%s: %d processed"
 }

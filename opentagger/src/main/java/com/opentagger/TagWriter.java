@@ -192,6 +192,66 @@ public class TagWriter {
         audio.commit();
     }
 
+    /** Une image intégrée, gardée telle quelle pour pouvoir la remettre. */
+    public record Image(byte[] data, String mime, int pictureType, String description) {}
+
+    /** Résultat de {@link #fixAlbumArt} : images retirées, et les images du fichier après (format TagInfo.coverInfo). */
+    public record AlbumArtFix(List<Image> removed, boolean changed, String coverInfo) {}
+
+    /** « Fix Album Art », le script MediaMonkey de l'utilisateur (2025) : une seule image, la pochette de face — la
+     *  première marquée « face », sinon la première — et les autres retirées (rendues à l'appelant pour l'annulation).
+     *  Ne touche à rien d'autre que les images, ni au marqueur OT_TAGGEDDATE. */
+    public AlbumArtFix fixAlbumArt(File fichier) throws Exception {
+        String n = fichier.getName().toLowerCase();
+        if (FfmpegTagIO.handles(fichier) || n.endsWith(".mpc"))
+            throw new Exception("format non modifiable ici : " + n.substring(n.lastIndexOf('.') + 1));
+        Config.silenceJaudiotaggerLogging();
+        repairM4aIfNeeded(fichier);
+        AudioFile audio = AudioFileIO.read(fichier);
+        Tag tag = audio.getTag();
+        if (tag == null) return new AlbumArtFix(List.of(), false, "0");
+        List<Artwork> arts = new ArrayList<>(tag.getArtworkList());
+        if (arts.isEmpty()) return new AlbumArtFix(List.of(), false, "0");
+        Artwork front = TagReader.frontCover(arts);
+        boolean typed = front.getPictureType() == 3 || tag instanceof Mp4Tag;   // MP4 : pas de type d'image
+        if (arts.size() == 1 && typed) return new AlbumArtFix(List.of(), false, TagReader.coverInfo(tag));
+        List<Image> removed = new ArrayList<>();
+        for (Artwork a : arts) {
+            if (a != front) removed.add(new Image(a.getBinaryData(), a.getMimeType(), a.getPictureType(), a.getDescription()));
+        }
+        tag.deleteArtworkField();
+        if (!(tag instanceof Mp4Tag)) front.setPictureType(3);
+        tag.setField(front);
+        audio.commit();
+        return new AlbumArtFix(removed, true, "1:" + TagReader.crc(front.getBinaryData()));
+    }
+
+    /** Remet des images retirées par {@link #fixAlbumArt} (« Annuler la dernière correction »). */
+    public void addImages(File fichier, List<Image> images) throws Exception {
+        repairM4aIfNeeded(fichier);
+        AudioFile audio = AudioFileIO.read(fichier);
+        Tag tag = audio.getTagOrCreateAndSetDefault();
+        for (Image im : images) {
+            Artwork a = ArtworkFactory.getNew();
+            a.setBinaryData(im.data());
+            a.setMimeType(im.mime() == null || im.mime().isBlank() ? "image/jpeg" : im.mime());
+            a.setPictureType(im.pictureType());
+            a.setDescription(im.description() == null ? "" : im.description());
+            tag.addField(a);
+        }
+        audio.commit();
+    }
+
+    /** Retire toutes les images intégrées (annulation d'une pochette ajoutée depuis le dossier). */
+    public void removeImages(File fichier) throws Exception {
+        repairM4aIfNeeded(fichier);
+        AudioFile audio = AudioFileIO.read(fichier);
+        Tag tag = audio.getTag();
+        if (tag == null) return;
+        tag.deleteArtworkField();
+        audio.commit();
+    }
+
     // ── Écriture native jaudiotagger ──────────────────────────────────────────
 
     /** Vrai pour .m4a ET .mp4 : même conteneur ISO-BMFF, même fragilité de parsing d'arbre

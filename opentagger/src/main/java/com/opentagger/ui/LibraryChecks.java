@@ -27,14 +27,20 @@ public final class LibraryChecks {
     public enum Field {
         TITLE(FieldKey.TITLE), ARTIST(FieldKey.ARTIST), ALBUM(FieldKey.ALBUM), ALBUM_ARTIST(FieldKey.ALBUM_ARTIST),
         YEAR(FieldKey.YEAR), GENRE(FieldKey.GENRE), TRACK(FieldKey.TRACK), COMPILATION(FieldKey.IS_COMPILATION),
-        RG_TRACK_GAIN(null), RG_TRACK_PEAK(null);
+        RG_TRACK_GAIN(null), RG_TRACK_PEAK(null), RG_ALBUM_GAIN(null), RG_ALBUM_PEAK(null),
+        /** En mémoire seulement : ce que la correction des pochettes a trouvé (TagInfo.coverInfo). */
+        COVER_INFO(null);
 
         public final FieldKey key;
         Field(FieldKey key) { this.key = key; }
 
         /** Nom du champ personnel (TXXX / atome libre / Vorbis) pour ceux qui n'ont pas de FieldKey. */
         public String customName() {
-            return this == RG_TRACK_GAIN ? "REPLAYGAIN_TRACK_GAIN" : this == RG_TRACK_PEAK ? "REPLAYGAIN_TRACK_PEAK" : null;
+            return switch (this) {
+                case RG_TRACK_GAIN -> "REPLAYGAIN_TRACK_GAIN"; case RG_TRACK_PEAK -> "REPLAYGAIN_TRACK_PEAK";
+                case RG_ALBUM_GAIN -> "REPLAYGAIN_ALBUM_GAIN"; case RG_ALBUM_PEAK -> "REPLAYGAIN_ALBUM_PEAK";
+                default -> null;
+            };
         }
 
         public String get(TagInfo t) {
@@ -42,7 +48,8 @@ public final class LibraryChecks {
                 case TITLE -> nz(t.title); case ARTIST -> nz(t.artist); case ALBUM -> nz(t.album); case ALBUM_ARTIST -> nz(t.albumArtist);
                 case YEAR -> t.dateForWrite(); case GENRE -> nz(t.genre); case TRACK -> nz(t.track);
                 case COMPILATION -> nz(t.isCompilation); case RG_TRACK_GAIN -> nz(t.replayGainTrackGain);
-                case RG_TRACK_PEAK -> t.replayGainTrackPeak;
+                case RG_TRACK_PEAK -> nz(t.replayGainTrackPeak); case RG_ALBUM_GAIN -> nz(t.replayGainAlbumGain);
+                case RG_ALBUM_PEAK -> nz(t.replayGainAlbumPeak); case COVER_INFO -> nz(t.coverInfo);
             };
         }
 
@@ -52,6 +59,8 @@ public final class LibraryChecks {
                 case ALBUM_ARTIST -> t.albumArtist = v; case YEAR -> t.setYearFromRaw(v); case GENRE -> t.genre = v;
                 case TRACK -> t.track = v; case COMPILATION -> t.isCompilation = v.isBlank() ? "0" : v;
                 case RG_TRACK_GAIN -> t.replayGainTrackGain = v; case RG_TRACK_PEAK -> t.replayGainTrackPeak = v;
+                case RG_ALBUM_GAIN -> t.replayGainAlbumGain = v; case RG_ALBUM_PEAK -> t.replayGainAlbumPeak = v;
+                case COVER_INFO -> t.coverInfo = v;
             }
         }
     }
@@ -59,11 +68,17 @@ public final class LibraryChecks {
     /** Les problèmes, dans l'ordre d'affichage. */
     public enum Check {
         NO_TITLE, NO_ARTIST, NO_ALBUM, NO_YEAR, NO_GENRE, ALBUM_ARTIST_SPLIT, NO_ALBUM_ARTIST, CASE, SWAPPED, NO_TRACK,
-        NO_REPLAYGAIN, MISSING_FILE
+        NO_COVER, MULTI_COVER, COVER_MISMATCH, NO_REPLAYGAIN, NO_ALBUM_GAIN, MISSING_FILE
     }
 
     /** Un fichier vu par l'analyse. {@code ref} = l'objet de l'appelant (FileEntry), rendu tel quel. */
-    public record Track<T>(T ref, Path path, TagInfo tags, boolean missing) {}
+    public record Track<T>(T ref, Path path, TagInfo tags, boolean missing) {
+        /** Images modifiables par jaudiotagger (pas Opus/AAC/WV/APE/MPC, voir FfmpegTagIO). */
+        boolean imagesWritable() {
+            String n = path.getFileName() == null ? "" : path.getFileName().toString().toLowerCase(Locale.ROOT);
+            return !n.endsWith(".mpc") && !com.opentagger.FfmpegTagIO.handles(path.toFile());
+        }
+    }
 
     /** Une correction proposée pour un fichier. */
     public record Fix<T>(T ref, Path path, Map<Field, String> changes) {}
@@ -72,8 +87,15 @@ public final class LibraryChecks {
         private final Map<Check, List<T>> found = new EnumMap<>(Check.class);
         private final Map<Check, List<Fix<T>>> fixes = new EnumMap<>(Check.class);
 
+        private final List<List<T>> albumsWithoutGain = new ArrayList<>();
+        private final List<T> coversNotRead = new ArrayList<>();
+
         public List<T> found(Check c) { return found.getOrDefault(c, List.of()); }
         public List<Fix<T>> fixes(Check c) { return fixes.getOrDefault(c, List.of()); }
+        /** Albums (dossier + titre d'album, 2 à 60 pistes) dont au moins une piste n'a pas de volume d'album. */
+        public List<List<T>> albumsWithoutGain() { return albumsWithoutGain; }
+        /** Fichiers modifiables dont les images n'ont pas encore été lues (scannés avant le 2026-10-14). */
+        public List<T> coversNotRead() { return coversNotRead; }
 
         void add(Check c, T ref) { found.computeIfAbsent(c, k -> new ArrayList<>()).add(ref); }
         void fix(Check c, Track<T> tr, Map<Field, String> changes) {
@@ -103,6 +125,10 @@ public final class LibraryChecks {
             if (nz(t.year).isBlank()) r.add(Check.NO_YEAR, tr.ref());
             if (nz(t.genre).isBlank()) r.add(Check.NO_GENRE, tr.ref());
             if (nz(t.replayGainTrackGain).isBlank()) r.add(Check.NO_REPLAYGAIN, tr.ref());
+            String cover = nz(t.coverInfo);
+            if (cover.equals("0")) r.add(Check.NO_COVER, tr.ref());
+            else if (coverCount(cover) >= 2) r.add(Check.MULTI_COVER, tr.ref());
+            else if (cover.isEmpty() && tr.imagesWritable()) r.coversNotRead.add(tr.ref());
 
             boolean fromMb = !nz(t.recordingMbid).isBlank();
             if (!fromMb) {
@@ -175,6 +201,28 @@ public final class LibraryChecks {
                         r.fix(Check.NO_ALBUM_ARTIST, tr, cs);
                     }
                 }
+            }
+        }
+
+        // ── Pochettes différentes dans un même album (seulement parmi les fichiers dont les images ont été lues) ──
+        Set<String> hashes = new HashSet<>();
+        for (Track<T> tr : album) {
+            String c = nz(tr.tags().coverInfo);
+            int colon = c.indexOf(':');
+            if (colon > 0) hashes.add(c.substring(colon + 1));
+        }
+        if (hashes.size() >= 2) for (Track<T> tr : album) if (nz(tr.tags().coverInfo).contains(":")) r.add(Check.COVER_MISMATCH, tr.ref());
+
+        // ── Volume d'album (ReplayGain album) : calculé par album entier, comme « Analyser le volume » de MediaMonkey ──
+        if (album.size() <= 60) {
+            boolean missing = false;
+            for (Track<T> tr : album) {
+                if (nz(tr.tags().replayGainAlbumGain).isBlank()) { r.add(Check.NO_ALBUM_GAIN, tr.ref()); missing = true; }
+            }
+            if (missing) {
+                List<T> refs = new ArrayList<>();
+                for (Track<T> tr : album) refs.add(tr.ref());
+                r.albumsWithoutGain.add(refs);
             }
         }
 
@@ -414,6 +462,14 @@ public final class LibraryChecks {
     }
 
     private static String nz(String s) { return s == null ? "" : s; }
+
+    /** Nombre d'images d'après TagInfo.coverInfo (« 2:1a2b3c4d » → 2), -1 si pas encore lu. */
+    static int coverCount(String coverInfo) {
+        if (coverInfo == null || coverInfo.isEmpty()) return -1;
+        int colon = coverInfo.indexOf(':');
+        try { return Integer.parseInt(colon < 0 ? coverInfo : coverInfo.substring(0, colon)); }
+        catch (NumberFormatException e) { return -1; }
+    }
 
     private static boolean empty(String s) {
         return s == null || s.isBlank() || TaggingWorker.isGenericTag(s);

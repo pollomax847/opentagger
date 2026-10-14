@@ -168,6 +168,10 @@ public class TagInfo {
     // cette image, inutile de la re-chercher à l'aveugle via TagEnrichment.resolveCover() (voir
     // son fournisseur "shazam").
     public String shazamCoverUrl      = "";
+    // Images intégrées, lues au scan (TagReader) — JAMAIS écrit dans le fichier : "" = pas encore lu, "0" = aucune,
+    // "2:1a2b3c4d" = 2 images, empreinte CRC32 de la pochette de face. Sert à l'onglet « À corriger » (sans pochette,
+    // plusieurs images, pochettes différentes dans un même album).
+    public String coverInfo           = "";
 
     // ── IDs & identifiants ───────────────────────────────────────────────────
     // Désambiguïsation MB, description de podcast, ou tag COMMENT déjà présent dans le fichier —
