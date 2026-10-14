@@ -4485,8 +4485,12 @@ public class MainFrame extends JFrame {
                         com.opentagger.model.TagInfo restored = null;
                         if (!wasPreviouslyTagged && size > 0 && Config.get().bool("tagging.persist_pending", true))
                             restored = cache.loadPendingIdentified(ff.getAbsolutePath(), size, mtime);
+                        // [6] : verdict « Ignoré » d'une session précédente, fichier inchangé (voir MetadataCache.skipped_verdicts).
+                        MetadataCache.SkippedVerdict verdict = null;
+                        if (!wasPreviouslyTagged && restored == null && size > 0 && Config.get().bool("tagging.remember_skipped", true))
+                            verdict = cache.loadSkippedVerdict(ff.getAbsolutePath(), size, mtime);
                         // [5] : coquille vide (aucun son) — voir ShellCleaner.
-                        return new Object[]{ entry, ti, wasPreviouslyTagged, size, restored, ShellCleaner.isShell(ff, size) };
+                        return new Object[]{ entry, ti, wasPreviouslyTagged, size, restored, ShellCleaner.isShell(ff, size), verdict };
                     });
                 }, this::isCancelled, true);
                 } finally {
@@ -4607,6 +4611,11 @@ public class MainFrame extends JFrame {
                             entry.result  = restoredTags;
                             entry.status  = com.opentagger.model.FileEntry.Status.IDENTIFIED;
                             entry.message = I18n.t("Identification retrouvée (pas encore enregistrée)");
+                        } else if (chunk.length > 6 && chunk[6] instanceof MetadataCache.SkippedVerdict v) {
+                            entry.status       = com.opentagger.model.FileEntry.Status.SKIPPED;
+                            entry.skipReason   = skipReasonOf(v.reason());
+                            entry.message      = v.message();
+                            entry.verdictSince = v.ts();
                         }
                         entry.awaitingScan = false;
                         tableModel.update(entry);
@@ -4772,6 +4781,7 @@ public class MainFrame extends JFrame {
         List<FileEntry> snapshot = new ArrayList<>(tableModel.allEntries());
         new SwingWorker<List<FileEntry>, Void>() {
             int skipped = 0;
+            int judged = 0;
             @Override protected List<FileEntry> doInBackground() {
                 List<FileEntry> result = new ArrayList<>();
                 // allEntries() (snapshot ci-dessus) : "Tout tagger" doit couvrir toute la
@@ -4793,6 +4803,9 @@ public class MainFrame extends JFrame {
                     if (e.awaitingScan) continue; // statut pas encore connu — servi plus tard, voir loadDirectory()
                     if (e.emptyShell) continue;   // aucun son à identifier, voir ShellCleaner
                     if (e.status == FileEntry.Status.TAGGED) { skipped++; continue; }
+                    // Déjà jugé lors d'une session précédente, fichier inchangé : pas relancé à chaque démarrage (il le sera
+                    // au bout de 30 jours, ou tout de suite via la sélection ou le menu Retraitement).
+                    if (e.status == FileEntry.Status.SKIPPED && e.verdictSince > 0) { judged++; continue; }
                     if (e.status != FileEntry.Status.IDENTIFIED && e.file.length() > 0) result.add(e);
                 }
                 return result;
@@ -4805,6 +4818,12 @@ public class MainFrame extends JFrame {
                     btnTagAll.setEnabled(true);
                     setStatus(I18n.t("Erreur pendant la préparation du taguage : %s", ex.getMessage()));
                     return;
+                }
+                if (judged > 0) {
+                    String msg = I18n.t("%d fichier(s) déjà jugé(s) lors d'une session précédente (non identifiés, illisibles, coupés…) "
+                            + "— pas relancés ; sélectionne-les ou passe par Retraitement pour les retenter.", judged);
+                    System.out.println("[OT] " + msg);
+                    appendLogLine(msg, FileEntry.Status.SKIPPED, null);
                 }
                 continueStartTagging(toTag, skipped, false);
             }
@@ -7187,6 +7206,11 @@ public class MainFrame extends JFrame {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /** Lit les champs d'un fichier audio — voir {@link com.opentagger.TagReader} (extrait le 2026-09-20). */
+    private static com.opentagger.model.SkipReason skipReasonOf(String name) {
+        try { return name == null || name.isEmpty() ? null : com.opentagger.model.SkipReason.valueOf(name); }
+        catch (IllegalArgumentException e) { return null; }
+    }
+
     TagInfo readTags(File f) {
         return com.opentagger.TagReader.read(f);
     }

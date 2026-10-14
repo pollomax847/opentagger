@@ -510,11 +510,32 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
             }
         }
 
+        rememberVerdict(entry);
+
         int doneCount = done.incrementAndGet();
         int shownTotal = Math.max(doneCount, batchTotal + extraTotal.get());
         setProgress((int) ((doneCount * 100L) / shownTotal));
         onFileProgress.accept(doneCount, shownTotal);
         publish(entry);
+    }
+
+    /** Verdicts qui ne changeront pas d'un redémarrage à l'autre tant que le fichier reste le même. Pas une erreur réseau
+     *  ni un Shazam saturé (NETWORK_ERROR), ni un fichier introuvable : ceux-là sont retentés. */
+    private static final java.util.Set<com.opentagger.model.SkipReason> LASTING_VERDICTS = java.util.EnumSet.of(
+            com.opentagger.model.SkipReason.NOT_IDENTIFIED, com.opentagger.model.SkipReason.LOW_SCORE,
+            com.opentagger.model.SkipReason.DURATION_MISMATCH, com.opentagger.model.SkipReason.GROUP_MISMATCH,
+            com.opentagger.model.SkipReason.PODCAST_PROBABLE, com.opentagger.model.SkipReason.UNREADABLE);
+
+    /** Retient le verdict « Ignoré » pour les prochains démarrages (voir MetadataCache.skipped_verdicts). */
+    static void rememberVerdict(FileEntry entry) {
+        if (entry.status != FileEntry.Status.SKIPPED || !Config.get().bool("tagging.remember_skipped", true)) return;
+        if (entry.skipReason != null && !LASTING_VERDICTS.contains(entry.skipReason)) return;
+        java.io.File f = (entry.currentPath != null ? entry.currentPath : entry.file.toPath()).toFile();
+        if (!f.isFile()) return;
+        try (MetadataCache c = new MetadataCache()) {
+            c.saveSkippedVerdict(f.getAbsolutePath(), f.length(), f.lastModified(),
+                    entry.skipReason == null ? "" : entry.skipReason.name(), entry.message);
+        } catch (Exception ignored) { /* simple économie au prochain démarrage */ }
     }
 
     @Override

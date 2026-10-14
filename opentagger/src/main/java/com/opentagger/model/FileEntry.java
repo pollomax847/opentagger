@@ -77,6 +77,10 @@ public class FileEntry {
      *  le statut n'est ni SKIPPED ni ERROR. Alimente le rapport "Non identifiés" par cause. */
     public SkipReason skipReason = null;
 
+    /** Date (ms) du verdict « Ignoré » retrouvé d'une session précédente (MetadataCache.skipped_verdicts), 0 sinon.
+     *  « Tout tagger » ne relance pas ces fichiers — seulement une action explicite (sélection, Retraitement). */
+    public long verdictSince = 0;
+
     /** Écart significatif entre durée réelle du fichier et durée MusicBrainz de l'enregistrement
      *  identifié. 0 = non renseigné (MB ou fichier), jamais considéré comme un écart. Seule source
      *  de vérité pour ce calcul — utilisé à la fois avant taguage (TaggingWorker, bloque en SKIPPED)

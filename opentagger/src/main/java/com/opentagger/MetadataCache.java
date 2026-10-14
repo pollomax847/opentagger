@@ -178,6 +178,18 @@ public class MetadataCache implements AutoCloseable {
                 // Identifications faites mais PAS ENCORE enregistrées sur le disque : sans cette table elles n'existaient qu'en mémoire et
                 // étaient perdues à chaque fermeture ou arrêt de l'app (plusieurs heures de travail perdues deux fois). Retrouvées au scan
                 // suivant si le fichier n'a pas changé (taille + date de modification) ; supprimées une fois le fichier enregistré.
+                // Verdicts « Non identifié / Audio illisible / Fichier coupé… » d'une session précédente (2026-10-14) : sans eux,
+                // chaque redémarrage relançait tous ces fichiers et en remplissait le journal (248 alertes sur 259 un matin
+                // étaient des fichiers déjà jugés la veille). Valables tant que le fichier ne change pas, 30 jours au plus.
+                st.execute("""
+                    CREATE TABLE IF NOT EXISTS skipped_verdicts (
+                        path    TEXT    PRIMARY KEY,
+                        size    INTEGER NOT NULL,
+                        mtime   INTEGER NOT NULL,
+                        reason  TEXT    NOT NULL,
+                        message TEXT    NOT NULL,
+                        ts      INTEGER NOT NULL
+                    )""");
                 st.execute("""
                     CREATE TABLE IF NOT EXISTS pending_identified (
                         path  TEXT    PRIMARY KEY,
@@ -772,6 +784,44 @@ public class MetadataCache implements AutoCloseable {
         } catch (Exception e) { LOG.fine("loadPendingIdentified: " + e.getMessage()); return null; }
     }
 
+    // ── Verdicts « Ignoré » retenus d'une session à l'autre ────────────────────────────────────────────────────────────
+
+    /** Un verdict retenu : motif (nom de SkipReason, vide si inconnu), message montré, date (ms). */
+    public record SkippedVerdict(String reason, String message, long ts) {}
+
+    /** Au-delà, le fichier est retenté (MusicBrainz, AcoustID et Shazam apprennent de nouveaux morceaux). */
+    public static final long SKIPPED_VERDICT_DAYS = 30;
+
+    public synchronized void saveSkippedVerdict(String path, long size, long mtime, String reason, String message) {
+        if (conn == null || path == null) return;
+        writeWithRetry("saveSkippedVerdict", path, () -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT OR REPLACE INTO skipped_verdicts(path,size,mtime,reason,message,ts) VALUES(?,?,?,?,?,?)")) {
+                ps.setString(1, path);
+                ps.setLong(2, size);
+                ps.setLong(3, mtime);
+                ps.setString(4, reason == null ? "" : reason);
+                ps.setString(5, message == null ? "" : message);
+                ps.setLong(6, System.currentTimeMillis());
+                ps.executeUpdate();
+            }
+        });
+    }
+
+    /** Le verdict retenu pour ce fichier, SEULEMENT s'il est inchangé et que le verdict a moins de 30 jours ; sinon null. */
+    public synchronized SkippedVerdict loadSkippedVerdict(String path, long size, long mtime) {
+        if (conn == null || path == null) return null;
+        try (PreparedStatement ps = conn.prepareStatement("SELECT size, mtime, reason, message, ts FROM skipped_verdicts WHERE path=?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next() || rs.getLong(1) != size || rs.getLong(2) != mtime) return null;
+                long ts = rs.getLong(5);
+                if (System.currentTimeMillis() - ts > SKIPPED_VERDICT_DAYS * 24 * 3600_000L) return null;
+                return new SkippedVerdict(rs.getString(3), rs.getString(4), ts);
+            }
+        } catch (Exception e) { LOG.fine("loadSkippedVerdict: " + e.getMessage()); return null; }
+    }
+
     /** Oublie l'identification en attente de ce fichier (appelé quand il vient d'être enregistré). */
     public synchronized void deletePendingIdentified(String path) {
         if (conn == null || path == null) return;
@@ -890,7 +940,8 @@ public class MetadataCache implements AutoCloseable {
     /** Tables purement techniques : recherches réseau, pochettes, lecture des tags au scan. Régénérées toutes seules, sans perte de travail. */
     public static final List<String> TECHNICAL_TABLES = List.of("lookups", "recordings", "image_cache", "scan_cache");
     /** Tables PERSONNELLES : ce qui a été tagué, les corrections manuelles, l'annulation. Non régénérables. */
-    public static final List<String> PERSONAL_TABLES = List.of("tagging_history", "file_history", "corrections", "undo_history", "pending_identified");
+    public static final List<String> PERSONAL_TABLES = List.of("tagging_history", "file_history", "corrections", "undo_history", "pending_identified",
+            "skipped_verdicts");
 
     /** Nombre de lignes de chaque table concernée (pour montrer ce qui va partir avant de confirmer). */
     public synchronized java.util.Map<String, Long> countRows(boolean includePersonal) {
