@@ -70,14 +70,28 @@ public class DuplicateDetector {
      * piste est indispensable : des dossiers réels contiennent des chansons différentes taguées à l'identique (trois
      * pistes d'un même album toutes nommées « Again And Again » au 12/10). Même règle que le nettoyage de MyBook.
      */
-    public static CopyScan detectCopies(List<FileEntry> entries) {
+    public static CopyScan detectCopies(List<FileEntry> entries) { return detectCopies(entries, (phase, done, total) -> {}); }
+
+    /** Avancement de la détection (étape, fait, total) — appelé très souvent : c'est l'appelant qui limite l'affichage
+     *  (2026-10-14, retour utilisateur : « aucun visu sur son avancement »). Peut lever une exception pour annuler. */
+    @FunctionalInterface public interface Progress { void step(String phase, int done, int total); }
+
+    public static CopyScan detectCopies(List<FileEntry> entries, Progress progress) {
+        int n = entries.size(), i = 0;
+        String reading = com.opentagger.I18n.t("lecture des tags");
         List<FileEntry> usable = new ArrayList<>();
         for (FileEntry e : entries) {
+            if ((++i & 1023) == 0) progress.step(reading, i, n);
             TagInfo t = e.activeTags();
             if (!t.artist.isBlank() && !t.title.isBlank()) usable.add(e);
         }
+        progress.step(reading, n, n);
+        String sameFolder = com.opentagger.I18n.t("même dossier");
+        int u = usable.size();
+        i = 0;
         Map<String, List<FileEntry>> byFolder = new LinkedHashMap<>();
         for (FileEntry e : usable) {
+            if ((++i & 1023) == 0) progress.step(sameFolder, i, u);
             TagInfo t = e.activeTags();
             byFolder.computeIfAbsent(parentOf(e) + "\u0000" + normalize(t.artist) + "\u0000" + normalize(t.title),
                     k -> new ArrayList<>()).add(e);
@@ -92,7 +106,10 @@ public class DuplicateDetector {
         }
         Map<String, List<FileEntry>> byAlbum = new LinkedHashMap<>();
         Map<String, Set<String>> albumsOfSong = new HashMap<>();
+        String otherFolders = com.opentagger.I18n.t("même album ailleurs");
+        i = 0;
         for (FileEntry e : usable) {
+            if ((++i & 1023) == 0) progress.step(otherFolders, i, u);
             TagInfo t = e.activeTags();
             String song = normalize(t.artist) + "|" + normalize(t.title);
             String album = folderAlbum(fileOf(e));

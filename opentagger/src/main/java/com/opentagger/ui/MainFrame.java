@@ -7626,8 +7626,16 @@ public class MainFrame extends JFrame {
         // cours, filtre sur un statut) masque silencieusement une partie des fichiers à la
         // détection — un vrai doublon dont une seule copie passe le filtre n'était jamais signalé.
         if (tableModel.allEntries().isEmpty()) { setStatus(I18n.t("Aucun fichier chargé.")); return; }
+        if (DuplicatesDialog.isRunning()) {
+            setStatus(I18n.t("Un retrait de doublons est encore en cours (barre « Doublons » en bas à droite) — attendez la fin."));
+            return;
+        }
         List<FileEntry> all = new ArrayList<>(tableModel.allEntries());
         setStatus(I18n.t("Recherche de doublons…"));
+        // Avancement visible (barre en bas à droite + barre d'état) : sur 290 000 fichiers, la recherche durait sans aucun
+        // signe de vie (retour utilisateur 2026-10-14). Affichage limité à ~6 fois par seconde.
+        beginProgress(ProgressSlot.DUPLICATE_DETECT);
+        long[] lastShown = {0};
         // Poussé en SwingWorker : DuplicateDetector.detect() seul est déjà coûteux sur une grosse
         // bibliothèque (des centaines de milliers de fichiers ici), mais le vrai gel venait de
         // computeBestMap()/qualityScore(), qui ouvre chaque fichier .m4a via jaudiotagger pour
@@ -7635,10 +7643,24 @@ public class MainFrame extends JFrame {
         // construction MÊME de DuplicatesDialog (et une seconde fois à chaque clic sur "Sélection
         // intelligente"). Retour utilisateur : "recherche audio en double [...] fige l'application".
         SwingWorker<DuplicateDetector.DetectionResult, Void> w = new SwingWorker<>() {
+            /** Hors EDT : n'affiche qu'au plus ~6 fois par seconde ; annule la recherche si « Arrêter ». */
+            private void report(String phase, int done, int total) {
+                if (isCancelled()) throw new java.util.concurrent.CancellationException();
+                long now = System.currentTimeMillis();
+                if (done < total && now - lastShown[0] < 150) return;
+                lastShown[0] = now;
+                SwingUtilities.invokeLater(() -> {
+                    JProgressBar bar = progressBars.get(ProgressSlot.DUPLICATE_DETECT);
+                    bar.setValue(total > 0 ? (int) (done * 100L / total) : 0);
+                    bar.setString(phase + "  " + done + " / " + total);
+                    setStatus(I18n.t("Recherche de doublons — %s : %d / %d", phase, done, total));
+                });
+            }
+
             @Override protected DuplicateDetector.DetectionResult doInBackground() {
                 // Vraies copies seulement (même dossier / même album rangé deux fois) — voir
                 // DuplicateDetector.detectCopies() pour le pourquoi (2026-10-12).
-                DuplicateDetector.CopyScan scan = DuplicateDetector.detectCopies(all);
+                DuplicateDetector.CopyScan scan = DuplicateDetector.detectCopies(all, this::report);
                 List<DuplicateDetector.DuplicateGroup> groups = new ArrayList<>(scan.groups());
                 java.util.Map<String, Integer> perFolder = new java.util.HashMap<>();
                 for (FileEntry fe : all) {
@@ -7647,7 +7669,10 @@ public class MainFrame extends JFrame {
                 }
                 java.util.Map<DuplicateDetector.DuplicateGroup, FileEntry> bestByGroup = new java.util.LinkedHashMap<>();
                 java.util.Map<FileEntry, Long> sizesByFile = new java.util.IdentityHashMap<>();
+                String choosing = I18n.t("copie à garder");
+                int gi = 0;
                 for (DuplicateDetector.DuplicateGroup g : groups) {
+                    report(choosing, ++gi, groups.size());
                     bestByGroup.put(g, DuplicateDetector.bestCopy(g.files(), perFolder));
                     for (FileEntry fe : g.files())
                         sizesByFile.put(fe, fe.sizeBytes > 0 ? fe.sizeBytes
@@ -7656,7 +7681,8 @@ public class MainFrame extends JFrame {
                 return new DuplicateDetector.DetectionResult(groups, bestByGroup, sizesByFile, scan.songsOnSeveralAlbums());
             }
             @Override protected void done() {
-                if (isCancelled()) return;
+                endProgress(ProgressSlot.DUPLICATE_DETECT);
+                if (isCancelled()) { setStatus(I18n.t("Recherche de doublons arrêtée.")); return; }
                 DuplicateDetector.DetectionResult result;
                 try {
                     result = get();
