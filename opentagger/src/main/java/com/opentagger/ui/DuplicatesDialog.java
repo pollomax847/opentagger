@@ -347,7 +347,9 @@ public class DuplicatesDialog extends JDialog {
     }
 
     /** Une action sur un fichier coché : vrai si faite. Lève une exception pour une erreur à montrer. */
-    @FunctionalInterface private interface FileOp { boolean apply(FileEntry e, File f) throws Exception; }
+    /** Une action sur un fichier coché : null si faite, sinon la raison pour laquelle le fichier est LAISSÉ (pas une
+     *  erreur : déjà retiré, renommé depuis la recherche…). Une vraie erreur lève une exception. */
+    @FunctionalInterface private interface FileOp { String apply(FileEntry e, File f) throws Exception; }
 
     /**
      * Retrait ou déplacement des copies cochées, avec l'avancement DANS la fenêtre (barre, compte, fichier en cours, Go) et
@@ -375,7 +377,7 @@ public class DuplicatesDialog extends JDialog {
         SwingWorker<Void, FileEntry> worker = new SwingWorker<>() {
             final java.util.concurrent.atomic.AtomicInteger processed = new java.util.concurrent.atomic.AtomicInteger();
             final java.util.concurrent.atomic.AtomicLong bytes = new java.util.concurrent.atomic.AtomicLong();
-            int ok = 0, errors = 0, dirsRemoved = 0;
+            int ok = 0, left = 0, errors = 0, dirsRemoved = 0;
             volatile String current = "";
             long lastShown;
 
@@ -386,7 +388,8 @@ public class DuplicatesDialog extends JDialog {
                     File f = e.currentPath != null ? e.currentPath.toFile() : e.file;
                     current = f.getName();
                     try {
-                        if (op.apply(e, f)) {
+                        String why = op.apply(e, f);
+                        if (why == null) {
                             publish(e);
                             Long b = sizesByFile.get(e);
                             if (b != null && b > 0) bytes.addAndGet(b);
@@ -394,8 +397,8 @@ public class DuplicatesDialog extends JDialog {
                             if (chkCleanDirs.isSelected() && f.getParentFile() != null) parents.put(f.getParentFile(), e.scanRoot);
                             ok++;
                         } else {
-                            if (journalLine != null) journalLine.accept(I18n.t("  ✗ %s → échec", f.getName()), FileEntry.Status.ERROR);
-                            errors++;
+                            if (journalLine != null) journalLine.accept(I18n.t("  ↷ %s — laissé : %s", f.getName(), why), FileEntry.Status.SKIPPED);
+                            left++;
                         }
                     } catch (Exception ex) {
                         if (journalLine != null) journalLine.accept(I18n.t("  ✗ %s → échec : %s", f.getName(), ex.getMessage()),
@@ -437,6 +440,7 @@ public class DuplicatesDialog extends JDialog {
                 if (onProgress != null) onProgress.accept(files.size(), files.size());   // ferme la barre de la fenêtre principale
                 String msg = I18n.t("%d / %d fichier(s) — %s (%s Go)", ok, files.size(), doneLabel, SZ.format(bytes.get() / 1e9))
                     + (dirsRemoved > 0 ? I18n.t(", %d dossier(s) vide(s) supprimé(s)", dirsRemoved) : "")
+                    + (left > 0 ? I18n.t(", %d laissé(s) (déjà retirés ou déplacés depuis la recherche)", left) : "")
                     + (errors > 0 ? I18n.t(", %d erreur(s)", errors) : "")
                     + (stopRun ? I18n.t(" — arrêté avant la fin") : "") + ".";
                 LOG.info("[Doublons] " + msg);
@@ -520,13 +524,19 @@ public class DuplicatesDialog extends JDialog {
         // définitivement ; les vraies copies gardent leur chemin d'origine dans le lot (remettre_en_place.py).
         String lot = "doublons-" + java.time.LocalDate.now();
         runBatch(I18n.t("Retrait de %d copie(s) vers la corbeille de l'appli", toDelete.size()), I18n.t("corbeille"), toDelete, (e, f) -> {
+            // Les fichiers ont pu bouger depuis la recherche (Enregistrement qui renomme, autre retrait…) : on le dit
+            // au lieu d'un « échec » qui fait croire à un problème — le 2026-10-15, toutes les « erreurs » étaient ça.
+            if (!f.isFile()) return I18n.t("déjà retiré, ou renommé depuis la recherche");
             FileEntry keep = keeperOf.get(e);
             DuplicateGroup g = groupOf(e);
             if (g != null && g.scope() != null && keep != null && keep != e) {
                 File kf = keep.currentPath != null ? keep.currentPath.toFile() : keep.file;
-                return com.opentagger.TrashHelper.moveToTrashKeepingPath(f, lot, g.scope().name(), kf) != null;
+                if (!kf.isFile()) return I18n.t("la copie gardée a changé de place depuis la recherche — gardé par sécurité");
+                if (com.opentagger.TrashHelper.moveToTrashKeepingPath(f, lot, g.scope().name(), kf) != null) return null;
+                throw new Exception(I18n.t("déplacement vers la corbeille impossible (détail dans %s/journal.tsv)", lot));
             }
-            return com.opentagger.TrashHelper.moveToTrash(f);
+            if (com.opentagger.TrashHelper.moveToTrash(f)) return null;
+            throw new Exception(I18n.t("déplacement vers la corbeille impossible"));
         });
     }
 
@@ -568,6 +578,7 @@ public class DuplicatesDialog extends JDialog {
         if (ok != JOptionPane.YES_OPTION) return;
 
         runBatch(I18n.t("Déplacement de %d copie(s) vers Doublons/", toMove.size()), I18n.t("Doublons/"), toMove, (e, f) -> {
+            if (!f.isFile()) return I18n.t("déjà déplacé, ou renommé depuis la recherche");
             java.nio.file.Path srcPath = f.toPath();
             java.nio.file.Path targetDir = srcPath.getParent().resolve("Doublons");
             java.nio.file.Files.createDirectories(targetDir);
@@ -580,7 +591,7 @@ public class DuplicatesDialog extends JDialog {
             java.nio.file.Files.move(srcPath, dest);
             com.opentagger.PlaylistSync.onFileMoved(srcPath, dest);
             e.currentPath = dest;
-            return true;
+            return null;
         });
     }
 

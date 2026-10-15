@@ -87,6 +87,29 @@ public class CorrectionsPanel extends JPanel {
         cm.getColumn(1).setPreferredWidth(80);  cm.getColumn(1).setMaxWidth(110);
         cm.getColumn(2).setPreferredWidth(95);  cm.getColumn(2).setMaxWidth(120);
         cm.getColumn(3).setPreferredWidth(420);
+        // Lignes sans fichier atténuées, nombres en couleur, texte complet au survol (la colonne Correction est souvent
+        // coupée) — sans ça, 16 lignes de poids égal dont la moitié à 0 noyaient les vrais problèmes.
+        javax.swing.table.DefaultTableCellRenderer cell = new javax.swing.table.DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean foc, int row, int col) {
+                Object shownValue = v instanceof Integer n ? MainFrame.number(n) : v;
+                super.getTableCellRendererComponent(t, shownValue, sel, foc, row, col);
+                int m = t.convertRowIndexToModel(row);
+                Object found = model.getValueAt(m, 1), fixable = model.getValueAt(m, 2);
+                boolean empty = Integer.valueOf(0).equals(found) && Integer.valueOf(0).equals(fixable);
+                setHorizontalAlignment(v instanceof Integer ? RIGHT : LEFT);
+                setToolTipText(v instanceof String str && !str.isBlank() ? str : null);
+                if (!sel) {
+                    Color base = UIManager.getColor("Label.foreground");
+                    if (empty) setForeground(UIManager.getColor("Label.disabledForeground"));
+                    else if (col == 1 && v instanceof Integer n && n > 0) setForeground(new Color(0xE0A040));
+                    else if (col == 2 && v instanceof Integer n && n > 0) setForeground(new Color(0x66BB6A));
+                    else setForeground(base);
+                }
+                setFont(getFont().deriveFont(!empty && col == 0 ? Font.BOLD : Font.PLAIN));
+                return this;
+            }
+        };
+        for (int i = 0; i < COLS.length; i++) table.getColumnModel().getColumn(i).setCellRenderer(cell);
         table.getSelectionModel().addListSelectionListener(e -> updateButtons());
         table.addMouseListener(new MouseAdapter() {
             @Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) showFiles(); }

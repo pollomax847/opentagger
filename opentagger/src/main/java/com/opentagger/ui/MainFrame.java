@@ -2083,8 +2083,8 @@ public class MainFrame extends JFrame {
             if (loaded == 0) {
                 lblLibrarySize.setVisible(false);
             } else {
-                lblLibrarySize.setText(I18n.t("Bibliothèque : %s (%d fichiers)",
-                        com.opentagger.ByteFormat.format(libraryBytes), loaded));
+                lblLibrarySize.setText(I18n.t("Bibliothèque : %s (%s fichiers)",
+                        com.opentagger.ByteFormat.format(libraryBytes), number(loaded)));
                 lblLibrarySize.setVisible(true);
             }
         }
@@ -2093,13 +2093,13 @@ public class MainFrame extends JFrame {
         int total = tableModel.getRowCount();
         int modelTotal = tableModel.totalCount();
         String totalText = (tableModel.isFiltered() && total != modelTotal)
-                ? total + " / " + modelTotal : String.valueOf(total);
+                ? number(total) + " / " + number(modelTotal) : number(total);
         lblStatTotal     .setText(I18n.t("Total  %s", totalText));
-        lblStatIdentified.setText(I18n.t("Identifiés  %d", identified));
-        lblStatTagged    .setText(I18n.t("Tagués  %d", tagged));
-        lblStatSkipped   .setText(I18n.t("Non identifiés  %d", skipped));
-        lblStatError     .setText(I18n.t("Erreurs  %d", error));
-        lblStatPending   .setText(I18n.t("En attente  %d", pending));
+        lblStatIdentified.setText(I18n.t("Identifiés  %s", number(identified)));
+        lblStatTagged    .setText(I18n.t("Tagués  %s", number(tagged)));
+        lblStatSkipped   .setText(I18n.t("Non identifiés  %s", number(skipped)));
+        lblStatError     .setText(I18n.t("Erreurs  %s", number(error)));
+        lblStatPending   .setText(I18n.t("En attente  %s", number(pending)));
 
         // Échantillon débit/ETA — voir throughputText(). O(1), aucune passe supplémentaire sur la
         // table (pending déjà calculé ci-dessus).
@@ -2107,7 +2107,10 @@ public class MainFrame extends JFrame {
         pendingHistory.addLast(new long[]{nowMs, pending});
         while (!pendingHistory.isEmpty() && nowMs - pendingHistory.peekFirst()[0] > THROUGHPUT_WINDOW_MS)
             pendingHistory.removeFirst();
-        lblThroughput.setText(throughputText(pending));
+        // « ⚡ … » sans mesure (rien n'avance encore, ou fenêtre trop courte) : masqué plutôt qu'affiché vide.
+        String rate = throughputText(pending);
+        lblThroughput.setText(groupDigits(rate));
+        lblThroughput.setVisible(!rate.endsWith("…"));
 
         // Chip actif = celui qui correspond au filtre statut actuellement appliqué. L'état "alerte"
         // (texte coloré) est réservé aux DEUX compteurs qui appellent vraiment une action, et
@@ -3540,6 +3543,51 @@ public class MainFrame extends JFrame {
 
     // ── Barre de statut ───────────────────────────────────────────────────────
 
+    /** Barre de progression de la barre d'état. Le nom de la tâche est écrit DANS la barre (« Doublons · 6 484 / 35 711 »)
+     *  et les grands nombres sont groupés : avant (2026-10-15), on ne voyait qu'un « 6484 / 35711 » gris sur fond
+     *  sombre, sans savoir de quelle tâche il s'agissait (le nom n'était que dans l'infobulle). */
+    static JProgressBar slotBar(String label) {
+        JProgressBar bar = new JProgressBar(0, 100) {
+            @Override public String getString() {
+                String v = super.getString();
+                return v == null || v.isBlank() ? label : label + "  ·  " + groupDigits(v);
+            }
+            // Texte foncé sur la partie remplie (couleur d'accent), texte normal du thème sur le reste — ces deux couleurs
+            // ne passent pas par FlatLaf.style (« unknown style ») : UI dédiée, reposée à chaque changement de thème.
+            @Override public void updateUI() {
+                setUI(new com.formdev.flatlaf.ui.FlatProgressBarUI() {
+                    @Override protected Color getSelectionForeground() { return new Color(0x1E1F22); }
+                    @Override protected Color getSelectionBackground() {
+                        Color c = UIManager.getColor("Label.foreground");
+                        return c != null ? c : Color.LIGHT_GRAY;
+                    }
+                });
+            }
+        };
+        bar.setPreferredSize(new Dimension(330, 17));
+        bar.setMaximumSize(new Dimension(330, 17));
+        bar.setStringPainted(true);
+        bar.setToolTipText(label);
+        bar.putClientProperty("FlatLaf.style", "font: 11 $defaultFont");
+        return bar;
+    }
+
+    private static final java.util.regex.Pattern LONG_NUMBER = java.util.regex.Pattern.compile("(?<![\\d.,])\\d{4,}(?![\\d.,])");
+
+    /** « 291750 fichiers » → « 291 750 fichiers » (espace insécable), sans toucher aux heures ni aux décimales. */
+    static String groupDigits(String s) {
+        if (s == null) return null;
+        java.util.regex.Matcher m = LONG_NUMBER.matcher(s);
+        StringBuilder b = new StringBuilder();
+        while (m.find()) m.appendReplacement(b, number(Long.parseLong(m.group())));
+        return m.appendTail(b).toString();
+    }
+
+    /** Nombre avec séparateur de milliers (espace insécable, lisible dans toutes les polices). */
+    static String number(long v) {
+        return java.text.NumberFormat.getIntegerInstance(java.util.Locale.FRANCE).format(v).replace('\u202f', '\u00a0');
+    }
+
     private static String progressSlotLabel(ProgressSlot slot) {
         return switch (slot) {
             case TAGGING             -> I18n.t("Taguage");
@@ -3592,12 +3640,8 @@ public class MainFrame extends JFrame {
         progressPanel.setLayout(new BoxLayout(progressPanel, BoxLayout.Y_AXIS));
         progressPanel.setOpaque(false);
         for (ProgressSlot slot : ProgressSlot.values()) {
-            JProgressBar bar = new JProgressBar(0, 100);
-            bar.setPreferredSize(new Dimension(220, 14));
-            bar.setMaximumSize(new Dimension(220, 14));
-            bar.setStringPainted(true);
+            JProgressBar bar = slotBar(progressSlotLabel(slot));
             bar.setVisible(false);
-            bar.setToolTipText(progressSlotLabel(slot));
             progressBars.put(slot, bar);
             progressPanel.add(bar);
         }

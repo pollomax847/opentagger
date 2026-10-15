@@ -693,7 +693,10 @@ public class DetailPanel extends JPanel {
 
     public void clear() {
         clearHighlights();
-        for (JTextField tf : allTextFields()) tf.setText("");
+        // Le placeholder « — valeurs multiples — » d'une sélection multiple précédente restait affiché dans TOUS les champs
+        // une fois la sélection vidée (capture du 2026-10-15 : « Sélectionnez un fichier… » au-dessus de onze champs
+        // « valeurs multiples »).
+        for (JTextField tf : allTextFields()) { tf.setText(""); tf.putClientProperty("JTextField.placeholderText", null); }
         taLyrics.setText("");
         taArtistBio.setText("");
         for (JCheckBox cb : new JCheckBox[]{
