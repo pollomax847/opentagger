@@ -47,7 +47,9 @@ public final class WorkerHub {
         AUDIO_AUDIT,
         /** Corrections façon MediaMonkey (onglet « À corriger », CorrectionsPanel) : écrit quelques champs dans les
          *  fichiers. Jamais un fichier PROCESSING, et seulement en mémoire pour un fichier IDENTIFIED. */
-        LIBRARY_FIX
+        LIBRARY_FIX,
+        /** « Annuler un enregistrement » (SaveJournal) : remet des tags et déplace des fichiers. */
+        UNDO_SAVE
     }
 
     /** Passes qui écrivent/renomment des fichiers de la bibliothèque — s'excluent mutuellement,
@@ -61,7 +63,7 @@ public final class WorkerHub {
             TaskKind.TAGGING, TaskKind.ALBUM_COMPLETION, TaskKind.INFO_COMPLETER, TaskKind.TRANSCODE,
             TaskKind.ALBUM_CLUSTER, TaskKind.COMPILATION_CLUSTER, TaskKind.PODCAST_TAG,
             TaskKind.DUPLICATE_DETECT, TaskKind.MISNAMED_REPAIR, TaskKind.ORPHAN_CLEANUP,
-            TaskKind.ARTWORK_COMPLETION, TaskKind.LIBRARY_FIX);
+            TaskKind.ARTWORK_COMPLETION, TaskKind.LIBRARY_FIX, TaskKind.UNDO_SAVE);
 
     public static final class TaskHandle {
         private final TaskKind kind;
@@ -193,6 +195,8 @@ public final class WorkerHub {
 
     private static boolean conflictsWith(TaskKind a, TaskKind b) {
         if (a == b) return true;
+        // Annuler pendant un enregistrement (ou l'inverse) : les deux réécrivent les mêmes fichiers.
+        if (a == TaskKind.UNDO_SAVE || b == TaskKind.UNDO_SAVE) return a != TaskKind.AUDIO_AUDIT && b != TaskKind.AUDIO_AUDIT;
         if ((a == TaskKind.LISTENBRAINZ_SYNC && b == TaskKind.TAGGING)
                 || (a == TaskKind.TAGGING && b == TaskKind.LISTENBRAINZ_SYNC)) return true;
         // LASTFM_SYNC (LastFmSyncWorker) : même raison que LISTENBRAINZ_SYNC juste au-dessus, même

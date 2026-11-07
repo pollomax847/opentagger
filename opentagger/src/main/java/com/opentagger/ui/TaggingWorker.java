@@ -89,6 +89,12 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
     private final java.util.Set<Path> discIdFailedFolders =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    // Identification par ALBUM ENTIER (findTags() étape 0.63, voir AlbumFirst) : une décision par dossier d'album,
+    // calculée une seule fois — computeIfAbsent : les autres fichiers du même dossier attendent ce résultat, les autres
+    // dossiers continuent en parallèle. Optional.empty() = dossier examiné, aucune parution retenue.
+    private final java.util.Map<Path, java.util.Optional<AlbumFirst.Decision>> albumFirstCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     // Cohérence de groupe pour un lot sans TOC exploitable (pistes sans numéro/durée fiable — voir
     // matchFolderByToc()) : demande utilisateur (2026-08-24) après le correctif "tagger tout l'album
     // depuis la vue arborescence" — s'assurer qu'un clic sur un groupe n'aboutit pas à des pistes
@@ -1383,6 +1389,74 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      * ici ne doit jamais interrompre le taguage normal du dossier (repli silencieux vers la suite
      * de la cascade, voir l'appelant).
      */
+    /** Dossier d'album d'un fichier : son dossier, ou celui du dessus si c'est « CD1 », « Disc 2 »… */
+    static Path albumFolderOf(File fichier) {
+        File dir = fichier.getAbsoluteFile().getParentFile();
+        if (dir != null && DISC_FOLDER_PATTERN.matcher(dir.getName()).find() && dir.getParentFile() != null) dir = dir.getParentFile();
+        return dir == null ? null : dir.toPath();
+    }
+
+    /** Tags du fichier d'après la parution qui explique tout son dossier (voir AlbumFirst et findTags() étape 0.63),
+     *  ou {@code null} si le dossier n'a pas été reconnu comme un album entier. */
+    private TagInfo albumFirstFor(File fichier) {
+        Path folder = albumFolderOf(fichier);
+        if (folder == null) return null;
+        java.util.Optional<AlbumFirst.Decision> d = albumFirstCache.computeIfAbsent(folder, this::decideAlbumFirst);
+        if (d.isEmpty()) return null;
+        MusicBrainzClient.ReleaseTrack tr = d.get().trackById().get(fichier.getAbsolutePath());
+        return tr == null ? null : AlbumFirst.toTagInfo(d.get().release(), tr);
+    }
+
+    // Fichiers du lot par dossier d'album, calculé UNE fois (pas un parcours de tout le lot par dossier : 100 000 fichiers ×
+    // 10 000 dossiers serait interminable).
+    private volatile java.util.Map<Path, List<FileEntry>> albumFolderIndex;
+
+    private java.util.Map<Path, List<FileEntry>> albumFolderIndex() {
+        java.util.Map<Path, List<FileEntry>> idx = albumFolderIndex;
+        if (idx != null) return idx;
+        synchronized (this) {
+            if (albumFolderIndex == null) {
+                java.util.Map<Path, List<FileEntry>> m = new java.util.HashMap<>();
+                for (FileEntry fe : entries) {
+                    File f = fe.currentPath != null ? fe.currentPath.toFile() : fe.file;
+                    Path p = f == null ? null : albumFolderOf(f);
+                    if (p != null) m.computeIfAbsent(p, k -> new ArrayList<>()).add(fe);
+                }
+                albumFolderIndex = m;
+            }
+            return albumFolderIndex;
+        }
+    }
+
+    private java.util.Optional<AlbumFirst.Decision> decideAlbumFirst(Path folder) {
+        List<AlbumFirst.Track> group = new ArrayList<>();
+        for (FileEntry fe : albumFolderIndex().getOrDefault(folder, List.of())) {
+            File f = fe.currentPath != null ? fe.currentPath.toFile() : fe.file;
+            if (f == null || fe.current == null) continue;
+            TagInfo c = fe.current;
+            group.add(new AlbumFirst.Track(f.getAbsolutePath(), c.title, c.artist, c.album, c.albumArtist, c.year,
+                    c.durationSec, intOrZero(c.track), intOrZero(c.discNo), c.recordingMbid, c.releaseMbid));
+        }
+        String folderName = folder.getFileName() == null ? ""
+                : folder.getFileName().toString().replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", " ").trim();
+        // Client neuf : MusicBrainzClient garde un état entre deux appels ; le quota de requêtes, lui, est commun.
+        // Discogs en 2e source (comme SongKong) quand MusicBrainz ne décide rien — réglage matching.album_first_discogs.
+        boolean withDiscogs = Config.get().bool("matching.album_first_discogs", true) && com.opentagger.DiscogsClient.configured();
+        AlbumFirst.Outcome o = AlbumFirst.identify(AlbumFirst.of(new MusicBrainzClient()),
+                withDiscogs ? AlbumFirst.ofDiscogs(new com.opentagger.DiscogsClient()) : null, group, folderName);
+        if (o.hints() != null) {   // dossiers fourre-tout : rien au journal, ils ne sont même pas essayés
+            if (o.decision() != null) {
+                MusicBrainzClient.ReleaseTracklist rel = o.decision().release();
+                log(I18n.t("  Album entier ✓ « %s » : la parution « %s » [%s] explique %d des %d fichiers du dossier",
+                        o.hints().album(), rel.album(), AlbumFirst.fromDiscogs(rel) ? "Discogs " + rel.releaseMeta().discogsId : rel.releaseMbid(),
+                        o.decision().trackById().size(), group.size()));
+            } else {
+                log(I18n.t("  Album entier — « %s » : %s → recherche chanson par chanson", o.hints().album(), o.why()));
+            }
+        }
+        return java.util.Optional.ofNullable(o.decision());
+    }
+
     private MusicBrainzClient.ReleaseTracklist matchFolderByToc(Path folder, MusicBrainzClient mb) {
         try {
             List<FileEntry> siblings = new ArrayList<>();
@@ -1814,6 +1888,21 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                     // TRACK incohérent avec la structure détectée) → suite normale pour ce fichier
                     // seul, le reste de l'album profite quand même du match.
                 }
+            }
+        }
+
+        // 0.63. ALBUM ENTIER (2026-11-07, comme SongKong et Bliss) — voir AlbumFirst : pour un dossier qui ressemble à un
+        // album, la parution MusicBrainz qui explique TOUS ses fichiers (titres et durées), cherchée UNE fois par dossier
+        // (les autres fichiers du dossier attendent ce résultat, les autres dossiers continuent). Après le TOC (durées de
+        // tout le disque, plus sûr), avant tout ce qui se décide chanson par chanson. Jamais en re-taguage forcé (même
+        // règle que le TOC : « forcer » promet une ré-identification par l'audio). Réglage : matching.album_first.
+        if (!forceReidentify && Config.get().bool("matching.album_first", true) && fichier.getParentFile() != null) {
+            TagInfo t = albumFirstFor(fichier);
+            if (t != null) {
+                boolean discogs = t.releaseMbid.isBlank() && !t.discogsId.isBlank();
+                log(I18n.t("  Album entier → %s – %s [%s]", t.artist, t.title, t.album) + (discogs ? " (Discogs)" : ""));
+                lastFindTagsSource.set(discogs ? MetadataCache.SOURCE_ALBUM_DISCOGS : MetadataCache.SOURCE_ALBUM);
+                return List.of(t);
             }
         }
 
@@ -3240,7 +3329,7 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
      *  entier), ou si le fichier porte déjà l'identifiant de sa release. Un simple identifiant d'ENREGISTREMENT prouve la chanson, pas
      *  l'album : elle figure sur des dizaines de parutions, et l'album choisi à partir de lui n'est qu'une préférence. */
     static boolean releaseIsProven(String identificationSource, TagInfo currentTags) {
-        if (MetadataCache.SOURCE_DISCID.equals(identificationSource)) return true;
+        if (MetadataCache.SOURCE_DISCID.equals(identificationSource) || MetadataCache.isAlbumSource(identificationSource)) return true;
         if (!MetadataCache.SOURCE_MBID.equals(identificationSource)) return false;
         return currentTags != null && currentTags.releaseMbid != null && !currentTags.releaseMbid.isBlank();
     }
@@ -3348,7 +3437,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
                 TagInfo t = e.result;
                 if (r.equals(t.releaseMbid)) continue;
                 String src = t.identificationSource;
-                if (MetadataCache.SOURCE_DISCID.equals(src) || MetadataCache.SOURCE_MBID.equals(src)) continue;
+                if (MetadataCache.SOURCE_DISCID.equals(src) || MetadataCache.SOURCE_MBID.equals(src)
+                        || MetadataCache.isAlbumSource(src)) continue;
                 MusicBrainzClient.ReleaseTrack tr = pickTrackInPinnedRelease(tl.tracks(), t.recordingMbid, t.title,
                         e.current != null ? e.current.durationSec : 0);
                 if (tr == null) continue;
@@ -3411,7 +3501,8 @@ public class TaggingWorker extends SwingWorker<Void, FileEntry> {
 
     static boolean shouldSkipForGroupMismatch(int agreementOnPinnedRelease, String source, int currentScore) {
         boolean trustedSource = MetadataCache.SOURCE_DISCID.equals(source)
-                || MetadataCache.SOURCE_MBID.equals(source);
+                || MetadataCache.SOURCE_MBID.equals(source)
+                || MetadataCache.isAlbumSource(source);
         return agreementOnPinnedRelease >= 2 && !trustedSource && currentScore > 50;
     }
 

@@ -174,6 +174,7 @@ public class MainFrame extends JFrame {
     private JCheckBoxMenuItem chkAutoReidentifyUnmatched;
     private JCheckBoxMenuItem chkAutoTagOnScan;
     private JCheckBoxMenuItem chkAutoSaveEnabled;
+    private JCheckBoxMenuItem chkPreviewBeforeSave;
     private JCheckBoxMenuItem chkMoveSkippedMenu;
     private JCheckBoxMenuItem chkMoveDurationMismatchMenu;
     private JCheckBoxMenuItem chkUseLibraryRootMenu;
@@ -920,6 +921,8 @@ public class MainFrame extends JFrame {
         JMenuItem miUndo = mitem(I18n.t("Annuler la dernière action"), "Ctrl+Z",  e -> performUndo());
         JMenuItem miRedo = mitem(I18n.t("Rétablir"),   "Ctrl+Y",  e -> performRedo());
         m.add(miUndo); m.add(miRedo);
+        // Annuler un ENREGISTREMENT (fichiers déjà écrits sur le disque), comme SongKong — voir SaveJournal.
+        m.add(mitem(I18n.t("Annuler un enregistrement…"), null, e -> SaveUndoDialog.open(this, this::afterSaveUndo)));
         m.addSeparator();
         // Cases ☑ (FileEntry.selected, ce que "Tout tagger" traite) — concept différent de la
         // SÉLECTION de lignes (surbrillance table) regroupée ci-dessous dans son propre sous-menu.
@@ -1003,12 +1006,25 @@ public class MainFrame extends JFrame {
         }
     }
 
+    /** Le bouton « Enregistrer tout » se montre quand l'utilisateur doit enregistrer lui-même : enregistrement automatique
+     *  coupé, ou aperçu avant enregistrement actif (rien ne s'écrit alors sans ce clic). */
+    private static boolean saveButtonVisible() {
+        return !Config.get().autoSaveEnabled() || Config.get().previewBeforeSave();
+    }
+
     /** Compte toutes les 2 s les fichiers identifiés en attente d'enregistrement, pour le frein de TaggingWorker (voir SaveBacklog). */
     private void startSaveBacklogMeter() {
         javax.swing.Timer timer = new javax.swing.Timer(2000, e -> {
             int n = 0;
             for (FileEntry fe : tableModel.allEntries()) if (fe.selected && fe.status == FileEntry.Status.IDENTIFIED) n++;
             SaveBacklog.setUnsaved(n);
+            // Avec l'aperçu avant enregistrement, le bouton dit combien de fichiers attendent l'accord de l'utilisateur.
+            if (btnSaveAll != null) {
+                String label = n > 0 && Config.get().previewBeforeSave()
+                        ? I18n.t("Enregistrer tout (%d)", n) : I18n.t("Enregistrer tout");
+                if (!label.equals(btnSaveAll.getText())) btnSaveAll.setText(label);
+                if (btnSaveAll.isVisible() != saveButtonVisible()) btnSaveAll.setVisible(saveButtonVisible());
+            }
         });
         timer.setRepeats(true);
         timer.start();
@@ -1103,7 +1119,8 @@ public class MainFrame extends JFrame {
         Config c = Config.get();
         chkAutoTagOnScan.setSelected(c.autoTagOnScan());
         chkAutoSaveEnabled.setSelected(c.autoSaveEnabled());
-        if (btnSaveAll != null) btnSaveAll.setVisible(!c.autoSaveEnabled());
+        if (btnSaveAll != null) btnSaveAll.setVisible(saveButtonVisible());
+        if (chkPreviewBeforeSave != null) chkPreviewBeforeSave.setSelected(c.previewBeforeSave());
         chkAutoGroupCompilations.setSelected(c.bool("tagging.auto_group_compilations", false));
         chkAutoReidentifyUnmatched.setSelected(c.bool("tagging.auto_reidentify_unmatched", false));
         chkAutoPlayCounts.setSelected(c.autoSyncPlayCounts());
@@ -1276,9 +1293,19 @@ public class MainFrame extends JFrame {
         chkAutoSaveEnabled.setSelected(Config.get().autoSaveEnabled());
         chkAutoSaveEnabled.addActionListener(e -> {
             Config.get().set("tagging.auto_save_enabled", String.valueOf(chkAutoSaveEnabled.isSelected()));
-            if (btnSaveAll != null) btnSaveAll.setVisible(!chkAutoSaveEnabled.isSelected());
+            if (btnSaveAll != null) btnSaveAll.setVisible(saveButtonVisible());
         });
         advanced.add(chkAutoSaveEnabled);
+
+        // Aperçu avant enregistrement (voir SavePreviewDialog, 2026-11-07) : même réglage que la case « Toujours montrer
+        // cet aperçu » de l'aperçu lui-même. Actif : rien n'est écrit sans que l'utilisateur ait vu les changements.
+        chkPreviewBeforeSave = new StayOpenCheckBoxMenuItem(I18n.t("Montrer les changements avant d'enregistrer"));
+        chkPreviewBeforeSave.setSelected(Config.get().previewBeforeSave());
+        chkPreviewBeforeSave.addActionListener(e -> {
+            Config.get().set("tagging.preview_before_save", String.valueOf(chkPreviewBeforeSave.isSelected()));
+            if (btnSaveAll != null) btnSaveAll.setVisible(saveButtonVisible());
+        });
+        advanced.add(chkPreviewBeforeSave);
 
         // Automatisation de « Outils → Re-traitement → Synchroniser les compteurs d'écoute » (qui reste
         // disponible à la main) : à la fin d'un scan, au plus une fois par 24 h — voir scheduleAutoPlayCountSync().
@@ -1511,6 +1538,53 @@ public class MainFrame extends JFrame {
         return mi;
     }
 
+    /** Après « Annuler un enregistrement » : chaque fichier remis reprend dans la liste son ancien nom et ses tags d'avant,
+     *  décoché (pour que « Tout tagger » ne repropose pas aussitôt la même identification). */
+    private void afterSaveUndo(List<com.opentagger.SaveJournal.UndoResult> results) {
+        java.util.Map<Path, FileEntry> byPath = new java.util.HashMap<>();
+        for (FileEntry e : tableModel.allEntries()) {
+            Path p = e.currentPath != null ? e.currentPath : e.file.toPath();
+            byPath.put(p.toAbsolutePath().normalize(), e);
+        }
+        record Back(FileEntry entry, Path from, Path now) {}
+        List<Back> backs = new ArrayList<>();
+        for (com.opentagger.SaveJournal.UndoResult r : results) {
+            if (r.state() != com.opentagger.SaveJournal.UndoState.RESTORED || r.from() == null || r.entry().current() == null) continue;
+            if (r.entry().kind() == com.opentagger.SaveJournal.Kind.SIDECAR) continue;
+            FileEntry e = byPath.get(r.from().toAbsolutePath().normalize());
+            if (e != null) backs.add(new Back(e, r.from(), r.entry().current()));
+        }
+        if (backs.isEmpty()) return;
+        Thread.ofVirtual().start(() -> {
+            java.util.Map<FileEntry, TagInfo> tags = new java.util.IdentityHashMap<>();
+            try (MetadataCache c = new MetadataCache()) {
+                for (Back b : backs) {
+                    tags.put(b.entry(), com.opentagger.TagReader.read(b.now().toFile()));
+                    // Plus « tagué par l'appli » : ses tags sont redevenus ceux d'avant.
+                    c.deleteFileHistory(b.from().toAbsolutePath().toString());
+                    c.deletePendingIdentified(b.from().toAbsolutePath().toString());
+                }
+            } catch (Exception ex) {
+                System.out.println("[OT] Annulation : relecture des tags incomplète : " + ex.getMessage());
+            }
+            SwingUtilities.invokeLater(() -> {
+                for (Back b : backs) {
+                    FileEntry e = b.entry();
+                    e.currentPath = b.now();
+                    if (tags.get(e) != null) e.current = tags.get(e);
+                    e.result = null;
+                    e.candidates = null;
+                    e.suggestions = null;
+                    e.status = FileEntry.Status.PENDING;
+                    e.selected = false;
+                    e.message = I18n.t("Remis comme avant (annulation d'un enregistrement)");
+                    tableModel.update(e);
+                }
+                setStatus(I18n.t("%d fichier(s) remis comme avant dans la liste (décochés).", backs.size()));
+            });
+        });
+    }
+
     // ── Barre d'outils (actions principales seulement) ───────────────────────
 
     private JPanel buildHeader() {
@@ -1557,7 +1631,7 @@ public class MainFrame extends JFrame {
         // charge déjà — bouton redondant tant qu'il l'est. Réapparaît si désactivé dans le menu
         // Tagger. F8 (raccourci clavier) reste fonctionnel dans les deux cas, juste le bouton
         // visuel qui se masque.
-        btnSaveAll.setVisible(!Config.get().autoSaveEnabled());
+        btnSaveAll.setVisible(saveButtonVisible());
         btnCancel    = headerBtn(I18n.t("Arrêter"), I18n.t("Annuler le traitement en cours"), ToolbarIcon.Kind.STOP);
         btnTagAll.addActionListener(e -> startTagging(table.getSelectedRowCount() > 0));
         btnSaveAll.addActionListener(e -> saveAll());
@@ -1631,6 +1705,7 @@ public class MainFrame extends JFrame {
         new String[]{"podcastDialog",      I18n.t("Tagger comme podcast")},
         new String[]{"detectDuplicates",   I18n.t("Détecter les doublons")},
         new String[]{"historyDialog",      I18n.t("Historique de taguage")},
+        new String[]{"saveUndo",           I18n.t("Annuler un enregistrement")},
         new String[]{"cdImport",           I18n.t("Importer un CD")}
     );
 
@@ -1673,6 +1748,9 @@ public class MainFrame extends JFrame {
                 I18n.t("Détecter les fichiers en double"), this::detectDuplicates));
         list.add(new ToolbarAction("historyDialog", I18n.t("Historique de taguage"),
                 I18n.t("Ouvrir l'historique de taguage"), () -> new HistoryDialog(this).setVisible(true)));
+        list.add(new ToolbarAction("saveUndo", I18n.t("Annuler un enregistrement"),
+                I18n.t("Remettre des fichiers comme avant un enregistrement (tags, nom et dossier)"),
+                () -> SaveUndoDialog.open(this, this::afterSaveUndo)));
         list.add(new ToolbarAction("cdImport", I18n.t("Importer un CD"),
                 I18n.t("Extraire un CD audio ou copier un CD de données"),
                 () -> new CdImportDialog(this).setVisible(true)));
@@ -3882,13 +3960,15 @@ public class MainFrame extends JFrame {
 
     /** Ajoute le résultat final d'un fichier (ignore les mises à jour PROCESSING transitoires). */
     /** Libellé lisible d'une source d'identification (TagInfo.identificationSource / MetadataCache.SOURCE_*). */
-    private static String sourceLabel(String src) {
+    static String sourceLabel(String src) {
         if (src == null || src.isBlank()) return "";
         return switch (src) {
             case MetadataCache.SOURCE_SONGREC  -> "SongRec";
             case MetadataCache.SOURCE_ACOUSTID -> "AcoustID";
             case MetadataCache.SOURCE_MBID     -> "MusicBrainz";
             case MetadataCache.SOURCE_TEXT     -> I18n.t("texte");
+            case MetadataCache.SOURCE_ALBUM    -> I18n.t("album entier (MusicBrainz)");
+            case MetadataCache.SOURCE_ALBUM_DISCOGS -> I18n.t("album entier (Discogs)");
             default -> src;
         };
     }
@@ -4725,6 +4805,8 @@ public class MainFrame extends JFrame {
                     if (Config.get().autoTagOnScan()) scheduleAutoTaggingFollowUp();
                     // Tags des fichiers lus : synchroniser les compteurs d'écoute (au plus 1 fois / 24 h).
                     if (Config.get().autoSyncPlayCounts()) scheduleAutoPlayCountSync();
+                    // Règles « À corriger » en mode automatique (façon Bliss) : après le scan, quand plus rien n'écrit.
+                    scheduleAutomaticRules();
                 } catch (Exception ex) {
                     completeScanEntry(scanRow, dirName, 0, 0, ex);
                     showError(ex.getMessage());
@@ -5217,7 +5299,7 @@ public class MainFrame extends JFrame {
 
         // allEntries() : les fichiers identifiés mais masqués par un filtre actif n'étaient sinon
         // jamais écrits sur le disque, sans le moindre avertissement.
-        List<FileEntry> toSave = new ArrayList<>();
+        List<FileEntry> found = new ArrayList<>();
         // Deux lignes sur LE MÊME fichier (chemins identiques à la casse près sous Windows/macOS : rescan, dossier ajouté deux
         // fois) : une seule est écrite — la seconde trouvait le fichier déjà renommé et finissait en « Fichier introuvable ».
         // Les autres lignes recopient le résultat de la première quand l'enregistrement est fini (voir le DONE plus bas), donc
@@ -5228,17 +5310,33 @@ public class MainFrame extends JFrame {
             if (!e.selected || e.status != FileEntry.Status.IDENTIFIED) continue;
             String key = com.opentagger.PathIdentity.key(e.currentPath != null ? e.currentPath : e.file.toPath());
             FileEntry first = firstByPath.putIfAbsent(key, e);
-            if (first == null) toSave.add(e);
+            if (first == null) found.add(e);
             else sameFile.computeIfAbsent(first, k -> new ArrayList<>()).add(e);
         }
-        if (toSave.isEmpty()) {
+        if (found.isEmpty()) {
             System.out.println("[OT] Enregistrer : aucun fichier identifié sélectionné à enregistrer.");
             setStatus(I18n.t("Aucun fichier identifié à enregistrer (utilisez « Tout tagger » d'abord)."));
             return;
         }
-        System.out.println("[OT] Enregistrer : " + toSave.size() + " fichier(s) — démarrage.");
-
         int maskIndex = Config.get().autoRenameEnabled() ? Config.get().defaultRenameMask() : -1;
+
+        // Aperçu avant d'écrire (tagging.preview_before_save, actif par défaut — voir SavePreviewDialog) : chaque changement
+        // « avant → après », les fichiers qui deviennent un autre morceau en orange ; seuls les fichiers restés cochés sont
+        // écrits. Les décochés restent « Identifié » et seront proposés de nouveau.
+        final List<FileEntry> toSave;
+        if (Config.get().previewBeforeSave()) {
+            List<FileEntry> keep = SavePreviewDialog.choose(this, found, maskIndex);
+            if (keep == null || keep.isEmpty()) {
+                System.out.println("[OT] Enregistrer : annulé dans l'aperçu — rien n'est écrit.");
+                setStatus(I18n.t("Enregistrement annulé : rien n'a été écrit."));
+                return;
+            }
+            sameFile.keySet().retainAll(new java.util.HashSet<>(keep));
+            toSave = keep;
+        } else {
+            toSave = found;
+        }
+        System.out.println("[OT] Enregistrer : " + toSave.size() + " fichier(s) — démarrage.");
         beginProgress(ProgressSlot.SAVE);
         runStartMillis = System.currentTimeMillis();
         logRunStart(I18n.t("Enregistrement"), toSave.size());
@@ -5357,6 +5455,15 @@ public class MainFrame extends JFrame {
             boolean hasWork = tableModel.allEntries().stream()
                     .anyMatch(fe -> fe.selected && fe.status == FileEntry.Status.IDENTIFIED);
             if (!stillFeeding && !hasWork) { runPostTagCommand(); return; } // vraiment terminé
+            // Aperçu avant enregistrement actif : jamais d'écriture sans l'accord de l'utilisateur. Les fichiers identifiés
+            // attendent le clic sur « Enregistrer tout » (qui montre les changements) ; on le signale seulement.
+            if (hasWork && Config.get().previewBeforeSave()) {
+                long n = tableModel.allEntries().stream()
+                        .filter(fe -> fe.selected && fe.status == FileEntry.Status.IDENTIFIED).count();
+                setStatus(I18n.t("%d fichier(s) identifié(s) attendent ton accord : « Enregistrer tout » montre les changements avant d'écrire.", n));
+                if (stillFeeding) scheduleAutoSaveFollowUp();
+                return;
+            }
 
             if (WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isPresent()) {
                 scheduleAutoSaveFollowUp(); // déjà en cours (ailleurs) — revérifier plus tard
@@ -5807,6 +5914,25 @@ public class MainFrame extends JFrame {
         }
     }
 
+
+    private javax.swing.Timer automaticRulesTimer;
+
+    /** Règles automatiques de l'onglet « À corriger » (voir RuleModes) : lancées une fois tous les scans finis et dès
+     *  que plus aucune passe n'écrit dans les fichiers (taguage, enregistrement…), vérifié toutes les 30 s. */
+    private void scheduleAutomaticRules() {
+        if (!RuleModes.anyAuto() || automaticRulesTimer != null) return;
+        automaticRulesTimer = new javax.swing.Timer(30_000, null);
+        automaticRulesTimer.setInitialDelay(5_000);
+        automaticRulesTimer.addActionListener(e -> {
+            if (!activeScanWorkers.isEmpty()) return;
+            if (!WorkerHub.get().blockers(WorkerHub.TaskKind.LIBRARY_FIX).isEmpty()) return;
+            if (WorkerHub.get().current(WorkerHub.TaskKind.SAVE).isPresent()) return;
+            automaticRulesTimer.stop();
+            automaticRulesTimer = null;
+            CorrectionsPanel.runAutomaticRules(this, tableModel);
+        });
+        automaticRulesTimer.start();
+    }
 
     /** Attend la fin de la synchronisation ListenBrainz puis lance celle de Last.fm (jamais en parallèle). */
     private void startLastFmAfterListenBrainz() {
@@ -6688,6 +6814,13 @@ public class MainFrame extends JFrame {
 
                 @Override
                 protected String doInBackground() {
+                    // Un lot d'annulation pour tout le renommage (voir SaveJournal).
+                    com.opentagger.SaveJournal.Batch undo = com.opentagger.SaveJournal.begin(I18n.t("Renommer les fichiers"));
+                    try { return renameAll(); }
+                    finally { com.opentagger.SaveJournal.end(undo); }
+                }
+
+                private String renameAll() {
                     FileRenamer renamer = new FileRenamer();
                     boolean cleanupEmptyDirs = Config.get().deleteEmptyDirsAfterRename();
                     // allEntries() : sinon un fichier tagué masqué par un filtre actif au moment du

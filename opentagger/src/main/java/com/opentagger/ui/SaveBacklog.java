@@ -34,7 +34,8 @@ public final class SaveBacklog {
      */
     public static void awaitRoom(BooleanSupplier cancelled) {
         Config cfg = Config.get();
-        if (!cfg.autoSaveEnabled() || savingDeferred) return;
+        // Avec l'aperçu avant enregistrement, c'est l'utilisateur qui enregistre : le frein n'a pas lieu d'être.
+        if (!cfg.autoSaveEnabled() || cfg.previewBeforeSave() || savingDeferred) return;
         int limit = cfg.num("tagging.max_unsaved", 500);
         long deadline = System.currentTimeMillis() + 10 * 60_000L;
         while (mustWait(unsaved, limit) && !cancelled.getAsBoolean() && System.currentTimeMillis() < deadline) {

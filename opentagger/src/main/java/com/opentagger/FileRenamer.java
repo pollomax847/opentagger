@@ -912,6 +912,7 @@ public class FileRenamer {
             }
         }
         PlaylistSync.onFileMoved(src, dst);
+        SaveJournal.moved(src, dst);   // pour « Annuler un enregistrement » (remettre le fichier à son ancienne place)
     }
 
     // ── Nettoyage des dossiers vides ──────────────────────────────────────────

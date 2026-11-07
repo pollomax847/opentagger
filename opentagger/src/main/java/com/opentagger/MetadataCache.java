@@ -444,6 +444,17 @@ public class MetadataCache implements AutoCloseable {
      *  suivent sans vérification individuelle propre — évite juste que des pistes du même album
      *  divergent vers des éditions MusicBrainz différentes. */
     public static final String SOURCE_GROUP_PIN = "group_pin";
+    /** Fichier rattaché à la parution MusicBrainz qui explique TOUT son dossier d'album (titres et durées de chaque
+     *  fichier, nom de l'album, artiste) — voir AlbumFirst et TaggingWorker.findTags() étape 0.63 (2026-11-07). Prouve
+     *  l'ALBUM comme le TOC, par les titres en plus des durées. */
+    public static final String SOURCE_ALBUM = "album";
+    /** Même chose d'après une parution Discogs (2e source quand MusicBrainz ne connaît pas l'album, voir AlbumFirst). */
+    public static final String SOURCE_ALBUM_DISCOGS = "album-discogs";
+
+    /** Identification par album entier, d'après MusicBrainz ou Discogs ? */
+    public static boolean isAlbumSource(String source) {
+        return SOURCE_ALBUM.equals(source) || SOURCE_ALBUM_DISCOGS.equals(source);
+    }
     // "beets" et "headphones" peuvent encore apparaître dans file_history (identifications
     // antérieures au 2026-09-25) : ces deux bases tierces ont été retirées de l'identification, ces
     // lignes sont traitées comme toute source non vérifiée par l'audio (étape 0 : SongRec re-vérifie).

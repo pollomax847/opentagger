@@ -108,6 +108,14 @@ public final class AlbumMatcher {
     static Map<Integer, MusicBrainzClient.ReleaseTrack> pairWithRelease(List<List<Item>> slots, MusicBrainzClient.ReleaseTracklist rel) {
         List<MusicBrainzClient.ReleaseTrack> tracks = rel.tracks();
         if (tracks == null || tracks.size() < slots.size()) return null;   // une release plus courte que le dossier ne peut pas tout expliquer
+        Map<Integer, MusicBrainzClient.ReleaseTrack> out = pairAsManyAsPossible(slots, rel);
+        return out.size() == slots.size() ? out : null;
+    }
+
+    /** Comme {@link #pairWithRelease}, mais rend aussi un appariement INCOMPLET : les places sans piste sont absentes. */
+    static Map<Integer, MusicBrainzClient.ReleaseTrack> pairAsManyAsPossible(List<List<Item>> slots, MusicBrainzClient.ReleaseTracklist rel) {
+        List<MusicBrainzClient.ReleaseTrack> tracks = rel.tracks();
+        if (tracks == null || tracks.isEmpty()) return new HashMap<>();
 
         List<Pair> eligible = new ArrayList<>();
         for (int s = 0; s < slots.size(); s++) {
@@ -140,7 +148,7 @@ public final class AlbumMatcher {
             }
             if (count == 1) { out.put(s, tracks.get(found)); trackUsed[found] = true; }
         }
-        return out.size() == slots.size() ? out : null;
+        return out;
     }
 
     /** Score d'un couple fichier ↔ piste, 0 s'ils ne vont pas ensemble. */
@@ -181,7 +189,7 @@ public final class AlbumMatcher {
         List<Match> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (MusicBrainzClient.ReleaseTracklist rel : candidates) {
-            if (rel == null || !seen.add(String.valueOf(rel.releaseMbid()))) continue;
+            if (rel == null || !seen.add(releaseKey(rel))) continue;
             Map<Integer, MusicBrainzClient.ReleaseTrack> pairs = pairWithRelease(slots, rel);
             if (pairs == null) continue;
             Map<String, MusicBrainzClient.ReleaseTrack> byItem = new LinkedHashMap<>();
@@ -191,6 +199,45 @@ public final class AlbumMatcher {
         out.sort(rankOrder(albumHint, hintYear, variedArtists));
         return out;
     }
+
+    /**
+     * Releases qui expliquent AU MOINS {@code minSlots} places du dossier (copies d'un même morceau = une place), de celle
+     * qui en explique le plus à celle qui en explique le moins, puis dans l'ordre habituel. Pour l'identification par album
+     * entier (AlbumFirst) : sur une vraie bibliothèque, un dossier d'album contient souvent un ou deux fichiers étrangers
+     * (autre version, extrait vidéo, morceau d'un autre disque), qui ne doivent pas empêcher de reconnaître les autres —
+     * ils suivent alors la recherche chanson par chanson. Seuls les fichiers expliqués figurent dans trackByItemId.
+     */
+    public static List<Match> acceptablePartial(List<Item> items, List<MusicBrainzClient.ReleaseTracklist> candidates,
+                                                String albumHint, String yearHint, int minSlots) {
+        if (items == null || items.isEmpty() || candidates == null) return List.of();
+        List<List<Item>> slots = dedupe(items);
+        boolean variedArtists = distinctArtists(items) >= 3;
+        int hintYear = parseYear(yearHint);
+        List<Match> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (MusicBrainzClient.ReleaseTracklist rel : candidates) {
+            if (rel == null || !seen.add(releaseKey(rel))) continue;
+            Map<Integer, MusicBrainzClient.ReleaseTrack> pairs = pairAsManyAsPossible(slots, rel);
+            if (pairs.size() < minSlots) continue;
+            Map<String, MusicBrainzClient.ReleaseTrack> byItem = new LinkedHashMap<>();
+            for (var e : pairs.entrySet()) for (Item it : slots.get(e.getKey())) byItem.put(it.id(), e.getValue());
+            out.add(new Match(rel, byItem, pairs.size(), rel.tracks().size() - pairs.size()));
+        }
+        out.sort(Comparator.comparingInt((Match m) -> -m.slots()).thenComparing(rankOrder(albumHint, hintYear, variedArtists)));
+        return out;
+    }
+
+    /** Clé d'une parution : son identifiant MusicBrainz, sinon son identifiant Discogs (les parutions Discogs n'ont pas
+     *  d'identifiant MusicBrainz : sans ça, seule la première était examinée, les autres passant pour des doublons). */
+    static String releaseKey(MusicBrainzClient.ReleaseTracklist r) {
+        if (r.releaseMbid() != null && !r.releaseMbid().isBlank()) return r.releaseMbid();
+        if (r.releaseMeta() != null && r.releaseMeta().discogsId != null && !r.releaseMeta().discogsId.isBlank())
+            return "discogs:" + r.releaseMeta().discogsId;
+        return "objet:" + System.identityHashCode(r);
+    }
+
+    /** Nombre de places (morceaux distincts) d'un dossier : ses copies d'un même morceau comptent pour une. */
+    public static int slotCount(List<Item> items) { return items == null ? 0 : dedupe(items).size(); }
 
     /** La meilleure release qui explique tout le dossier, ou {@code null}. */
     public static Match best(List<Item> items, List<MusicBrainzClient.ReleaseTracklist> candidates, String albumHint, String yearHint) {
@@ -205,7 +252,7 @@ public final class AlbumMatcher {
                 .thenComparing(m -> m.extraTracks())                                                   // l'édition la plus proche du dossier
                 .thenComparing(m -> !"official".equalsIgnoreCase(String.valueOf(m.release().releaseStatus())))
                 .thenComparing(m -> yearDistance(m, hintYear))                                         // année des tags, sinon la plus ancienne
-                .thenComparing(m -> String.valueOf(m.release().releaseMbid()));                       // ordre stable
+                .thenComparing(m -> releaseKey(m.release()));                                         // ordre stable
     }
 
     /** 2 : même nom d'album, 1 : nom approchant, 0 : sinon ou pas d'indice. Les parenthèses comptent : « (Deluxe) » est une autre édition. */

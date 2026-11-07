@@ -53,6 +53,13 @@ public class TagWriter {
     }
 
     public TagInfo write(File fichier, TagInfo info, Path coverImage) throws Exception {
+        // Étiquettes d'origine gardées avant toute écriture : « Annuler un enregistrement » (voir SaveJournal).
+        SaveJournal.beforeWrite(fichier);
+        try { return writeImpl(fichier, info, coverImage); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private TagInfo writeImpl(File fichier, TagInfo info, Path coverImage) throws Exception {
         // Réaffectation immédiate (pas seulement le throttle de Config.get()) : on veut le
         // silencing effectif dès CETTE écriture, sans attendre la prochaine fenêtre de 2s.
         Config.silenceJaudiotaggerLogging();
@@ -141,6 +148,12 @@ public class TagWriter {
      */
     public void writeCoverOnly(java.io.File fichier, java.nio.file.Path coverImage) throws Exception {
         if (coverImage == null || !java.nio.file.Files.exists(coverImage)) return;
+        SaveJournal.beforeWrite(fichier);
+        try { writeCoverOnlyImpl(fichier, coverImage); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private void writeCoverOnlyImpl(java.io.File fichier, java.nio.file.Path coverImage) throws Exception {
         long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
         repairM4aIfNeeded(fichier);
         AudioFile audio = AudioFileIO.read(fichier);
@@ -163,6 +176,12 @@ public class TagWriter {
     public void writeAlbumReplayGain(File fichier, String albumGain, String albumPeak) {
         if ((albumGain == null || albumGain.isBlank())
                 && (albumPeak == null || albumPeak.isBlank())) return;
+        SaveJournal.beforeWrite(fichier);
+        try { writeAlbumReplayGainImpl(fichier, albumGain, albumPeak); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private void writeAlbumReplayGainImpl(File fichier, String albumGain, String albumPeak) {
         try {
             repairM4aIfNeeded(fichier);
             AudioFile audio = AudioFileIO.read(fichier);
@@ -177,6 +196,12 @@ public class TagWriter {
      *  marqueur OT_TAGGEDDATE : une correction façon MediaMonkey (ui.LibraryChecks) ne doit pas faire passer pour tagué
      *  un fichier que l'appli n'a jamais identifié. Les champs personnels (ReplayGain…) ne sont jamais retirés. */
     public void writeFields(File fichier, Map<FieldKey, String> fields, Map<String, String> custom) throws Exception {
+        SaveJournal.beforeWrite(fichier);
+        try { writeFieldsImpl(fichier, fields, custom); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private void writeFieldsImpl(File fichier, Map<FieldKey, String> fields, Map<String, String> custom) throws Exception {
         String n = fichier.getName().toLowerCase();
         if (FfmpegTagIO.handles(fichier) || n.endsWith(".mpc"))
             throw new Exception("format non modifiable champ par champ : " + n.substring(n.lastIndexOf('.') + 1));
@@ -202,6 +227,12 @@ public class TagWriter {
      *  première marquée « face », sinon la première — et les autres retirées (rendues à l'appelant pour l'annulation).
      *  Ne touche à rien d'autre que les images, ni au marqueur OT_TAGGEDDATE. */
     public AlbumArtFix fixAlbumArt(File fichier) throws Exception {
+        SaveJournal.beforeWrite(fichier);
+        try { return fixAlbumArtImpl(fichier); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private AlbumArtFix fixAlbumArtImpl(File fichier) throws Exception {
         String n = fichier.getName().toLowerCase();
         if (FfmpegTagIO.handles(fichier) || n.endsWith(".mpc"))
             throw new Exception("format non modifiable ici : " + n.substring(n.lastIndexOf('.') + 1));
@@ -228,6 +259,12 @@ public class TagWriter {
 
     /** Remet des images retirées par {@link #fixAlbumArt} (« Annuler la dernière correction »). */
     public void addImages(File fichier, List<Image> images) throws Exception {
+        SaveJournal.beforeWrite(fichier);
+        try { addImagesImpl(fichier, images); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private void addImagesImpl(File fichier, List<Image> images) throws Exception {
         repairM4aIfNeeded(fichier);
         AudioFile audio = AudioFileIO.read(fichier);
         Tag tag = audio.getTagOrCreateAndSetDefault();
@@ -244,6 +281,12 @@ public class TagWriter {
 
     /** Retire toutes les images intégrées (annulation d'une pochette ajoutée depuis le dossier). */
     public void removeImages(File fichier) throws Exception {
+        SaveJournal.beforeWrite(fichier);
+        try { removeImagesImpl(fichier); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    private void removeImagesImpl(File fichier) throws Exception {
         repairM4aIfNeeded(fichier);
         AudioFile audio = AudioFileIO.read(fichier);
         Tag tag = audio.getTag();
@@ -1247,6 +1290,8 @@ public class TagWriter {
         // ci-dessous (ex. pb.start() qui échoue, ou p.waitFor() interrompu par "Arrêter" —
         // ClosedByInterruptException, observé le même soir sur un autre fichier) tombait dans le
         // catch générique, qui n'avait pas accès à `tmp` (hors de sa portée) pour le nettoyer.
+        // La réparation réécrit tout le fichier, son compris : copie entière gardée pour l'annulation (voir SaveJournal).
+        SaveJournal.keepWholeCopy(f);
         File tmp = null;
         try {
             tmp = File.createTempFile("ot_fix_", ".m4a", f.getParentFile());
@@ -1311,9 +1356,32 @@ public class TagWriter {
     private static final Set<FieldKey> IDENTITY_FIELDS = EnumSet.of(
             FieldKey.ARTIST, FieldKey.ALBUM_ARTIST, FieldKey.TITLE, FieldKey.ALBUM);
 
-    private TagInfo mergeWithExisting(TagInfo info, Tag tag) {
+    // Champs propres au SON du fichier (pas au morceau qu'on croit qu'il est) : les seuls gardés quand le fichier
+    // devient un autre morceau — voir mergeWithExisting et SameSong.
+    private static final Set<FieldKey> SOUND_FIELDS = EnumSet.of(
+            FieldKey.BPM, FieldKey.KEY, FieldKey.ENCODER, FieldKey.RATING, FieldKey.COMMENT,
+            FieldKey.ACOUSTID_FINGERPRINT, FieldKey.ACOUSTID_ID);
+    private static final Set<String> SOUND_PROPS = Set.of(
+            "fbpm", "isHD", "replayGainTrackGain", "replayGainTrackPeak");
+
+    /**
+     * Fusion « l'existant seulement si le calculé est vide » (réglage tags.clear_existing_tags=false).
+     *
+     * <p>Sauf quand les nouveaux tags décrivent un AUTRE morceau que les anciens (artiste ou titre sans rapport,
+     * voir {@link SameSong#otherSong}) : alors rien de l'ancienne identité n'est recopié — ni artiste de l'album,
+     * ni tris, ni paroles, ni ISRC, ni identifiants, ni numéros de piste, ni dates — seulement ce qui décrit le
+     * son lui-même (BPM, ReplayGain de la piste, empreinte AcoustID, note, commentaire). Avant ce correctif
+     * (2026-11-07), une ré-identification qui n'apportait que l'artiste et le titre laissait le reste de l'ancien
+     * morceau dans le fichier : « Taylor Swift – Style » avec l'artiste de l'album « 2pac » et les paroles de 2Pac.
+     *
+     * <p>Package-privé pour les tests (MergeOtherSongTest).
+     */
+    TagInfo mergeWithExisting(TagInfo info, Tag tag) {
         TagInfo m = info.copy();
+        boolean otherSong = SameSong.otherSong(getTagFirst(tag, FieldKey.ARTIST), getTagFirst(tag, FieldKey.TITLE),
+                                               info.artist, info.title);
         for (FieldKey key : FieldKey.values()) {
+            if (otherSong && !SOUND_FIELDS.contains(key)) continue;
             String existing = getTagFirst(tag, key);
             if (existing == null || existing.isBlank()) continue;
             if (IDENTITY_FIELDS.contains(key) && TagInfo.isGenericIdentityValue(existing)) continue;
@@ -1332,7 +1400,7 @@ public class TagWriter {
         }
         // Champs de la table TagFieldRegistry (pays, label, ReplayGain, tags Picard/Discogs/Last.fm…) :
         // même sémantique "existant seulement si le calculé est vide" que la boucle ci-dessus.
-        TagFieldRegistry.readInto(tag, m);
+        TagFieldRegistry.readInto(tag, m, prop -> !otherSong || SOUND_PROPS.contains(prop));
         return m;
     }
 

@@ -256,6 +256,10 @@ public class Config {
     // reste IDENTIFIED en mémoire sans jamais être écrit). Désactivable pour repasser en contrôle
     // 100% manuel (façon Picard strict) si préféré — voir chkAutoSaveEnabled.
     public boolean autoSaveEnabled()               { return bool("tagging.auto_save_enabled",    true); }
+    // Aperçu avant d'enregistrer (2026-11-07, demande utilisateur : « montrer les changements prévus avant d'écrire ») —
+    // voir ui.SavePreviewDialog. Actif par défaut : « Enregistrer tout » montre chaque changement et attend l'accord, et
+    // l'enregistrement automatique ne s'arme plus tout seul (les fichiers identifiés attendent ce clic).
+    public boolean previewBeforeSave()             { return bool("tagging.preview_before_save", true); }
     // Synchronisation AUTOMATIQUE des compteurs d'écoute (ListenBrainz / Last.fm → tags des fichiers),
     // lancée à la fin d'un scan, au plus une fois par 24 h — voir MainFrame.scheduleAutoPlayCountSync().
     // Désactivée par défaut, comme les autres automatismes du menu Tagger : elle réécrit des tags.

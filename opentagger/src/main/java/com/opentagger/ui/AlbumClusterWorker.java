@@ -80,6 +80,13 @@ public class AlbumClusterWorker extends SwingWorker<Void, String> {
 
     @Override
     protected Void doInBackground() throws Exception {
+        // Un lot d'annulation pour toute la passe : Édition → Annuler un enregistrement (voir SaveJournal).
+        com.opentagger.SaveJournal.Batch undo = com.opentagger.SaveJournal.begin(I18n.t("Regrouper par album"));
+        try { return work(); }
+        finally { com.opentagger.SaveJournal.end(undo); }
+    }
+
+    private Void work() throws Exception {
         // allEntries() : TOUTE la bibliothèque, filtre de la table ignoré — sinon un filtre actif
         // au moment du clic laisserait des albums entiers hors de la passe.
         Map<String, List<FileEntry>> groups = new LinkedHashMap<>();

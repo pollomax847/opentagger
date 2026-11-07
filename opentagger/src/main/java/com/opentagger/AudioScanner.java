@@ -109,6 +109,12 @@ public class AudioScanner {
         return false;
     }
 
+    /** Le nom porte-t-il une extension audio reconnue ? (sans les autres filtres de {@link #isAudio}) */
+    public static boolean hasAudioExtension(java.nio.file.Path p) {
+        String lower = p == null || p.getFileName() == null ? "" : p.getFileName().toString().toLowerCase();
+        return EXTENSIONS.stream().anyMatch(lower::endsWith);
+    }
+
     private boolean isAudio(File f) {
         String nom = f.getName();
         // Exclure les fichiers cachés et les resource forks macOS (._NomFichier)

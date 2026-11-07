@@ -232,8 +232,15 @@ public final class TagFieldRegistry {
     /** Remplit, dans {@code ti}, chaque champ de la table encore VIDE depuis le tag du fichier — jamais
      *  d'écrasement d'une valeur déjà lue par la lecture "à la main" (même sémantique que mergeWithExisting). */
     public static void readInto(Tag tag, TagInfo ti) {
+        readInto(tag, ti, prop -> true);
+    }
+
+    /** Variante qui ne relit que les champs dont le nom passe {@code keep} — voir TagWriter.mergeWithExisting :
+     *  quand le fichier devient un autre morceau, seuls les champs propres au SON (ReplayGain…) sont gardés. */
+    public static void readInto(Tag tag, TagInfo ti, java.util.function.Predicate<String> keep) {
         if (tag == null) return;
         for (Entry e : ALL) {
+            if (!keep.test(e.prop())) continue;
             String v;
             try {
                 v = e.key() != null ? tag.getFirst(e.key()) : TagWriter.getCustomField(tag, e.custom());

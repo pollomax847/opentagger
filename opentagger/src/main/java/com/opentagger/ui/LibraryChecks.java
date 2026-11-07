@@ -67,7 +67,15 @@ public final class LibraryChecks {
 
     /** Les problèmes, dans l'ordre d'affichage. */
     public enum Check {
-        NO_TITLE, NO_ARTIST, NO_ALBUM, NO_YEAR, NO_GENRE, ALBUM_ARTIST_SPLIT, NO_ALBUM_ARTIST, CASE, SWAPPED, NO_TRACK,
+        NO_TITLE, NO_ARTIST, NO_ALBUM, NO_YEAR, NO_GENRE, ALBUM_ARTIST_SPLIT, NO_ALBUM_ARTIST,
+        /** Artiste de l'album sans rapport avec l'artiste des pistes (« Tommy Wright III » sur un album de Taylor Swift) :
+         *  Plex range l'album chez cet artiste et lui donne sa photo. Ajouté le 2026-11-07 (règles façon Bliss). */
+        ALBUM_ARTIST_ODD,
+        /** Années différentes d'une piste à l'autre dans un même album. */
+        YEAR_SPLIT,
+        CASE, SWAPPED, NO_TRACK,
+        /** Numéros de piste manquants dans un album (« 1, 2, 4 » sur 12) : constat seulement, comme l'intégrité d'album de Bliss. */
+        MISSING_TRACKS,
         NO_COVER, MULTI_COVER, COVER_MISMATCH, NO_REPLAYGAIN, NO_ALBUM_GAIN, MISSING_FILE
     }
 
@@ -121,7 +129,7 @@ public final class LibraryChecks {
             TagInfo t = tr.tags();
             if (empty(nz(t.title)))  r.add(Check.NO_TITLE, tr.ref());
             if (empty(nz(t.artist))) r.add(Check.NO_ARTIST, tr.ref());
-            if (empty(nz(t.album)))  r.add(Check.NO_ALBUM, tr.ref());
+            if (emptyAlbum(nz(t.album))) r.add(Check.NO_ALBUM, tr.ref());
             if (nz(t.year).isBlank()) r.add(Check.NO_YEAR, tr.ref());
             if (nz(t.genre).isBlank()) r.add(Check.NO_GENRE, tr.ref());
             if (nz(t.replayGainTrackGain).isBlank()) r.add(Check.NO_REPLAYGAIN, tr.ref());
@@ -148,7 +156,7 @@ public final class LibraryChecks {
 
                 if (swapped(t, tr.path())) swap(r, tr);
             }
-            if (!empty(nz(t.album)) && tr.path().getParent() != null) {
+            if (!emptyAlbum(nz(t.album)) && tr.path().getParent() != null) {
                 byFolder.computeIfAbsent(tr.path().getParent(), k -> new HashMap<>())
                         .computeIfAbsent(key(nz(t.album)), k -> new ArrayList<>()).add(tr);
             }
@@ -160,7 +168,59 @@ public final class LibraryChecks {
                 if (album.size() >= 2) checkAlbum(r, album, vaName, album.get(0).path().getParent());
             }
         }
+        checkOddAlbumArtists(r, tracks);
         return r;
+    }
+
+    /** Pistes d'un même album (nom d'album + artiste de l'album, tous dossiers confondus, même les dossiers fourre-tout) dont
+     *  l'artiste de l'album n'a rien à voir avec l'interprète, alors qu'un seul interprète fait presque tout l'album. C'est la
+     *  trace des anciennes identifications mélangées (voir SameSong) : Plex range alors l'album chez un autre artiste et lui
+     *  donne sa photo. Correction : l'interprète principal. Jamais pour une compilation ni un album d'artistes variés. */
+    static final int ODD_MIN_TRACKS = 3;
+    static final double ODD_MAJORITY = 0.8;
+
+    private static <T> void checkOddAlbumArtists(Report<T> r, List<Track<T>> tracks) {
+        Map<String, List<Track<T>>> groups = new LinkedHashMap<>();
+        for (Track<T> tr : tracks) {
+            if (tr.missing()) continue;
+            TagInfo t = tr.tags();
+            String aa = nz(t.albumArtist).trim();
+            if (empty(aa) || com.opentagger.AudioTagAudit.isGenericArtist(aa) || emptyAlbum(nz(t.album)) || empty(nz(t.artist))) continue;
+            groups.computeIfAbsent(key(nz(t.album)) + "|" + key(aa), k -> new ArrayList<>()).add(tr);
+        }
+        for (List<Track<T>> album : groups.values()) {
+            if (album.size() < ODD_MIN_TRACKS) continue;
+            String aa = nz(album.get(0).tags().albumArtist).trim();
+            int compil = 0, related = 0;
+            for (Track<T> tr : album) {
+                if ("1".equals(nz(tr.tags().isCompilation)) || compilationFolder(tr.path().getParent())) compil++;
+                if (artistRelated(aa, nz(tr.tags().artist))) related++;
+            }
+            if (compil > 0 || related > 0) continue;
+            Map<String, Integer> counts = new HashMap<>();
+            for (Track<T> tr : album) counts.merge(key(FEAT_SPLIT.split(nz(tr.tags().artist).trim(), 2)[0]), 1, Integer::sum);
+            Map.Entry<String, Integer> top = Collections.max(counts.entrySet(), Map.Entry.comparingByValue());
+            if (top.getValue() < ODD_MAJORITY * album.size()) continue;
+            Map<String, String> primaries = primaryArtists(album);
+            String target = soleCredit(album, top.getKey());
+            if (target == null) target = primaries.get(top.getKey());
+            for (Track<T> tr : album) {
+                r.add(Check.ALBUM_ARTIST_ODD, tr.ref());
+                if (target != null && !target.isBlank()) r.fix(Check.ALBUM_ARTIST_ODD, tr, new EnumMap<>(Map.of(Field.ALBUM_ARTIST, target)));
+            }
+        }
+    }
+
+    /** L'artiste de l'album est-il l'un des artistes crédités sur la piste (principal ou invité), à l'orthographe près ? */
+    static boolean artistRelated(String albumArtist, String artist) {
+        String a = key(albumArtist), b = key(artist);
+        if (a.isEmpty() || b.isEmpty()) return true;
+        if (b.contains(a) || a.contains(b)) return true;
+        for (String part : FEAT_SPLIT.split(artist)) {
+            String k = key(part);
+            if (!k.isEmpty() && (k.contains(a) || a.contains(k))) return true;
+        }
+        return com.opentagger.AudioTagAudit.artistSimilarity(albumArtist, artist) >= 0.75;
     }
 
     private static <T> void checkAlbum(Report<T> r, List<Track<T>> album, String vaName, Path dir) {
@@ -229,6 +289,48 @@ public final class LibraryChecks {
         // ── Année / genre manquants : repris des autres pistes s'ils y sont unanimes ──
         fillFromAlbum(r, album, Check.NO_YEAR, Field.YEAR, t -> nz(t.year).trim());
         fillFromAlbum(r, album, Check.NO_GENRE, Field.GENRE, t -> nz(t.genre).trim());
+
+        // ── Années différentes dans l'album : l'année très majoritaire (70 %) pour les autres ──
+        Map<String, Integer> years = new HashMap<>();
+        Map<String, String> yearText = new HashMap<>();
+        int withYear = 0;
+        for (Track<T> tr : album) {
+            String y = year4(tr.tags());
+            if (y.isEmpty()) continue;
+            withYear++;
+            years.merge(y, 1, Integer::sum);
+            yearText.putIfAbsent(y, Field.YEAR.get(tr.tags()));
+        }
+        if (years.size() >= 2) {
+            Map.Entry<String, Integer> top = Collections.max(years.entrySet(), Map.Entry.comparingByValue());
+            boolean fixable = top.getValue() >= 0.7 * withYear;
+            for (Track<T> tr : album) {
+                String y = year4(tr.tags());
+                if (y.isEmpty() || y.equals(top.getKey())) continue;
+                r.add(Check.YEAR_SPLIT, tr.ref());
+                if (fixable) r.fix(Check.YEAR_SPLIT, tr, new EnumMap<>(Map.of(Field.YEAR, yearText.get(top.getKey()))));
+            }
+        }
+
+        // ── Pistes manquantes (constat) : numéros absents jusqu'au nombre de pistes annoncé, disque par disque ──
+        if (album.size() >= 3) {
+            Map<String, Set<Integer>> numbers = new HashMap<>();
+            Map<String, Integer> totals = new HashMap<>();
+            boolean usable = true;
+            for (Track<T> tr : album) {
+                int n = parseNumber(nz(tr.tags().track));
+                int total = parseTotal(nz(tr.tags().track), nz(tr.tags().trackTotal));
+                if (n <= 0 || total <= 0 || n > total || total > 60) { usable = false; break; }
+                String disc = String.valueOf(Math.max(1, parseNumber(nz(tr.tags().discNo))));
+                numbers.computeIfAbsent(disc, k -> new HashSet<>()).add(n);
+                totals.merge(disc, total, Math::max);
+            }
+            if (usable) {
+                boolean missing = false;
+                for (var e : numbers.entrySet()) if (e.getValue().size() < totals.get(e.getKey())) missing = true;
+                if (missing) for (Track<T> tr : album) r.add(Check.MISSING_TRACKS, tr.ref());
+            }
+        }
 
         // ── Numéro de piste manquant : celui du nom de fichier (« 05 - Titre », « 1-05 Titre ») ──
         Set<String> used = new HashSet<>();
@@ -463,12 +565,44 @@ public final class LibraryChecks {
 
     private static String nz(String s) { return s == null ? "" : s; }
 
+    private static String year4(TagInfo t) {
+        String y = nz(t.year).trim();
+        return y.length() >= 4 && y.substring(0, 4).chars().allMatch(Character::isDigit) ? y.substring(0, 4) : "";
+    }
+
+    /** « 3 », « 03 », « 3/12 » → 3 ; 0 si illisible. */
+    static int parseNumber(String s) {
+        String t = s.trim();
+        int slash = t.indexOf('/');
+        if (slash >= 0) t = t.substring(0, slash).trim();
+        try { return Integer.parseInt(t); } catch (NumberFormatException e) { return 0; }
+    }
+
+    /** Nombre de pistes : « 3/12 » → 12, sinon le champ du nombre de pistes. */
+    static int parseTotal(String track, String trackTotal) {
+        int slash = track.indexOf('/');
+        if (slash >= 0) {
+            try { return Integer.parseInt(track.substring(slash + 1).trim()); } catch (NumberFormatException ignored) {}
+        }
+        return parseNumber(trackTotal);
+    }
+
     /** Nombre d'images d'après TagInfo.coverInfo (« 2:1a2b3c4d » → 2), -1 si pas encore lu. */
     static int coverCount(String coverInfo) {
         if (coverInfo == null || coverInfo.isEmpty()) return -1;
         int colon = coverInfo.indexOf(':');
         try { return Integer.parseInt(colon < 0 ? coverInfo : coverInfo.substring(0, colon)); }
         catch (NumberFormatException e) { return -1; }
+    }
+
+    private static final Pattern NO_ALBUM_NAME = Pattern.compile(
+            "(?i)\\s*\\[?(unknown album|album inconnu|no album|unknown|inconnu|untitled|sans titre|sans album)\\]?\\s*");
+
+    /** Album absent. Plus strict que {@link #empty} : « 25 », « 21 », « 1989 » sont de vrais albums (Adele, Taylor Swift), pas
+     *  des valeurs vides — avant le 2026-11-07, ils comptaient comme « Sans album » et leurs pistes n'étaient jamais vérifiées
+     *  ensemble. */
+    static boolean emptyAlbum(String s) {
+        return s == null || s.isBlank() || s.trim().length() < 2 && !Character.isDigit(s.trim().charAt(0)) || NO_ALBUM_NAME.matcher(s).matches();
     }
 
     private static boolean empty(String s) {

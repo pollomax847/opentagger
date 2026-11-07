@@ -311,6 +311,248 @@ public class DiscogsClient {
         return (results.isArray() && !results.isEmpty()) ? results.get(0) : null;
     }
 
+    // ── Album entier (voir AlbumFirst) : Discogs en 2e source quand MusicBrainz ne connaît pas l'album ─────────────
+
+    /** Une parution trouvée par la recherche : identifiant, titre de l'album (sans « Artiste - »), formats (« CD, Album »). */
+    public record AlbumHit(long id, String album, String formats, String year) {}
+
+    /** Clés Discogs présentes (sans elles, toute requête échoue en 401). */
+    public static boolean configured() {
+        return !Config.get().discogsKey().isBlank() && !Config.get().discogsSecret().isBlank();
+    }
+
+    /** Parutions Discogs d'un album : par titre de parution et artiste (titre seul pour une compilation). */
+    public List<AlbumHit> searchAlbumReleases(String album, String artist, int limit, MetadataCache cache) throws Exception {
+        if (!configured() || album == null || album.isBlank()) return List.of();
+        String a = artist == null ? "" : artist;
+        String cacheKey = "discogs:albumsearch:" + MetadataCache.queryHash(a, album);
+        String body = cache == null ? null : cache.getLookup(cacheKey);
+        if (body == null) {
+            String url = BASE_URL + "/database/search?type=release&per_page=" + Math.max(1, Math.min(limit, 25))
+                    + "&release_title=" + encode(album) + (a.isBlank() ? "" : "&artist=" + encode(a));
+            HttpResponse<String> response = sendWithThrottleRetry(get(url));
+            if (response == null || response.statusCode() != 200) return List.of();
+            body = response.body();
+            if (cache != null) cache.putLookup(cacheKey, body);
+        }
+        return parseSearch(mapper.readTree(body));
+    }
+
+    /** La parution {@code id} au format de MusicBrainzClient.ReleaseTracklist (identifiants MusicBrainz vides,
+     *  identifiant Discogs dans releaseMeta), ou {@code null}. */
+    public MusicBrainzClient.ReleaseTracklist lookupAlbumRelease(long id, MetadataCache cache) throws Exception {
+        if (!configured() || id <= 0) return null;
+        String cacheKey = "discogs:release:" + id;
+        String body = cache == null ? null : cache.getLookup(cacheKey);
+        if (body == null) {
+            HttpResponse<String> response = sendWithThrottleRetry(get(BASE_URL + "/releases/" + id));
+            if (response == null || response.statusCode() != 200) return null;
+            body = response.body();
+            if (cache != null) cache.putLookup(cacheKey, body);
+        }
+        return parseRelease(mapper.readTree(body), Config.get().vaName());
+    }
+
+    /** Année de la première parution (le « master » Discogs regroupe toutes les éditions), ou "". */
+    public String masterYear(long masterId, MetadataCache cache) throws Exception {
+        if (!configured() || masterId <= 0) return "";
+        String cacheKey = "discogs:master:" + masterId;
+        String body = cache == null ? null : cache.getLookup(cacheKey);
+        if (body == null) {
+            HttpResponse<String> response = sendWithThrottleRetry(get(BASE_URL + "/masters/" + masterId));
+            if (response == null || response.statusCode() != 200) return "";
+            body = response.body();
+            if (cache != null) cache.putLookup(cacheKey, body);
+        }
+        int y = mapper.readTree(body).path("year").asInt(0);
+        return y > 0 ? String.valueOf(y) : "";
+    }
+
+    private HttpRequest get(String url) {
+        return HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", Config.get().userAgent())
+                .header("Authorization", authHeader())
+                .timeout(HttpTimeouts.apiCall())
+                .GET()
+                .build();
+    }
+
+    static List<AlbumHit> parseSearch(JsonNode root) {
+        List<AlbumHit> out = new ArrayList<>();
+        for (JsonNode r : root.path("results")) {
+            long id = r.path("id").asLong(0);
+            if (id <= 0) continue;
+            String title = JsonText.of(r.path("title"), "").trim();
+            int dash = title.indexOf(" - ");
+            String album = dash >= 0 ? title.substring(dash + 3).trim() : title;
+            List<String> formats = new ArrayList<>();
+            r.path("format").forEach(f -> formats.add(f.asText()));
+            out.add(new AlbumHit(id, album, String.join(", ", formats), JsonText.of(r.path("year"), "").trim()));
+        }
+        return out;
+    }
+
+    private static final java.util.regex.Pattern DISC_TRACK_POS =
+            java.util.regex.Pattern.compile("(?i)^(?:cd|dvd|disc|disk)?\\s*(\\d{1,2})\\s*[-.:]\\s*(\\d{1,3})$");
+    private static final java.util.regex.Pattern NUMBER_POS = java.util.regex.Pattern.compile("^(\\d{1,3})$");
+
+    /** Nom d'artiste Discogs sans son numéro d'homonyme : « Prince (2) » → « Prince ». */
+    static String cleanArtist(String name) {
+        return name == null ? "" : name.replaceAll("\\s*\\(\\d+\\)$", "").replace("*", "").trim();
+    }
+
+    /** « A », « feat. B » … : les crédits Discogs mis bout à bout avec leurs liaisons. */
+    static String joinArtists(JsonNode artists) {
+        StringBuilder b = new StringBuilder();
+        for (JsonNode a : artists) {
+            // Le nom officiel, pas la variante imprimée sur CETTE édition (« アデル = Adele » sur l'édition japonaise) :
+            // un même artiste doit porter le même nom sur tous ses albums.
+            String name = withoutTranslation(cleanArtist(JsonText.of(a.path("name"), "")));
+            if (name.isBlank()) continue;
+            b.append(name);
+            String join = JsonText.of(a.path("join"), "").trim();
+            if (!join.isEmpty()) b.append(join.equals(",") ? ", " : " " + join + " ");
+        }
+        return b.toString().replaceAll("\\s*(,|&|feat\\.?|Feat\\.?)\\s*$", "").trim();
+    }
+
+    /** « Hello = こんにちは » → « Hello » : les éditions japonaises, coréennes… ajoutent la traduction après « = ». */
+    static String withoutTranslation(String s) {
+        if (s == null) return "";
+        int eq = s.indexOf(" = ");
+        if (eq <= 0) return s.trim();
+        String left = s.substring(0, eq).trim(), right = s.substring(eq + 3).trim();
+        boolean leftLatin = left.codePoints().anyMatch(c -> Character.isLetter(c) && Character.UnicodeScript.of(c) == Character.UnicodeScript.LATIN);
+        boolean rightLatin = right.codePoints().anyMatch(c -> Character.isLetter(c) && Character.UnicodeScript.of(c) == Character.UnicodeScript.LATIN);
+        if (leftLatin && !rightLatin) return left;
+        if (!leftLatin && rightLatin) return right;
+        return s.trim();
+    }
+
+    /** « 3:45 » ou « 1:02:03 » → millisecondes (0 si absent). */
+    static int durationMs(String d) {
+        if (d == null || d.isBlank()) return 0;
+        String[] p = d.trim().split(":");
+        try {
+            int s = 0;
+            for (String x : p) s = s * 60 + Integer.parseInt(x.trim());
+            return s * 1000;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** Parution Discogs (JSON de /releases/{id}) → tracklist. Les positions « 1-05 »/« CD2-3 » donnent disque et piste,
+     *  « 7 » la piste ; les faces de vinyle (« A1 », « B2 ») sont numérotées dans l'ordre. */
+    static MusicBrainzClient.ReleaseTracklist parseRelease(JsonNode root, String vaName) {
+        long id = root.path("id").asLong(0);
+        String album = withoutTranslation(JsonText.of(root.path("title"), ""));
+        if (id <= 0 || album.isBlank()) return null;
+        String albumArtist = joinArtists(root.path("artists"));
+        boolean various = albumArtist.equalsIgnoreCase("Various") || albumArtist.isBlank();
+        List<String> formatWords = new ArrayList<>();
+        for (JsonNode f : root.path("formats")) {
+            formatWords.add(JsonText.of(f.path("name"), ""));
+            f.path("descriptions").forEach(d -> formatWords.add(d.asText()));
+        }
+        boolean compilation = various || formatWords.stream().anyMatch(w -> w.equalsIgnoreCase("Compilation"));
+        if (various) albumArtist = vaName == null || vaName.isBlank() ? "Various Artists" : vaName;
+
+        // Pistes : les « index » (mouvements regroupés) donnent leurs sous-pistes, les « heading » (titres de face) rien.
+        List<Raw> raws = new ArrayList<>();
+        for (JsonNode t : root.path("tracklist")) {
+            String type = JsonText.of(t.path("type_"), "track");
+            if (type.equals("heading")) continue;
+            if (type.equals("index") && t.path("sub_tracks").isArray() && !t.path("sub_tracks").isEmpty()) {
+                for (JsonNode st : t.path("sub_tracks")) raws.add(raw(st, t));
+                continue;
+            }
+            raws.add(raw(t, null));
+        }
+        if (raws.isEmpty()) return null;
+        boolean discTrack = raws.stream().allMatch(r -> DISC_TRACK_POS.matcher(r.pos()).matches());
+        boolean numbered = !discTrack && raws.stream().allMatch(r -> NUMBER_POS.matcher(r.pos()).matches());
+        int[] disc = new int[raws.size()], no = new int[raws.size()];
+        for (int i = 0; i < raws.size(); i++) {
+            java.util.regex.Matcher m;
+            if (discTrack && (m = DISC_TRACK_POS.matcher(raws.get(i).pos())).matches()) {
+                disc[i] = Integer.parseInt(m.group(1));
+                no[i] = Integer.parseInt(m.group(2));
+            } else if (numbered) {
+                disc[i] = 1;
+                no[i] = Integer.parseInt(raws.get(i).pos());
+            } else {
+                disc[i] = 1;
+                no[i] = i + 1;
+            }
+        }
+        java.util.Map<Integer, Integer> perDisc = new java.util.HashMap<>();
+        for (int d : disc) perDisc.merge(d, 1, Integer::sum);
+        boolean multi = perDisc.size() > 1;
+        List<MusicBrainzClient.ReleaseTrack> tracks = new ArrayList<>();
+        for (int i = 0; i < raws.size(); i++) {
+            Raw r = raws.get(i);
+            String artist = r.artist().isBlank() ? albumArtist : r.artist();
+            tracks.add(new MusicBrainzClient.ReleaseTrack(multi ? disc[i] : 0, no[i], perDisc.get(disc[i]), r.title(), artist,
+                    "", r.ms(), "", "", ""));
+        }
+
+        String year = root.path("year").asInt(0) > 0 ? String.valueOf(root.path("year").asInt()) : "";
+        String label = "", catno = "", barcode = "";
+        JsonNode labels = root.path("labels");
+        if (labels.isArray() && !labels.isEmpty()) {
+            label = cleanArtist(JsonText.of(labels.get(0).path("name"), ""));
+            catno = JsonText.of(labels.get(0).path("catno"), "").trim();
+            if (catno.equalsIgnoreCase("none")) catno = "";
+        }
+        for (JsonNode idf : root.path("identifiers")) {
+            if ("Barcode".equalsIgnoreCase(JsonText.of(idf.path("type"), ""))) {
+                barcode = JsonText.of(idf.path("value"), "").replaceAll("[^0-9]", "");
+                if (!barcode.isBlank()) break;
+            }
+        }
+        String country = JsonText.of(root.path("country"), "").trim();
+        String releaseType = formatWords.stream().anyMatch(w -> w.equalsIgnoreCase("Single")) ? "single"
+                : formatWords.stream().anyMatch(w -> w.equalsIgnoreCase("EP")) ? "ep"
+                : formatWords.stream().anyMatch(w -> w.equalsIgnoreCase("Album") || w.equalsIgnoreCase("LP")) ? "album" : "";
+
+        TagInfo meta = new TagInfo();
+        meta.year = year;
+        meta.label = label;
+        meta.catalogNo = catno;
+        meta.barcode = barcode;
+        meta.country = country;
+        meta.releaseType = releaseType;
+        if (compilation) meta.isCompilation = "1";
+        meta.discogsId = String.valueOf(id);
+        long master = root.path("master_id").asLong(0);
+        if (master > 0) meta.discogsMasterId = String.valueOf(master);
+        meta.releaseDiscogsUrl = JsonText.of(root.path("uri"), "").trim();
+        List<String> styles = new ArrayList<>();
+        root.path("styles").forEach(x -> styles.add(x.asText()));
+        meta.discogsStyles = String.join(", ", styles);
+        meta.discogsFormat = String.join(", ", formatWords.stream().filter(w -> !w.isBlank()).toList());
+        String sort = cleanArtist(JsonText.of(root.path("artists_sort"), ""));
+        return new MusicBrainzClient.ReleaseTracklist("", album, albumArtist, various ? "" : sort, year, "", compilation, tracks,
+                country, barcode, "", label, catno, "", "", releaseType, "", meta);
+    }
+
+    private record Raw(String pos, String title, String artist, int ms) {}
+
+    /** Une piste du tracklist ; une sous-piste sans artiste prend celui de sa piste « index ». */
+    private static Raw raw(JsonNode t, JsonNode parent) {
+        String artist = joinArtists(t.path("artists"));
+        if (artist.isBlank() && parent != null) artist = joinArtists(parent.path("artists"));
+        String title = withoutTranslation(JsonText.of(t.path("title"), ""));
+        if (parent != null) {
+            String head = JsonText.of(parent.path("title"), "").trim();
+            if (!head.isBlank() && !title.toLowerCase(java.util.Locale.ROOT).contains(head.toLowerCase(java.util.Locale.ROOT)))
+                title = head + ": " + title;
+        }
+        return new Raw(JsonText.of(t.path("position"), "").trim(), title, artist, durationMs(JsonText.of(t.path("duration"), "")));
+    }
+
     /**
      * Avant ce correctif : un 429 (quota Discogs dépassé — 60 req/min pour une clé authentifiée)
      * ou toute autre erreur HTTP se traduisait en simple `return null`, indiscernable dans les

@@ -283,8 +283,11 @@ public final class TagEnrichment {
                     String fname = Config.get().str("cover.filename", "cover");
                     String ext   = cover.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
                     Path dest = fichier.toPath().resolveSibling(fname + ext);
-                    if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false))
+                    if (!java.nio.file.Files.exists(dest) || Config.get().bool("cover.overwrite_file", false)) {
+                        SaveJournal.beforeSidecar(dest);
                         java.nio.file.Files.copy(cover, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        SaveJournal.afterWrite(dest.toFile());
+                    }
                 } catch (Exception ignored) {}
             }
 
@@ -313,7 +316,9 @@ public final class TagEnrichment {
                 String name = fichier.getName();
                 String stem = name.contains(".") ? name.substring(0, name.lastIndexOf('.')) : name;
                 Path lrcPath = fichier.toPath().resolveSibling(stem + ".lrc");
+                SaveJournal.beforeSidecar(lrcPath);
                 java.nio.file.Files.writeString(lrcPath, written.syncedLyrics);
+                SaveJournal.afterWrite(lrcPath.toFile());
             } catch (Exception ignored) {}
         }
 
@@ -421,8 +426,11 @@ public final class TagEnrichment {
                     if (artistPhoto != null) {
                         String ext   = artistPhoto.getFileName().toString().toLowerCase().endsWith(".png") ? ".png" : ".jpg";
                         Path dest = destDir.resolve(fname + ext);
-                        if (!java.nio.file.Files.exists(dest) || Config.get().artistPhotoOverwrite())
+                        if (!java.nio.file.Files.exists(dest) || Config.get().artistPhotoOverwrite()) {
+                            SaveJournal.beforeSidecar(dest);
                             java.nio.file.Files.copy(artistPhoto, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            SaveJournal.afterWrite(dest.toFile());
+                        }
                     }
                 } catch (Exception ignored) {
                 } finally {

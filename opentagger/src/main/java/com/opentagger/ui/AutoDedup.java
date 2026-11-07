@@ -247,9 +247,11 @@ public final class AutoDedup {
                 dropped = fe; dropSize = fe.length();
                 if (!TrashHelper.moveToTrash(fe)) return new Resolution(false, saved, "");
                 java.nio.file.Files.move(saved, existing);
+                com.opentagger.SaveJournal.moved(saved, existing);
             } else {
                 dropped = fs; dropSize = fs.length();
                 if (!TrashHelper.moveToTrash(fs)) return new Resolution(false, saved, "");
+                com.opentagger.SaveJournal.trashed(saved);
             }
             TRASHED.incrementAndGet();
             String what = newIsBetter ? "ancienne copie (moins bonne qualité)" : "copie mal rangée";

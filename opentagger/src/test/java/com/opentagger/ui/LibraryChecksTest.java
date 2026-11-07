@@ -252,4 +252,70 @@ public class LibraryChecksTest {
         assertEquals(3, LibraryChecks.coverCount("3:aaaa"));
         assertEquals(-1, LibraryChecks.coverCount(""));
     }
+
+    // ── Règles ajoutées le 2026-11-07 (façon Bliss) ─────────────────────────────────────────────────
+
+    @Test public void unAlbumRangeChezUnArtisteSansRapportEstSignale() {
+        // Cas réel vu dans Plex : « Tommy Wright III » comme artiste de l'album de Taylor Swift (vieille identification mélangée).
+        for (int i = 1; i <= 4; i++) add("/m/Taylor Swift/1989/0" + i + ".mp3", "Taylor Swift", "Tommy Wright III", "T" + i, "1989");
+        add("/m/Taylor Swift/1989/05.mp3", "Taylor Swift feat. Kendrick Lamar", "Tommy Wright III", "Bad Blood", "1989");
+        var r = run();
+        assertEquals(5, r.found(Check.ALBUM_ARTIST_ODD).size());
+        assertEquals("Taylor Swift", fixOf(r, Check.ALBUM_ARTIST_ODD, "/m/Taylor Swift/1989/05.mp3").get(Field.ALBUM_ARTIST));
+    }
+
+    @Test public void uneCompilationDeDjNestPasSignalee() {
+        // DJ Abdel est l'artiste de l'album, chaque piste a son interprète : c'est voulu.
+        String[] artists = {"Akon", "Rihanna", "Sean Paul", "Lorie", "Shy'm"};
+        for (int i = 0; i < artists.length; i++)
+            add("/m/DJ Abdel/Hip Hop Soul Party 5/0" + i + ".mp3", artists[i], "DJ Abdel", "T" + i, "Hip Hop Soul Party 5");
+        assertTrue(run().found(Check.ALBUM_ARTIST_ODD).isEmpty());
+    }
+
+    @Test public void unInviteEnArtisteDeLAlbumNestPasSignale() {
+        for (int i = 1; i <= 3; i++) add("/m/2Pac/X/0" + i + ".mp3", "2Pac feat. Tommy Wright III", "Tommy Wright III", "T" + i, "X");
+        assertTrue(run().found(Check.ALBUM_ARTIST_ODD).isEmpty());
+    }
+
+    @Test public void deuxPistesNeSuffisentPas() {
+        add("/m/a/1.mp3", "Taylor Swift", "Tommy Wright III", "A", "Seul");
+        add("/m/a/2.mp3", "Taylor Swift", "Tommy Wright III", "B", "Seul");
+        assertTrue(run().found(Check.ALBUM_ARTIST_ODD).isEmpty());
+    }
+
+    @Test public void anneeMinoritaireAlignee() {
+        for (int i = 1; i <= 4; i++) add("/m/Adele/25/0" + i + ".mp3", "Adele", "Adele", "T" + i, "25").year = "2015";
+        add("/m/Adele/25/05.mp3", "Adele", "Adele", "T5", "25").year = "2016";
+        var r = run();
+        assertEquals(1, r.found(Check.YEAR_SPLIT).size());
+        assertEquals("2015", fixOf(r, Check.YEAR_SPLIT, "/m/Adele/25/05.mp3").get(Field.YEAR));
+    }
+
+    @Test public void anneesPartageesSansMajoriteNeSontPasCorrigees() {
+        add("/m/X/Y/01.mp3", "X", "X", "A", "Yankee").year = "2001";
+        add("/m/X/Y/02.mp3", "X", "X", "B", "Yankee").year = "2001";
+        add("/m/X/Y/03.mp3", "X", "X", "C", "Yankee").year = "2005";
+        add("/m/X/Y/04.mp3", "X", "X", "D", "Yankee").year = "2005";
+        var r = run();
+        assertEquals(2, r.found(Check.YEAR_SPLIT).size());
+        assertTrue(r.fixes(Check.YEAR_SPLIT).isEmpty());
+    }
+
+    @Test public void pistesManquantesConstatees() {
+        add("/m/Booba/Ouest Side/01.mp3", "Booba", "Booba", "A", "Ouest Side").track = "1/16";
+        add("/m/Booba/Ouest Side/02.mp3", "Booba", "Booba", "B", "Ouest Side").track = "2/16";
+        add("/m/Booba/Ouest Side/04.mp3", "Booba", "Booba", "C", "Ouest Side").track = "4/16";
+        var r = run();
+        assertEquals(3, r.found(Check.MISSING_TRACKS).size());
+        assertTrue(r.fixes(Check.MISSING_TRACKS).isEmpty());
+    }
+
+    @Test public void albumCompletPasSignale() {
+        for (int i = 1; i <= 3; i++) {
+            TagInfo t = add("/m/Z/W/0" + i + ".mp3", "Z", "Z", "T" + i, "W");
+            t.track = String.valueOf(i);
+            t.trackTotal = "3";
+        }
+        assertTrue(run().found(Check.MISSING_TRACKS).isEmpty());
+    }
 }

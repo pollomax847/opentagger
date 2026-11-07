@@ -110,16 +110,20 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
         // voir le commentaire du champ cachePool pour le pourquoi de ce pool.
         for (int i = 0; i < threads; i++) cachePool.add(new MetadataCache());
 
+        // Un lot d'annulation par « Enregistrer tout » : Édition → Annuler un enregistrement (voir SaveJournal).
+        final com.opentagger.SaveJournal.Batch journal =
+                com.opentagger.SaveJournal.begin(I18n.t("Enregistrer tout — %d fichier(s)", total));
         try {
             for (int i = 0; i < entries.size(); i++) {
                 if (isCancelled()) break;
                 final FileEntry entry   = entries.get(i);
                 final int       fileIdx = i + 1;
-                futures.add(pool.submit(() -> processOne(entry, fileIdx, total)));
+                futures.add(pool.submit(() -> com.opentagger.SaveJournal.run(journal, () -> processOne(entry, fileIdx, total))));
             }
 
             WorkerHub.awaitAll(pool, futures, WorkerHub.defaultFutureTimeoutSec());
         } finally {
+            com.opentagger.SaveJournal.end(journal);
             // Toutes les tâches sont finies (ou annulées) à ce stade — aucune ne détient plus de
             // connexion empruntée, sûr de tout fermer.
             for (MetadataCache c : cachePool) c.close();
@@ -238,8 +242,8 @@ public class SaveWorker extends SwingWorker<Void, FileEntry> {
     protected void done() {
         if (!isCancelled()) {
             onProgress.accept(errors.get() > 0
-                ? I18n.t("Enregistrement terminé — %d fichier(s) enregistré(s), %d erreur(s)", saved.get(), errors.get())
-                : I18n.t("Enregistrement terminé — %d fichier(s) enregistré(s)", saved.get()));
+                ? I18n.t("Enregistrement terminé — %d fichier(s) enregistré(s), %d erreur(s) · Édition → Annuler un enregistrement", saved.get(), errors.get())
+                : I18n.t("Enregistrement terminé — %d fichier(s) enregistré(s) · Édition → Annuler un enregistrement", saved.get()));
         }
     }
 

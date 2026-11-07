@@ -128,6 +128,13 @@ public class ArtworkCompletionWorker extends SwingWorker<ArtworkCompletionWorker
 
     @Override
     protected Summary doInBackground() {
+        // Un lot d'annulation pour toute la passe : Édition → Annuler un enregistrement (voir SaveJournal).
+        com.opentagger.SaveJournal.Batch undo = com.opentagger.SaveJournal.begin(I18n.t("Compléter les pochettes"));
+        try { return work(); }
+        finally { com.opentagger.SaveJournal.end(undo); }
+    }
+
+    private Summary work() {
         CaaClient caa = new CaaClient();
         FanArtClient fanArt = new FanArtClient();
         DeezerClient deezer = new DeezerClient();

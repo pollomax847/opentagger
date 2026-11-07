@@ -45,7 +45,11 @@ import java.util.List;
  */
 public class CorrectionsPanel extends JPanel {
 
-    private static final String[] COLS = {I18n.t("Problème"), I18n.t("Fichiers"), I18n.t("Corrigeables"), I18n.t("Correction")};
+    private static final String[] COLS = {I18n.t("Problème"), I18n.t("Fichiers"), I18n.t("Corrigeables"), I18n.t("Mode"), I18n.t("Correction")};
+    /** Colonne du mode de la règle (désactivée / manuelle / automatique, voir RuleModes). */
+    private static final int MODE_COL = 3;
+    /** Corrections automatiques déjà tentées pendant cette session (règle + fichier) : jamais retentées en boucle. */
+    private static final Set<String> AUTO_TRIED = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
     private static final String UNDONE = ".annule";
 
@@ -66,15 +70,26 @@ public class CorrectionsPanel extends JPanel {
     private boolean analyzing;
     private String afterAnalysis;   // résultat de la dernière correction, gardé à l'écran après la ré-analyse
     private volatile boolean stopRequested;
+    /** Sans fenêtre : lancé à la fin d'un scan pour les règles automatiques (voir {@link #runAutomaticRules}). */
+    private final boolean headless;
 
     public CorrectionsPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose) {
+        this(owner, tableModel, onClose, false);
+    }
+
+    private CorrectionsPanel(MainFrame owner, FileTableModel tableModel, Runnable onClose, boolean headless) {
         this.owner      = owner;
         this.tableModel = tableModel;
         this.onClose    = onClose;
+        this.headless   = headless;
 
         model = new DefaultTableModel(COLS, 0) {
-            @Override public boolean isCellEditable(int r, int c) { return false; }
+            @Override public boolean isCellEditable(int r, int c) { return c == MODE_COL && !analyzing && !btnStop.isVisible(); }
             @Override public Class<?> getColumnClass(int c) { return c == 1 || c == 2 ? Integer.class : String.class; }
+            @Override public void setValueAt(Object v, int r, int c) {
+                super.setValueAt(v, r, c);
+                if (c == MODE_COL && v != null) modeChosen(rows.get(r), String.valueOf(v));
+            }
         };
         table = new JTable(model);
         table.setRowHeight(24);
@@ -86,7 +101,8 @@ public class CorrectionsPanel extends JPanel {
         cm.getColumn(0).setPreferredWidth(300);
         cm.getColumn(1).setPreferredWidth(80);  cm.getColumn(1).setMaxWidth(110);
         cm.getColumn(2).setPreferredWidth(95);  cm.getColumn(2).setMaxWidth(120);
-        cm.getColumn(3).setPreferredWidth(420);
+        cm.getColumn(MODE_COL).setPreferredWidth(110); cm.getColumn(MODE_COL).setMaxWidth(140);
+        cm.getColumn(4).setPreferredWidth(420);
         // Lignes sans fichier atténuées, nombres en couleur, texte complet au survol (la colonne Correction est souvent
         // coupée) — sans ça, 16 lignes de poids égal dont la moitié à 0 noyaient les vrais problèmes.
         javax.swing.table.DefaultTableCellRenderer cell = new javax.swing.table.DefaultTableCellRenderer() {
@@ -95,7 +111,16 @@ public class CorrectionsPanel extends JPanel {
                 super.getTableCellRendererComponent(t, shownValue, sel, foc, row, col);
                 int m = t.convertRowIndexToModel(row);
                 Object found = model.getValueAt(m, 1), fixable = model.getValueAt(m, 2);
-                boolean empty = Integer.valueOf(0).equals(found) && Integer.valueOf(0).equals(fixable);
+                boolean off = RuleModes.get(rows.get(m)) == RuleModes.Mode.OFF;
+                boolean empty = off || Integer.valueOf(0).equals(found) && Integer.valueOf(0).equals(fixable);
+                if (col == MODE_COL && !sel && RuleModes.get(rows.get(m)) == RuleModes.Mode.AUTO) {
+                    super.getTableCellRendererComponent(t, shownValue, sel, foc, row, col);
+                    setForeground(new Color(0x66BB6A));
+                    setFont(getFont().deriveFont(Font.BOLD));
+                    setToolTipText(I18n.t("Corrigée sans demander après chaque scan (annulable : Édition → Annuler un enregistrement)"));
+                    setHorizontalAlignment(LEFT);
+                    return this;
+                }
                 setHorizontalAlignment(v instanceof Integer ? RIGHT : LEFT);
                 setToolTipText(v instanceof String str && !str.isBlank() ? str : null);
                 if (!sel) {
@@ -110,6 +135,16 @@ public class CorrectionsPanel extends JPanel {
             }
         };
         for (int i = 0; i < COLS.length; i++) table.getColumnModel().getColumn(i).setCellRenderer(cell);
+        // Mode de la règle : liste déroulante, sans « Automatique » pour les règles qui ne savent que constater.
+        JComboBox<String> modeBox = new JComboBox<>();
+        table.getColumnModel().getColumn(MODE_COL).setCellEditor(new DefaultCellEditor(modeBox) {
+            @Override public Component getTableCellEditorComponent(JTable t, Object v, boolean sel, int row, int col) {
+                Check c = rows.get(t.convertRowIndexToModel(row));
+                modeBox.removeAllItems();
+                for (RuleModes.Mode m : RuleModes.Mode.values()) if (m != RuleModes.Mode.AUTO || RuleModes.canAuto(c)) modeBox.addItem(m.label());
+                return super.getTableCellEditorComponent(t, v, sel, row, col);
+            }
+        });
         table.getSelectionModel().addListSelectionListener(e -> updateButtons());
         table.addMouseListener(new MouseAdapter() {
             @Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) showFiles(); }
@@ -124,9 +159,117 @@ public class CorrectionsPanel extends JPanel {
         btnUndo.setToolTipText(I18n.t("Remet les valeurs d'avant la dernière correction (notées dans %s)", journalDir()));
 
         setLayout(new BorderLayout(0, 0));
+        JLabel intro = new JLabel(I18n.t("<html>Chaque règle peut être <b>désactivée</b>, <b>manuelle</b> (tu vois le constat et tu "
+                + "cliques « Corriger », avec aperçu) ou <b>automatique</b> (corrigée sans demander après chaque scan). Toute correction "
+                + "s'annule par Édition → Annuler un enregistrement.</html>"));
+        intro.setBorder(new EmptyBorder(8, 12, 8, 12));
+        add(intro, BorderLayout.NORTH);
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(buildFooter(), BorderLayout.SOUTH);
         refresh();
+    }
+
+    /**
+     * Fin de scan : analyse la liste et applique les règles en mode automatique, sans ouvrir de fenêtre. Ne fait rien si
+     * aucune règle n'est automatique ou si une autre passe écrit déjà dans les fichiers (réessayé au prochain scan).
+     */
+    static void runAutomaticRules(MainFrame owner, FileTableModel tableModel) {
+        if (!RuleModes.anyAuto()) return;
+        if (!WorkerHub.get().blockers(WorkerHub.TaskKind.LIBRARY_FIX).isEmpty()) return;
+        new CorrectionsPanel(owner, tableModel, () -> {}, true);
+    }
+
+    /** L'utilisateur change le mode d'une règle dans le tableau. */
+    private void modeChosen(Check c, String label) {
+        RuleModes.Mode chosen = RuleModes.Mode.MANUAL;
+        for (RuleModes.Mode m : RuleModes.Mode.values()) if (m.label().equals(label)) chosen = m;
+        if (chosen == RuleModes.get(c)) return;
+        RuleModes.set(c, chosen);
+        table.repaint();
+        if (chosen != RuleModes.Mode.AUTO || report == null) { SwingUtilities.invokeLater(this::refresh); return; }
+        int n = fixable(c).size();
+        if (n == 0) { lblStatus.setText(I18n.t("« %s » est maintenant automatique.", label(c))); return; }
+        int ok = JOptionPane.showConfirmDialog(this, I18n.t("<html>« %s » est maintenant <b>automatique</b> : elle corrigera sans "
+                        + "demander après chaque scan.<br>Corriger tout de suite les %d fichier(s) déjà trouvés ?<br>(annulable : Édition → "
+                        + "Annuler un enregistrement)</html>", label(c), n),
+                I18n.t("Règle automatique"), JOptionPane.YES_NO_OPTION);
+        if (ok == JOptionPane.YES_OPTION) runAutomatic(List.of(c));
+    }
+
+    /** Applique sans demander les corrections des règles {@code which} (celles pas encore tentées). @return false si rien à faire. */
+    private boolean runAutomatic(Collection<Check> which) {
+        if (report == null || !WorkerHub.get().blockers(WorkerHub.TaskKind.LIBRARY_FIX).isEmpty()) return false;
+        TagWriter writer = new TagWriter();
+        List<Task> tasks = new ArrayList<>();
+        // Champs : une seule écriture par fichier, la première règle de la liste l'emporte sur un même champ.
+        Map<FileEntry, Map<Field, String>> fields = new LinkedHashMap<>();
+        Map<FileEntry, Path> paths = new IdentityHashMap<>();
+        List<FileEntry> online = Collections.synchronizedList(new ArrayList<>());
+        int busy = 0;
+        List<String> names = new ArrayList<>();
+        Set<FileEntry> gone = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Check c : rows) {
+            if (!which.contains(c) || !RuleModes.canAuto(c)) continue;
+            int before = tasks.size() + fields.size() + gone.size();
+            switch (c) {
+                case MISSING_FILE -> gone.addAll(report.found(c));
+                case NO_REPLAYGAIN, MULTI_COVER, NO_COVER -> {
+                    for (Object o : fixable(c)) {
+                        FileEntry e = (FileEntry) o;
+                        Path p = pathOf(e);
+                        if (busy(e)) { busy++; continue; }
+                        if (!AUTO_TRIED.add(c + "|" + p)) continue;
+                        tasks.add(new Task(p.getFileName().toString(),
+                                c == Check.NO_REPLAYGAIN ? j -> trackGain(j, writer, e, p)
+                                : c == Check.MULTI_COVER ? j -> fixAlbumArt(j, writer, e, p)
+                                : j -> coverFromFolder(j, writer, e, p, online)));
+                    }
+                }
+                case NO_ALBUM_GAIN -> {
+                    for (List<FileEntry> album : report.albumsWithoutGain()) {
+                        if (album.stream().anyMatch(this::busy)) { busy += album.size(); continue; }
+                        Path dir = pathOf(album.get(0)).getParent();
+                        if (!AUTO_TRIED.add(c + "|" + dir)) continue;
+                        tasks.add(new Task(dir == null ? "?" : String.valueOf(dir.getFileName()), j -> albumGain(j, writer, album)));
+                    }
+                }
+                default -> {
+                    for (Fix<FileEntry> f : report.fixes(c)) {
+                        FileEntry e = f.ref();
+                        if (busy(e)) { busy++; continue; }
+                        if (!AUTO_TRIED.add(c + "|" + pathOf(e))) continue;
+                        Map<Field, String> m = fields.computeIfAbsent(e, k -> new EnumMap<>(Field.class));
+                        f.changes().forEach(m::putIfAbsent);
+                        paths.put(e, pathOf(e));
+                    }
+                }
+            }
+            if (tasks.size() + fields.size() + gone.size() > before) names.add(label(c));
+        }
+        if (!gone.isEmpty()) tableModel.removeEntries(gone);
+        for (Map.Entry<FileEntry, Map<Field, String>> e : fields.entrySet())
+            tasks.add(fieldTask(writer, e.getKey(), paths.get(e.getKey()), e.getValue()));
+        if (tasks.isEmpty()) {
+            if (!gone.isEmpty()) note(I18n.t("Règles automatiques : %d fichier(s) introuvable(s) retiré(s) de la liste.", gone.size()));
+            return false;
+        }
+        System.out.println("[OT] Règles automatiques : " + String.join(", ", names) + " — " + tasks.size() + " correction(s)");
+        Runnable after = online.isEmpty() ? () -> {} : () -> {
+            List<FileEntry> identified = new ArrayList<>(online);
+            identified.removeIf(e -> e.status != FileEntry.Status.TAGGED && e.status != FileEntry.Status.IDENTIFIED);
+            if (identified.isEmpty()) return;
+            javax.swing.Timer t = new javax.swing.Timer(1000, ev -> owner.completeArtworkFor(identified));
+            t.setRepeats(false);
+            t.start();
+        };
+        run(I18n.t("Règles automatiques (%s)", String.join(", ", names)), tasks, busy, newJournal("auto"), after);
+        return true;
+    }
+
+    /** Message dans l'onglet, ou dans la barre d'état de la fenêtre principale quand il n'y a pas d'onglet. */
+    private void note(String msg) {
+        if (headless) owner.setStatus(msg);
+        else lblStatus.setText(msg);
     }
 
     /** Relit l'état en mémoire (appelé quand on revient sur l'onglet). */
@@ -174,12 +317,21 @@ public class CorrectionsPanel extends JPanel {
             updateButtons();
             return;
         }
-        for (Check c : rows) model.addRow(new Object[]{label(c), r.found(c).size(), fixable(c).size(), howFixed(c, r)});
+        for (Check c : rows) {
+            boolean off = RuleModes.get(c) == RuleModes.Mode.OFF;
+            model.addRow(new Object[]{label(c), off ? 0 : r.found(c).size(), off ? 0 : fixable(c).size(), RuleModes.get(c).label(),
+                    off ? I18n.t("désactivée") : howFixed(c, r)});
+        }
         if (sel >= 0 && sel < model.getRowCount()) table.setRowSelectionInterval(sel, sel);
         lblStatus.setText(afterAnalysis != null ? afterAnalysis
                 : I18n.t("%d fichier(s) analysé(s). Double-clic sur une ligne pour voir ses fichiers dans la liste.", total));
+        if (headless && afterAnalysis != null) owner.setStatus(afterAnalysis);
         afterAnalysis = null;
         updateButtons();
+        // Règles automatiques : appliquées après chaque analyse, chacune une seule fois par fichier et par session.
+        List<Check> auto = new ArrayList<>();
+        for (Check c : rows) if (RuleModes.get(c) == RuleModes.Mode.AUTO) auto.add(c);
+        if (!auto.isEmpty()) runAutomatic(auto);
     }
 
     private Check selected() {
@@ -190,8 +342,9 @@ public class CorrectionsPanel extends JPanel {
     private void updateButtons() {
         Check c = selected();
         boolean idle = !analyzing && !btnStop.isVisible() && report != null;
-        btnShow.setEnabled(idle && c != null && !shown(c).isEmpty());
-        btnFix.setEnabled(idle && c != null && !fixable(c).isEmpty());
+        boolean on = c != null && RuleModes.get(c) != RuleModes.Mode.OFF;
+        btnShow.setEnabled(idle && on && !shown(c).isEmpty());
+        btnFix.setEnabled(idle && on && !fixable(c).isEmpty());
         btnUndo.setEnabled(!analyzing && !btnStop.isVisible() && lastJournal() != null);
         btnRefresh.setEnabled(!analyzing && !btnStop.isVisible());
     }
@@ -207,6 +360,9 @@ public class CorrectionsPanel extends JPanel {
             case NO_GENRE -> I18n.t("Sans genre");
             case ALBUM_ARTIST_SPLIT -> I18n.t("Album éclaté : artiste de l'album différent selon les pistes");
             case NO_ALBUM_ARTIST -> I18n.t("Plusieurs artistes, pas d'artiste de l'album");
+            case ALBUM_ARTIST_ODD -> I18n.t("Artiste de l'album sans rapport avec les pistes (mauvais rangement dans Plex)");
+            case YEAR_SPLIT -> I18n.t("Années différentes dans un même album");
+            case MISSING_TRACKS -> I18n.t("Pistes manquantes dans l'album");
             case CASE -> I18n.t("Tout en majuscules ou en minuscules");
             case SWAPPED -> I18n.t("Artiste et titre inversés");
             case NO_TRACK -> I18n.t("Numéro de piste manquant");
@@ -227,6 +383,9 @@ public class CorrectionsPanel extends JPanel {
             case NO_GENRE -> I18n.t("genre repris des autres pistes de l'album quand elles sont d'accord");
             case ALBUM_ARTIST_SPLIT -> I18n.t("même artiste de l'album partout (graphie majoritaire, Various Artists pour une compilation)");
             case NO_ALBUM_ARTIST -> I18n.t("Various Artists (3 interprètes ou plus) ou l'interprète principal");
+            case ALBUM_ARTIST_ODD -> I18n.t("l'interprète de presque toutes les pistes (jamais pour une compilation)");
+            case YEAR_SPLIT -> I18n.t("l'année de la grande majorité des pistes (70 %)");
+            case MISSING_TRACKS -> I18n.t("constat seulement : numéros absents jusqu'au nombre de pistes annoncé");
             case CASE -> I18n.t("Majuscule à chaque mot (jamais sur des tags venus de MusicBrainz)");
             case SWAPPED -> I18n.t("remis dans l'ordre du nom de fichier « Artiste - Titre »");
             case NO_TRACK -> I18n.t("numéro pris dans le nom du fichier (« 05 - … »)");
@@ -528,6 +687,7 @@ public class CorrectionsPanel extends JPanel {
             int done;
 
             @Override protected Void doInBackground() throws Exception {
+                com.opentagger.SaveJournal.Batch undo = com.opentagger.SaveJournal.begin(I18n.t("Correction : %s", what));
                 try (Journal j = new Journal(journalFile)) {
                     for (Task t : tasks) {
                         if (stopRequested || isCancelled()) break;
@@ -537,6 +697,8 @@ public class CorrectionsPanel extends JPanel {
                             errors.add(t.name() + " : " + ex.getMessage());
                         }
                     }
+                } finally {
+                    com.opentagger.SaveJournal.end(undo);
                 }
                 return null;
             }
@@ -555,6 +717,7 @@ public class CorrectionsPanel extends JPanel {
                         + (skipped > 0 ? I18n.t(", %d en cours de traitement laissé(s) pour plus tard", skipped) : "")
                         + (errors.isEmpty() ? "." : I18n.t(", %d erreur(s) — ex. %s", errors.size(), errors.get(0)));
                 System.out.println("[OT] À corriger — " + msg + " Journal : " + journalFile);
+                if (headless) owner.setStatus(msg + " " + I18n.t("(annulable : Édition → Annuler un enregistrement)"));
                 try {
                     if (Files.size(journalFile) == 0) Files.deleteIfExists(journalFile);
                 } catch (IOException ignored) {}

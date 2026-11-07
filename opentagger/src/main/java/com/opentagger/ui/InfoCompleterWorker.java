@@ -210,23 +210,37 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
             TagInfo mbr = null;
 
             // Lookup direct si recordingMbid connu → plus rapide et précis que text search
+            // Tout résultat (lookup par MBID comme recherche texte) doit nommer le même artiste ET le même titre
+            // que le fichier avant qu'on en recopie quoi que ce soit — voir SameSong (2026-11-07). Avant : le MBID
+            // déjà présent était cru sans vérification (les MBID des tags sont souvent faux), et la recherche texte
+            // prenait le 1er résultat sur la seule note MusicBrainz (relative : ~100 pour le premier, même quand
+            // c'est un autre morceau). Résultat réel : « Taylor Swift – Style » complété avec l'artiste de
+            // l'album, le tri, l'ISRC et les dates de « 2Pac – Thug Style ».
             if (!ti.recordingMbid.isBlank()) {
                 log(I18n.t("  MB lookup: %s", ti.recordingMbid));
                 TagInfo full = mb.lookupRecording(ti.recordingMbid);
                 if (full != null && !full.title.isBlank()) {
-                    mbr = full;
-                    log(I18n.t("  MB lookup→ %s – %s [%s %s]", full.artist, full.title, full.album, full.year));
+                    if (SameSong.matches(ti.artist, ti.title, full.artist, full.title)) {
+                        mbr = full;
+                        log(I18n.t("  MB lookup→ %s – %s [%s %s]", full.artist, full.title, full.album, full.year));
+                    } else {
+                        log(I18n.t("  MB lookup ⚠ %s – %s ne correspond pas au fichier (%s – %s) : ignoré",
+                                full.artist, full.title, ti.artist, ti.title));
+                    }
                 }
             }
 
-            // Fallback : recherche texte si lookup échoue ou MBID absent
-            if (mbr == null) {
+            // Fallback : recherche texte si lookup échoue ou MBID absent — seulement si le fichier dit clairement
+            // qui il est (artiste et titre non vides, non génériques) : sinon aucun résultat ne peut être vérifié.
+            if (mbr == null && !SameSong.verifiable(ti.artist, ti.title)) {
+                log(I18n.t("  MB search ignorée : artiste ou titre manquant, impossible de vérifier un résultat"));
+            } else if (mbr == null) {
                 log(I18n.t("  MB search: '%s' / '%s'", ti.artist, ti.title));
-                mbr = mbLookup(mb, ti.artist, ti.title);
+                mbr = mbLookup(mb, ti, ti.title);
                 if (mbr == null && ti.title.contains("(")) {
                     String clean = ti.title.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
                     log(I18n.t("  MB search (nettoyé): '%s'", clean));
-                    mbr = mbLookup(mb, ti.artist, clean);
+                    mbr = mbLookup(mb, ti, clean);
                 }
                 if (mbr == null && !ti.title.isBlank()) {
                     // Dernier essai avec titre tronqué — seuil plus élevé (90%)
@@ -234,7 +248,7 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
                     String[] words = ti.title.split("\\s+");
                     if (words.length > 1) {
                         String short1 = words[0] + " " + words[1];
-                        TagInfo candidate = mbLookupStrict(mb, ti.artist, short1, 90);
+                        TagInfo candidate = mbLookupStrict(mb, ti, short1, 90);
                         if (candidate != null && titlesSimilar(ti.title, candidate.title)) {
                             mbr = candidate;
                             log(I18n.t("  MB search (titre court): '%s'", short1));
@@ -413,19 +427,31 @@ public class InfoCompleterWorker extends SwingWorker<Void, FileEntry> {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    /** Cherche dans MB et retourne le meilleur résultat si score ≥ 70, sinon null. */
-    private TagInfo mbLookup(MusicBrainzClient mb, String artist, String title) {
-        return mbLookupStrict(mb, artist, title, 70);
+    /** Cherche dans MB et retourne le premier résultat vérifié (score ≥ 70), sinon null. */
+    private TagInfo mbLookup(MusicBrainzClient mb, TagInfo file, String title) {
+        return mbLookupStrict(mb, file, title, 70);
     }
 
-    /** Cherche dans MB et retourne le meilleur résultat si score ≥ minScore, sinon null. */
-    private TagInfo mbLookupStrict(MusicBrainzClient mb, String artist, String title, int minScore) {
+    /**
+     * Cherche dans MB (artiste du fichier + {@code title}) et retourne le premier résultat de score ≥ minScore qui
+     * est bien le morceau du fichier ({@link #isSameSong} : même artiste ET même titre que le fichier, comparés au
+     * titre COMPLET du fichier, pas au titre raccourci de la requête). Les résultats suivants sont aussi regardés :
+     * le bon morceau n'est pas toujours le premier.
+     */
+    private TagInfo mbLookupStrict(MusicBrainzClient mb, TagInfo file, String title, int minScore) {
         try {
-            List<TagInfo> results = mb.searchRecording(artist, title);
-            if (!results.isEmpty() && results.get(0).score >= minScore)
-                return results.get(0);
+            for (TagInfo r : mb.searchRecording(file.artist, title)) {
+                if (r.score < minScore) continue;
+                if (isSameSong(file, r)) return r;
+                log(I18n.t("  MB search ⚠ %s – %s écarté : ce n'est pas %s – %s", r.artist, r.title, file.artist, file.title));
+            }
         } catch (Exception ignored) {}
         return null;
+    }
+
+    /** Package-privé pour les tests : le résultat {@code r} décrit-il le morceau du fichier {@code file} ? */
+    static boolean isSameSong(TagInfo file, TagInfo r) {
+        return SameSong.matches(file.artist, file.title, r.artist, r.title);
     }
 
     /** Retourne true si deux titres partagent ≥ 60% de leurs mots (après normalisation). */

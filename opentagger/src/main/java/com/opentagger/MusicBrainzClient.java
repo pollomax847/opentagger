@@ -781,6 +781,32 @@ public class MusicBrainzClient {
         return out;
     }
 
+    /**
+     * Releases dont le titre correspond à {@code albumName}, de l'artiste {@code artist} s'il est donné (ignoré pour
+     * « Various Artists »), avec le nombre de pistes de chaque disque — pour l'identification par album entier
+     * (voir AlbumFirst). Score MusicBrainz ≥ 80 ; le vrai tri se fait ensuite sur les pistes.
+     */
+    public List<ReleaseRef> searchReleases(String albumName, String artist, int limit) throws Exception {
+        if (albumName == null || albumName.isBlank()) return List.of();
+        StringBuilder q = new StringBuilder("release:\"").append(escapeLucene(albumName)).append("\"");
+        if (artist != null && !artist.isBlank() && !"Various Artists".equalsIgnoreCase(artist)
+                && !Config.get().vaName().equalsIgnoreCase(artist)) {
+            q.append(" AND artist:\"").append(escapeLucene(artist)).append("\"");
+        }
+        String url = mbBaseUrl() + "/release?query=" + URLEncoder.encode(q.toString(), StandardCharsets.UTF_8)
+                + "&limit=" + Math.max(1, Math.min(limit, 25)) + "&fmt=json";
+        HttpResponse<String> resp = getWithRetry(url);
+        if (resp == null) return List.of();
+        List<ReleaseRef> out = new ArrayList<>();
+        for (JsonNode rel : mapper.readTree(resp.body()).path("releases")) {
+            if (rel.path("score").asInt(0) < 80) continue;
+            List<Integer> counts = new ArrayList<>();
+            for (JsonNode medium : rel.path("media")) counts.add(medium.path("track-count").asInt(0));
+            out.add(new ReleaseRef(JsonText.of(rel.path("id"), "").trim(), JsonText.of(rel.path("title"), "").trim(), counts));
+        }
+        return out;
+    }
+
     // ── Identification d'album par TOC (façon "Albunack Disc IDs" de SongKong) ───────────────
 
     /** Une release qui contient un enregistrement donné, avec le nombre de pistes de chacun de ses disques. */

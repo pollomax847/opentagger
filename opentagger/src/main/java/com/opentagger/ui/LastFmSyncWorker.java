@@ -39,6 +39,13 @@ public class LastFmSyncWorker extends SwingWorker<Void, FileEntry> {
 
     @Override
     protected Void doInBackground() throws Exception {
+        // Un lot d'annulation pour toute la passe : Édition → Annuler un enregistrement (voir SaveJournal).
+        com.opentagger.SaveJournal.Batch undo = com.opentagger.SaveJournal.begin(I18n.t("Synchro des écoutes Last.fm"));
+        try { return work(); }
+        finally { com.opentagger.SaveJournal.end(undo); }
+    }
+
+    private Void work() throws Exception {
         String username = Config.get().lastfmUsername();
         if (username.isBlank()) {
             onProgress.accept(I18n.t("Aucun nom d'utilisateur Last.fm configuré (Préférences → APIs)."));

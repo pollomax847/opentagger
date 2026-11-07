@@ -43,6 +43,13 @@ public class ListenBrainzSyncWorker extends SwingWorker<Void, FileEntry> {
 
     @Override
     protected Void doInBackground() throws Exception {
+        // Un lot d'annulation pour toute la passe : Édition → Annuler un enregistrement (voir SaveJournal).
+        com.opentagger.SaveJournal.Batch undo = com.opentagger.SaveJournal.begin(I18n.t("Synchro des écoutes ListenBrainz"));
+        try { return work(); }
+        finally { com.opentagger.SaveJournal.end(undo); }
+    }
+
+    private Void work() throws Exception {
         String username = Config.get().listenbrainzUsername();
         if (username.isBlank()) {
             onProgress.accept(I18n.t("Aucun nom d'utilisateur ListenBrainz configuré (Préférences → APIs)."));
