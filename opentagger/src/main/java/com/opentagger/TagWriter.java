@@ -295,6 +295,171 @@ public class TagWriter {
         audio.commit();
     }
 
+    // ── songrec-rename : l'identité seule (voir SongRecRename) ──────────────────────────────────────
+
+    /**
+     * Écrit seulement titre, artiste, album, année et genre (songrec-rename, d'après Shazam) ; les autres tags restent.
+     * Si {@code clearOld} (le fichier devient un AUTRE morceau), tout ce qui décrit l'ancien morceau est d'abord effacé
+     * (artiste de l'album, tris, paroles, numéros, identifiants…) ; seuls restent les tags du son (BPM, tonalité,
+     * encodeur, note, commentaire, ReplayGain de la piste, AcoustID) et la pochette — même règle que l'outil Python.
+     * {@code ext} : extension réelle (« .mp3 ») d'un fichier dont le nom n'en a pas. Renvoie le nombre de tags effacés.
+     */
+    public int writeIdentityOnly(File fichier, String ext, TagInfo id, boolean clearOld) throws Exception {
+        SaveJournal.beforeWrite(fichier);
+        try { return writeIdentityOnlyImpl(fichier, ext, id, clearOld); }
+        finally { SaveJournal.afterWrite(fichier); }
+    }
+
+    static final Set<String> SOUND_ID3 = Set.of("TBPM", "TKEY", "TSSE", "TENC", "TLEN", "TFLT", "POPM", "PCNT", "COMM",
+            "APIC", "RVA2", "RVAD", "EQU2", "GEOB", "PRIV",
+            "TBP", "TKE", "TSS", "TEN", "TLE", "TFT", "POP", "CNT", "COM", "PIC", "RVA", "EQU", "GEO");   // ID3v2.2
+    static final Set<String> SOUND_NAMES = Set.of("bpm", "fbpm", "initialkey", "key", "encoder", "encodedby", "encoded_by",
+            "rating", "comment", "description", "acoustid fingerprint", "acoustid id", "acoustid_fingerprint", "acoustid_id",
+            "replaygain_track_gain", "replaygain_track_peak", "itunnorm", "itunsmpb", "metadata_block_picture", "coverart",
+            "coverartmime");
+    static final Set<String> SOUND_MP4 = Set.of("tmpo", "\u00a9too", "\u00a9cmt", "covr", "pgap", "stik");
+
+    /** Ce champ décrit-il le SON (à garder quand le morceau change) ? */
+    static boolean keepSoundField(TagField f) {
+        String id = f.getId() == null ? "" : f.getId();
+        if (f instanceof AbstractID3v2Frame frame) {
+            String fid = id.split(":")[0];
+            if (fid.equals("TXXX") || fid.equals("TXX"))
+                return frame.getBody() instanceof FrameBodyTXXX b
+                        && SOUND_NAMES.contains(String.valueOf(b.getDescription()).toLowerCase(java.util.Locale.ROOT));
+            return SOUND_ID3.contains(fid);
+        }
+        String k = id.toLowerCase(java.util.Locale.ROOT);
+        if (k.startsWith("----:")) return SOUND_NAMES.contains(k.substring(k.lastIndexOf(':') + 1));
+        return SOUND_MP4.contains(k) || SOUND_NAMES.contains(k) || k.startsWith("cover art");
+    }
+
+    private int writeIdentityOnlyImpl(File fichier, String ext, TagInfo id, boolean clearOld) throws Exception {
+        long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
+        String n = fichier.getName().toLowerCase(java.util.Locale.ROOT);
+        if (n.endsWith(".mpc")) throw new Exception("écriture .mpc (Musepack) impossible");
+        int removed = 0;
+        if (FfmpegTagIO.handles(fichier)) {
+            // Opus, WAV, WV, APE : réécriture complète par ffmpeg, d'après les tags actuels (sans l'ancienne identité).
+            TagInfo cur = FfmpegTagIO.read(fichier);
+            if (cur == null) cur = new TagInfo();
+            TagInfo out = cur.copy();
+            if (clearOld) {
+                out = new TagInfo();
+                out.bpm = cur.bpm; out.fbpm = cur.fbpm; out.initialKey = cur.initialKey; out.rating = cur.rating;
+                out.comment = cur.comment; out.acoustidId = cur.acoustidId; out.acoustidFingerprint = cur.acoustidFingerprint;
+                out.replayGainTrackGain = cur.replayGainTrackGain; out.replayGainTrackPeak = cur.replayGainTrackPeak;
+                for (Field f : TagInfo.class.getFields()) {
+                    if (f.getType() == String.class && !java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        Object v = f.get(cur);
+                        if (v != null && !((String) v).isBlank() && f.get(out) instanceof String w && w.isBlank()) removed++;
+                    }
+                }
+            }
+            out.title = id.title; out.artist = id.artist;
+            if (!id.album.isBlank()) out.album = id.album;
+            if (!id.year.isBlank()) out.year = id.year;
+            if (!id.genre.isBlank()) out.genre = id.genre;
+            FfmpegTagIO.write(fichier, out, null);
+            if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+            return removed;
+        }
+        Config.silenceJaudiotaggerLogging();
+        repairM4aIfNeeded(fichier);
+        String real = ext == null || ext.isBlank() ? "" : ext.replaceFirst("^\\.", "");
+        AudioFile audio = !real.isEmpty() && !n.endsWith("." + real) ? AudioFileIO.readAs(fichier, real) : AudioFileIO.read(fichier);
+        Tag tag = audio.getTagOrCreateAndSetDefault();
+        if (clearOld) {
+            Map<String, List<TagField>> byId = new LinkedHashMap<>();
+            for (java.util.Iterator<TagField> it = tag.getFields(); it.hasNext(); ) {
+                TagField f = it.next();
+                byId.computeIfAbsent(f.getId(), k -> new ArrayList<>()).add(f);
+            }
+            for (Map.Entry<String, List<TagField>> e : byId.entrySet()) {
+                List<TagField> keep = new ArrayList<>();
+                for (TagField f : e.getValue()) if (keepSoundField(f)) keep.add(f);
+                if (keep.size() == e.getValue().size()) continue;
+                removed += e.getValue().size() - keep.size();
+                tag.deleteField(e.getKey());
+                for (TagField f : keep) tag.addField(f);   // TXXX mêlés : ceux du son reviennent
+            }
+        }
+        tag.setField(FieldKey.TITLE, id.title);
+        tag.setField(FieldKey.ARTIST, id.artist);
+        if (!id.album.isBlank()) tag.setField(FieldKey.ALBUM, id.album);
+        if (!id.year.isBlank()) tag.setField(FieldKey.YEAR, id.year);
+        if (!id.genre.isBlank()) tag.setField(FieldKey.GENRE, id.genre);
+        // ID3v1 en fin de MP3 : refait d'après le v2, sinon l'ancienne identité y resterait.
+        if (audio instanceof org.jaudiotagger.audio.mp3.MP3File mp3 && mp3.hasID3v1Tag() && mp3.getID3v2Tag() != null)
+            mp3.setID3v1Tag(new org.jaudiotagger.tag.id3.ID3v11Tag(mp3.getID3v2Tag()));
+        audio.commit();
+        if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+        return removed;
+    }
+
+    /**
+     * Écrit seulement les paroles (texte simple) dans le fichier ; tout le reste est gardé tel quel. Texte vide : les
+     * paroles sont retirées. Pour « opentagger --paroles » (2026-11-09).
+     *
+     * <p>Volontairement HORS du journal d'annulation (SaveJournal) : il garderait les étiquettes entières de chaque
+     * fichier, pochettes comprises (des dizaines de Go pour toute la bibliothèque), alors qu'ici on sait exactement ce
+     * qui change. « opentagger --paroles --annuler » retire ce que la commande a ajouté (voir LyricsCommand).
+     *
+     * <p>Formats réécrits entièrement par ffmpeg (Opus, WAV, WavPack, APE, AAC brut) et Musepack refusés : la réécriture
+     * perdrait des étiquettes ou la pochette. M4A/MP4 : jaudiotagger réécrit le fichier sur place ; une copie de
+     * sécurité est faite avant, puis remise si le fichier ne se relit plus ou si le son a changé.
+     */
+    public void writeLyricsOnly(File fichier, String lyrics) throws Exception {
+        String n = fichier.getName().toLowerCase(java.util.Locale.ROOT);
+        if (FfmpegTagIO.handles(fichier) || n.endsWith(".mpc"))
+            throw new Exception("format non pris en charge pour les paroles seules");
+        Config.silenceJaudiotaggerLogging();
+        long savedTimestamp = Config.get().preserveTimestamps() ? fichier.lastModified() : 0;
+        Path safety = null;
+        TagSnapshot.Layout before = null;
+        String soundBefore = null;
+        if (isM4aFamily(fichier)) {
+            safety = Files.createTempFile("ot_paroles_", ".m4a");
+            Files.copy(fichier.toPath(), safety, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            before = TagSnapshot.layout(fichier.toPath());
+            if (before != null) soundBefore = TagSnapshot.audioHash(fichier.toPath(), before);
+        }
+        try {
+            AudioFile audio = AudioFileIO.read(fichier);
+            Tag tag = audio.getTagOrCreateAndSetDefault();
+            if (lyrics == null || lyrics.isBlank()) tag.deleteField(FieldKey.LYRICS);
+            else tag.setField(FieldKey.LYRICS, lyrics);
+            audio.commit();
+            if (safety != null) {
+                boolean ok = isReadableM4a(fichier);
+                if (ok && soundBefore != null) {
+                    TagSnapshot.Layout after = TagSnapshot.layout(fichier.toPath());
+                    ok = after != null && soundBefore.equals(TagSnapshot.audioHash(fichier.toPath(), after));
+                }
+                if (!ok) throw new Exception("M4A abîmé par l'écriture : fichier d'origine remis");
+            }
+            if (savedTimestamp > 0) fichier.setLastModified(savedTimestamp);
+        } catch (Exception e) {
+            // Échec en cours de route (M4A réécrit sur place) : toujours remettre la copie de sécurité.
+            if (safety != null)
+                Files.copy(safety, fichier.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            throw e;
+        } finally {
+            if (safety != null) Files.deleteIfExists(safety);
+        }
+    }
+
+    /** Paroles déjà dans le fichier (texte simple), "" si aucune ou illisible. */
+    public static String readLyrics(File fichier) {
+        try {
+            Config.silenceJaudiotaggerLogging();
+            Tag tag = AudioFileIO.read(fichier).getTag();
+            return tag == null ? "" : tag.getFirst(FieldKey.LYRICS);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     // ── Écriture native jaudiotagger ──────────────────────────────────────────
 
     /** Vrai pour .m4a ET .mp4 : même conteneur ISO-BMFF, même fragilité de parsing d'arbre
@@ -1149,7 +1314,7 @@ public class TagWriter {
      *   M4A     → atome freeform ----:com.apple.iTunes:NOM
      *   Vorbis  → clé plain-text (FLAC/OGG)
      */
-    private static void setCustomField(Tag tag, String name, String value) {
+    static void setCustomField(Tag tag, String name, String value) {
         if (value == null || value.isBlank()) return;
         try {
             if (tag instanceof AbstractID3v2Tag id3) {

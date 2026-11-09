@@ -41,13 +41,16 @@ public class App {
         // On force ici l'unicode réellement standard pour chaque version ID3v2, et on force aussi
         // la ré-encodage des frames déjà présentes (pas seulement les nouvelles) pour ne jamais
         // laisser un fichier avec un mélange d'encodages.
-        org.jaudiotagger.tag.TagOptionSingleton opts = org.jaudiotagger.tag.TagOptionSingleton.getInstance();
-        opts.setId3v23DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_16);
-        opts.setId3v24DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_8);
-        opts.setResetTextEncodingForExistingFrames(true);
+        configureTagLibrary();
 
         if (args.length == 0) {
             MainFrame.launch(startupDirs(new File[0]));
+            return;
+        }
+
+        // --- Paroles seulement : opentagger --paroles [--simulation|--annuler|--limite N] <dossier> (2026-11-09) ---
+        if ("--paroles".equals(args[0])) {
+            LyricsCommand.main(java.util.Arrays.copyOfRange(args, 1, args.length));
             return;
         }
 
@@ -307,6 +310,16 @@ public class App {
      *  l'app) pendant un appel SongRec en cours. Confirmé en direct 2026-09-06 : 56 fichiers, 22Mo,
      *  accumulés sur plusieurs redémarrages. Balayé au démarrage plutôt que réparé à la source (une
      *  JVM tuée de force ne peut de toute façon jamais garantir l'exécution de son propre finally). */
+    /** Réglages communs de jaudiotagger (encodage Unicode, logs coupés) — aussi pour les outils en ligne de commande
+     *  lancés sans passer par main() (voir SongRecRename). */
+    public static void configureTagLibrary() {
+        Logger.getLogger("org.jaudiotagger").setLevel(Level.OFF);
+        org.jaudiotagger.tag.TagOptionSingleton opts = org.jaudiotagger.tag.TagOptionSingleton.getInstance();
+        opts.setId3v23DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_16);
+        opts.setId3v24DefaultTextEncoding(org.jaudiotagger.tag.id3.valuepair.TextEncoding.UTF_8);
+        opts.setResetTextEncodingForExistingFrames(true);
+    }
+
     private static void cleanupStaleSongRecTempFiles() {
         File tmpDir = new File(System.getProperty("java.io.tmpdir", "/tmp"));
         File[] stale = tmpDir.listFiles((dir, name) -> name.startsWith("ot_shazam_") && name.endsWith(".wav"));
@@ -334,6 +347,7 @@ public class App {
         System.out.println("Usage:");
         System.out.println("  Fichier unique  : opentagger <fichier.mp3> [--acoustid]");
         System.out.println("  Dossier entier  : opentagger --dossier <dossier/> [--acoustid] [--masque N]");
+        System.out.println("  Paroles seules  : opentagger --paroles [--simulation | --annuler] <dossier/>");
         System.out.println();
         System.out.println("Options:");
         System.out.println("  --acoustid    Identifie par empreinte audio");
